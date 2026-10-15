@@ -1,0 +1,18 @@
+{
+  "id": ".",
+  "name": "The Machine",
+  "short_name": "The Machine",
+  "description": "Your personal assistant inbox",
+  "start_url": ".",
+  "scope": ".",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "background_color": "#131518",
+  "theme_color": "#131518",
+  "icons": [
+    {"src": "brand/app-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "brand/favicon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "brand/app-icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+    {"src": "brand/app-icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}

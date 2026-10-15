@@ -1,0 +1,171 @@
+{
+  "owner_name": "Alex Owner",
+  "timezone": "Europe/Amsterdam",
+  "telegram_owner": "1000001",
+  "tailscale_owner": "alex@example.com",
+  "dashboard_host": "machine.example-tailnet.ts.net",
+  "dashboard_path": "/assistant/",
+  "dashboard_aliases": [],
+  "dashboard_alias_path": "/assistant/",
+  "port": 8787,
+  "database": "~/.local/share/personal-assistant/events.sqlite",
+  "credentials": {
+    "api-token": "~/.local/share/personal-assistant/api-token",
+    "owner-token": "~/.local/share/personal-assistant/owner-token",
+    "gog-password": "~/.local/share/personal-assistant/gog-password",
+    "maton-slack": "~/.local/share/personal-assistant/maton.env",
+    "salesflare": "~/.local/share/personal-assistant/salesflare.env"
+  },
+  "app_dir": "~/.openclaw/workspace/tools/personal-assistant",
+  "openclaw": "/usr/local/bin/openclaw",
+  "node": "/usr/local/bin/node",
+  "openclaw_package_dir": "/usr/local/lib/node_modules/openclaw",
+  "openclaw_state": "~/.openclaw/state/openclaw.sqlite",
+  "agent_db": "~/.openclaw/agents/main/agent/openclaw-agent.sqlite",
+  "gog": "gog",
+  "wacli": "wacli",
+  "heartbeat_job_id": "",
+  "delivery_enabled": false,
+  "delivery_batch_size": 5,
+  "digest_at": "08:30",
+  "bootstrap_days": 7,
+  "poll_seconds": 300,
+  "http_timeout": 15,
+  "slack_thread_retention_days": 30,
+  "preparation_concurrency": 3,
+  "prompt_receipts": "~/.local/share/personal-assistant/prompt-receipts",
+  "attachment_dir": "~/.local/share/personal-assistant/attachments",
+  "attachment_sources": [
+    "~/.openclaw/workspace/data/assistant-attachments",
+    "~/.openclaw/workspace/memory/assistant"
+  ],
+  "booking_links": {
+    "30-minute call": "https://example.com/book/30min"
+  },
+  "review_worker": {
+    "enabled": false,
+    "min_signals": 40,
+    "max_wait_minutes": 60,
+    "gap_seconds": 600,
+    "timeout_seconds": 1500,
+    "outage_grace_seconds": 600,
+    "retry_seconds": 60,
+    "max_retry_seconds": 1800
+  },
+  "weekly_recap": {
+    "enabled": false,
+    "weekday": 5,
+    "at": "16:00"
+  },
+  "accounts": [
+    {
+      "id": "work-gmail",
+      "service": "gmail",
+      "transport": "gog",
+      "email": "alex@example.com",
+      "client": "default",
+      "boundary": "work:Acme",
+      "excluded_terms": [],
+      "exclude": [
+        {
+          "senders": [
+            "notifications@vendor.example"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "work-calendar",
+      "service": "calendar",
+      "transport": "gog",
+      "email": "alex@example.com",
+      "client": "default",
+      "calendar_id": "primary",
+      "boundary": "work:Acme",
+      "excluded_title_terms": [
+        "'s birthday"
+      ],
+      "exclude": [
+        {
+          "routine_recurring": true,
+          "titles": [
+            "Lunch",
+            "Focus time",
+            "Stand up"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "work-slack",
+      "service": "slack",
+      "transport": "maton",
+      "email": "alex@example.com",
+      "credential": "maton-slack",
+      "credential_variable": "MATON_API_KEY",
+      "connection_id": "00000000-0000-0000-0000-000000000000",
+      "team_id": "T00000000",
+      "user_id": "U00000000",
+      "slack_host": "acme.slack.com",
+      "fair_incremental": true,
+      "boundary": "work:Acme",
+      "exclude": [
+        {
+          "channels": [
+            "alerts",
+            "deploys"
+          ],
+          "bots_only": true
+        }
+      ]
+    },
+    {
+      "id": "work-crm",
+      "service": "salesflare",
+      "transport": "rest",
+      "api_base": "https://api.salesflare.com",
+      "app_base": "https://app.salesflare.com",
+      "credential": "salesflare",
+      "credential_variable": "SALESFLARE_API_KEY",
+      "email": "alex@example.com",
+      "owner_emails": [
+        "alex@example.com"
+      ],
+      "user_id": 1,
+      "team_id": 1,
+      "join_pipelines": [],
+      "boundary": "work:Acme"
+    },
+    {
+      "id": "personal-android",
+      "service": "android",
+      "transport": "openclaw-feed",
+      "node_id": "replace-with-your-openclaw-node-id",
+      "reconcile_seconds": 600,
+      "boundary": "personal:phone",
+      "exclude": [
+        {
+          "packages": [
+            "com.google.android.youtube",
+            "com.spotify.music"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "personal-whatsapp",
+      "service": "whatsapp",
+      "transport": "wacli",
+      "store": "~/.local/share/wacli",
+      "identity_sha256": "sha256-of-your-linked-whatsapp-jid",
+      "boundary": "personal:whatsapp"
+    },
+    {
+      "id": "openclaw-gateway",
+      "service": "gateway",
+      "transport": "journald",
+      "unit": "openclaw-gateway.service",
+      "boundary": "owner:system"
+    }
+  ]
+}

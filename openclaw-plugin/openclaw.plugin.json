@@ -1,0 +1,36 @@
+{
+  "id": "personal-assistant-bridge",
+  "name": "Personal assistant bridge",
+  "description": "Local SQLite signals and owner-only Telegram feedback; no reasoning or external business actions.",
+  "version": "0.1.1",
+  "activation": {
+    "onStartup": true,
+    "onChannels": [
+      "telegram"
+    ],
+    "onCommands": [
+      "assistant_feedback"
+    ]
+  },
+  "contracts": {
+    "tools": [
+      "assistant_signals"
+    ]
+  },
+  "toolMetadata": {
+    "assistant_signals": {
+      "profiles": [
+        "full"
+      ],
+      "sideEffecting": true
+    }
+  },
+  "commandAliases": [
+    "assistant_feedback"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

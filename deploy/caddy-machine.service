@@ -1,0 +1,17 @@
+# Example systemd user unit for Caddy in front of the dashboard (optional).
+# Only needed when you serve the dashboard on a custom domain; otherwise `tailscale serve` is enough.
+# The Cloudflare env file holds CF_API_TOKEN for the DNS-01 certificate challenge.
+[Unit]
+Description=Caddy for the assistant dashboard on the tailnet (example)
+After=network-online.target
+# Waits for the tailnet addresses at boot: keep retrying, never give up.
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=%h/.config/caddy/cloudflare.env
+ExecStart=/usr/local/bin/caddy run --config %h/.openclaw/workspace/tools/personal-assistant/deploy/Caddyfile --adapter caddyfile
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

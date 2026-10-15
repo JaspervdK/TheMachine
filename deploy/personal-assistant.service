@@ -1,0 +1,33 @@
+# Example systemd *user* unit for the service. Copy to ~/.config/systemd/user/, adjust the paths,
+# then: systemctl --user daemon-reload && systemctl --user enable --now personal-assistant
+# (The installer, ./install.sh, writes a filled-in copy for you.)
+# %h is the user's home directory. The checkout is assumed at ~/.openclaw/workspace/tools/personal-assistant.
+[Unit]
+Description=The Machine: signal collector and suggestions inbox
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.openclaw/workspace/tools/personal-assistant
+ExecStart=/usr/bin/python3 %h/.openclaw/workspace/tools/personal-assistant/assistant.py serve
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# node and openclaw must be on PATH (for example a mise/nvm install directory).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+# Optional: hand secrets to the service via systemd credentials instead of the paths in
+# config.json `credentials`. The names must match the keys the service reads.
+#LoadCredential=api-token:%h/.local/share/personal-assistant/api-token
+#LoadCredential=gog-password:%h/.local/share/personal-assistant/gog-password
+#LoadCredential=salesflare:%h/.local/share/personal-assistant/salesflare.env
+
+[Install]
+WantedBy=default.target

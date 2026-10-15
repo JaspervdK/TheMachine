@@ -1,0 +1,54 @@
+# Example Caddyfile: serve the dashboard on the tailnet only (optional).
+#
+# Tailscale Serve cannot serve a custom domain, so Caddy holds :443 on the machine's tailnet
+# addresses for both a custom name (assistant.example.com, whose DNS points at the tailnet IP)
+# and the machine's ts.net name. Caddy strips Tailscale's identity headers and passes the peer
+# address in X-Tailnet-Client; the service looks the login up with `tailscale whois` and only
+# serves the dashboard to `tailscale_owner` from config.json.
+#
+# Replace: 100.64.0.1 / fd00::1 with this machine's tailnet addresses
+# (`tailscale ip -4` and `tailscale ip -6`), assistant.example.com with your domain, machine.example.ts.net with the
+# machine's MagicDNS name. 8787 is the service's `port`; 18789 is the OpenClaw Gateway.
+# Needs a Caddy build with the cloudflare DNS module (or use another DNS provider module).
+{
+	admin off
+	auto_https disable_redirects
+	default_bind 100.64.0.1 [fd00::1]
+}
+
+(assistant) {
+	redir /assistant /assistant/
+	handle_path /assistant/* {
+		reverse_proxy 127.0.0.1:8787 {
+			header_up -Tailscale-User-Login
+			header_up -Tailscale-User-Name
+			header_up -Tailscale-User-Profile-Pic
+			header_up X-Tailnet-Client {remote_host}
+		}
+	}
+}
+
+# Custom domain: the dashboard at the root (config: dashboard_host + dashboard_path "/").
+assistant.example.com {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	reverse_proxy 127.0.0.1:8787 {
+		header_up -Tailscale-User-Login
+		header_up -Tailscale-User-Name
+		header_up -Tailscale-User-Profile-Pic
+		header_up X-Tailnet-Client {remote_host}
+	}
+}
+
+# The machine's ts.net name, certificate from tailscaled: the dashboard under /assistant/
+# (config: dashboard_aliases + dashboard_alias_path), everything else to the OpenClaw Gateway.
+machine.example.ts.net {
+	tls {
+		get_certificate tailscale
+	}
+	import assistant
+	handle {
+		reverse_proxy 127.0.0.1:18789
+	}
+}
