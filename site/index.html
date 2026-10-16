@@ -51,7 +51,16 @@ h1 em{font-style:normal;color:var(--mint)}
 .stage{position:relative;min-height:440px;display:flex;flex-direction:column;justify-content:flex-end;align-items:flex-start}
 .stage .robot{position:absolute;right:-10px;top:-30px;width:290px;filter:drop-shadow(0 30px 40px #0008)}
 .card{background:var(--surface-2);border:1px solid var(--line);border-radius:18px;padding:18px 18px 14px;box-shadow:0 20px 50px #0007;max-width:380px}
-.stage .card{position:relative;width:100%;outline:none}
+.stage .card{position:relative;width:100%;outline:none;scroll-margin-top:84px}
+/* An invitation to try the card: a hint above it and a soft pulse on Do it, until the first tap. */
+.stage .try{position:relative;margin:0 0 10px 4px;font:600 13px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--amber);transition:opacity .4s ease}
+.stage .try::after{content:" ↓";display:inline-block;margin-left:4px;animation:try-bob 1.6s ease-in-out infinite}
+.stage .try.gone{opacity:0;visibility:hidden}
+@keyframes try-bob{0%,100%{transform:none}50%{transform:translateY(3px)}}
+.card.nudge .buttons .b.go{animation:nudge 2.2s ease-in-out infinite}
+@keyframes nudge{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--mint) 0%,transparent)}50%{box-shadow:0 0 0 6px color-mix(in srgb,var(--mint) 30%,transparent)}}
+.stage .card.spot{animation:spot 1.2s ease-out 2}
+@keyframes spot{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--mint) 55%,transparent),0 20px 50px #0007}100%{box-shadow:0 0 0 16px color-mix(in srgb,var(--mint) 0%,transparent),0 20px 50px #0007}}
 /* Once the demo starts, the card keeps its top edge and grows downwards; both hero columns keep their place. */
 .hero.live{align-items:start}
 .stage.live{justify-content:flex-start}
@@ -127,7 +136,8 @@ h1 em{font-style:normal;color:var(--mint)}
 #send-dialog .b:hover{background:#ffffff1c}
 #send-dialog .b.go{background:var(--mint);color:#1a1d17;font-weight:600}
 @media (prefers-reduced-motion:reduce){
-  .card .fade,.card .progress i{animation:none}
+  .card .fade,.card .progress i,.stage .try::after,.stage .card.spot{animation:none}
+  .card.nudge .buttons .b.go{animation:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--mint) 35%,transparent)}
   .card .progress i{width:100%;opacity:.5}
   .btn,.card .b{transition:none}
   html{scroll-behavior:auto}
@@ -211,12 +221,13 @@ footer a{color:var(--muted);text-decoration:none}
     <p class="lede">The Machine reads your email, calendar, chats and phone notifications, finds the few things that actually need you, and sends them to Telegram as short cards. Tap <b>Do it</b> and your own agent carries the task out.</p>
     <div class="ctas">
       <a class="btn primary" href="https://github.com/JeroenCorthout/TheMachine#quick-start">Get started</a>
-      <a class="btn ghost" href="#how">See how it works</a>
+      <a class="btn ghost" href="#demo">See how it works</a>
     </div>
     <div class="tags"><span>Self-hosted</span><span>Your own model</span><span>MIT licensed</span></div>
   </div>
-  <div class="stage" role="region" aria-label="Try a suggestion card (demo with made-up data, nothing is sent)">
+  <div class="stage" id="demo" role="region" aria-label="Try a suggestion card (demo with made-up data, nothing is sent)">
     <img class="robot" src="assets/the-machine.webp" alt="">
+    <p class="try" id="demo-try">Try it: tap Do it</p>
     <div class="card" id="demo-card" tabindex="-1">
       <div class="from"><img src="assets/favicon.png" alt="">The Machine<span class="demo">Demo · nothing is sent</span></div>
       <b class="t">Follow up with Alex about pricing</b>
@@ -509,6 +520,18 @@ function reset(){
   go('initial');unlock();
 }
 const panel=v=>{if(!['change','snooze','date','dismissAsk'].includes(S.view))S.ret=S.view;go(v)};
+
+// "See how it works" lands on the card and points at Do it; the hint and pulse go after the first tap.
+const tryHint=document.getElementById('demo-try');card.classList.add('nudge');
+const engaged=()=>{card.classList.remove('nudge');if(tryHint)tryHint.classList.add('gone')};
+const spotlight=()=>{
+  const fits=card.offsetHeight<innerHeight-120;
+  card.scrollIntoView({behavior:reduce.matches?'auto':'smooth',block:fits?'center':'start'});
+  setTimeout(()=>{card.classList.remove('spot');void card.offsetWidth;card.classList.add('spot');
+    const b=$('[data-act=doit]')||$('.b.go');if(b)b.focus({preventScroll:true})},reduce.matches?0:650)};
+document.querySelectorAll('a[href="#demo"]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();history.replaceState(null,'','#demo');spotlight()}));
+if(location.hash==='#demo')addEventListener('load',()=>setTimeout(spotlight,100));
+card.addEventListener('click',e=>{if(e.target.closest('button'))engaged()},true);
 
 card.addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b||!card.contains(b))return;
