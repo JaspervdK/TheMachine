@@ -5563,7 +5563,7 @@ class App:
         limit = min(int(args.get('limit') or 12), 30)
         with self.store.connect() as db:
             if args.get('node_id'):
-                found = graph.detail(db, str(args['node_id']))
+                found = graph.detail(db, str(args['node_id']), max(1, min(int(args.get('events') or 12), 40)))
                 if not found:
                     raise ValueError('Unknown node_id; find people and projects with query')
                 found['around'] = graph.spread(db, [found['id']], limit)
@@ -5685,7 +5685,7 @@ class App:
                         if query.strip():
                             self.output(200, app.graph_action({'query': query, 'limit': 20}))
                         elif node:
-                            found = app.graph_action({'node_id': node, 'limit': 10})
+                            found = app.graph_action({'node_id': node, 'limit': 10, 'events': 40})
                             rows = app.store.events([a['id'] for a in app.config['accounts']], event_ids=[int(line.split(' ', 1)[0]) for line in found['recent']])
                             found['recent'] = [{'id': r['id'], 'account_id': r['account_id'], 'kind': r['kind'], 'occurred_at': r['occurred_at'], 'title': r['title'][:200],
                                                 'source_url': r['metadata'].get('source_url')} for r in sorted(rows, key=lambda r: r['occurred_at'], reverse=True)]

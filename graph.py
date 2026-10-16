@@ -657,12 +657,12 @@ def overview(db, limit=12):
             'orgs': rows("SELECT * FROM graph_nodes WHERE kind='org' ORDER BY strength DESC LIMIT ?", 8)}
 
 
-def detail(db, node_id):
+def detail(db, node_id, events=12):
     row = db.execute('SELECT * FROM graph_nodes WHERE id=?', (node_id,)).fetchone()
     if not row:
         return None
     view = node_view(row, neighbours(db, node_id, 20))
-    view['event_ids'] = [r[0] for r in db.execute('SELECT event_id FROM graph_events WHERE node_id=? ORDER BY at DESC LIMIT 12', (node_id,))]
+    view['event_ids'] = [r[0] for r in db.execute('SELECT event_id FROM graph_events WHERE node_id=? ORDER BY at DESC LIMIT ?', (node_id, events))]
     return view
 
 
