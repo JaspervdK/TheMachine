@@ -1501,6 +1501,8 @@ class Store:
                 db.execute('ALTER TABLE suggestions ADD COLUMN handled_hint TEXT')
             if 'early' not in columns:
                 db.execute('ALTER TABLE suggestions ADD COLUMN early INTEGER NOT NULL DEFAULT 0')
+            if 'awaiting' not in columns:
+                db.execute('ALTER TABLE suggestions ADD COLUMN awaiting TEXT')
             preparation_columns = {r['name'] for r in db.execute('PRAGMA table_info(preparations)')}
             for column in ['details', 'started_at']:
                 if column not in preparation_columns:
@@ -2117,7 +2119,7 @@ class Store:
                        (now(), summary[:4000], encoded(items), analysis_id))
         return {'status': 'complete'}
 
-    def suggest(self, dedupe_key, title, body, event_ids, when='now', digest_at='08:30', work=False, urgent=False, due=None, ahead=False):
+    def suggest(self, dedupe_key, title, body, event_ids, when='now', digest_at='08:30', work=False, urgent=False, due=None, ahead=False, awaiting=None):
         if not dedupe_key or not title or not body or not event_ids:
             raise ValueError('Evidence, title, body and stable dedupe_key are required')
         if due is not None:
@@ -2134,14 +2136,25 @@ class Store:
             rows = db.execute('SELECT id,account_id,kind,occurred_at,metadata FROM events WHERE deleted=0 AND id IN (' + ','.join('?' for _ in event_ids) + ')', event_ids).fetchall()
             if {r['id'] for r in rows} != set(event_ids):
                 raise ValueError('Every evidence event must exist and be live')
+            watch = None
+            if awaiting is not None:
+                promise = next((r for r in rows if r['id'] == awaiting), None)
+                watch = promise and awaiting_key(dict(promise), self.owner_user_ids)
+                if not watch:
+                    raise ValueError('awaiting_event_id must be one of event_ids: the email, Slack or WhatsApp message where someone else made the promise')
+                if when in ('now', 'digest') and not due:
+                    raise ValueError('A follow-up on someone else\'s promise needs due (their deadline) or when, so the card waits until then')
             if due:
                 # A deadline within three days goes out now; one that the
                 # weekend hold would reach too late counts as urgent.
                 today = dt.datetime.fromisoformat(now()).astimezone(local_tz()).date()
-                if (dt.date.fromisoformat(due) - today).days <= 3:
+                if awaiting is not None and when in ('now', 'digest'):
+                    # Someone else's deadline: check the morning after it passed.
+                    when = (dt.date.fromisoformat(due) + dt.timedelta(days=1)).isoformat() + 'T' + digest_at
+                elif (dt.date.fromisoformat(due) - today).days <= 3:
                     when = 'now'
             deliver_after = delivery_time(when, digest_at, work=work, urgent=urgent)
-            if due and deliver_after and dt.datetime.fromisoformat(deliver_after).astimezone(local_tz()).date().isoformat() > due:
+            if due and awaiting is None and deliver_after and dt.datetime.fromisoformat(deliver_after).astimezone(local_tz()).date().isoformat() > due:
                 urgent = True
                 deliver_after = delivery_time(when, digest_at, work=work, urgent=True)
             # Saved by a preview review: shown on the dashboard only. Never sent (not now and not
@@ -2155,6 +2168,8 @@ class Store:
                         encoded(sorted({r['account_id'] for r in rows})), now(), deliver_after, source_line(sorted([dict(r) for r in rows],key=lambda r:event_ids.index(r['id']))), int(urgent), due))
             db.execute('INSERT INTO deliveries(suggestion_id,status,updated_at) VALUES(?,?,?)',
                        (suggestion_id, 'previewed' if preview else 'queued', now()))
+            if watch:
+                db.execute('UPDATE suggestions SET awaiting=? WHERE id=?', (encoded(watch), suggestion_id))
             if ahead:
                 # Prepared ahead: the work starts now, research and drafting only, and the card
                 # reaches the owner once it's ready. Sending or changing anything still waits for
@@ -2165,7 +2180,8 @@ class Store:
                 db.execute("UPDATE suggestions SET status='accepted',early=1 WHERE id=?", (suggestion_id,))
                 self.queue_preparation(db, suggestion_id, decision_id)
         return {'id': suggestion_id, 'status': 'accepted' if ahead else 'pending', 'duplicate': False, 'deliver_after': deliver_after,
-                **({'prepared_ahead': True} if ahead else {}), **({'preview': True} if preview else {})}
+                **({'prepared_ahead': True} if ahead else {}), **({'preview': True} if preview else {}),
+                **({'awaiting': 'The card waits; if they follow up first it closes itself.'} if watch else {})}
 
     def ahead_room(self, per_day):
         since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=1)).isoformat()
@@ -2178,6 +2194,23 @@ class Store:
             db.execute("UPDATE suggestions SET status='pending',early=0 WHERE id=?", (row['id'],))
             db.execute("UPDATE preparations SET status='cancelled',updated_at=? WHERE suggestion_id=?", (now(), row['id']))
             db.execute("UPDATE deliveries SET reminder=0 WHERE suggestion_id=? AND message_id IS NULL", (row['id'],))
+
+    def settle_awaiting(self, db):
+        """A follow-up on someone else's promise closes itself when they wrote again before it was due.
+        Their new message goes through the normal review, so a delay still gets a card."""
+        for row in db.execute("SELECT s.id,s.awaiting FROM suggestions s JOIN deliveries d ON d.suggestion_id=s.id WHERE s.awaiting IS NOT NULL "
+                              "AND d.message_id IS NULL AND d.status='queued' AND s.status IN ('pending','accepted','prepared','instructions')").fetchall():
+            watch = json.loads(row['awaiting'])
+            answer = next((e for e in db.execute('SELECT id,account_id,kind,occurred_at,title,metadata FROM events WHERE account_id=? AND kind=? AND occurred_at>? AND deleted=0 ORDER BY occurred_at',
+                                                 (watch['account_id'], watch['kind'], watch['since'])) if awaiting_match(watch, dict(e), self.owner_user_ids)), None)
+            if not answer:
+                continue
+            stamp = now()
+            db.execute("UPDATE suggestions SET status='completed',early=0 WHERE id=?", (row['id'],))
+            db.execute("INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)",
+                       ('followed-up:' + row['id'], row['id'], 'complete', f"They followed up: {answer['title'][:150]} (signal {answer['id']})", 'assistant', stamp))
+            db.execute("UPDATE deliveries SET status='cancelled',reminder=0,updated_at=? WHERE suggestion_id=?", (stamp, row['id']))
+            db.execute("UPDATE preparations SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status IN ('queued','starting','running','blocked')", (stamp, row['id']))
 
     def preference_summary(self, days=30, limit=3500):
         """What the owner did with recent suggestions, so reviews learn what's worth the owner's time."""
@@ -2203,6 +2236,10 @@ class Store:
         behaviour = self.behaviour_text(days)
         if behaviour:
             lines += ['', 'How the owner acted on cards:', behaviour]
+        rates = self.quality_text(days)
+        if rates:
+            # First, so the length limit never cuts it.
+            lines = [rates, ''] + lines
         text = '\n'.join(lines)
         return text if len(text) <= limit else text[:limit] + '\n…'
 
@@ -2224,6 +2261,61 @@ class Store:
                                               "(julianday(d.created_at)-julianday(coalesce(s.deliver_after,s.created_at)))*1440 BETWEEN 0 AND 10", (since,))]
         return {'edits': sorted(edits.values(), key=lambda e: e['at'], reverse=True), 'sent_as_written': sent.count(False),
                 'sent_edited': sent.count(True), 'snoozed_again': [(r[0], r[1]) for r in snoozed], 'quick_dismissed': quick}
+
+    def quality(self, days=30, until=None):
+        """How good the cards were, so changes to the rules can be judged by results.
+
+        Worth it: the owner tapped Do it or Send, or marked it done. Not needed: dismissed. Do it right
+        first time: no Change and no Try again after the first Do it. Cards that closed themselves (a
+        follow-up that arrived) don't count."""
+        end = until or now()
+        since = (dt.datetime.fromisoformat(end) - dt.timedelta(days=days)).isoformat()
+        with self.connect() as db:
+            cards = [dict(r) for r in db.execute(
+                "SELECT s.id,s.status,(SELECT e.kind FROM events e WHERE e.id=json_extract(s.event_ids,'$[0]')) kind FROM suggestions s "
+                "WHERE s.created_at>=? AND s.created_at<? AND s.id NOT IN (SELECT suggestion_id FROM decisions WHERE id LIKE 'followed-up:%')", (since, end))]
+            choices = collections.defaultdict(list)
+            for d in db.execute("SELECT suggestion_id,choice FROM decisions WHERE source IN ('telegram','dashboard') AND created_at>=? ORDER BY created_at", (since,)):
+                choices[d['suggestion_id']].append(d['choice'])
+        def outcome(c):
+            made = choices.get(c['id'], [])
+            if c['status'] == 'rejected':
+                return 'dismissed'
+            if {'accept', 'send'} & set(made) or c['status'] == 'completed':
+                return 'worth_it'
+            return 'open'
+        result = {'days': days, 'cards': len(cards), 'worth_it': 0, 'dismissed': 0, 'open': 0, 'do_it': 0, 'first_time': 0, 'by_source': {}}
+        for c in cards:
+            o = outcome(c)
+            result[o] += 1
+            source = result['by_source'].setdefault(source_kind(c['kind']) if c['kind'] else 'other', {'worth_it': 0, 'dismissed': 0, 'open': 0})
+            source[o] += 1
+            made = choices.get(c['id'], [])
+            if 'accept' in made:
+                result['do_it'] += 1
+                after = made[made.index('accept') + 1:]
+                result['first_time'] += not ({'other', 'retry'} & set(after))
+        decided = result['worth_it'] + result['dismissed']
+        result['hit_rate'] = round(100 * result['worth_it'] / decided) if decided else None
+        result['first_time_rate'] = round(100 * result['first_time'] / result['do_it']) if result['do_it'] else None
+        return result
+
+    def quality_report(self, days=30):
+        """This period and the one before, for the dashboard."""
+        current = self.quality(days)
+        before = self.quality(days, (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat())
+        b = self.behaviour(days)
+        return {**current, 'previous': {k: before[k] for k in ('hit_rate', 'first_time_rate', 'cards')},
+                'sent_as_written': b['sent_as_written'], 'sent_edited': b['sent_edited']}
+
+    def quality_text(self, days=30):
+        """Which sources' cards were worth it, for reviews. Only sources with enough decided cards."""
+        q = self.quality(days)
+        lines = [f"- {source}: {n['worth_it']} of {n['worth_it'] + n['dismissed']} worth it" for source, n in
+                 sorted(q['by_source'].items(), key=lambda x: -(x[1]['worth_it'] + x[1]['dismissed'])) if n['worth_it'] + n['dismissed'] >= 3]
+        if not lines:
+            return ''
+        return f"Cards in the last {days} days by source (worth it = Do it, Send or done; the rest dismissed):\n" + '\n'.join(lines)
 
     def behaviour_text(self, days=30):
         b = self.behaviour(days)
@@ -2795,6 +2887,7 @@ class Store:
                         outstanding += 1
                 review['remaining_count'] = outstanding
                 review['recovered_count'] = sum(not i.get('excluded') for i in items) - outstanding if review['status']!='complete' else None
+        result['quality'] = self.quality_report()
         return result
 
 
@@ -3277,6 +3370,37 @@ def source_kind(kind):
         return SOURCE_KIND[kind]
     plugin = load_connector(str(kind).split('.')[0]) if '.' in str(kind) else None
     return (getattr(plugin, 'KINDS', None) or {}).get(kind, 'signal')
+
+
+def _address(value):
+    found = re.findall(r'[^\s<>"\',;]+@[^\s<>"\',;]+', str(value or ''))
+    return found[0].lower() if found else ''
+
+
+def awaiting_key(event, owner_slack_ids=()):
+    """Where to look for the follow-up to someone else's promise in this message; None when the
+    message is the owner's own or not a conversation."""
+    m = event['metadata'] if isinstance(event['metadata'], dict) else json.loads(event['metadata'])
+    key = {'account_id': event['account_id'], 'kind': event['kind'], 'since': event['occurred_at']}
+    if event['kind'] == 'gmail.message' and 'SENT' not in m.get('labels', []) and _address(m.get('from')):
+        return {**key, 'thread_id': m.get('thread_id'), 'from': _address(m.get('from'))}
+    if event['kind'] == 'slack.message' and m.get('user_id') and m['user_id'] not in owner_slack_ids:
+        return {**key, 'channel_id': m.get('channel_id'), 'user_id': m['user_id']}
+    if event['kind'] == 'whatsapp.message' and not m.get('from_me') and m.get('chat_id'):
+        return {**key, 'conversation': m['chat_id'], 'sender': m.get('sender_id') or m.get('from') or ''}
+    return None
+
+
+def awaiting_match(watch, event, owner_slack_ids=()):
+    m = event['metadata'] if isinstance(event['metadata'], dict) else json.loads(event['metadata'])
+    if watch['kind'] == 'gmail.message':
+        return 'SENT' not in m.get('labels', []) and (m.get('thread_id') == watch.get('thread_id') or _address(m.get('from')) == watch['from'])
+    if watch['kind'] == 'slack.message':
+        return m.get('channel_id') == watch['channel_id'] and m.get('user_id') == watch['user_id']
+    if m.get('from_me') or m.get('chat_id') != watch['conversation']:
+        return False
+    # In a group chat only the person who promised counts.
+    return not watch['sender'] or (m.get('sender_id') or m.get('from') or '') == watch['sender']
 
 
 SOURCE_KIND = {'gmail.message': 'email', 'calendar.event': 'calendar', 'slack.message': 'Slack',
@@ -3806,6 +3930,7 @@ def deliver_one(store, config, edit_cards=True):
         db.execute("UPDATE deliveries SET status='uncertain',error='interrupted_delivery' WHERE status='sending' AND updated_at<?",
                    ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=3)).isoformat(),))
         retry_cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).isoformat()
+        store.settle_awaiting(db)
         rows = db.execute("SELECT s.*,d.reminder,d.message_id,d.previous_message_ids,p.status preparation_status,p.reason preparation_reason,"+FEEDBACK_COLUMN+" FROM suggestions s JOIN deliveries d ON s.id=d.suggestion_id LEFT JOIN preparations p ON s.id=p.suggestion_id WHERE d.status='queued' AND (d.error IS NULL OR d.updated_at<?) AND ((s.status='pending' AND s.handled_hint IS NULL) OR (d.reminder=1 AND s.status IN ('accepted','prepared','instructions'))) AND ((d.reminder=1 AND s.early=0) OR s.deliver_after IS NULL OR s.deliver_after<=?) ORDER BY d.reminder DESC,s.created_at LIMIT 1",(retry_cutoff,now())).fetchall()
         if not rows:
             return
@@ -4030,6 +4155,14 @@ def weekly_recap(store, config, current=None, usage=None):
         lines.append(f"**Tokens:** {usage['input'] / 1e6:.1f}M input, {usage['cacheRead'] / 1e6:.1f}M cached, {usage['output'] / 1e3:.0f}K output "
                      f"over {usage['runs']} sessions. At Azure list price (GPT-6.1 Sol, Sweden Central) that's about ${usage['usd']:.2f}; "
                      "today it runs on your subscription.")
+    week, before = store.quality(7, current.isoformat()), store.quality(7, since)
+    if week['hit_rate'] is not None:
+        trend = lambda then: '' if then is None else f" (week before: {then}%)"
+        line = (f"**Hit rate:** {week['worth_it']} of {week['worth_it'] + week['dismissed']} cards you decided on were worth it, {week['hit_rate']}%"
+                + trend(before['hit_rate']) + '.')
+        if week['do_it']:
+            line += f" Do it got it right the first time {week['first_time']} of {week['do_it']} times" + trend(before['first_time_rate']) + '.'
+        lines.append(line)
     learned = store.behaviour(7)
     parts = []
     if learned['sent_as_written'] or learned['sent_edited']:
@@ -4221,7 +4354,8 @@ class App:
             return self.store.suggest(args['dedupe_key'], args['title'], args['body'], args['event_ids'], args.get('when') or 'digest',
                                       self.config.get('digest_at', '08:30'),work=work,urgent=args.get('urgent') is True,due=args.get('due'),
                                       ahead=args.get('prepare_ahead') is True and self.config.get('prepare_ahead', True) is not False
-                                      and self.store.ahead_room(int(self.config.get('prepare_ahead_per_day', 10))))
+                                      and self.store.ahead_room(int(self.config.get('prepare_ahead_per_day', 10))),
+                                      awaiting=args.get('awaiting_event_id'))
         if name == 'prepare':
             with self.store.connect() as db:
                 row=db.execute('SELECT account_ids,event_ids FROM suggestions WHERE id=?',(args['suggestion_id'],)).fetchone()
@@ -4236,6 +4370,10 @@ class App:
                     evidence=db.execute('SELECT e.kind,e.metadata FROM events e JOIN suggestions s ON s.id=? JOIN json_each(s.event_ids) ids ON ids.value=e.id',(args['suggestion_id'],)).fetchall()
                 if not evidence or any(e['kind']!='assistant.test' or json.loads(e['metadata']).get('test') is not True for e in evidence):
                     raise ValueError('Demo previews are only available on explicitly labeled assistant test tasks')
+            problems=next_actions.check(action,args['body'],[a.get('email','') for a in self.config['accounts']])
+            if problems and args.get('checked') is not True:
+                # The run fixes these itself; checked:true saves anyway when one is deliberate.
+                raise ValueError('Check before saving: '+'; '.join(problems)+'. Fix and save again, or add checked:true if this is intended.')
             saved=self.store.prepare(args['suggestion_id'], args['body'],args.get('job_id'),action)
             if args.get('send_now') is True and not saved.get('replayed'):
                 with self.store.connect() as db:

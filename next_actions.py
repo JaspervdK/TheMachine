@@ -220,6 +220,32 @@ def validate(value, config, allowed_accounts, recipient_options=None):
     return result
 
 
+PLACEHOLDER = re.compile(r'(?i)\[(?:name|first name|your name|recipient|company|date|time|link|url|amount|insert[^\]]*|x{2,}|\.\.\.|…)\]|\{\{[^}]*\}\}|<(?:name|link|date)>|\bTODO\b|\bTBD\b|\bXXX\b|lorem ipsum')
+# Only the sender's own "here's the file" phrasing; "thanks for the attached invoice" is fine.
+ATTACHED = re.compile(r"(?i)\b(?:I(?:'ve| have)? attached|attached (?:is|are|you'll find|please find)|(?:please )?find attached|see (?:the )?attached|I(?:'m| am) attaching|in bijlage (?:vind|stuur|zit)|(?:vind|stuur) (?:je|u) (?:hierbij|in bijlage)|bijgevoegd vind|ci-joint|anbei)\b")
+
+
+def check(value, result='', own_addresses=()):
+    """Mistakes a Do it result can't go out with: checked before it's saved, so the
+    run fixes them itself instead of the owner tapping Change. Returns plain problems; empty is fine."""
+    problems = []
+    for action in actions(value):
+        text = (action.get('subject') or '') + '\n' + (action.get('body') or '')
+        if PLACEHOLDER.search(text):
+            problems.append(f"“{action.get('label') or action['kind']}” still has a placeholder ({PLACEHOLDER.search(text)[0]}): fill it in from the evidence")
+        if re.search(r'\[[^\]]+\]\((?!https?://)[^)]*\)', text):
+            problems.append('A link has no real https:// address')
+        if action['kind'] == 'email':
+            if ATTACHED.search(action['body']) and not action.get('attachments'):
+                problems.append('The email mentions an attachment but has none: add attachments:[<paths>] or reword it')
+            own = {a.lower() for a in own_addresses if a}
+            if own and action['to'] and set(a.lower() for a in action['to']) <= own:
+                problems.append('The email only goes to your own address: use the other person’s verified address')
+    if not any(a['kind'] in ('email', 'email_demo') for a in actions(value)) and re.search(r'(?im)^\s*\**subject:\**\s*\S', result or ''):
+        problems.append('The result contains an email (a Subject: line) but no email next action: put the ready email in next_actions so it gets a Send button')
+    return problems
+
+
 def revise(action, subject=None, body=None):
     """The owner's own edit of a ready draft: same recipients, account and attachments, new text and revision."""
     if action['kind'] != 'email':

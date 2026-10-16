@@ -50,6 +50,7 @@ So the owner doesn't need Change: the result is the shortest version that works.
 - Reopen files you make (`libreoffice --headless --convert-to pdf`, `pdftoppm`) and look at them before offering them.
 - After a change across files or languages, search for the old value everywhere and finish it; prefer the shared source over hand-editing copies.
 - Never call something prepared unless it is a concrete result. Do not fabricate a completed task.
+- Check before saving: reread the card, the owner's latest note and the evidence, and go through the result as they will. Is every point they asked for handled? Are names, dates, amounts, recipients and links taken from the evidence, not guessed? Would they send or use it as is? Fix what isn't right first. The service also checks for leftover placeholders, a mentioned attachment that isn't attached, links without an address and an email written in the result text instead of next_actions; it rejects the save with "Check before saving: …". Fix those and save again; add checked:true only when the flagged thing is deliberate.
 
 ## Next actions
 
