@@ -46,8 +46,8 @@ class Preparation(unittest.TestCase):
         self.assertIn('The owner has NOT tapped Do it yet',message);self.assertIn('never use send_now',message)
         job=self.q('SELECT job_id FROM preparations WHERE suggestion_id=?',sid)['job_id']
         with self.assertRaises(ValueError):  # the draft is saved, but only the owner sends it
-            self.app.action('prepare',{'suggestion_id':sid,'job_id':job,'body':'Draft ready.','send_now':True})
-        self.app.action('prepare',{'suggestion_id':sid,'job_id':job,'body':'Draft ready.'})
+            self.app.action('prepare',{'suggestion_id':sid,'job_id':job,'body':'Draft ready.','send_now':True,'outcome':'needs_you','needs':'approve the send'})
+        self.app.action('prepare',{'suggestion_id':sid,'job_id':job,'body':'Draft ready.','outcome':'needs_you','needs':'approve the send'})
         row=self.q('SELECT status,early FROM suggestions WHERE id=?',sid)
         self.assertEqual(row,{'status':'prepared','early':1})
         self.deliver(sent)

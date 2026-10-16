@@ -297,7 +297,7 @@ class NextActions(unittest.TestCase):
             decision=db.execute("SELECT choice,feedback FROM decisions WHERE choice='prepare_next'").fetchone()
             self.assertEqual(tuple(decision),('prepare_next',''))
         # The step finishes; when a later result offers the same step, it works again.
-        self.app().action('prepare',{'suggestion_id':self.sid,'job_id':self.job()['job_id'],'body':'Support email drafted.','next_actions':[
+        self.app().action('prepare',{'suggestion_id':self.sid,'job_id':self.job()['job_id'],'body':'Support email drafted.','outcome':'done','next_actions':[
             {'kind':'prepare','label':'Draft support email','instructions':'Draft an email about the exact field-mapping error; do not send it.'}]})
         self.assertEqual(self.action_job()['status'],'done')
         again=self.row()['next_actions'][0];self.assertEqual(again['revision'],choices[0]['revision'])

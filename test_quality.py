@@ -153,5 +153,77 @@ class CheckBeforeSaving(Base):
         self.assertEqual(self.save('Hi Sam, see attached [TBD].\n\nCheers,\n\nAlex', checked=True)['status'], 'prepared')
 
 
+class NotesRulesAndOutcome(Base):
+    def setUp(self):
+        super().setUp()
+        self.store.commit_page('work', {}, [mail('one', a.now())])
+        self.sid = self.store.suggest('task', 'Reply to Sam', 'I can draft it.', [1])['id']
+        self.store.decide(self.sid, 'accept', '', 'go', 'telegram')
+
+    def run_job(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE preparations SET status='running'")
+            return db.execute('SELECT job_id FROM preparations').fetchone()[0]
+
+    def save(self, **extra):
+        return self.app.action('prepare', {'suggestion_id': self.sid, 'job_id': self.run_job(), 'body': 'Drafted.', **extra})
+
+    def test_results_say_whether_they_are_finished(self):
+        with self.assertRaisesRegex(ValueError, 'Say whether the job is finished'):
+            self.save()
+        with self.assertRaisesRegex(ValueError, 'Say whether the job is finished'):
+            self.save(outcome='needs_you')
+        self.save(outcome='needs_you', needs='Approve the send.')
+        row = dict(self.store.snapshot(self.app.config['accounts'])['suggestions'][0])
+        self.assertTrue(a.card(row).endswith('Needs you: Approve the send.'))
+        self.store.decide(self.sid, 'other', 'Go ahead and put it live', 'go2', 'telegram')
+        self.save(outcome='done', note_kind='continue')
+        row = dict(self.store.snapshot(self.app.config['accounts'])['suggestions'][0])
+        self.assertTrue(a.card(row).endswith('Finished. Mark it done if it looks right.'))
+
+    def test_change_notes_are_sorted_and_count_as_what_they_were(self):
+        self.save(outcome='needs_you', needs='approve the send')
+        self.store.decide(self.sid, 'other', 'Always put a blank line before my name', 'n1', 'telegram')
+        with self.assertRaisesRegex(ValueError, "Say what the owner's Change note was"):
+            self.save(outcome='needs_you', needs='approve the send')
+        self.save(outcome='needs_you', needs='approve the send', note_kind='style')
+        self.store.decide(self.sid, 'other', 'try again', 'n2', 'telegram')
+        self.save(outcome='needs_you', needs='approve the send', note_kind='continue')
+        with self.store.connect() as db:
+            self.assertEqual([tuple(r) for r in db.execute('SELECT decision_id,kind FROM note_kinds ORDER BY decision_id')], [('n1', 'style'), ('n2', 'continue')])
+        q = self.store.quality()
+        self.assertEqual((q['do_it'], q['first_time'], q['finished']), (1, 0, 0))
+        self.assertEqual(self.store.quality_report()['notes'], {'style': 1, 'fact': 0, 'continue': 1, 'new_ask': 0, 'unsorted': 0})
+        with self.store.connect() as db:  # keep going alone: right first time, not finished
+            db.execute("DELETE FROM decisions WHERE id='n1'")
+        q = self.store.quality()
+        self.assertEqual((q['first_time'], q['finished'], q['first_time_rate'], q['finished_rate']), (1, 0, 100, 0))
+
+    def test_draft_rules_reach_drafts_and_mark_the_chart(self):
+        self.store.decide(self.sid, 'other', 'Always use my HTML signature', 'n1', 'telegram')
+        rule = self.app.action('remember_fact', {'text': 'Use the HTML signature in every reply.', 'decision_id': 'n1', 'kind': 'draft'})
+        fact = self.app.action('remember_fact', {'text': 'Sam left Example Corp.', 'decision_id': 'n1'})
+        with self.assertRaises(ValueError):
+            self.app.action('remember_fact', {'text': 'Something else here', 'decision_id': 'n1', 'kind': 'mood'})
+        self.assertEqual(self.store.facts_text(kind='draft'), '- Use the HTML signature in every reply.')
+        self.assertEqual(self.store.facts_text(), '- Sam left Example Corp.')
+        prompt = a.preparation_prompt({'job_id': 'j' * 16, 'suggestion_id': self.sid}, self.store.facts_text(), rules=self.store.facts_text(kind='draft'))
+        self.assertIn("Draft rules from the owner's notes", prompt)
+        self.assertIn('- Use the HTML signature in every reply.', prompt)
+        self.store.forget_fact(rule['id'])
+        self.store.forget_fact(fact['id'])
+        texts = [c['text'] for c in self.store.rule_changes('2000-01-01')]
+        self.assertEqual(texts, ['Draft rule: Use the HTML signature in every reply.', 'Removed draft rule: Use the HTML signature in every reply.'])
+        rules = Path(self.temp.name) / 'AGENTS.md'
+        rules.write_text('one')
+        self.store.note_rule_files([rules])
+        self.store.note_rule_files([rules])
+        rules.write_text('two')
+        self.store.note_rule_files([rules])
+        self.assertEqual([c['text'] for c in self.store.rule_changes('2000-01-01')][2:], ['AGENTS.md tracked', 'AGENTS.md edited'])
+        today = self.store.quality_trend()['daily'][-1]
+        self.assertEqual(today['changes'], texts + ['AGENTS.md edited'])  # "tracked" is only the starting point
+
+
 if __name__ == '__main__':
     unittest.main()

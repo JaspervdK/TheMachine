@@ -37,6 +37,8 @@ import next_actions
 import preparation_state
 
 ROOT = Path(__file__).resolve().parent
+# How reviews and Do it work; edits show as markers on the hit-rate chart.
+RULE_FILES = (ROOT / 'AGENTS.md', ROOT / 'PREPARATION.md')
 # The OpenClaw agent workspace (memory/, data/, USER.md). Override with OPENCLAW_WORKSPACE.
 WORKSPACE = Path(os.environ.get('OPENCLAW_WORKSPACE') or Path.home() / '.openclaw/workspace').expanduser()
 BROWSER_LEASE = WORKSPACE / 'data/browser-lease/lease.json'
@@ -1211,6 +1213,8 @@ REPLY_HEADER = re.compile(
     r'|^From:[ \t]\S[^\n]*\r?\nSent:[ \t]', re.M | re.I)
 FORWARD_SUBJECT = re.compile(r'(?i)^\s*(?:fwd?|tr|wg|doorst)\s*:')
 QUOTED_HISTORY_KEPT = 3000
+NOTE_KINDS = ('style', 'fact', 'continue', 'new_ask')
+FACT_KINDS = ('fact', 'draft')
 # Text parts that only tell the reader to open the HTML version.
 PLAIN_PLACEHOLDER = re.compile(r'(?i)plain[- ]text version (?:is )?not available|requires an? html|'
                                r'view (?:this|the) (?:email|message) in (?:a|your) (?:web )?browser|use an html[- ]capable')
@@ -1503,6 +1507,14 @@ class Store:
                 db.execute('ALTER TABLE suggestions ADD COLUMN early INTEGER NOT NULL DEFAULT 0')
             if 'awaiting' not in columns:
                 db.execute('ALTER TABLE suggestions ADD COLUMN awaiting TEXT')
+            if 'outcome' not in columns:
+                db.execute('ALTER TABLE suggestions ADD COLUMN outcome TEXT')
+            if 'kind' not in {r['name'] for r in db.execute('PRAGMA table_info(facts)')}:
+                db.execute("ALTER TABLE facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact'")
+            # What each Change note was: a style fix, a missing fact, keep going, or a new ask.
+            db.execute('CREATE TABLE IF NOT EXISTS note_kinds(decision_id TEXT PRIMARY KEY,suggestion_id TEXT NOT NULL,kind TEXT NOT NULL,source TEXT NOT NULL,created_at TEXT NOT NULL)')
+            # Changes to how cards and drafts are made, shown on the hit-rate chart.
+            db.execute('CREATE TABLE IF NOT EXISTS rule_changes(id INTEGER PRIMARY KEY,at TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,ref TEXT)')
             preparation_columns = {r['name'] for r in db.execute('PRAGMA table_info(preparations)')}
             for column in ['details', 'started_at']:
                 if column not in preparation_columns:
@@ -2254,9 +2266,11 @@ class Store:
                 first.update(after=r['after_body'], after_subject=r['after_subject'], at=r['created_at'])
             edited_revisions = {r[0] for r in db.execute('SELECT new_revision FROM draft_edits')}
             # As is: no edit in the dashboard and no Change or Try again before the send.
+            # A note that only said keep going or asked for something else didn't change the draft.
             sent = [r['revision'] in edited_revisions or r['changed'] for r in db.execute(
-                "SELECT j.revision,EXISTS(SELECT 1 FROM decisions d WHERE d.suggestion_id=j.suggestion_id AND d.choice IN ('other','retry') "
-                "AND d.source IN ('telegram','dashboard') AND d.created_at<j.created_at) changed FROM action_jobs j WHERE j.status='sent' AND j.updated_at>=?", (since,))]
+                "SELECT j.revision,EXISTS(SELECT 1 FROM decisions d LEFT JOIN note_kinds k ON k.decision_id=d.id WHERE d.suggestion_id=j.suggestion_id AND d.choice='other' "
+                "AND coalesce(k.kind,'') NOT IN ('continue','new_ask') AND d.source IN ('telegram','dashboard') AND d.created_at<j.created_at) changed "
+                "FROM action_jobs j WHERE j.status='sent' AND j.updated_at>=?", (since,))]
             snoozed = db.execute("SELECT s.title,count(*) n FROM decisions d JOIN suggestions s ON s.id=d.suggestion_id WHERE d.choice='snooze' "
                                  "AND d.source IN ('telegram','dashboard') AND d.created_at>=? GROUP BY d.suggestion_id HAVING n>=2 ORDER BY n DESC", (since,)).fetchall()
             quick = [r[0] for r in db.execute("SELECT s.title FROM decisions d JOIN suggestions s ON s.id=d.suggestion_id WHERE d.choice='reject' AND d.feedback='' "
@@ -2278,8 +2292,11 @@ class Store:
                 "SELECT s.id,s.status,(SELECT e.kind FROM events e WHERE e.id=json_extract(s.event_ids,'$[0]')) kind FROM suggestions s "
                 "WHERE s.created_at>=? AND s.created_at<? AND s.id NOT IN (SELECT suggestion_id FROM decisions WHERE id LIKE 'followed-up:%')", (since, end))]
             choices = collections.defaultdict(list)
-            for d in db.execute("SELECT suggestion_id,choice FROM decisions WHERE source IN ('telegram','dashboard') AND created_at>=? ORDER BY created_at", (since,)):
-                choices[d['suggestion_id']].append(d['choice'])
+            for d in db.execute("SELECT d.suggestion_id,d.choice,k.kind FROM decisions d LEFT JOIN note_kinds k ON k.decision_id=d.id "
+                                "WHERE d.source IN ('telegram','dashboard') AND d.created_at>=? ORDER BY d.created_at", (since,)):
+                # A Change counts as what it was: other:style, other:continue, … (other: when not sorted).
+                choices[d['suggestion_id']].append(d['choice'] + (':' + (d['kind'] or '') if d['choice'] == 'other' else ''))
+        cards = [c for c in cards if c['kind'] != 'assistant.test']
         def outcome(c):
             made = choices.get(c['id'], [])
             if c['status'] == 'rejected':
@@ -2287,29 +2304,34 @@ class Store:
             if {'accept', 'send'} & set(made) or c['status'] == 'completed':
                 return 'worth_it'
             return 'open'
-        result = {'days': days, 'cards': len(cards), 'worth_it': 0, 'dismissed': 0, 'open': 0, 'do_it': 0, 'first_time': 0, 'by_source': {}}
+        result = {'days': days, 'cards': len(cards), 'worth_it': 0, 'dismissed': 0, 'open': 0, 'do_it': 0, 'first_time': 0, 'finished': 0, 'by_source': {}}
         for c in cards:
             o = outcome(c)
             result[o] += 1
-            source = result['by_source'].setdefault(source_kind(c['kind']) if c['kind'] else 'other', {'worth_it': 0, 'dismissed': 0, 'open': 0})
+            source = result['by_source'].setdefault(SOURCE_KIND.get(c['kind'], 'other'), {'worth_it': 0, 'dismissed': 0, 'open': 0})
             source[o] += 1
             made = choices.get(c['id'], [])
             if 'accept' in made:
                 result['do_it'] += 1
-                after = made[made.index('accept') + 1:]
-                result['first_time'] += not ({'other', 'retry'} & set(after))
+                after = set(made[made.index('accept') + 1:])
+                # First try: no correction (style, a missing fact, or a Change not sorted yet).
+                result['first_time'] += not ({'other:', 'other:style', 'other:fact'} & after)
+                # Finished: no keep-going nudge and no Try again.
+                result['finished'] += not ({'other:continue', 'retry'} & after)
         decided = result['worth_it'] + result['dismissed']
         result['hit_rate'] = round(100 * result['worth_it'] / decided) if decided else None
         result['first_time_rate'] = round(100 * result['first_time'] / result['do_it']) if result['do_it'] else None
+        result['finished_rate'] = round(100 * result['finished'] / result['do_it']) if result['do_it'] else None
         return result
 
     def quality_report(self, days=30):
-        """This period and the one before, for the dashboard."""
+        """This period and the one before, for the dashboard and recap."""
         current = self.quality(days)
         before = self.quality(days, (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat())
         b = self.behaviour(days)
-        return {**current, 'previous': {k: before[k] for k in ('hit_rate', 'first_time_rate', 'cards')},
-                'sent_as_written': b['sent_as_written'], 'sent_edited': b['sent_edited'], 'trend': self.quality_trend()}
+        return {**current, 'previous': {k: before[k] for k in ('hit_rate', 'first_time_rate', 'finished_rate', 'cards')},
+                'sent_as_written': b['sent_as_written'], 'sent_edited': b['sent_edited'], 'trend': self.quality_trend(),
+                'notes': self.note_kind_counts(days)}
 
     def quality_trend(self, days=14, weeks=8):
         """Hit rate per local day and per week (from Monday), oldest first, so progress shows.
@@ -2319,7 +2341,9 @@ class Store:
         def bucket(start, end):
             utc = lambda d: dt.datetime.combine(d, dt.time(), zone).astimezone(dt.timezone.utc).isoformat()
             q = self.quality(until=utc(end), since=utc(start))
-            return {'start': start.isoformat(), **{k: q[k] for k in ('worth_it', 'dismissed', 'open', 'hit_rate', 'do_it', 'first_time_rate')}}
+            changes = [c['text'] for c in self.rule_changes(utc(start)) if c['at'] < utc(end) and not c['text'].endswith(' tracked')]
+            return {'start': start.isoformat(), 'changes': changes,
+                    **{k: q[k] for k in ('worth_it', 'dismissed', 'open', 'hit_rate', 'do_it', 'first_time_rate', 'finished_rate')}}
         monday = today - dt.timedelta(days=today.weekday())
         return {'daily': [bucket(today - dt.timedelta(days=i), today - dt.timedelta(days=i - 1)) for i in range(days - 1, -1, -1)],
                 'weekly': [bucket(monday - dt.timedelta(weeks=i), monday - dt.timedelta(weeks=i - 1)) for i in range(weeks - 1, -1, -1)]}
@@ -2353,11 +2377,13 @@ class Store:
             out.append(f"- {e['title']}{subject}\n  Your draft: {clip(e['before'])}\n  The owner changed it to: {clip(e['after'])}")
         return '\n'.join(out)
 
-    def remember_fact(self, text, decision_id):
+    def remember_fact(self, text, decision_id, kind='fact'):
         """Keep a lasting fact from one of the owner's own written notes, so later reviews and preparations use it."""
         text = ' '.join(str(text or '').split())
         if not 5 <= len(text) <= 240:
             raise ValueError('A fact is one short sentence (5-240 characters)')
+        if kind not in FACT_KINDS:
+            raise ValueError('kind is fact (true about the world) or draft (how the owner wants drafts written)')
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             note = db.execute("SELECT suggestion_id,feedback FROM decisions WHERE id=? AND source IN ('telegram','dashboard') AND feedback!='' AND id NOT IN (SELECT decision_id FROM decision_annotations)", (decision_id,)).fetchone()
@@ -2367,27 +2393,70 @@ class Store:
             tombstone = next((r for r in removed if ' '.join(r['text'].casefold().split()) == text.casefold()),None)
             if tombstone:
                 return {'id':tombstone['id'],'suppressed':True}
-            existing = db.execute('SELECT id FROM facts WHERE removed_at IS NULL AND lower(text)=lower(?)', (text,)).fetchone()
+            existing = db.execute('SELECT id FROM facts WHERE removed_at IS NULL AND kind=? AND lower(text)=lower(?)', (kind, text)).fetchone()
             if existing:
                 return {'id': existing['id'], 'duplicate': True}
             if db.execute('SELECT count(*) FROM facts WHERE removed_at IS NULL').fetchone()[0] >= 80:
                 raise ValueError('Too many facts; the owner can remove old ones on the dashboard')
-            cur = db.execute('INSERT INTO facts(text,decision_id,suggestion_id,created_at) VALUES(?,?,?,?)', (text, decision_id, note['suggestion_id'], now()))
+            cur = db.execute('INSERT INTO facts(text,decision_id,suggestion_id,created_at,kind) VALUES(?,?,?,?,?)', (text, decision_id, note['suggestion_id'], now(), kind))
+            if kind == 'draft':
+                db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'draft_rule',?,?)", (now(), 'Draft rule: ' + text, str(cur.lastrowid)))
             return {'id': cur.lastrowid}
 
     def forget_fact(self, fact_id):
         with self.connect() as db:
-            if not db.execute('UPDATE facts SET removed_at=? WHERE id=? AND removed_at IS NULL', (now(), int(fact_id))).rowcount:
+            row = db.execute('SELECT kind,text FROM facts WHERE id=? AND removed_at IS NULL', (int(fact_id),)).fetchone()
+            if not row:
                 raise ValueError('Unknown fact')
+            db.execute('UPDATE facts SET removed_at=? WHERE id=?', (now(), int(fact_id)))
+            if row['kind'] == 'draft':
+                db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'draft_rule',?,?)", (now(), 'Removed draft rule: ' + row['text'], str(fact_id)))
         return {'removed': True}
 
     def facts(self):
         with self.connect() as db:
-            return [dict(r) for r in db.execute('SELECT id,text,suggestion_id,created_at FROM facts WHERE removed_at IS NULL ORDER BY created_at')]
+            return [dict(r) for r in db.execute('SELECT id,text,suggestion_id,created_at,kind FROM facts WHERE removed_at IS NULL ORDER BY created_at')]
 
-    def facts_text(self, limit=3000):
-        text = '\n'.join('- ' + f['text'] for f in self.facts())
+    def facts_text(self, limit=3000, kind='fact'):
+        text = '\n'.join('- ' + f['text'] for f in self.facts() if f['kind'] == kind)
         return text if len(text) <= limit else text[:limit] + '\n…'
+
+    def tag_note(self, suggestion_id, kind, db, source='assistant'):
+        """Record what the Change note behind this preparation was. Returns False when there's no untagged note."""
+        job = db.execute("SELECT p.decision_id,d.choice FROM preparations p JOIN decisions d ON d.id=p.decision_id WHERE p.suggestion_id=?", (suggestion_id,)).fetchone()
+        if not job or job['choice'] != 'other' or db.execute('SELECT 1 FROM note_kinds WHERE decision_id=?', (job['decision_id'],)).fetchone():
+            return False
+        if kind not in NOTE_KINDS:
+            raise ValueError("Say what the owner's Change note was: note_kind " + ', '.join(NOTE_KINDS) +
+                             ' (style: how it was written; fact: something you didn\'t know; continue: keep going or finish the job; new_ask: something else to do)')
+        db.execute('INSERT INTO note_kinds VALUES(?,?,?,?,?)', (job['decision_id'], suggestion_id, kind, source, now()))
+        return True
+
+    def note_kind_counts(self, days=30):
+        since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+        with self.connect() as db:
+            rows = db.execute("SELECT coalesce(k.kind,'unsorted') kind,count(*) n FROM decisions d LEFT JOIN note_kinds k ON k.decision_id=d.id "
+                              "WHERE d.choice='other' AND d.source IN ('telegram','dashboard') AND d.created_at>=? GROUP BY 1", (since,)).fetchall()
+        counts = {k: 0 for k in NOTE_KINDS + ('unsorted',)}
+        counts.update({r['kind']: r['n'] for r in rows})
+        return counts
+
+    def rule_changes(self, since):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute('SELECT at,kind,text FROM rule_changes WHERE at>=? ORDER BY at', (since,))]
+
+    def note_rule_files(self, paths):
+        """Log an edit to the rule files (AGENTS.md, PREPARATION.md) once, by content hash."""
+        with self.connect() as db:
+            for path in paths:
+                try:
+                    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+                except OSError:
+                    continue
+                name = Path(path).name
+                last = db.execute("SELECT ref FROM rule_changes WHERE kind='file' AND text LIKE ? ORDER BY id DESC LIMIT 1", (name + ' %',)).fetchone()
+                if not last or last['ref'] != digest:
+                    db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'file',?,?)", (now(), name + (' edited' if last else ' tracked'), digest))
 
     def looks_handled(self, suggestion_id, reason, event_ids):
         """A later signal suggests an open card is already done. Only a hint: the owner still closes it."""
@@ -2640,7 +2709,7 @@ class Store:
             db.execute('UPDATE suggestions SET feedback_prompt_message_id=? WHERE id=? AND feedback_request_id=? AND feedback_until>?',
                        (str(message_id),suggestion_id,request_id,now()))
 
-    def prepare(self, suggestion_id, body, job_id=None, next_action=None):
+    def prepare(self, suggestion_id, body, job_id=None, next_action=None, outcome=None, note_kind=None, require_note=False):
         if not body.strip():
             raise ValueError('A concrete local preparation is required')
         if len(body) > 1000:
@@ -2662,10 +2731,12 @@ class Store:
                 return {'status': 'prepared', 'replayed': True}
             if db.execute("SELECT 1 FROM action_jobs WHERE suggestion_id=? AND status IN ('sending','uncertain')",(suggestion_id,)).fetchone():
                 raise ValueError('An earlier send is still being checked. Resolve that outcome before replacing its draft.')
+            if job_id and (note_kind or require_note):
+                self.tag_note(suggestion_id, note_kind, db)
             db.execute("UPDATE action_jobs SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status IN ('queued','blocked')",(now(),suggestion_id))
             # The chosen next step is finished; the same step offered again later is a fresh choice.
             db.execute("UPDATE action_jobs SET status='done',updated_at=? WHERE suggestion_id=? AND status='local_preparation'",(now(),suggestion_id))
-            db.execute("UPDATE suggestions SET body=?,status='prepared',next_action=? WHERE id=?", (body[:5000],action_json,suggestion_id))
+            db.execute("UPDATE suggestions SET body=?,status='prepared',next_action=?,outcome=? WHERE id=?", (body[:5000],action_json,encoded(outcome) if outcome else None,suggestion_id))
             db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (suggestion_id,))
             db.execute("UPDATE preparations SET status='done',updated_at=?,error=NULL,reason=NULL WHERE suggestion_id=?",(now(),suggestion_id))
             # A new result is worth a notification, not only an invisible edit.
@@ -2742,7 +2813,7 @@ class Store:
             db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(suggestion_id,))
         return {'status':'queued'}
 
-    def preparation_blocked(self, suggestion_id, job_id, reason, details=None):
+    def preparation_blocked(self, suggestion_id, job_id, reason, details=None, note_kind=None):
         if not reason.strip() or len(reason)>400:
             raise ValueError('Give a short, specific blocker')
         if details is not None and (not isinstance(details,str) or len(details)>2000):
@@ -2751,6 +2822,8 @@ class Store:
             job=db.execute('SELECT * FROM preparations WHERE suggestion_id=?',(suggestion_id,)).fetchone()
             if not job or job['job_id']!=job_id or job['status'] not in ('starting','running'):
                 raise ValueError('Preparation cancelled or replaced')
+            if note_kind:
+                self.tag_note(suggestion_id, note_kind, db)
             db.execute("UPDATE preparations SET status='blocked',reason=?,details=?,updated_at=? WHERE suggestion_id=?",(reason,(details or '').strip() or None,now(),suggestion_id))
             db.execute("UPDATE deliveries SET status='queued',reminder=1,needs_edit=1,error=NULL WHERE suggestion_id=? AND status IN ('queued','sent','uncertain')",(suggestion_id,))
         return {'status':'blocked','reason':reason}
@@ -3616,6 +3689,12 @@ def card(row):
               'snoozed': 'Snoozed until '+dt.datetime.fromisoformat(row['snoozed_until']).astimezone(local_tz()).strftime('%-d %b · %H:%M')+'.' if row.get('snoozed_until') else 'Snoozed.',
               'instructions': 'Got your feedback. I’ll update this.',
               'prepared': 'Ready for you.', 'completed': 'Done.'}.get(row['status'], '')
+    if row['status'] == 'prepared' and row.get('outcome'):
+        try:
+            outcome = json.loads(row['outcome'])
+            status = 'Finished. Mark it done if it looks right.' if outcome['state'] == 'done' else 'Needs you: ' + outcome['needs'].rstrip('.') + '.'
+        except (ValueError, KeyError, TypeError):
+            pass
     if row.get('early') and row['status'] == 'prepared':
         status = 'Prepared ahead, so you only need to approve it. Nothing was sent or changed.'
     if row.get('preparation_status') in ('starting','running'): status='Preparing…'
@@ -4046,7 +4125,7 @@ def owner_details(config=None):
     return ('\n' + '\n'.join(lines)) if lines else ''
 
 
-def preparation_prompt(job, facts='', config=None, edits=''):
+def preparation_prompt(job, facts='', config=None, edits='', rules=''):
     # The standing rules live in PREPARATION.md, which the plugin prepends to every preparation
     # session (outside the runner's message limit); this message carries only the job itself.
     j,sid=job['job_id'],job['suggestion_id']
@@ -4058,11 +4137,16 @@ Follow the preparation rules above (tools/personal-assistant/PREPARATION.md; rea
 For this job:
 - Browser lease owner: assistant-{j[:8]} (python3 {browser_lease_script(config)} claim --owner assistant-{j[:8]} --minutes 30 --wait 10).
 - Attachments folder: {WORKSPACE}/data/assistant-attachments/{j}/
-- Save the result with assistant_signals prepare args suggestion_id={sid}, job_id={j}, body=<short result>, next_actions=[...] and send_now:true only when the owner asked you to send it.
+- Save the result with assistant_signals prepare args suggestion_id={sid}, job_id={j}, body=<short result>, next_actions=[...], outcome and send_now:true only when the owner asked you to send it.
+- outcome:'done' when the job is finished and nothing is left for the owner but to check it; outcome:'needs_you' with needs:<the one thing they have to do> otherwise (approve the send, sign in, choose). Finish what you can first: don't stop to ask about steps the rules already let you do.
+- When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card ("always…", signatures, formatting, tone with this kind of person) also becomes a draft rule: assistant_signals remember_fact args text=<the rule, general>, decision_id=<that note's decision>, kind=draft. A fact note that holds beyond this card goes in remember_fact as a fact.
 - Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>.''' + owner_details(config) + (f'''
 
 Facts the owner told you earlier (true unless they say otherwise now):
 {facts}''' if facts else '') + (f'''
+
+Draft rules from the owner's notes (follow them in every draft unless their note on this card says otherwise):
+{rules}''' if rules else '') + (f'''
 
 Drafts the owner edited themselves before sending. Write the next drafts the way they ended up writing these (length, tone, what they cut or added):
 {edits}''' if edits else '')
@@ -4390,7 +4474,15 @@ class App:
             if problems and args.get('checked') is not True:
                 # The run fixes these itself; checked:true saves anyway when one is deliberate.
                 raise ValueError('Check before saving: '+'; '.join(problems)+'. Fix and save again, or add checked:true if this is intended.')
-            saved=self.store.prepare(args['suggestion_id'], args['body'],args.get('job_id'),action)
+            outcome=None
+            if args.get('outcome') is not None or args.get('job_id'):
+                # Every result says plainly whether the job is finished.
+                needs=' '.join(str(args.get('needs') or '').split())
+                if args.get('outcome')=='done':outcome={'state':'done'}
+                elif args.get('outcome')=='needs_you' and 3<=len(needs)<=200:outcome={'state':'needs_you','needs':needs}
+                else:raise ValueError("Say whether the job is finished: outcome:'done' (nothing left for the owner but to check it), or outcome:'needs_you' with needs:<what they have to do, e.g. approve the send, sign in, pick an option>")
+            saved=self.store.prepare(args['suggestion_id'], args['body'],args.get('job_id'),action,outcome,args.get('note_kind'),require_note=True)
+
             if args.get('send_now') is True and not saved.get('replayed'):
                 with self.store.connect() as db:
                     if db.execute('SELECT early FROM suggestions WHERE id=?',(args['suggestion_id'],)).fetchone()[0]:
@@ -4410,7 +4502,7 @@ class App:
             else:raise ValueError('Sending approval must come from the owner’s controls')
             return self.store.confirm_action(args['suggestion_id'],args['revision'],args['approval_id'],source,args.get('recipients'))
         if name == 'remember_fact':
-            return self.store.remember_fact(args.get('text'), args.get('decision_id'))
+            return self.store.remember_fact(args.get('text'), args.get('decision_id'), args.get('kind') or 'fact')
         if name == 'looks_handled':
             return self.store.looks_handled(args['suggestion_id'], args.get('reason'), args.get('event_ids') or [])
         if name in ('push_subscribe', 'push_unsubscribe'):
@@ -4435,7 +4527,7 @@ class App:
                 raise ValueError('Only the owner can remove a fact, on the dashboard')
             return self.store.forget_fact(args['id'])
         if name == 'preparation_blocked':
-            return self.store.preparation_blocked(args['suggestion_id'],args['job_id'],args['reason'],args.get('details'))
+            return self.store.preparation_blocked(args['suggestion_id'],args['job_id'],args['reason'],args.get('details'),args.get('note_kind'))
         if name == 'refresh_card':
             with self.store.connect() as db:
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(args['suggestion_id'],))
@@ -4825,7 +4917,8 @@ class App:
             if chosen:job['next_step']=json.loads(chosen['payload'])['instructions']
             with self.store.connect() as db:
                 job['ahead']=bool(db.execute('SELECT early FROM suggestions WHERE id=?',(job['suggestion_id'],)).fetchone()[0])
-            request['message']=preparation_prompt(job,self.store.facts_text(),self.config,self.store.draft_edits_text())
+            self.store.note_rule_files(RULE_FILES)
+            request['message']=preparation_prompt(job,self.store.facts_text(),self.config,self.store.draft_edits_text(),self.store.facts_text(kind='draft'))
             if request['session_job_id'] != job['job_id']:
                 request['message']+='\nThis continues the SAME session, with earlier work in context. Before changing anything in an app, read assistant_signals preparation_history (offset 0, then any next_offset): a compact list of earlier calls. Summaries are shortened: when reconciling a call, request preparation_history with its call_ref, offset 0 and any next_offset for exact saved parameters and receipts. If detail_complete=false, check the retained transcript or original app for the missing suffix. Do not repeat an external step that already happened; check uncertain ones against the app first. If the owner\'s latest note asks for something different (a rewrite, another approach), do that. Saving your result or a blocker is always allowed.'
         result=runner(request)
@@ -4993,6 +5086,7 @@ class App:
         action = 'stop' if expired or run['status'] == 'recovering' else 'start' if run['status'] == 'starting' else 'status'
         request = {'kind': 'review', 'job_id': run['run_id'], 'action': action}
         if request['action'] == 'start':
+            self.store.note_rule_files(RULE_FILES)
             request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text())
         receipt = runner(request)
         result = receipt.get('status', 'unavailable')
