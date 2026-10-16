@@ -2992,15 +2992,20 @@ class Store:
             row = db.execute('SELECT event_ids FROM suggestions WHERE id=?', (suggestion_id,)).fetchone()
             if not row:
                 raise ValueError('Unknown suggestion')
-            ids = json.loads(row['event_ids'])[:20]
+        # The reviewer lists the event that matters first; newest-first put side context on top.
+        return self.event_views(json.loads(row['event_ids'])[:20])[:5]
+
+    def event_views(self, ids):
+        """Collected messages, in the given order, for reading on the dashboard."""
+        ids = [int(i) for i in ids]
+        with self.connect() as db:
             rows = [dict(r) for r in db.execute('SELECT id,account_id,source_id,kind,occurred_at,title,body,metadata FROM events WHERE id IN (' + ','.join('?' for _ in ids) + ')', ids)] if ids else []
-            # The reviewer lists the event that matters first; newest-first put side context on top.
-            rows = sorted(rows, key=lambda r: ids.index(r['id']))[:5]
+        rows.sort(key=lambda r: ids.index(r['id']))
         result = []
         for r in rows:
             m = json.loads(r['metadata'])
             url = m.get('source_url')
-            who = (m.get('sender_display') or m.get('from') or m.get('chat_name') or m.get('app_name')
+            who = 'You' if m.get('from_me') else (m.get('sender_display') or m.get('from') or m.get('chat_name') or m.get('app_name')
                    or (('#' + m['channel_name']) if m.get('channel_name') else '') or '')
             result.append({'kind': source_kind(r['kind']), 'from': str(who)[:300], 'to': str(m.get('to') or '')[:500],
                            'cc': str(m.get('cc') or '')[:500], 'title': r['title'][:500], 'occurred_at': r['occurred_at'],
@@ -4567,9 +4572,10 @@ class App:
         return account, gog_read(self.config, account, 'gmail', 'v1', 'gmail.users.messages.get',
                                  {'userId': 'me', 'id': message_id, 'format': 'full'}, 'https://www.googleapis.com/auth/gmail.readonly')
 
-    def originals(self, suggestion_id):
-        """Source messages for the dashboard, with Gmail attachments looked up live (read-only)."""
-        items = self.store.originals(suggestion_id)
+    def originals(self, suggestion_id, event_id=''):
+        """Source messages for the dashboard, with Gmail attachments looked up live (read-only):
+        a card's, or one collected event opened from the Events or People tab."""
+        items = self.store.originals(suggestion_id) if suggestion_id else self.store.event_views([event_id])
         cache = self.__dict__.setdefault('_attachments', {})
         for item in items:
             source = item.pop('gmail')
@@ -4587,11 +4593,15 @@ class App:
 
     def email_view(self, suggestion_id, event_id):
         """The HTML of one source email, read live (read-only), with its embedded images."""
-        source = next((item['gmail'] for item in self.store.originals(suggestion_id) if str(item['event_id']) == str(event_id) and item['gmail']), None)
+        source = self.gmail_source(suggestion_id, event_id)
         if not source:
             raise ValueError('Email not available')
         payload = self.gmail_message(source['account_id'], source['message_id'])[1].get('payload')
         return {'html': message_html(payload), 'images': message_images(payload)}
+
+    def gmail_source(self, suggestion_id, event_id):
+        items = self.store.originals(suggestion_id) if suggestion_id else self.store.event_views([event_id])
+        return next((item['gmail'] for item in items if str(item['event_id']) == str(event_id) and item['gmail']), None)
 
     def draft_attachment(self, suggestion_id, sha256):
         """A file attached to this card's own email draft, served from the service's store by checksum."""
@@ -4604,7 +4614,7 @@ class App:
         return next_actions.attachment_bytes(record, self.config), record['type'], record['name']
 
     def attachment(self, suggestion_id, event_id, part):
-        source = next((item['gmail'] for item in self.store.originals(suggestion_id) if str(item['event_id']) == str(event_id) and item['gmail']), None)
+        source = self.gmail_source(suggestion_id, event_id)
         if not source:
             raise ValueError('Attachment not available')
         account, message = self.gmail_message(source['account_id'], source['message_id'])
@@ -5687,7 +5697,8 @@ class App:
                         self.output(404, {'error': 'Progress not available'})
                 elif path.path == '/api/originals':
                     try:
-                        self.output(200, {'originals': app.originals(urllib.parse.parse_qs(path.query).get('id', [''])[0])})
+                        args = urllib.parse.parse_qs(path.query)
+                        self.output(200, {'originals': app.originals(args.get('id', [''])[0], args.get('event', [''])[0])})
                     except (ValueError, sqlite3.OperationalError):
                         self.output(404, {'error': 'Original not available'})
                 elif path.path == '/api/email':

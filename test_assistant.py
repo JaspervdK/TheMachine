@@ -361,6 +361,13 @@ class Invariants(unittest.TestCase):
         self.store.decide(sid,'complete','','done-click','dashboard')
         self.assertEqual(self.store.looks_handled(sid,'Signed again later.',[2]),{'skipped':'already closed'})
 
+    def test_any_event_opens_on_its_own_without_a_card(self):
+        mine={**event(source='wa',body='See you at 8'),'kind':'whatsapp.message','metadata':{'from_me':True,'chat_name':'Anna'}}
+        self.store.commit_page('work', {}, [event(), mine])
+        [item]=self.store.event_views(['2'])
+        self.assertEqual((item['event_id'],item['from'],item['body']),(2,'You','See you at 8'))
+        self.assertEqual([i['event_id'] for i in self.store.event_views([2,1])],[2,1])
+        with self.assertRaises(ValueError):self.store.event_views(['nope'])
     def test_originals_follow_the_reviewers_order_main_evidence_first(self):
         old={**event(source='debit',body='Add money'),'title':'Add money for your Direct Debit','occurred_at':'2026-10-12T13:18:00+00:00'}
         new={**event(source='stripe',body='Money in'),'title':'Money received','occurred_at':'2026-10-12T13:24:00+00:00'}
