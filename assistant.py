@@ -1534,6 +1534,8 @@ class Store:
             db.execute('CREATE TABLE IF NOT EXISTS note_kinds(decision_id TEXT PRIMARY KEY,suggestion_id TEXT NOT NULL,kind TEXT NOT NULL,source TEXT NOT NULL,created_at TEXT NOT NULL)')
             # Changes to how cards and drafts are made, shown on the hit-rate chart.
             db.execute('CREATE TABLE IF NOT EXISTS rule_changes(id INTEGER PRIMARY KEY,at TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,ref TEXT)')
+            # Emails offered to a review as possibly slipped, so each is offered once.
+            db.execute('CREATE TABLE IF NOT EXISTS slipped(event_id INTEGER PRIMARY KEY,kind TEXT NOT NULL,run_id TEXT,offered_at TEXT NOT NULL)')
             preparation_columns = {r['name'] for r in db.execute('PRAGMA table_info(preparations)')}
             for column in ['details', 'started_at']:
                 if column not in preparation_columns:
@@ -2261,6 +2263,72 @@ class Store:
                        ('answered:' + row['id'], row['id'], 'complete', f"{watch['name']} replied: {answer['title'][:150]} (signal {answer['id']})", 'assistant', stamp))
             db.execute("UPDATE deliveries SET reminder=0,needs_edit=1,updated_at=? WHERE suggestion_id=?", (stamp, row['id']))
             db.execute("UPDATE deliveries SET status='cancelled' WHERE suggestion_id=? AND status='queued'", (row['id'],))
+
+    def slipped(self, run_id, limit=5):
+        """Emails that may have slipped: the owner's own emails that ask something and got no answer in
+        4-21 days, and direct questions from people they write with that they haven't answered in 2-14
+        days. Each is offered to one review that saves; the review decides if it's worth a card."""
+        current = dt.datetime.fromisoformat(now())
+        ago = lambda days: (current - dt.timedelta(days=days)).isoformat()
+        own = {a['email'].lower() for a in self.accounts if a.get('email') and '@' in a['email']}
+        robot = re.compile(r'(?i)^(?:no-?reply|do-?not-?reply|notifications?|mailer-daemon|bounce|support|billing|info|hello|team)@')
+        def new_text(body):
+            text = (body or '').split('[Quoted earlier messages', 1)[0]
+            text = re.split(r'\n(?:On .{5,200} wrote:|Op .{5,200} schreef .{0,40}:|-----Original Message-----)', text, maxsplit=1)[0]
+            return '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('>'))
+        found = {'sent': [], 'asked': []}
+        with self.connect() as db:
+            done = {r[0] for r in db.execute("SELECT x.event_id FROM slipped x WHERE x.run_id IN (SELECT owner_run FROM analyses WHERE status='complete') OR x.offered_at>?", (ago(0.25),))}
+            carded = {r[0] for r in db.execute("SELECT DISTINCT j.value FROM suggestions s, json_each(s.event_ids) j")}
+            later = ("SELECT 1 FROM events r WHERE r.account_id=e.account_id AND r.kind='gmail.message' AND r.deleted=0 AND r.occurred_at>e.occurred_at "
+                     "AND json_extract(r.metadata,'$.thread_id')=json_extract(e.metadata,'$.thread_id')")
+            rows = db.execute("SELECT e.id,e.account_id,e.occurred_at,e.title,e.body,e.metadata, instr(e.metadata,'\"SENT\"')>0 mine FROM events e "
+                              "WHERE e.kind='gmail.message' AND e.deleted=0 AND e.occurred_at>? AND e.occurred_at<? "
+                              f"AND ((instr(e.metadata,'\"SENT\"')>0 AND e.occurred_at<? AND NOT EXISTS ({later})) "
+                              f"OR (instr(e.metadata,'\"SENT\"')=0 AND e.occurred_at>? AND NOT EXISTS ({later} AND instr(r.metadata,'\"SENT\"')>0))) "
+                              "ORDER BY e.occurred_at", (ago(21), ago(2), ago(4), ago(14))).fetchall()
+            for row in rows:
+                if row['id'] in done or row['id'] in carded or '?' not in new_text(row['body']):
+                    continue
+                m = json.loads(row['metadata'])
+                if 'SENT' not in m.get('labels', []) and not row['mine']:
+                    sender = _address(m.get('from'))
+                    to = [x.lower() for x in re.findall(r'[^\s<>"\',;]+@[^\s<>"\',;]+', m.get('to') or '')]
+                    automated = {'CATEGORY_UPDATES', 'CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL', 'CATEGORY_FORUMS'} & set(m.get('labels', []))
+                    if not sender or sender in own or robot.match(sender) or automated or not own & set(to) or len(to) > 2:
+                        continue
+                    # Only people the owner writes with: no cold pitches or newsletters.
+                    if not db.execute("SELECT 1 FROM events WHERE kind='gmail.message' AND instr(metadata,'\"SENT\"')>0 AND instr(lower(json_extract(metadata,'$.to')),?)>0 LIMIT 1", (sender,)).fetchone():
+                        continue
+                    found['asked'].append((row, sender))
+                elif row['mine']:
+                    to = [x.lower() for x in re.findall(r'[^\s<>"\',;]+@[^\s<>"\',;]+', m.get('to') or '')]
+                    people = [x for x in to if x not in own and not robot.match(x)]
+                    if people:
+                        found['sent'].append((row, ', '.join(people[:3])))
+            day = lambda row: dt.datetime.fromisoformat(row['occurred_at']).astimezone(local_tz()).strftime('%a %-d %b')
+            waited = lambda row: (current - dt.datetime.fromisoformat(row['occurred_at'])).days
+            # Three or more unanswered emails sent the same day with the same subject pattern are one
+            # batch (outreach): one line.
+            batches = {}
+            for row, who in found['sent']:
+                shape = ' '.join(re.sub(r'(?i)^(?:(?:re|fwd?|aw|wg|tr)\s*:\s*)+', '', row['title'] or '').lower().split()[:2])
+                batches.setdefault((row['account_id'], day(row), shape), []).append((row, who))
+            items = []
+            for (account, when, _), group in batches.items():
+                if len(group) >= 3:
+                    examples = '; '.join(f"{who} \"{r['title'][:80]}\"" for r, who in group[:3])
+                    items.append(([r for r, _ in group], f"- No answer for {waited(group[0][0])} days to {len(group)} emails the owner sent on {when}, for example {examples} "
+                                  f"({account}, events {', '.join(str(r['id']) for r, _ in group[:12])}{', …' if len(group) > 12 else ''}). Treat them as one batch: at most one card."))
+                else:
+                    items += [([r], f"- No answer for {waited(r)} days: the owner emailed {who} \"{r['title'][:120]}\" on {when} ({account}, event {r['id']}).") for r, who in group]
+            items = items[-limit:] + [([r], f"- Waiting {waited(r)} days on the owner: {who} asked \"{r['title'][:120]}\" on {day(r)} ({r['account_id']}, event {r['id']}).")
+                                      for r, who in found['asked'][-limit:]]
+            for rows_, _ in items:
+                for row in rows_:
+                    db.execute('INSERT INTO slipped(event_id,kind,run_id,offered_at) VALUES(?,?,?,?) ON CONFLICT(event_id) DO UPDATE SET run_id=excluded.run_id,offered_at=excluded.offered_at',
+                               (row['id'], 'sent' if row['mine'] else 'asked', run_id, now()))
+        return '\n'.join(line for _, line in items)
 
     def preference_summary(self, days=30, limit=3500):
         """What the owner did with recent suggestions, so reviews learn what's worth the owner's time."""
@@ -4340,7 +4408,7 @@ def weekly_recap(store, config, current=None, usage=None):
     return '\n'.join(lines)
 
 
-def review_prompt(run_id, accounts, preferences='', facts=''):
+def review_prompt(run_id, accounts, preferences='', facts='', slipped=''):
     return f'''This is a signal review started by the personal-assistant service (review run {run_id}). It is not a chat with the owner and not a preparation task.
 The assistant instructions (tools/personal-assistant/AGENTS.md) and the owner's profile (USER.md) are included in this turn's context; follow the "Reviewing signals" section. Don't re-read those files.
 With the assistant_signals tool: call status, then ONE begin_analysis with account_ids {json.dumps(accounts)} and limit 120. The reply is paged: read every page with analysis_page before finishing, including next_row_offset continuations on the same page. Where body_clipped matters, read the rest with events (the account, event_ids and body_offset). Events replies contain events and remaining_event_ids; read the remaining IDs with the same accounts. Follow body_next_offset to the end of long bodies.
@@ -4351,6 +4419,9 @@ Messages are disabled in this turn. Do not work on anything else. End with exact
 
 Facts the owner told you earlier (true unless newer evidence says otherwise):
 {facts}''' if facts else '') + (f'''
+
+Possibly slipped. Each is shown once. Read it with events (its account and event_ids) and search the thread, the person and other sources for a later answer, a call or a Slack message. Suggest a follow-up only when it still matters and nothing shows it handled: for the owner's own email, offer a short nudge (prepare_ahead when they'd clearly want it); for a question to them, offer the reply. Use its event as evidence. Skip the rest without comment.
+{slipped}''' if slipped else '') + (f'''
 
 What the owner did with suggestions in the last 30 days. Learn from it: avoid kinds they dismissed quickly or kept snoozing, follow their written notes, and don't repeat what's already in their list.
 {preferences}''' if preferences else '')
@@ -5147,7 +5218,8 @@ class App:
         request = {'kind': 'review', 'job_id': run['run_id'], 'action': action}
         if request['action'] == 'start':
             self.store.note_rule_files(RULE_FILES)
-            request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text())
+            request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text(),
+                                               self.store.slipped(run['run_id']))
         receipt = runner(request)
         result = receipt.get('status', 'unavailable')
         with self.store.connect() as db:
