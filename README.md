@@ -6,6 +6,12 @@ A private, self-hosted assistant inbox for [OpenClaw](https://docs.openclaw.ai).
 
 ## Try the dashboard
 
+**[Open the live demo](https://jeroencorthout.github.io/TheMachine/)**: sample data only, runs in your browser.
+
+<img src="docs/demo.gif" alt="Reading a prepared result, tapping Do it and marking a task done in the demo" width="360">
+
+Or run it locally:
+
 ```bash
 git clone https://github.com/JeroenCorthout/TheMachine.git
 cd TheMachine
@@ -35,7 +41,7 @@ Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Req
 - **Delivers** suggestions as Telegram cards through your existing OpenClaw bot, with a phone-friendly dashboard (installable as an app, with optional push notifications) on your tailnet.
 - **Acts** when you tap **Do it**: the agent drafts the email (with a Send button), makes the fix, or does the research, and reports back on the same card. **Change** lets you reply with instructions; **Snooze**, **Dismiss** and **Mark done** work as you'd expect, and your choices steer later reviews.
 
-The service itself contains no model. All interpretation happens in your OpenClaw agent, with your model provider.
+The service itself contains no model. All interpretation happens in your OpenClaw agent, with your model provider: see [Bring your own model](docs/models.md) for choosing one, including local models.
 
 ## Architecture
 
@@ -248,6 +254,8 @@ Read this before you turn on delivery.
 - **Rollback:** disable a source by removing its account from `config.json`; disable reviews with `review_worker.enabled: false`; stop delivery with `delivery_enabled: false`; disable the plugin with `openclaw plugins disable personal-assistant-bridge`. Keep the database.
 
 ## Adding a source
+
+Sources can be added as a single-file plugin in `connectors/` without touching `assistant.py`. [docs/adding-a-source.md](docs/adding-a-source.md) walks through one, with [`connectors/rss.py`](connectors/rss.py) (RSS and Atom feeds) as a working example. The rules for any source:
 
 1. Use an existing credential for the exact account, with only the read permission needed. Give the source its own account ID, boundary and checkpoint.
 2. Add an adapter that returns the common event fields: `account_id`, a stable `source_id`, `kind`, `occurred_at`, `title`, `body`, `metadata` (with a source URL where possible) and `deleted`. No AI, guessing or writes in collectors.

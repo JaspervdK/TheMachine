@@ -1,6 +1,7 @@
 """The demo must stay local and never admit real service actions or private files."""
 import http.client
 import json
+import tempfile
 import threading
 import unittest
 from unittest import mock
@@ -42,13 +43,27 @@ class DemoTest(unittest.TestCase):
     def test_actions_are_memory_only_and_live_actions_are_rejected(self):
         task=self.server.state['suggestions'][1]
         with mock.patch('subprocess.run',side_effect=AssertionError('No commands in demo')):
-            status,_=self.request('/api/action',{'action':'decide','args':{'suggestion_id':task['id'],'choice':'accept'}})
+            status,body=self.request('/api/action',{'action':'decide','args':{'suggestion_id':task['id'],'choice':'accept'}})
             self.assertEqual(status,200)
+            self.assertEqual(json.loads(body)['status'],'accepted')
             self.assertEqual(task['status'],'accepted')
             status,_=self.request('/api/action',{'action':'confirm_action','args':{'suggestion_id':task['id']}})
             self.assertEqual(status,400)
             status,_=self.request('/api/action',{'action':'decide','args':{'suggestion_id':task['id'],'choice':'complete'}},origin=False)
             self.assertEqual(status,403)
+
+    def test_static_build_has_only_the_page_brand_and_sample_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=demo.build(tmp)
+            files=sorted(str(p.relative_to(out)) for p in out.rglob('*') if p.is_file())
+            self.assertTrue(all(f in ('index.html','manifest.webmanifest','.nojekyll') or f.startswith('brand/') for f in files),files)
+            html=(out/'index.html').read_text()
+            self.assertIn('<base href="./"><script>window.DEMO=',html)
+            self.assertIn('Sample data',html)
+            self.assertIn('const pushOK=false;',html)
+            self.assertNotIn('__BASE__',html)
+            for brand in ['avatar.png','sleepy.webp','favicon-512.png']:
+                self.assertTrue((out/'brand'/brand).is_file(),brand)
 
 
 if __name__=='__main__':

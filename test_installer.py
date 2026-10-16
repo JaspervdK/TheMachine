@@ -175,6 +175,10 @@ class InstallerTest(unittest.TestCase):
     def test_removed_source_is_rejected_without_rewriting_private_config(self):
         self.assertEqual(self.install('--no-start').returncode, 0)
         config = json.loads(self.config.read_text())
+        config['accounts'].append({'id':'work-feed','service':'rss','transport':'http','boundary':'work','url':'https://example.com/feed.xml'})
+        self.config.write_text(json.dumps(config))
+        self.assertEqual(self.install('--no-start').returncode, 0, 'connector plugins are supported sources')
+        config = json.loads(self.config.read_text())
         config['accounts'].append({'id':'old-source','service':'unsupported'})
         self.config.write_text(json.dumps(config))
         before = self.config.read_text()

@@ -42,6 +42,51 @@ def sample_state():
             'review_health':{'pending':0,'total':24,'last_completed':stamp},'review_runs':[]}
 
 
+def sample_responses(state):
+    stamp = state['suggestions'][0]['created_at']
+    return {'events':[{'id':1,'kind':'email','title':'Project kickoff','occurred_at':stamp,
+                       'body':'Hi! Would Tuesday at 10:00 work for the kickoff?',
+                       'metadata':{'from':'sam@example.com'}}],
+            'originals':[{'kind':'email','event_id':1,'title':'Project kickoff',
+                          'from':'Sam Example <sam@example.com>','to':'owner@example.com','cc':'',
+                          'occurred_at':stamp,'body':'Hi! Would Tuesday at 10:00 work for the kickoff?','attachments':[]}],
+            'result':{'name':'venue-comparison.md','text':VENUE_RESULT},
+            'progress':{'status':'running','started_at':None,'steps':[{'title':'Read the renewal notice','at':''},{'title':'Compare the plan terms','at':''}]}}
+
+
+BRAND_ALIASES = {'avatar.png':'app-icon-192.png','favicon-32.png':'app-icon-192.png',
+                 'favicon-512.png':'app-icon-maskable-512.png','sleepy.webp':'app-icon-192.png',
+                 'sad.webp':'app-icon-192.png','thinking.webp':'app-icon-192.png'}
+
+
+def demo_page(note='Buttons only change this local demo; nothing is sent or run.'):
+    html = (ROOT / 'dashboard.html').read_text()
+    html = html.replace('<main>', f'<main><aside style="margin:16px 0;padding:12px 16px;border:1px solid var(--line);border-radius:12px">Demo · Sample data. {note}</aside>', 1)
+    # The demo never installs a service worker or offers push subscriptions.
+    return html.replace("const pushOK='serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;", "const pushOK=false;")
+
+
+def build(out):
+    """A static copy for any web host: the API runs in the browser (demo-shim.js) on the same sample data."""
+    out = Path(out)
+    (out / 'brand').mkdir(parents=True, exist_ok=True)
+    state = sample_state()
+    data = {'state':state, 'built_at':dt.datetime.now(dt.timezone.utc).isoformat(), **sample_responses(state)}
+    shim = '<script>window.DEMO=' + json.dumps(data).replace('</', '<\\/') + ';\n' + (ROOT / 'demo-shim.js').read_text() + '</script>'
+    html = demo_page('Buttons only change this page in your browser; nothing is sent or run. Reload to start over.')
+    html = html.replace('<base href="__BASE__">', '<base href="./">' + shim, 1)
+    (out / 'index.html').write_text(html)
+    for file in (ROOT / 'brand').iterdir():
+        if file.is_file():
+            (out / 'brand' / file.name).write_bytes(file.read_bytes())
+    for alias, name in BRAND_ALIASES.items():
+        if not (ROOT / 'brand' / alias).is_file():
+            (out / 'brand' / alias).write_bytes((ROOT / 'brand' / name).read_bytes())
+    (out / 'manifest.webmanifest').write_bytes((ROOT / 'manifest.webmanifest').read_bytes())
+    (out / '.nojekyll').write_text('')
+    return out
+
+
 class DemoServer(ThreadingHTTPServer):
     def __init__(self, port=8788):
         self.state = sample_state()
@@ -67,17 +112,10 @@ class DemoHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path, query = parsed.path, parse_qs(parsed.query)
         if path == '/':
-            html = (ROOT / 'dashboard.html').read_text()
-            html = html.replace('<main>', '<main><aside style="margin:16px 0;padding:12px 16px;border:1px solid var(--line);border-radius:12px">Demo · Sample data. Buttons only change this local demo; nothing is sent or run.</aside>', 1)
-            # The demo never installs a service worker or offers push subscriptions.
-            html = html.replace("const pushOK='serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;", "const pushOK=false;")
-            self.respond(html.encode(), mime='text/html; charset=utf-8')
+            self.respond(demo_page().encode(), mime='text/html; charset=utf-8')
         elif path.startswith('/brand/'):
             name = path.removeprefix('/brand/')
-            aliases = {'avatar.png':'app-icon-192.png','favicon-32.png':'app-icon-192.png',
-                       'favicon-512.png':'app-icon-maskable-512.png','sleepy.webp':'app-icon-192.png',
-                       'sad.webp':'app-icon-192.png','thinking.webp':'app-icon-192.png'}
-            file = ROOT / 'brand' / aliases.get(name,name)
+            file = ROOT / 'brand' / BRAND_ALIASES.get(name,name)
             if file.parent != ROOT / 'brand' or not file.is_file():
                 self.respond({'error':'Not found'}, 404)
             else:
@@ -88,23 +126,17 @@ class DemoHandler(BaseHTTPRequestHandler):
             with self.server.lock:
                 self.respond(self.server.state)
         elif path == '/api/events':
-            self.respond([{'id':1,'kind':'email','title':'Project kickoff',
-                           'occurred_at':self.server.state['suggestions'][0]['created_at'],
-                           'body':'Hi! Would Tuesday at 10:00 work for the kickoff?',
-                           'metadata':{'from':'sam@example.com'}}])
+            self.respond(sample_responses(self.server.state)['events'])
         elif path == '/api/originals':
-            self.respond({'originals':[{'kind':'email','event_id':1,'title':'Project kickoff',
-                          'from':'Sam Example <sam@example.com>','to':'owner@example.com','cc':'',
-                          'occurred_at':self.server.state['suggestions'][0]['created_at'],
-                          'body':'Hi! Would Tuesday at 10:00 work for the kickoff?','attachments':[]}]})
+            self.respond({'originals':sample_responses(self.server.state)['originals']})
         elif path == '/api/email':
             self.respond({'html':''})
         elif path == '/api/result':
-            self.respond({'name':'venue-comparison.md','text':VENUE_RESULT})
+            self.respond(sample_responses(self.server.state)['result'])
         elif path == '/result-file' and query.get('file')==['demo/venue-comparison.md']:
             self.respond(VENUE_RESULT.encode(), mime='text/markdown; charset=utf-8')
         elif path == '/api/progress':
-            self.respond({'status':'running','started_at':None,'steps':[{'title':'Read the renewal notice','at':''},{'title':'Compare the plan terms','at':''}]})
+            self.respond(sample_responses(self.server.state)['progress'])
         else:
             self.respond({'error':'Unavailable in the demo'}, 404)
 
@@ -142,7 +174,7 @@ class DemoHandler(BaseHTTPRequestHandler):
                 self.server.state['decisions'].append({'suggestion_id':task['id'],'choice':choice,
                     'feedback':str(args.get('feedback',''))[:1000],'source':'demo',
                     'created_at':dt.datetime.now(dt.timezone.utc).isoformat()})
-            self.respond({'demo':True})
+            self.respond({'demo':True,'status':status})
         except (ValueError, KeyError, TypeError, StopIteration):
             self.respond({'error':'This action is unavailable in the demo; nothing was sent or run'}, 400)
 
@@ -150,7 +182,11 @@ class DemoHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port',type=int,default=8788)
+    parser.add_argument('--build',metavar='DIR',help='write a static demo site to DIR instead of serving')
     args = parser.parse_args()
+    if args.build:
+        print(f'Static demo written to {build(args.build)}/')
+        return
     with DemoServer(args.port) as server:
         print(f'Demo: http://127.0.0.1:{server.server_port}/ (Ctrl+C to stop; changes disappear)',flush=True)
         try:
