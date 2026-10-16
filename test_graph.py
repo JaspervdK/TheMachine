@@ -1,0 +1,196 @@
+import datetime as dt
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location('graph_assistant', Path(__file__).with_name('assistant.py'))
+a = importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
+graph = a.graph
+NOW = dt.datetime(2026, 10, 16, 12, tzinfo=dt.timezone.utc)
+CONFIG = {'accounts': [{'id': 'work', 'email': 'sam@acme.com'}, {'id': 'chat', 'service': 'whatsapp', 'email': 'Personal WhatsApp'},
+                       {'id': 'slack', 'service': 'slack', 'email': 'sam@acme.com', 'user_id': 'U0OWNER'}]}
+counter = iter(range(1, 10**6))
+
+
+def at(days_ago, hour=0):
+    return (NOW - dt.timedelta(days=days_ago, hours=hour)).isoformat()
+
+
+def mail(days_ago, sender, to, labels=('INBOX',), cc='', thread=None, hour=0, **extra):
+    n = next(counter)
+    return {'account_id': 'work', 'source_id': f'm{n}', 'kind': 'gmail.message', 'occurred_at': at(days_ago, hour), 'title': f'Mail {n}', 'body': 'Hello',
+            'deleted': False, 'metadata': {'from': sender, 'to': to, 'cc': cc, 'labels': list(labels), 'message-id': f'<{n}@x>',
+                                           'thread_id': thread or f't{n}', **extra}}
+
+
+def chat(days_ago, phone, name, mine=False, hour=0):
+    n = next(counter)
+    return {'account_id': 'chat', 'source_id': f'w{n}', 'kind': 'whatsapp.message', 'occurred_at': at(days_ago, hour), 'title': name, 'body': 'Hi',
+            'deleted': False, 'metadata': {'chat_id': phone + '@s.whatsapp.net', 'chat_name': name, 'from_me': mine, 'from': 'You' if mine else name,
+                                           'sender_id': None if mine else phone + '@s.whatsapp.net'}}
+
+
+class Graph(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.store = a.Store(Path(self.temp.name) / 'events.sqlite')
+        self.app = object.__new__(a.App); self.app.store = self.store; self.app.config = CONFIG
+        self.now = a.now
+        a.now = lambda: NOW.isoformat(); self.addCleanup(setattr, a, 'now', self.now)
+
+    def add(self, *events):
+        for e in events:
+            self.store.commit_page(e['account_id'], {}, [e])
+
+    def build(self):
+        with self.store.connect() as db:
+            db.isolation_level = None
+            return graph.build(db, CONFIG, NOW.isoformat())
+
+    def node(self, node_id):
+        with self.store.connect() as db:
+            row = db.execute('SELECT * FROM graph_nodes WHERE id=?', (node_id,)).fetchone()
+            return graph.node_view(row) if row else None
+
+    def ids(self, source_ids):
+        with self.store.connect() as db:
+            return [db.execute('SELECT id FROM events WHERE source_id=?', (s,)).fetchone()[0] for s in source_ids]
+
+    def test_owner_bulk_and_aliases_never_become_people(self):
+        self.add(mail(1, 'Sam <sam@acme.com>', 'Ann <ann@client.com>', ('SENT',)),
+                 mail(1, 'Sam Owner <sam@home.org>', 'ann@client.com', ('SENT',)),  # an alias the owner sends from
+                 mail(2, 'News <newsletter@shop.com>', 'sam@acme.com', ('CATEGORY_PROMOTIONS', 'INBOX')),
+                 mail(2, 'Robot <noreply@service.com>', 'sam@acme.com'),
+                 mail(2, 'Acme info <info@acme.com>', 'sam@acme.com'),  # a shared role address at the owner's own domain
+                 mail(3, 'Ann <ann@client.com>', 'Sam <sam@acme.com>, Sam Owner <sam@home.org>'),
+                 chat(1, '32470000001', 'Sam Owner'))  # the owner's own name on another channel
+        self.build()
+        with self.store.connect() as db:
+            people = {r['id'] for r in db.execute("SELECT id FROM graph_nodes WHERE kind='person'")}
+        self.assertEqual(people, {'email:ann@client.com'})
+        self.assertEqual(self.node('org:client.com')['name'], 'client.com')
+
+    def test_owner_messages_weigh_more_a_burst_is_one_day_and_it_fades(self):
+        self.add(*[chat(1, '32470000001', 'Bea Burst', hour=h) for h in range(10)],
+                 chat(1, '32470000002', 'Cas Owner', mine=True),
+                 chat(120, '32470000003', 'Dee Old'), chat(120, '32470000003', 'Dee Old', mine=True))
+        self.build()
+        bea, cas, dee = (self.node('wa:3247000000' + n)['strength'] for n in '123')
+        self.assertAlmostEqual(bea, 1.0 * 0.5 ** (1 / 60), places=2)  # ten messages, one day, capped
+        self.assertGreater(cas, 0.55)
+        self.assertLess(dee, 0.25)  # two months of fading, twice over
+
+    def test_same_full_name_joins_channels_unless_said_to_differ(self):
+        self.add(mail(1, 'Ann Example <ann@client.com>', 'sam@acme.com'), chat(2, '32470000001', 'Ann Example'),
+                 chat(2, '32470000009', 'Bo Ambiguous'), mail(2, 'Bo Ambiguous <bo@one.com>', 'sam@acme.com'), mail(2, 'Bo Ambiguous <bo@two.com>', 'sam@acme.com'))
+        self.build()
+        self.assertEqual(self.node('email:ann@client.com')['ids'], ['+32470000001', 'ann@client.com'])
+        self.assertIsNone(self.node('wa:32470000001'))
+        self.assertIsNotNone(self.node('wa:32470000009'))  # two addresses carry that name: not joined
+        with self.store.connect() as db:
+            graph.merge(db, 'wa:32470000001', 'email:ann@client.com', False, NOW.isoformat())
+        self.build()
+        self.assertIsNotNone(self.node('wa:32470000001'))
+        with self.store.connect() as db:
+            graph.merge(db, 'wa:32470000009', 'email:bo@one.com', True, NOW.isoformat())
+        self.build()
+        self.assertIn('+32470000009', self.node('email:bo@one.com')['ids'])
+
+    def test_slack_email_joins_the_mail_identity(self):
+        n = next(counter)
+        self.add({'account_id': 'slack', 'source_id': f's{n}', 'kind': 'slack.message', 'occurred_at': at(1), 'title': '#DM U0ANN: hi', 'body': 'hi',
+                  'deleted': False, 'metadata': {'conversation_type': 'dm', 'channel_name': 'DM U0ANN', 'user_id': 'U0ANN', 'channel_id': 'D1'}},
+                 mail(2, 'Ann <ann@client.com>', 'sam@acme.com'))
+        self.store.remember_name('slack:U0ANN', 'Ann Example', 'ann@client.com')
+        self.assertEqual(self.store.names_to_check(['slack:U0ANN', 'slack:U0NEW']), ['slack:U0NEW'])
+        self.build()
+        ann = self.node('email:ann@client.com')
+        self.assertEqual((ann['name'], ann['ids']), ('Ann Example', ['Slack', 'ann@client.com']))
+
+    def test_projects_from_review_and_cards_spread_to_threads_and_people(self):
+        self.add(mail(3, 'Ann <ann@client.com>', 'sam@acme.com', thread='deal'), mail(2, 'Sam <sam@acme.com>', 'ann@client.com, Bob <bob@client.com>', ('SENT',), thread='deal'),
+                 mail(1, 'Zed <zed@else.com>', 'sam@acme.com'))
+        first, _, other = self.thread_ids()
+        claim = self.store.begin_analysis(['work'], 10)
+        with self.assertRaises(ValueError):
+            self.store.finish_analysis(claim['analysis_id'], 'x', projects={'Acme deal': [999999]})
+        self.store.finish_analysis(claim['analysis_id'], 'Reviewed', projects={'Acme deal': [first]})
+        self.build()
+        with self.store.connect() as db:
+            project = db.execute("SELECT * FROM graph_nodes WHERE kind='project'").fetchone()
+            self.assertEqual((project['name'], project['signals']), ('Acme deal', 2))  # the reply in the same thread joined it
+            people = {n['id'] for n in graph.neighbours(db, project['id'])}
+            self.assertEqual(people, {'email:ann@client.com', 'email:bob@client.com'})
+            self.assertEqual(graph.active_projects(db), ['Acme deal'])
+        card = self.store.suggest('zed-1', 'Answer Zed', 'Zed asked a question.', [other], project='acme  DEAL')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT project FROM suggestions WHERE id=?', (card['id'],)).fetchone()[0], 'Acme deal')
+        self.build()
+        with self.store.connect() as db:
+            ids = {n['id'] for n in graph.neighbours(db, project['id'])}
+        self.assertIn('email:zed@else.com', ids)
+
+    def thread_ids(self):
+        with self.store.connect() as db:
+            rows = db.execute("SELECT id,json_extract(metadata,'$.thread_id') t FROM events ORDER BY id").fetchall()
+        deal = [r['id'] for r in rows if r['t'] == 'deal']
+        return deal[0], deal[1], next(r['id'] for r in rows if r['t'] != 'deal')
+
+    def test_card_decisions_strengthen_and_not_relevant_weakens(self):
+        self.add(mail(5, 'Ann <ann@client.com>', 'sam@acme.com'), mail(5, 'Bob <bob@client.com>', 'sam@acme.com'), mail(5, 'Cy <cy@client.com>', 'sam@acme.com'))
+        ann, bob, cy = self.ids(self.sources())
+        self.build()
+        base = self.node('email:ann@client.com')['strength']
+        for key, event_id, choice, feedback in (('a', ann, 'accept', ''), ('a2', ann, 'complete', ''), ('b', bob, 'reject', ''), ('c', cy, 'reject', 'Already handled')):
+            card = self.store.suggest(key, 'T', 'B', [event_id]) if key != 'a2' else card
+            with self.store.connect() as db:
+                db.execute('INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)', (key, card['id'], choice, feedback, 'dashboard', at(1)))
+        self.build()
+        self.assertAlmostEqual(self.node('email:ann@client.com')['strength'] - base, 0.5 ** (1 / 60), places=2)  # one boost per card
+        self.assertIsNone(self.node('email:bob@client.com'))  # faded out entirely
+        self.assertAlmostEqual(self.node('email:cy@client.com')['strength'], base, places=3)
+
+    def sources(self):
+        with self.store.connect() as db:
+            return [r[0] for r in db.execute('SELECT source_id FROM events ORDER BY id')]
+
+    def test_going_quiet_is_measured_against_their_own_rhythm(self):
+        weekly = [chat(d, '32470000001', 'Wes Weekly', mine=d % 2 == 0) for d in range(30, 120, 7)]
+        self.add(*weekly, chat(30, '32470000001', 'Wes Weekly', mine=True),
+                 *[chat(d, '32470000002', 'Rae Recent', mine=True) for d in (2, 9, 16, 23)])
+        self.build()
+        wes, rae = self.node('wa:32470000001'), self.node('wa:32470000002')
+        self.assertEqual((wes['usual_gap_days'], wes['quiet']), (7, True))
+        self.assertFalse(rae['quiet'])
+        with self.store.connect() as db:
+            self.assertEqual([p['id'] for p in graph.overview(db)['quiet']], ['wa:32470000001'])
+        self.assertIn('• Gone quiet: Wes Weekly (usually every 7 days)', a.recap_graph_lines(self.store))
+
+    def test_preparation_context_and_agent_lookup(self):
+        self.add(mail(3, 'Ann Example <ann@client.com>', 'sam@acme.com', thread='deal'), mail(2, 'Sam <sam@acme.com>', 'Ann Example <ann@client.com>, Bob <bob@client.com>', ('SENT',), thread='deal'))
+        first = self.ids(self.sources())[0]
+        card = self.store.suggest('ann-1', 'Answer Ann', 'Ann asked about pricing.', [first], project='Acme deal')
+        self.build()
+        lines = self.app.graph_lines(card['id'])
+        self.assertIn('People and projects', lines)
+        self.assertIn('- Ann Example (ann@client.com): ', lines)
+        self.assertIn('projects: Acme deal', lines)
+        self.assertIn('often with Bob', lines)
+        self.assertIn('- Project Acme deal: ', lines)
+        found = self.app.graph_action({'query': 'ann example'})['found']
+        self.assertEqual([f['id'] for f in found], ['email:ann@client.com'])
+        detail = self.app.graph_action({'node_id': 'email:ann@client.com'})
+        self.assertEqual(len(detail['recent']), 2)
+        self.assertIn('email:bob@client.com', [n['id'] for n in detail['around']])
+        self.app.graph_build = self.build
+        self.app.graph_action({'close_project': 'acme deal'})
+        with self.store.connect() as db:
+            self.assertEqual(graph.overview(db)['projects'], [])
+        with self.assertRaises(ValueError):
+            self.app.graph_action({'merge': ['email:ann@client.com']})
+
+
+if __name__ == '__main__':
+    unittest.main()

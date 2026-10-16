@@ -34,6 +34,7 @@ import urllib.request
 import uuid
 from zoneinfo import ZoneInfo
 import embeddings
+import graph
 import next_actions
 import preparation_state
 
@@ -1560,6 +1561,9 @@ class Store:
             db.execute('CREATE INDEX IF NOT EXISTS events_pending_account ON events(account_id,ingested_at,id) WHERE analyzed_version<version')
             db.execute('CREATE INDEX IF NOT EXISTS analyses_owner ON analyses(owner_run,owner_session)')
             db.execute(embeddings.SCHEMA)  # after the monotonic-ID migration, which rebuilds events
+            db.executescript(graph.SCHEMA)
+            if 'project' not in {r[1] for r in db.execute('PRAGMA table_info(suggestions)')}:
+                db.execute('ALTER TABLE suggestions ADD COLUMN project TEXT')
 
     def ensure_monotonic_event_ids(self):
         # Purged evidence IDs remain in review/suggestion provenance. Never let
@@ -1926,6 +1930,19 @@ class Store:
                        (reason, reason, now(), int(terminal), owner_session, owner_run))
         return {'recorded': True}
 
+    def names_to_check(self, identifiers, days=30):
+        if not identifiers:
+            return []
+        stale = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+        with self.connect() as db:
+            known = {r[0] for r in db.execute('SELECT identifier FROM identity_names WHERE checked_at>=? AND identifier IN (' +
+                                               ','.join('?' for _ in identifiers) + ')', (stale, *identifiers))}
+        return sorted(set(identifiers) - known)
+
+    def remember_name(self, identifier, name, address):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO identity_names(identifier,name,email,checked_at) VALUES(?,?,?,?)', (identifier, name, address, now()))
+
     def begin_analysis(self, accounts, limit=40, owner_session=None, owner_run=None):
         accounts = list(dict.fromkeys(accounts))
         with self.connect() as db:
@@ -2141,7 +2158,7 @@ class Store:
                   'next_row_offset': row_offset + len(shown) if row_offset + len(shown) < len(views) else None}
         return {'analysis_id': analysis_id, 'page': int(page), 'pages': pages, **result}
 
-    def finish_analysis(self, analysis_id, summary='', owner_session=None, owner_run=None, reviewed_ids=None):
+    def finish_analysis(self, analysis_id, summary='', owner_session=None, owner_run=None, reviewed_ids=None, projects=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM analyses WHERE id=?', (analysis_id,)).fetchone()
@@ -2157,6 +2174,16 @@ class Store:
             reviewed = set(reviewed_ids) if reviewed_ids is not None else {i['id'] for i in items}
             if not reviewed <= {i['id'] for i in items}:
                 raise ValueError('Reviewed IDs must belong to this batch')
+            if projects is not None:
+                # Signals that belong to an ongoing piece of work, named for the people and projects graph.
+                if not isinstance(projects, dict) or not all(isinstance(v, list) for v in projects.values()):
+                    raise ValueError('projects is {"Project name": [event_ids]}')
+                batch = {i['id'] for i in items}
+                for name, ids in projects.items():
+                    if not set(ids) <= batch:
+                        raise ValueError('Project event IDs must belong to this batch')
+                    if ids:
+                        graph.label(db, ids, name, 'review', now())
             for item in items:
                 if item.get('excluded'):
                     continue
@@ -2170,7 +2197,7 @@ class Store:
                        (now(), summary[:4000], encoded(items), analysis_id))
         return {'status': 'complete'}
 
-    def suggest(self, dedupe_key, title, body, event_ids, when='now', digest_at='08:30', work=False, urgent=False, due=None, ahead=False, awaiting=None):
+    def suggest(self, dedupe_key, title, body, event_ids, when='now', digest_at='08:30', work=False, urgent=False, due=None, ahead=False, awaiting=None, project=None):
         if not dedupe_key or not title or not body or not event_ids:
             raise ValueError('Evidence, title, body and stable dedupe_key are required')
         if due is not None:
@@ -2221,6 +2248,9 @@ class Store:
                        (suggestion_id, 'previewed' if preview else 'queued', now()))
             if watch:
                 db.execute('UPDATE suggestions SET awaiting=? WHERE id=?', (encoded(watch), suggestion_id))
+            if project:
+                graph.label(db, event_ids, project, 'card', now())
+                db.execute('UPDATE suggestions SET project=(SELECT name FROM projects WHERE name=? COLLATE NOCASE) WHERE id=?', (re.sub(r'\s+', ' ', str(project)).strip(), suggestion_id))
             if ahead:
                 # Prepared ahead: the work starts now, research and drafting only, and the card
                 # reaches the owner once it's ready. Sending or changing anything still waits for
@@ -3420,8 +3450,26 @@ def sync_slack(store, config, account, source=None):
                 if time.time() >= state.get('next_discovery', 0):
                     state['phase'] = 'discover'
     store.commit_page(account['id'], state, events)
+    if isinstance(source, Slack):
+        remember_slack_names(store, source, events)
     more = state['mode'] != 'incremental' or state['index'] != 0 or bool(state.get('scan'))
     return {'mode': state['mode'], 'events': len(events), 'more': more}
+
+
+def remember_slack_names(store, source, events, per_page=3):
+    """Names and emails for the people graph: Slack messages carry only user IDs. A few lookups per
+    page, each once a month; the email joins the person to their mail. Best effort."""
+    users = {e['metadata'].get('user_id') for e in events} | {
+        m[1] for e in events for m in [re.fullmatch(r'DM ([UW][A-Z0-9]+)', e['metadata'].get('channel_name') or '')] if m}
+    wanted = store.names_to_check(['slack:' + u for u in users if u and u not in (source.account.get('user_id'),)])
+    for identifier in wanted[:per_page]:
+        try:
+            user = source.get('users.info', {'user': identifier.split(':', 1)[1]}).get('user', {})
+        except SourceError:
+            return
+        profile = user.get('profile') or {}
+        name = None if user.get('is_bot') else (profile.get('real_name') or profile.get('display_name') or user.get('real_name'))
+        store.remember_name(identifier, name and str(name)[:200], None if user.get('is_bot') else str(profile.get('email') or '').lower()[:320] or None)
 
 
 GATEWAY_SIGNALS = (
@@ -4353,6 +4401,26 @@ def assistant_token_usage(since_ms, path=None):
     return totals
 
 
+def recap_graph_lines(store):
+    """What's alive this week: projects heating up or cooling, and who has gone quiet."""
+    try:
+        with store.connect() as db:
+            view = graph.overview(db, 3)
+    except sqlite3.Error:
+        return []
+    out = []
+    for state in ('heating up', 'active', 'cooling'):
+        names = [p['name'] for p in view['projects'] if p['state'] == state][:3]
+        if names:
+            out.append(f"• {state[0].upper() + state[1:]}: {', '.join(names)}")
+    if view['quiet']:
+        out.append('• Gone quiet: ' + ', '.join(p['name'] + (' (usually daily)' if round(p['usual_gap_days']) <= 1 else f" (usually every {round(p['usual_gap_days'])} days)")
+                                               for p in view['quiet']))
+    if view['new']:
+        out.append(f"• New this week: {', '.join(p['name'] for p in view['new'][:3])}")
+    return out
+
+
 def weekly_recap(store, config, current=None, usage=None):
     """Friday recap: what the assistant suggested, what the owner did, what it cost, what's noisy."""
     current = current or dt.datetime.fromisoformat(now())
@@ -4415,6 +4483,9 @@ def weekly_recap(store, config, current=None, usage=None):
     if preps:
         cards.append(f"• Do it: {preps.get('done', 0)} ready, {preps.get('cancelled', 0)} stopped by you, {preps.get('blocked', 0) or 'none'} stuck")
     lines += ['', '**Cards**', *cards]
+    alive = recap_graph_lines(store)
+    if alive:
+        lines += ['', '**People and projects**', *alive]
     learned = store.behaviour(7)
     noticed = []
     if learned['sent_as_written'] or learned['sent_edited']:
@@ -4450,6 +4521,7 @@ def review_prompt(run_id, accounts, preferences='', facts='', slipped=''):
 The assistant instructions (tools/personal-assistant/AGENTS.md) and the owner's profile (USER.md) are included in this turn's context; follow the "Reviewing signals" section. Don't re-read those files.
 With the assistant_signals tool: call status, then ONE begin_analysis with account_ids {json.dumps(accounts)} and limit 120. The reply is paged: read every page with analysis_page before finishing, including next_row_offset continuations on the same page. Where body_clipped matters, read the rest with events (the account, event_ids and body_offset). Events replies contain events and remaining_event_ids; read the remaining IDs with the same accounts. Follow body_next_offset to the end of long bodies.
 Save only genuinely useful, distinct suggestions with suggest; the service delivers them. Then finish_analysis with reviewed_ids. Defer only what you expect to judge better later.
+Name the ongoing work: finish_analysis projects ({{"Project name": [event_ids from this batch]}}) for signals that clearly belong to a deal, hire, launch, renovation or other piece of work, and project on a suggest that belongs to one. Reuse begin_analysis's projects names when they fit. graph tells who someone is to the owner (closeness, rhythm, gone quiet, their projects).
 Before suggesting, check it isn't already handled: search related signals (same thread, sender or chat) for a later reply from the owner or from a colleague (e.g. a teammate on the owner's own email domain answering the thread), or a confirmation (signed, paid, booked, resolved). If so, don't suggest it. When a signal in this batch shows that an OPEN suggestion (pending, prepared, accepted or snoozed in status) is now done, call looks_handled with suggestion_id, a short plain reason and the event_ids that show it; the owner still closes it themselves. For anything tied to a date, check the calendars for that date (days off, travel, existing plans).
 When a note the owner wrote on a suggestion (decisions with source telegram or dashboard) states something that stays true beyond that card, save it once with remember_fact (text, decision_id); skip one-off wording requests.
 Messages are disabled in this turn. Do not work on anything else. End with exactly NO_REPLY.''' + (f'''
@@ -4486,6 +4558,7 @@ class App:
         self.token = credential(config, 'api-token')
         self.owner_token = owner_credential(config)
         self.stop = threading.Event()
+        self.graph_dirty = threading.Event()
 
     def gmail_message(self, account_id, message_id):
         account = next(a for a in self.config['accounts'] if a['id'] == account_id)
@@ -4627,9 +4700,15 @@ class App:
         if name == 'analysis_page':
             return self.store.analysis_page(args['analysis_id'], args.get('page', 1), args.get('row_offset', 0))
         if name == 'begin_analysis':
-            return self.store.begin_analysis(selected, args.get('limit', 40), args.get('_review_session'), args.get('_review_run'))
+            result = self.store.begin_analysis(selected, args.get('limit', 40), args.get('_review_session'), args.get('_review_run'))
+            if isinstance(result, dict) and result.get('analysis_id'):
+                with self.store.connect() as db:
+                    result['projects'] = graph.active_projects(db)  # reuse these names in finish_analysis and suggest
+            return result
         if name == 'finish_analysis':
-            return self.store.finish_analysis(args['analysis_id'], args.get('summary', ''), args.get('_review_session'), args.get('_review_run'), args.get('reviewed_ids'))
+            return self.store.finish_analysis(args['analysis_id'], args.get('summary', ''), args.get('_review_session'), args.get('_review_run'), args.get('reviewed_ids'), args.get('projects'))
+        if name == 'graph':
+            return self.graph_action(args)
         if name == 'preview_review':
             return self.start_preview()
         if name == 'review_context':
@@ -4645,7 +4724,7 @@ class App:
                                       self.config.get('digest_at', '08:30'),work=work,urgent=args.get('urgent') is True,due=args.get('due'),
                                       ahead=args.get('prepare_ahead') is True and self.config.get('prepare_ahead', True) is not False
                                       and self.store.ahead_room(int(self.config.get('prepare_ahead_per_day', 10))),
-                                      awaiting=args.get('awaiting_event_id'))
+                                      awaiting=args.get('awaiting_event_id'),project=args.get('project'))
         if name == 'prepare':
             with self.store.connect() as db:
                 row=db.execute('SELECT account_ids,event_ids FROM suggestions WHERE id=?',(args['suggestion_id'],)).fetchone()
@@ -5125,6 +5204,10 @@ class App:
                 job['ahead']=bool(db.execute('SELECT early FROM suggestions WHERE id=?',(job['suggestion_id'],)).fetchone()[0])
             self.store.note_rule_files(RULE_FILES)
             request['message']=preparation_prompt(job,self.store.facts_text(),self.config,self.store.draft_edits_text(),self.store.facts_text(kind='draft'))
+            try:
+                lines=self.graph_lines(job['suggestion_id'])
+                if len(request['message'])+len(lines)<19000:request['message']+=lines  # the runner refuses over 20,000
+            except Exception as error:LOG.error('graph lines error=%s',type(error).__name__)
             if embeddings.settings(self.config):
                 try:
                     lines=self.related_lines(job['suggestion_id'])
@@ -5415,6 +5498,81 @@ class App:
             with self.store.connect() as db:
                 return [(i,None) for i in embeddings.fts_ids(db,accounts,query,limit) if i not in {*map(int,event_ids),*map(int,exclude)}],False
 
+    def graph_worker(self):
+        """Rebuilds the people and projects graph every ten minutes, and soon after a label or merge."""
+        wait = 30
+        while not self.stop.is_set():
+            self.graph_dirty.wait(wait)
+            if self.stop.is_set():
+                return
+            self.graph_dirty.clear()
+            try:
+                self.graph_build()
+                wait = 600
+            except Exception as error:
+                LOG.error('graph error=%s', type(error).__name__)
+                wait = 1800
+
+    def graph_build(self):
+        with self.store.connect() as db:
+            db.isolation_level = None  # graph.build runs its own transaction
+            return graph.build(db, self.config, now())
+
+    def graph_event_lines(self, event_ids):
+        rows = self.store.events([a['id'] for a in self.config['accounts']], event_ids=list(event_ids)) if event_ids else []
+        return [f"{r['id']} ({r['account_id']}) {source_line([r])[8:]} · {clamp(' '.join(r['title'].split()), 100)}" for r in sorted(rows, key=lambda r: r['occurred_at'], reverse=True)]
+
+    def graph_action(self, args):
+        """People and projects for the agent: look up, explore around, label and merge."""
+        changed = False
+        with self.store.connect() as db:
+            if args.get('merge') or args.get('different'):
+                pair = args.get('merge') or args.get('different')
+                if not isinstance(pair, list) or len(pair) != 2:
+                    raise ValueError('merge and different take two person ids, like ["email:ann@example.com", "wa:32470000000"]')
+                graph.merge(db, pair[0], pair[1], bool(args.get('merge')), now())
+                changed = True
+            if args.get('project') and args.get('event_ids'):
+                if db.execute('SELECT count(*) FROM events WHERE deleted=0 AND id IN (' + ','.join('?' for _ in args['event_ids']) + ')',
+                              [int(i) for i in args['event_ids']]).fetchone()[0] != len(set(args['event_ids'])):
+                    raise ValueError('Every event must exist and be live')
+                graph.label(db, args['event_ids'], args['project'], 'agent', now())
+                changed = True
+            if args.get('close_project'):
+                if not db.execute('UPDATE projects SET closed_at=? WHERE name=? COLLATE NOCASE AND closed_at IS NULL', (now(), str(args['close_project']).strip())).rowcount:
+                    raise ValueError('No open project by that name')
+                changed = True
+        if changed:
+            self.graph_build()
+        limit = min(int(args.get('limit') or 12), 30)
+        with self.store.connect() as db:
+            if args.get('node_id'):
+                found = graph.detail(db, str(args['node_id']))
+                if not found:
+                    raise ValueError('Unknown node_id; find people and projects with query')
+                found['around'] = graph.spread(db, [found['id']], limit)
+                found['recent'] = self.graph_event_lines(found.pop('event_ids'))
+                return found
+            if args.get('query'):
+                hits = graph.find(db, args['query'], limit)
+                return {'found': [graph.node_view(r, graph.neighbours(db, r['id'], 6)) for r in hits],
+                        'hint': 'Open one with node_id for its links, recent signals and what is alive around it.'}
+            if args.get('event_ids') and not args.get('project'):
+                return {'on_these_signals': [graph.node_view(r, graph.neighbours(db, r['id'], 6)) for r in graph.for_events(db, args['event_ids'])[:limit]]}
+            result = graph.overview(db, limit)
+            return {**result, 'changed': changed} if changed else result
+
+    def graph_lines(self, suggestion_id):
+        """Who the people on a task are to the owner, and the projects around them, for a preparation."""
+        with self.store.connect() as db:
+            row = db.execute('SELECT event_ids,project FROM suggestions WHERE id=?', (suggestion_id,)).fetchone()
+            ids = json.loads(row['event_ids'] or '[]') if row else []
+            text = graph.context_lines(db, ids) if ids else ''
+        if not text:
+            return ''
+        return ('\n\nPeople and projects (from all signals, closeness fades with time; look up anyone with assistant_signals graph '
+                'and a query or node_id, and keep personal details out of work messages and the other way round):\n' + text)
+
     def related_lines(self, suggestion_id, limit=8):
         """A short "Possibly related" list for a preparation: the task's own accounts, not its evidence."""
         with self.store.connect() as db:
@@ -5504,6 +5662,22 @@ class App:
                         self.output(200, app.action('events', {'account_ids': args.get('account', []), 'query': query, 'semantic': bool(query.strip()), 'full': True}))
                     except (ValueError, sqlite3.OperationalError):
                         self.output(400, {'error': 'Select accounts and use a valid search'})
+                elif path.path == '/api/graph':
+                    node = urllib.parse.parse_qs(path.query).get('node', [''])[0]
+                    query = urllib.parse.parse_qs(path.query).get('q', [''])[0]
+                    try:
+                        if query.strip():
+                            self.output(200, app.graph_action({'query': query, 'limit': 20}))
+                        elif node:
+                            found = app.graph_action({'node_id': node, 'limit': 10})
+                            rows = app.store.events([a['id'] for a in app.config['accounts']], event_ids=[int(line.split(' ', 1)[0]) for line in found['recent']])
+                            found['recent'] = [{'id': r['id'], 'account_id': r['account_id'], 'kind': r['kind'], 'occurred_at': r['occurred_at'], 'title': r['title'][:200],
+                                                'source_url': r['metadata'].get('source_url')} for r in sorted(rows, key=lambda r: r['occurred_at'], reverse=True)]
+                            self.output(200, found)
+                        else:
+                            self.output(200, app.graph_action({'limit': 15}))
+                    except (ValueError, sqlite3.OperationalError):
+                        self.output(404, {'error': 'Not in the graph'})
                 elif path.path == '/api/progress':
                     try:
                         self.output(200, app.preparation_progress(urllib.parse.parse_qs(path.query).get('id', [''])[0]))
@@ -5600,6 +5774,7 @@ class App:
         threading.Thread(target=self.preparation_worker, daemon=True).start()
         threading.Thread(target=self.action_worker, daemon=True).start()
         threading.Thread(target=self.review_worker, daemon=True).start()
+        threading.Thread(target=self.graph_worker, daemon=True).start()
         if embeddings.settings(self.config):
             threading.Thread(target=self.embedding_worker, daemon=True).start()
         server.timeout = 1
