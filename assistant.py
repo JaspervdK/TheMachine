@@ -4653,7 +4653,7 @@ class App:
             result=subprocess.run([node_bin(self.config),str(ROOT/'change-prompt-run.mjs')],env=node_env(self.config),input=encoded(request),capture_output=True,text=True,timeout=60)
             reply=json.loads(result.stdout)
             if reply.get('definitely_not_sent'):
-                # e.g. pinned OpenClaw files moved after an update: visible, then the plain prompt.
+                # e.g. OpenClaw helpers removed or renamed by an update: visible, then the plain prompt.
                 LOG.warning('native Change prompt unavailable; using plain prompt')
             return reply
         except OSError:return {'definitely_not_sent':True}

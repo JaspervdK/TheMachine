@@ -3,12 +3,14 @@ import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 // ForceReply uses the existing OpenClaw Telegram send/cache/receipt route, with no poller.
 // The public extension API provides account and transport helpers. Three client helpers
-// still need a compatibility bridge: resolve their named exports from the pinned build's
+// still need a compatibility bridge: resolve their named exports from the installed build's
 // own export table instead of hardcoding content hashes or minified export aliases.
+// No version pin: any OpenClaw release whose modules still provide every helper below works;
+// one that doesn't throws here, and the service falls back to the plain prompt.
 const DIST=process.env.OPENCLAW_PACKAGE_DIR||resolve(dirname(process.execPath),'..','lib','node_modules','openclaw');
 export async function telegramInternals() {
   const manifest=JSON.parse(await readFile(resolve(DIST,'package.json'),'utf8'));
-  if(manifest.name!=='openclaw'||manifest.version!=='2026.10.2') throw Error('Unsupported Telegram transport build');
+  if(manifest.name!=='openclaw') throw Error('OpenClaw not found next to this Node');
   const entry=resolve(DIST,'dist/extensions/telegram/runtime-api.js');
   const source=await readFile(entry,'utf8');
   const sendPath=source.match(/import \{[^}]*\bas sendMessageTelegram\b[^}]*\} from "([^"\n]+)"/);

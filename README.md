@@ -69,8 +69,8 @@ Python's standard library and SQLite are enough: no database server, queue, web 
 
 - Linux with systemd user services (macOS works for development and tests, not as a managed service).
 - **Python 3.12+** (standard library only).
-- **Node.js 24.16+ within the 24.x series, or 26.1+** (`>=24.16.0 <25 || >=26.1.0`, matching the pinned OpenClaw engine range). Node 22 and 25 are unsupported. The installer resolves mise/asdf shims and the installed npm package.
-- **OpenClaw 2026.10.2**, with the Gateway running and its Telegram channel set up with your bot. Other versions are untested; see [Known limitations](#known-limitations).
+- **Node.js 24.16+ within the 24.x series, or 26.1+** (`>=24.16.0 <25 || >=26.1.0`, matching OpenClaw's engine range). Node 22 and 25 are unsupported. The installer resolves mise/asdf shims and the installed npm package.
+- **OpenClaw 2026.10.2 or later**, with the Gateway running and its Telegram channel set up with your bot. CI tests 2026.10.2 and the latest release every week; see [Known limitations](#known-limitations).
 - Optional, per feature:
   - `gog` (Google Workspace CLI) for Gmail and Calendar (OAuth per account, file keyring).
   - **Tailscale** for dashboard access (the dashboard only serves your Tailscale identity).
@@ -248,7 +248,7 @@ Sources can be added as a single-file plugin in `connectors/` without touching `
 
 ## Known limitations
 
-- **Change prompt and OpenClaw versions.** The native Telegram reply prompt (`openclaw-plugin/change-prompt.ts`) uses the Telegram extension API and a version-checked bridge for three client helpers. It resolves the pinned build's exports without hardcoded content hashes. CI loads the real 2026.10.2 transport modules. Other versions fall back to a plain prompt before sending (replies still work); an uncertain send never triggers that fallback. The Gateway SDK entry points used elsewhere (`plugin-sdk/gateway-runtime`, `system-event-runtime`, `plugin-entry`) are public but experimental; check them when upgrading OpenClaw.
+- **Change prompt and OpenClaw versions.** The native Telegram reply prompt (`openclaw-plugin/change-prompt.ts`) uses the Telegram extension API and a bridge for three client helpers. It resolves them from the installed build's export table, without a version pin or hardcoded content hashes, so OpenClaw updates don't break it. CI loads the real transport modules of 2026.10.2 and of the latest release. If a release removes or renames a helper, Change falls back to a plain prompt before sending (replies still work); an uncertain send never triggers that fallback. The Gateway SDK entry points used elsewhere (`plugin-sdk/gateway-runtime`, `system-event-runtime`, `plugin-entry`) are public but experimental; check them when upgrading OpenClaw.
 - **Telegram only** for delivery; the dashboard needs Tailscale (or your own reverse proxy that sets the same identity headers).
 - **Gmail and Calendar need `gog`**, Slack needs Maton; there are no built-in OAuth flows.
 - **Not realtime.** Sources poll (five minutes by default; Slack can take hours on a large workspace), and reviews batch signals.

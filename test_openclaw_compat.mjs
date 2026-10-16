@@ -1,13 +1,10 @@
-// Load the real pinned SDK, without a Gateway or a Telegram send. Stub-only tests
+// Load the real installed SDK, without a Gateway or a Telegram send. Stub-only tests
 // cannot detect packaging changes, missing modules, or renamed minified exports.
 import {FIXTURE,ROOT} from './test-env.mjs';
 import assert from 'node:assert/strict';
 import {gatewayRuntime,OPENCLAW} from './openclaw-root.mjs';
 import {telegramInternals} from './openclaw-plugin/change-prompt.ts';
-import {readFile} from 'node:fs/promises';
 import {execFileSync} from 'node:child_process';
-const version=JSON.parse(await readFile(OPENCLAW+'/package.json','utf8')).version;
-assert.equal(version,'2026.10.2','Run compatibility tests with the pinned OpenClaw release');
 const telegram=await telegramInternals();
 for(const name of ['resolveTelegramAccount','sendMessageTelegram','getOrCreateAccountThrottler',
                   'createTelegramClientFetch','asTelegramClientFetch','resolveTelegramTransport','makeProxyFetch','Bot'])
