@@ -1,8 +1,8 @@
 """X (Twitter): replies and mentions, and DMs, for one or more accounts signed in to the OpenClaw browser.
 
-Read-only through integrations/x_inbox.py, which calls X's own web API from a tab of the
-signed-in OpenClaw browser: no API key, no cookies leaving the browser, and nothing marked as
-seen or read. Sign in to X once in that browser (`openclaw browser --browser-profile openclaw
+Read-only through integrations/x_inbox.py, which makes the same requests x.com does from a tab
+of the signed-in OpenClaw browser (not X's developer API): no API key, no cookies leaving the
+browser, and nothing marked as seen or read. Sign in to X once in that browser (`openclaw browser --browser-profile openclaw
 open https://x.com/login`); add more accounts with X's own account switcher. One config account
 per X account:
 

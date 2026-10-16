@@ -1,0 +1,278 @@
+"""LinkedIn connector plugin and the owner-approved LinkedIn Send. No live calls."""
+import json
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+import next_actions as n
+import test_ux as ux
+a = ux.a
+li = a.load_connector('linkedin')
+H = a.CONNECTOR_HELPERS
+
+ACCOUNT = {'id': 'li', 'service': 'linkedin', 'transport': 'linkedin-inbox', 'email': 'LinkedIn', 'boundary': 'work:linkedin'}
+CONV = 'urn:li:msg_conversation:(urn:li:fsd_profile:ME,2-ABC==)'
+NOW = '2026-10-13T10:00:00+00:00'
+
+
+def raw(**extra):
+    return {'urn': 'urn:li:msg_message:(urn:li:fsd_profile:ME,2-M1==)', 'conversation': CONV, 'with': 'Ada Lovelace',
+            'from': 'Ada Lovelace', 'fromMe': False, 'at': 1791880000000, 'text': 'Can we talk Friday?', 'subject': None,
+            'headline': 'Engineer', 'group': False, 'categories': ['INBOX'], **extra}
+
+
+class Source:
+    def __init__(self, rows):
+        self.rows, self.calls = rows, []
+
+    def page(self, since, state):
+        self.calls.append(since)
+        return {'messages': self.rows, 'state': {}, 'more': False}
+
+
+class LinkedInSource(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = a.Store(Path(self.tmp.name) / 'a.sqlite')
+        a.set_timezone('Europe/Amsterdam')
+
+    def test_event_shape_thread_link_and_invalid_rows(self):
+        e = li.event(ACCOUNT, raw(), H)
+        self.assertEqual(e['kind'], 'linkedin.message')
+        self.assertEqual(e['metadata']['conversation_id'], CONV)
+        self.assertEqual(e['metadata']['source_url'], 'https://www.linkedin.com/messaging/thread/2-ABC%3D%3D/')
+        self.assertEqual(li.event(ACCOUNT, raw(fromMe=True), H)['metadata']['from'], 'You')
+        for bad in (raw(urn='x'), raw(at='soon'), raw(fromMe=None), raw(conversation=None)):
+            with self.assertRaises(a.SourceError):
+                li.event(ACCOUNT, bad, H)
+
+    def test_sync_is_incremental_dedupes_and_sleeps_at_night(self):
+        src = Source([raw(), raw()])
+        with patch.object(a, 'now', return_value=NOW):
+            self.assertEqual(li.sync(self.store, {}, ACCOUNT, H, src)['events'], 1)
+            li.sync(self.store, {}, ACCOUNT, H, src)
+        self.assertEqual(src.calls[1], int(a.dt.datetime.fromisoformat(NOW).timestamp() * 1000) - 3600000)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM events').fetchone()[0], 1)
+        with patch.object(a, 'now', return_value='2026-10-13T23:30:00+00:00'):  # 01:30 local time
+            li.sync(self.store, {}, ACCOUNT, H, src)
+        self.assertEqual(len(src.calls), 2)
+
+    def test_reader_only_runs_read_commands_and_maps_errors(self):
+        source = li.Source({'linkedin_inbox': '/bin/linkedin-inbox-test'}, ACCOUNT, H)
+        with self.assertRaises(a.SourceError):
+            source.run(['send', '--yes'])
+        ok = subprocess.CompletedProcess([], 0, json.dumps({'messages': [], 'state': {}, 'more': False}), '')
+        with patch.object(a.subprocess, 'run', return_value=ok) as run:
+            source.page(5, {'cursor': 'C1'})
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ['/bin/linkedin-inbox-test', 'sync', '--since', '5'])
+        self.assertEqual(json.loads(command[command.index('--state') + 1]), {'cursor': 'C1'})
+        for stderr, code, wait in (('the OpenClaw browser is busy (x)', 'linkedin_browser_busy', 600),
+                                   ('LinkedIn is signed out in the OpenClaw browser', 'linkedin_signed_out', 3600),
+                                   ('LinkedIn lookup failed: boom', 'linkedin_read_failed', 900)):
+            with patch.object(a.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', 'linkedin-inbox: ' + stderr)):
+                with self.assertRaises(a.SourceError) as caught:
+                    source.page(0, {})
+            self.assertEqual((caught.exception.category, caught.exception.retry_after), (code, wait))
+        with patch.object(a.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{"messages": []}', '')):
+            with self.assertRaises(a.SourceError):
+                source.page(0, {})
+        self.assertTrue(li.READER.exists())
+
+    def test_partial_scan_keeps_floor_and_cursor_across_long_outage(self):
+        class Paged:
+            def __init__(self): self.calls = []
+            def page(self, since, state):
+                self.calls.append((since, state))
+                return {'messages': [raw()], 'state': {'cursor': 'page2'} if len(self.calls) == 1 else {}, 'more': len(self.calls) == 1}
+        src = Paged()
+        with patch.object(a, 'now', return_value=NOW):
+            self.assertTrue(li.sync(self.store, {}, ACCOUNT, H, src)['more'])
+        with patch.object(a, 'now', return_value='2026-10-30T10:00:00+00:00'):
+            self.assertFalse(li.sync(self.store, {}, ACCOUNT, H, src)['more'])
+        self.assertEqual(src.calls[0][0], src.calls[1][0])
+        self.assertEqual(src.calls[1][1], {'cursor': 'page2'})
+        self.assertTrue(self.store.checkpoint('li')['coverage_complete'])
+
+    def test_review_context_source_line_and_promises(self):
+        self.store.commit_page('li', {}, [li.event(ACCOUNT, raw(urn='urn:li:msg_message:(urn:li:fsd_profile:ME,2-M0==)', at=1791870000000, text='Hello?'), H),
+                                          li.event(ACCOUNT, raw(), H)])
+        with self.store.connect() as db:
+            rows = [dict(r) for r in db.execute('SELECT * FROM events ORDER BY occurred_at')]
+        context = self.store.conversation_context([rows[1]])
+        self.assertEqual(len(context[rows[1]['id']]), 1)
+        self.assertTrue(context[rows[1]['id']][0].endswith('Ada Lovelace: Hello?'))
+        self.assertTrue(a.source_line([rows[1]]).startswith('Source: LinkedIn from Ada Lovelace · '))
+        watch = a.awaiting_key(rows[1])
+        self.assertEqual(watch['conversation'], CONV)
+        self.assertTrue(a.awaiting_match(watch, {**rows[1], 'metadata': {**json.loads(rows[1]['metadata']), 'message_id': 'later'}}))
+        self.assertIsNone(a.awaiting_key({**rows[1], 'metadata': {**json.loads(rows[1]['metadata']), 'from_me': True}}))
+
+
+class LinkedInSend(unittest.TestCase):
+    row = ux.UX.row
+    decide = ux.UX.decide
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = a.Store(Path(self.tmp.name) / 'events.sqlite')
+        self.store.commit_page('li', {}, [li.event(ACCOUNT, raw(), H)])
+        with self.store.connect() as db:
+            event_id = db.execute("SELECT id FROM events WHERE kind='linkedin.message'").fetchone()[0]
+        self.sid = self.store.suggest('li-task', 'Reply to Ada', 'Ada asks about Friday.', [event_id])['id']
+
+    def app(self):
+        app = object.__new__(a.App)
+        app.store = self.store
+        app.config = {'accounts': [ACCOUNT, {'id': 'work', 'email': 'owner@example.com', 'service': 'gmail', 'transport': 'gog'}]}
+        return app
+
+    def ready(self, **draft):
+        self.decide('accept')
+        action = {'kind': 'linkedin', 'label': 'Send reply', 'account_id': 'li', 'conversation_id': CONV, 'body': 'Friday works.', **draft}
+        self.app().action('prepare', {'suggestion_id': self.sid, 'body': 'Reply ready.', 'next_action': action})
+        return self.row()['next_action']
+
+    def confirm(self, key='owner-approval'):
+        return self.app().action('confirm_action', {'suggestion_id': self.sid, 'revision': self.row()['next_action']['revision'],
+                                                    'approval_id': key}, owner_dashboard=True)
+
+    def job(self):
+        with self.store.connect() as db:
+            return dict(db.execute('SELECT * FROM action_jobs ORDER BY created_at DESC LIMIT 1').fetchone())
+
+    def transport(self, send=None, preflight=None, reconcile=None):
+        class T:
+            def preflight(self, action): return preflight(action) if preflight else None
+            def send(self, action, job): return send(action, job) if send else {'message_id': 'urn:li:msg_message:X'}
+            def reconcile(self, action, job): return reconcile(action, job) if reconcile else {}
+        return T()
+
+    def test_draft_names_recipient_from_task_and_offers_send(self):
+        action = self.ready()
+        self.assertEqual(action['to_name'], 'Ada Lovelace')
+        self.assertIn('LinkedIn message to Ada Lovelace', n.preview(action))
+        self.assertEqual(a.controls(self.row())['blocks'][0]['buttons'][0]['label'], 'Send reply')
+
+    def test_only_task_conversations_or_named_profiles(self):
+        self.decide('accept')
+        for bad in ({'conversation_id': 'urn:li:msg_conversation:(other)'}, {'conversation_id': None, 'profile': 'ada'},
+                    {'conversation_id': CONV, 'profile': 'ada', 'to_name': 'Ada'}, {'account_id': 'work'}, {'label': 'Reply'},
+                    {'body': 'x' * 8001}):
+            action = {'kind': 'linkedin', 'account_id': 'li', 'conversation_id': CONV, 'body': 'Hi', **bad}
+            action = {k: v for k, v in action.items() if v is not None}
+            with self.assertRaises(ValueError):
+                self.app().action('prepare', {'suggestion_id': self.sid, 'body': 'x', 'next_action': action})
+        self.app().action('prepare', {'suggestion_id': self.sid, 'body': 'x', 'next_action':
+                                      {'kind': 'linkedin', 'account_id': 'li', 'profile': 'ada-l', 'to_name': 'Ada Lovelace', 'body': 'Hi'}})
+
+    def test_owner_edit_keeps_recipient_and_has_no_subject(self):
+        action = self.ready()
+        revised = self.app().action('revise_draft', {'suggestion_id': self.sid, 'revision': action['revision'], 'body': 'Friday at ten works.'},
+                                    owner_dashboard=True)
+        self.assertEqual(revised['status'], 'revised')
+        current = self.row()['next_action']
+        self.assertEqual((current['body'], current['conversation_id'], current.get('subject')), ('Friday at ten works.', CONV, None))
+
+    def test_approved_send_runs_once_and_card_says_linkedin(self):
+        self.ready()
+        self.confirm()
+        self.confirm('second-click')
+        calls = []
+        self.app().action_step(self.transport(send=lambda action, job: (calls.append(action), {'message_id': 'urn:li:msg_message:X'})[1]))
+        self.app().action_step(self.transport(send=lambda *_: self.fail('Duplicate send')))
+        self.assertEqual([c['body'] for c in calls], ['Friday works.'])
+        self.assertEqual(self.job()['status'], 'sent')
+        self.assertIn('LinkedIn message sent.', str(a.card(self.row())))
+
+    def test_reply_in_that_conversation_answers_the_card(self):
+        self.ready()
+        self.confirm()
+        with patch.object(a, 'now', return_value='2026-10-13T10:00:00+00:00'):
+            self.app().action_step(self.transport())
+        later = li.event(ACCOUNT, raw(urn='urn:li:msg_message:(urn:li:fsd_profile:ME,2-M2==)', at=1792000000000, text='Great, see you then.'), H)
+        own = li.event(ACCOUNT, raw(urn='urn:li:msg_message:(urn:li:fsd_profile:ME,2-M3==)', at=1792000000001, fromMe=True), H)
+        self.store.commit_page('li', {}, [later, own])
+        with self.store.connect() as db:
+            rows = {json.loads(r['metadata'])['message_id']: dict(r) for r in db.execute("SELECT * FROM events WHERE occurred_at>'2026-10-14'")}
+        replies = self.store.card_replies(list(rows.values()))
+        self.assertEqual([replies[r['id']]['suggestion_id'] for r in rows.values() if r['id'] in replies], [self.sid])
+        self.assertIn(rows[later['metadata']['message_id']]['id'], replies)
+
+    def test_busy_browser_waits_without_blocking_or_sending(self):
+        self.ready()
+        self.confirm()
+        def busy(_): raise n.LinkedInBusy()
+        self.assertEqual(self.app().action_step(self.transport(preflight=busy, send=lambda *_: self.fail('sent while busy'))), 'waiting')
+        job = self.job()
+        self.assertEqual(job['status'], 'queued')
+        self.assertIsNotNone(job['retry_at'])
+
+    def test_unknown_outcome_never_resends_and_no_intent_requeues(self):
+        self.ready()
+        self.confirm()
+        self.app().action_step(self.transport(send=lambda *_: {}))
+        self.assertEqual(self.job()['status'], 'uncertain')
+        self.assertIn('LinkedIn message', self.job()['error'])
+        with self.store.connect() as db:
+            db.execute('UPDATE action_jobs SET retry_at=NULL')
+        self.app().action_step(self.transport(reconcile=lambda *_: {}, send=lambda *_: self.fail('resent an uncertain message')))
+        self.assertEqual(self.job()['status'], 'uncertain')
+        self.assertIn('LinkedIn message', self.job()['error'])
+
+
+class Transport(unittest.TestCase):
+    config = {'accounts': [ACCOUNT], 'linkedin_inbox': '/bin/linkedin-inbox-test'}
+    action = {'kind': 'linkedin', 'account_id': 'li', 'profile': 'ada-l', 'to_name': 'Ada Lovelace', 'body': 'Hi Ada'}
+
+    def test_preflight_checks_profile_name_and_send_uses_job_token(self):
+        t = n.LinkedInTransport(self.config)
+        seen = []
+        def run(args, **_):
+            seen.append(args)
+            if '--yes' in args:
+                return subprocess.CompletedProcess(args, 0, json.dumps({'sent': 'sent', 'messageUrn': 'urn:li:msg_message:Q'}), '')
+            return subprocess.CompletedProcess(args, 0, json.dumps({'preview': {'name': 'Ada  lovelace'}}), '')
+        with patch.object(n.subprocess, 'run', side_effect=run):
+            t.preflight(self.action)
+            self.assertEqual(t.send(self.action, {'id': 'J1'}), {'message_id': 'urn:li:msg_message:Q'})
+        self.assertEqual(seen[0][:4], ['/bin/linkedin-inbox-test', 'send', '--profile', 'ada-l'])
+        self.assertNotIn('--yes', seen[0])
+        self.assertEqual(seen[1][seen[1].index('--token') + 1], 'assistant-J1')
+        wrong = subprocess.CompletedProcess([], 0, json.dumps({'preview': {'name': 'Bob Other'}}), '')
+        with patch.object(n.subprocess, 'run', return_value=wrong), self.assertRaises(ValueError):
+            t.preflight(self.action)
+
+    def test_default_reader_is_the_bundled_one(self):
+        self.assertEqual(n.LinkedInTransport({'accounts': [ACCOUNT]}).cli(self.action), str(n.LINKEDIN_INBOX))
+        self.assertTrue(n.LINKEDIN_INBOX.exists())
+
+    def test_refusal_unknown_and_busy_outcomes(self):
+        t = n.LinkedInTransport(self.config)
+        cases = [(subprocess.CompletedProcess([], 4, json.dumps({'sent': 'failed', 'status': 422}), ''), {'rejected': 422}),
+                 (subprocess.CompletedProcess([], 4, json.dumps({'sent': 'uncertain'}), ''), {}),
+                 (subprocess.CompletedProcess([], 2, '', 'not sending again'), {}),
+                 (subprocess.CompletedProcess([], 2, '', 'browser is busy'), {'not_sent': True})]
+        for result, expected in cases:
+            with patch.object(n.subprocess, 'run', return_value=result):
+                self.assertEqual(t.send(self.action, {'id': 'J'}), expected)
+        none = subprocess.CompletedProcess([], 0, json.dumps({'found': False, 'attempted': False}), '')
+        with patch.object(n.subprocess, 'run', return_value=none):
+            self.assertEqual(t.reconcile(self.action, {'id': 'J'}), {})
+        with patch.object(n.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', 'the OpenClaw browser is busy')):
+            with self.assertRaises(n.LinkedInBusy):
+                t.preflight(self.action)
+
+    def test_action_transport_routes_linkedin(self):
+        email, linkedin = object(), object()
+        router = n.ActionTransport(email, linkedin)
+        self.assertIs(router.pick({'kind': 'linkedin'}), linkedin)
+        self.assertIs(router.pick({'kind': 'email'}), email)
+
+
+if __name__ == '__main__':
+    unittest.main()

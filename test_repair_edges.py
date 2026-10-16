@@ -10,9 +10,25 @@ import test_preparation as p
 import next_actions as n
 import rollout_health
 
+spec=importlib.util.spec_from_file_location('linkedin_dependency',Path(__file__).parent/'integrations/linkedin_inbox.py')
+li=importlib.util.module_from_spec(spec);spec.loader.exec_module(li)
 
 
 class SenderEvidence(unittest.TestCase):
+    def test_partial_log_preserves_intent_and_never_proves_no_attempt(self):
+        with tempfile.TemporaryDirectory() as td,patch.object(li,'SENDS_LOG',Path(td)/'sends.jsonl'):
+            li.log_send({'token':'t','result':'intent','text':'same','to':{'conversationUrn':'C'}})
+            with li.SENDS_LOG.open('a') as f:f.write('{"partial":')
+            self.assertEqual(li.prior_send('t')['result'],'intent')
+            calls=[]
+            with patch.object(li,'run',side_effect=lambda *a,**kw:calls.append(kw) or {'found':[]}),contextlib.redirect_stdout(io.StringIO()) as out:
+                li.cmd_verify(type('Args',(),{'token':'t'})())
+            self.assertFalse(json.loads(out.getvalue())['found']);self.assertEqual(calls[0]['token'],'t')
+            with contextlib.redirect_stdout(io.StringIO()) as out:li.cmd_verify(type('Args',(),{'token':'other'})())
+            self.assertIsNone(json.loads(out.getvalue())['attempted'])
+            with self.assertRaises(li.Fail):li.prior_send('other')
+            self.assertIn('m.originToken === P.token',li.JS)
+
     def test_reload_health_check_is_read_only_and_omits_payload(self):
         import sqlite3
         with sqlite3.connect(':memory:') as db:

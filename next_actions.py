@@ -83,8 +83,9 @@ def attachment_bytes(record, config):
 
 
 # Owner-approved sends: each needs the Send review and Send now (Telegram) or the dashboard dialog.
-SEND_KINDS = ('email', 'email_demo', 'slack')
-TEXT_KINDS = ('slack',)  # a message without a subject
+SEND_KINDS = ('email', 'email_demo', 'linkedin', 'slack')
+TEXT_KINDS = ('linkedin', 'slack')  # a message without a subject
+LINKEDIN_INBOX = Path(__file__).resolve().parent / 'integrations/linkedin_inbox.py'
 
 
 def canonical(value):
@@ -108,13 +109,20 @@ def visible_actions(value):
 
 
 def label(value):
-    return value.get('label') or {'email':'Send','email_demo':'Send','slack':'Send','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
+    return value.get('label') or {'email':'Send','email_demo':'Send','linkedin':'Send','slack':'Send','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
 
 
 def preview(value):
+    if value['kind'] == 'linkedin':
+        return linkedin_preview(value)
     if value['kind'] == 'slack':
         return 'Slack message to ' + value['to_name'] + (' (' + value['to_email'] + ')' if value.get('to_email') else '') + '\n\n' + value['body'] + delegate_note(value)
     return email_preview(value) if value['kind'] in ('email','email_demo') else value['instructions']
+
+
+def linkedin_preview(action):
+    to = action['to_name'] + (' (linkedin.com/in/' + action['profile'] + ')' if action.get('profile') else '')
+    return 'LinkedIn message to ' + to + '\n\n' + action['body']
 
 
 def delegate_note(action):
@@ -140,13 +148,13 @@ def delegation(value, result, name=None):
         result['to_name'] = name
 
 
-def validate(value, config, allowed_accounts, recipient_options=None):
+def validate(value, config, allowed_accounts, recipient_options=None, linkedin_threads=None):
     if value is None:
         return None
     if isinstance(value,list):
         if not 1<=len(value)<=3:raise ValueError('Offer one to three useful next actions, not a menu of everything')
         if any(not isinstance(item,dict) for item in value):raise ValueError('Each next action must be one concrete choice')
-        choices=[validate(item,config,allowed_accounts,recipient_options) for item in value]
+        choices=[validate(item,config,allowed_accounts,recipient_options,linkedin_threads) for item in value]
         if len({item['revision'] for item in choices})!=len(choices) or len({label(item).lower() for item in choices})!=len(choices):
             raise ValueError('Next actions must be distinct concrete choices')
         return {'kind':'menu','actions':choices}
@@ -249,6 +257,37 @@ def validate(value, config, allowed_accounts, recipient_options=None):
         if name is not None and (not isinstance(name, str) or not 1 <= len(name.strip()) <= 100 or '\n' in name):
             raise ValueError('to_name is the person’s name')
         delegation(value, result, name and name.strip())
+    elif value.get('kind') == 'linkedin':
+        # A LinkedIn message: a reply in a conversation from this task's own signals, or a new
+        # message to a profile slug the owner gave. Sent only after the owner's approval.
+        if set(value) - {'kind', 'label', 'account_id', 'conversation_id', 'profile', 'to_name', 'body'}:
+            raise ValueError('Unsupported LinkedIn message fields')
+        account = next((a for a in config['accounts'] if a['id'] == value.get('account_id') and a.get('service') == 'linkedin'), None)
+        if not account or account['id'] not in allowed_accounts:
+            raise ValueError('Use the LinkedIn account belonging to this task')
+        result = {'kind': 'linkedin', 'account_id': account['id']}
+        if value.get('label'):
+            if value['label'] != 'Send' and not value['label'].startswith('Send '):
+                raise ValueError('LinkedIn button labels must say Send, such as Send reply')
+            result['label'] = value['label']
+        threads = linkedin_threads or {}
+        if bool(value.get('conversation_id')) == bool(value.get('profile')):
+            raise ValueError('A LinkedIn message needs either the conversation_id from this task or a profile slug, not both')
+        if value.get('conversation_id'):
+            if value['conversation_id'] not in threads:
+                raise ValueError('Reply only in a LinkedIn conversation from this task’s own messages')
+            result.update(conversation_id=value['conversation_id'], to_name=threads[value['conversation_id']])
+        else:
+            if not isinstance(value['profile'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_%-]{1,99}', value['profile']):
+                raise ValueError('profile is the slug from linkedin.com/in/<slug>/')
+            name = value.get('to_name')
+            if not isinstance(name, str) or not 2 <= len(name.strip()) <= 100 or '\n' in name:
+                raise ValueError('Give to_name: the person’s name as shown on that profile; the send checks it')
+            result.update(profile=value['profile'], to_name=name.strip())
+        body = value.get('body')
+        if not isinstance(body, str) or not body.strip() or len(body) > 8000 or '\x00' in body:
+            raise ValueError('Provide the concrete LinkedIn message, at most 8000 characters')
+        result['body'] = body.strip()
     elif value.get('kind') == 'slack':
         # A Slack direct message from the owner's own Slack account, mostly to hand a task to a
         # colleague. Any Slack account in the task's boundary; sent only after the owner's Send now.
@@ -283,7 +322,7 @@ def validate(value, config, allowed_accounts, recipient_options=None):
         result['body'] = body.strip()
         delegation(value, result)
     else:
-        raise ValueError('Only email drafts, Slack messages, local preparation and original-page links are supported; no payments or arbitrary writes')
+        raise ValueError('Only email drafts, LinkedIn and Slack messages, local preparation and original-page links are supported; no payments or arbitrary writes')
     result['revision'] = hashlib.sha256(canonical(result).encode()).hexdigest()[:12]
     return result
 
@@ -317,7 +356,7 @@ def check(value, result='', own_addresses=()):
 def revise(action, subject=None, body=None):
     """The owner's own edit of a ready draft: same recipients, account and attachments, new text and revision."""
     if action['kind'] not in ('email',) + TEXT_KINDS:
-        raise ValueError('Only email and Slack drafts can be edited')
+        raise ValueError('Only email, LinkedIn and Slack drafts can be edited')
     result = {k: v for k, v in action.items() if k != 'revision'}
     if body is not None:
         if not isinstance(body, str) or not body.strip() or len(body) > (8000 if action['kind'] in TEXT_KINDS else 12000) or '\x00' in body:
@@ -532,6 +571,69 @@ class EmailTransport:
         return {}  # Absence or ambiguity never means it is safe to resend.
 
 
+class LinkedInBusy(Exception):
+    """The shared browser is busy: try again shortly; nothing was sent."""
+
+
+class LinkedInTransport:
+    """Sends one owner-approved LinkedIn message through integrations/linkedin_inbox.py (config
+    "linkedin_inbox" overrides the path). The job id is the idempotency token: the reader logs the
+    intent before writing and refuses a token it has seen."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def cli(self, action):
+        return self.config.get('linkedin_inbox', str(LINKEDIN_INBOX))
+
+    def target(self, action):
+        return ['--conversation', action['conversation_id']] if action.get('conversation_id') else ['--profile', action['profile']]
+
+    def run(self, action, args, timeout=240):
+        result = subprocess.run([self.cli(action), *args], capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 2 and 'busy' in result.stderr.lower():
+            raise LinkedInBusy()
+        return result
+
+    def preflight(self, action):
+        if action['kind'] != 'linkedin':
+            raise ValueError('Only an owner-approved LinkedIn message can use the LinkedIn transport')
+        result = self.run(action, ['send', *self.target(action), '--text', action['body'], '--json'])
+        if result.returncode:
+            err = result.stderr.lower()
+            raise ValueError('LinkedIn is signed out in the OpenClaw browser. Nothing was sent.' if 'signed out' in err
+                             else 'I couldn’t find that LinkedIn recipient. Nothing was sent.' if 'no recipient' in err
+                             else 'I couldn’t reach LinkedIn. Nothing was sent; tap Send again.')
+        try:
+            name = json.loads(result.stdout)['preview']['name']
+        except (ValueError, KeyError, TypeError):
+            raise ValueError('I couldn’t check the LinkedIn recipient. Nothing was sent.') from None
+        if action.get('profile') and ' '.join(name.lower().split()) != ' '.join(action['to_name'].lower().split()):
+            raise ValueError(f'That LinkedIn profile belongs to {name}, not {action["to_name"]}. Nothing was sent.')
+
+    def send(self, action, job):
+        try:
+            result = self.run(action, ['send', *self.target(action), '--text', action['body'], '--token', 'assistant-' + job['id'], '--yes', '--json'])
+        except LinkedInBusy:
+            return {'not_sent': True}
+        try:
+            out = json.loads(result.stdout or '{}')
+        except ValueError:
+            return {}
+        if out.get('sent') == 'sent':
+            return {'message_id': out.get('messageUrn') or 'linkedin:' + job['id']}
+        if out.get('sent') == 'failed' and isinstance(out.get('status'), int):
+            return {'rejected': out['status']}
+        return {}  # Unknown outcome: never resend; reconcile checks the conversation.
+
+    def reconcile(self, action, job):
+        result = self.run(action, ['verify', '--token', 'assistant-' + job['id']])
+        if result.returncode:
+            return {}
+        out = json.loads(result.stdout)
+        return {'message_id': out.get('message') or 'linkedin:' + job['id']} if out.get('found') else {}
+
+
 def slack_text(body):
     """Plain draft text in Slack's own format: [text](https://url) links become <url|text>."""
     text = body.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -636,17 +738,17 @@ class SlackTransport:
 
 
 class ActionTransport:
-    """Routes an approved send to Gmail or Slack by its kind."""
+    """Routes an approved send to Gmail, LinkedIn or Slack by its kind."""
 
-    def __init__(self, email, slack=None):
-        self.email, self.slack = email, slack
+    def __init__(self, email, linkedin, slack=None):
+        self.email, self.linkedin, self.slack = email, linkedin, slack
 
     def pick(self, action):
         if action['kind'] == 'slack':
             if not self.slack:
                 raise ValueError('Slack sending isn’t set up. Nothing was sent.')
             return self.slack
-        return self.email
+        return self.linkedin if action['kind'] == 'linkedin' else self.email
 
     def preflight(self, action):
         return self.pick(action).preflight(action)

@@ -18,17 +18,17 @@ Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Req
 
 ## What it does
 
-- **Collects** signals from Gmail, Google Calendar, Slack, the Salesflare CRM, Android notifications (through the OpenClaw node app), WhatsApp (through a local `wacli` store) and the OpenClaw Gateway's own failures, plus GitHub, Stripe, X and RSS through [connector plugins](docs/adding-a-source.md). Collection is incremental and read-only by default; everything goes into one private SQLite database with full-text search.
+- **Collects** signals from Gmail, Google Calendar, Slack, the Salesflare CRM, Android notifications (through the OpenClaw node app), WhatsApp (through a local `wacli` store) and the OpenClaw Gateway's own failures, plus GitHub, Stripe, LinkedIn, X and RSS through [connector plugins](docs/adding-a-source.md). Collection is incremental and read-only by default; everything goes into one private SQLite database with full-text search.
 - **Reviews** waiting signals in isolated turns of your existing OpenClaw main agent. The agent saves a suggestion only when something is worth your time: an unanswered request, a deadline, a problem it can fix, or an email of yours that slipped.
 - **Delivers** suggestions as Telegram cards through your existing OpenClaw bot, with a phone-friendly dashboard (installable as an app, with optional push notifications) on your tailnet.
-- **Acts** when you tap **Do it**: the agent drafts the email or Slack message (with a Send button), makes the fix, does the research, or hands the task to a colleague and waits for their reply, and reports back on the same card. **Change** lets you reply with instructions; **Snooze**, **Dismiss** and **Mark done** work as you'd expect, and your choices steer later reviews.
+- **Acts** when you tap **Do it**: the agent drafts the email, LinkedIn or Slack message (with a Send button), makes the fix, does the research, or hands the task to a colleague and waits for their reply, and reports back on the same card. **Change** lets you reply with instructions; **Snooze**, **Dismiss** and **Mark done** work as you'd expect, and your choices steer later reviews.
 
 The service itself contains no model. All interpretation happens in your OpenClaw agent, with your model provider: see [Bring your own model](docs/models.md) for choosing one, including local models.
 
 ## Architecture
 
 ```text
-Gmail · Calendar · Slack · CRM · Android notifications · WhatsApp · OpenClaw Gateway · plugins (GitHub, Stripe, X, RSS)
+Gmail · Calendar · Slack · CRM · Android notifications · WhatsApp · OpenClaw Gateway · plugins (GitHub, Stripe, LinkedIn, X, RSS)
                 │  (read-only collectors, one thread and checkpoint per account)
                 ▼
 assistant.py (systemd user service) → private SQLite + full-text search, local API on 127.0.0.1
@@ -48,7 +48,7 @@ Do it → isolated preparation turn of the same agent → result, draft + Send, 
 | `assistant.py` | Collectors, SQLite store, local API, dashboard server, Telegram outbox, review and preparation workers |
 | `dashboard.html`, `sw.js`, `manifest.webmanifest`, `brand/` | Owner dashboard and installable web app |
 | `cli.py` | The `assistant` command line |
-| `next_actions.py` | Approved sends: email (Gmail via `gog`) and Slack direct messages (Maton) |
+| `next_actions.py` | Approved sends: email (Gmail via `gog`), LinkedIn messages (OpenClaw browser) and Slack direct messages (Maton) |
 | `preparation_state.py`, `rollout_health.py` | Preparation bookkeeping and health checks |
 | `openclaw-plugin/` | `personal-assistant-bridge`: the `assistant_signals` tool, Telegram buttons and replies, Android feed capture, review/preparation guards |
 | `*.mjs` | Small Node helpers that call the OpenClaw Gateway (`openclaw-root.mjs` finds the installed package) |
@@ -78,7 +78,7 @@ Python's standard library and SQLite are enough: no database server, queue, web 
   - **Caddy** only to serve the dashboard on a custom domain (`deploy/Caddyfile`).
   - `wacli` for WhatsApp; a Maton connection for Slack (allowed to post as you, to send Slack messages); a Salesflare API key.
   - The `gh` CLI logged in as you for GitHub; a restricted read-only key (or a Maton connection) for Stripe.
-  - For X: your X accounts signed in to the OpenClaw browser (profile `openclaw`).
+  - For LinkedIn and X: your accounts signed in to the OpenClaw browser (profile `openclaw`).
   - The OpenClaw Android app paired as a node for phone notifications.
 
 ## Install
@@ -178,6 +178,7 @@ Collectors read existing source content. The optional Salesflare `join_pipelines
 | `gateway` | journald | `unit` (default `openclaw-gateway.service`), `bootstrap_hours` |
 | `github` (plugin) | `gh` CLI logged in as you | `login`, `repos` (optional filter), `ci_repos` + `ci_branch` (failed runs) |
 | `stripe` (plugin) | A restricted read-only Stripe key, or a Maton Stripe connection | `transport` (`api` or `maton`), `credential` (+ `credential_variable`, `connection_id` for Maton), `stripe_account`, `large_subscription_monthly` (500) |
+| `linkedin` (plugin) | LinkedIn signed in to the OpenClaw browser | `active_hours` (`[7, 22]`, local time); config `linkedin_inbox` for the reader path |
 | `rss` (plugin) | — | `url` |
 
 Plugin accounts aren't set up by the installer: add them to `accounts` by hand, using the keys above (each connector's header has a full example), then restart the service.
@@ -191,7 +192,8 @@ Plugin accounts aren't set up by the installer: add them to `accounts` by hand, 
 - **OpenClaw Gateway:** failed agent runs on Telegram, refused hand-offs and failed Telegram sends, grouped per half hour with secrets redacted.
 - **GitHub:** notifications on threads you take part in (review requests, mentions, assignments, comments, threads you opened), each with the issue or PR and its latest comment. GET requests only; nothing is marked read. Each run checks that `gh` is logged in as `login`. Optional failed workflow runs per repository.
 - **Stripe:** only events worth a look are stored: failed payments, disputes, ended subscriptions, scheduled cancellations, past due or unpaid, and new subscriptions of at least `large_subscription_monthly` a month. GET on the account, events and customers only; it never refunds, retries or changes anything. Each run checks the key belongs to `stripe_account`. For a direct key, create a restricted key with read access to Events, Customers and Account.
-- **X:** replies, mentions and the DM inbox for each X account signed in to the OpenClaw browser (`connectors/x.py` with `integrations/x_inbox.py`), read through X's own web API from a background tab, so nothing is marked seen. Several accounts can share the browser through X's account switcher: x-inbox switches to the one it reads and always back to `primary`, one run at a time, and only while no other job holds the browser lease. Encrypted X Chat isn't read. No API key needed.
+- **LinkedIn:** inbox conversations and messages (`connectors/linkedin.py` with `integrations/linkedin_inbox.py`), read through LinkedIn's own messaging API from a tab parked on `linkedin.com/robots.txt`, so nothing is marked read. Hourly in waking hours only (`poll_seconds`, `active_hours`), to keep automated LinkedIn traffic low. Pages follow LinkedIn's own cursors and commit with the messages; an unfinished scan continues after 30 seconds and keeps its lower bound through outages, however long; only a completed scan advances it. Spam is skipped. A busy browser retries in 10 minutes, signed out hourly. LinkedIn's query IDs are pinned; `linkedin_inbox.py discover` refreshes them when LinkedIn changes its client. No API key needed.
+- **X:** replies, mentions and the DM inbox for each X account signed in to the OpenClaw browser (`connectors/x.py` with `integrations/x_inbox.py`), read through the owner's own signed-in x.com session (the same requests x.com makes, not X's developer API) from a background tab, so nothing is marked seen. Several accounts can share the browser through X's account switcher: x-inbox switches to the one it reads and always back to `primary`, one run at a time, and only while no other job holds the browser lease. Encrypted X Chat isn't read. No API key needed.
 - **RSS/Atom:** the example plugin; see [Adding a source](docs/adding-a-source.md).
 
 ## Reviews
@@ -203,6 +205,8 @@ The service starts reviews itself (`review_worker.enabled`). When at least `min_
 Your decisions and written reasons are summarised into every review prompt, and lasting facts you state are saved (`remember_fact`) and listed, removable, on the dashboard. Style notes that hold beyond one card (signatures, formatting, tone) become **draft rules** that every later draft follows. Each Do it result says whether it's finished or what it needs from you, and the run sorts your Change notes (style, missing fact, keep going, new ask). The Feedback tab shows the split, the hit rate per day or week, and markers where the rules changed.
 
 **Slack messages and hand-offs.** A Do it result can carry a Slack direct message from your own Slack account (the Maton Slack connection, as your user) to one person, named by Slack `user_id` or work email, with their name. `SlackTransport` in `next_actions.py` is separate from the read-only Slack source and can only look the person up (`users.info`, `users.lookupByEmail`), open the DM, post one message and read that DM back. Before sending it checks that the Slack name matches and that it's an active person, not a bot. An unclear outcome stays uncertain and is checked by finding exactly one message from you with that text in the DM; it's never resent. `delegate:true` (on Slack, or an email to one address) hands the task over: after the send the card is snoozed for `wait_days` (default 3; a weekday at 09:00) with a watch on that person. When they reply (in that DM, or in that email thread or to that email), the card closes itself and their reply is reviewed as an answer to the card; without a reply it comes back saying so. Sending needs a Maton Slack connection that is allowed to post as you.
+
+**LinkedIn messages** use the same approval path. The `linkedin` action either replies in a conversation from the task's own LinkedIn signals (`conversation_id`), or writes to a profile slug you gave (`profile` plus `to_name`). Preflight resolves the recipient without sending, and a profile whose name doesn't match `to_name` blocks the send. `LinkedInTransport` runs `linkedin_inbox.py send --yes` with the job ID as token; the reader logs its intent before the one write (fsynced, token admission locked) and never reuses a token. An unclear outcome stays uncertain and is checked through `linkedin_inbox.py verify` by exact message identity, not by matching text or time; missing or damaged send evidence stays uncertain and is never resent. A busy browser just waits.
 
 ## Telegram and the dashboard
 

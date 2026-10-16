@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """x-inbox: X (Twitter) mentions, replies and DMs through the signed-in OpenClaw browser.
 
-Calls X's own web API from inside a tab of the openclaw Chrome profile, so no cookies leave
-the browser. The tab sits on x.com/robots.txt, so nothing opens in the UI, and nothing is
+Makes the same requests x.com itself makes (not X's developer API) from inside a tab of the
+openclaw Chrome profile, so no cookies leave the browser. The tab sits on x.com/robots.txt, so nothing opens in the UI, and nothing is
 marked as read or seen. Reading never posts, likes, follows or sends anything.
 
 Several accounts can be signed in at once (X's account switcher). To read another one the

@@ -67,6 +67,11 @@ delete item.next_actions;
 item.next_action={kind:'email_demo',label:'Send',revision:'abcdef123456',from:'the-machine@example.invalid',to:['alex@example.invalid'],subject:'Demo reply',body:'Thanks for the proposal.'};
 await handler(ctx('send_abcdef123456'));const demoPreview=edits.pop();assert.match(demoPreview.text,/nothing will be sent/);assert.deepEqual(demoPreview.buttons.flat().map(b=>b.text),['Back']);
 const demoChoices=choices.length;await handler(ctx('confirm_abcdef123456'));assert.equal(choices.length,demoChoices);delete item.next_action;
+item.status='prepared';item.next_action={kind:'linkedin',label:'Send reply',revision:'abcdef123456',account_id:'li',conversation_id:'urn:li:msg_conversation:(x,2-A)',to_name:'Ada Lovelace',body:'Friday works.'};
+await handler(ctx('back'));assert.equal(edits.pop().buttons.flat()[0].text,'Send reply');
+{const before=choices.length;await handler(ctx('send_abcdef123456'));const r=edits.pop();assert.match(r.text,/Send this LinkedIn message\?\nTo: Ada Lovelace\n\nFriday works\./);
+ assert.deepEqual(r.buttons.flat().map(b=>b.text),['Send now','Edit','Cancel']);assert.equal(choices.length,before);
+ await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');edits.pop();}
 // Handing it to a colleague on Slack: the Send shares a row with Mark done, and the preview says the card waits.
 item.status='prepared';item.next_action={kind:'slack',label:'Send to Sam',revision:'abcdef123456',account_id:'slack',to_email:'sam@example.com',to_name:'Sam',body:'Could you check the invoice?',delegate:true,wait_days:3};
 await handler(ctx('back'));assert.deepEqual(edits.pop().buttons.map(row=>row.map(b=>b.text)),[['Send to Sam','Mark done','Snooze'],['Change','Not needed']]);

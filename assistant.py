@@ -2034,7 +2034,7 @@ class Store:
     def conversation_context(self, rows, limit=4, hours=48):
         """Up to four earlier messages from the same chat for each Slack/WhatsApp signal, so a
         short reply ("let me check") is reviewed with what it answers."""
-        keys = {'slack.message': 'channel_id', 'whatsapp.message': 'chat_id', 'x.dm': 'conversation_id', 'x.mention': 'conversation_id'}
+        keys = {'slack.message': 'channel_id', 'whatsapp.message': 'chat_id', 'linkedin.message': 'conversation_id', 'x.dm': 'conversation_id', 'x.mention': 'conversation_id'}
         context = {}
         with self.connect() as db:
             for row in rows:
@@ -2072,6 +2072,8 @@ class Store:
                     by_key[('rfc', job['rfc_message_id'])] = card
                 if action.get('thread_id'):
                     by_key[('thread', action['account_id'], action['thread_id'])] = card
+            elif action.get('kind') == 'linkedin' and action.get('conversation_id'):
+                by_key[('linkedin', action['account_id'], action['conversation_id'])] = card
             elif action.get('kind') == 'slack' and str(job['message_id'] or '').startswith('slack:'):
                 by_key[('slack', action['account_id'], job['message_id'].split(':')[1])] = card
         found = {}
@@ -2080,6 +2082,8 @@ class Store:
             card = None
             if row['kind'] == 'gmail.message' and 'SENT' not in m.get('labels', []):
                 card = by_key.get(('rfc', str(m.get('in-reply-to') or '').strip())) or by_key.get(('thread', row['account_id'], m.get('thread_id')))
+            elif row['kind'] == 'linkedin.message' and not m.get('from_me'):
+                card = by_key.get(('linkedin', row['account_id'], m.get('conversation_id')))
             elif row['kind'] == 'slack.message' and m.get('user_id') not in self.owner_user_ids:
                 card = by_key.get(('slack', row['account_id'], m.get('channel_id')))
             if card and row['occurred_at'] > card['sent_at']:
@@ -2178,7 +2182,7 @@ class Store:
                 promise = next((r for r in rows if r['id'] == awaiting), None)
                 watch = promise and awaiting_key(dict(promise), self.owner_user_ids)
                 if not watch:
-                    raise ValueError('awaiting_event_id must be one of event_ids: the email, Slack or WhatsApp message where someone else made the promise')
+                    raise ValueError('awaiting_event_id must be one of event_ids: the email, Slack, WhatsApp or LinkedIn message where someone else made the promise')
                 if when in ('now', 'digest') and not due:
                     raise ValueError('A follow-up on someone else\'s promise needs due (their deadline) or when, so the card waits until then')
             if due:
@@ -2857,7 +2861,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
-            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','slack'):
+            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack'):
                 raise ValueError('This draft changed or is no longer ready. Use its current buttons.')
             if db.execute("SELECT 1 FROM action_jobs WHERE suggestion_id=? AND status IN ('sending','uncertain','sent')",(suggestion_id,)).fetchone():
                 raise ValueError('This draft is already being sent or was sent.')
@@ -2882,7 +2886,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
-            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','slack','prepare'):
+            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','prepare'):
                 raise ValueError('This result changed or is no longer ready. Use its current buttons.')
             if action.get('to_options'):
                 # The owner picked who gets it, only from the addresses the service found in the thread.
@@ -3582,7 +3586,7 @@ def awaiting_key(event, owner_slack_ids=()):
         return {**key, 'thread_id': m.get('thread_id'), 'from': _address(m.get('from'))}
     if event['kind'] == 'slack.message' and m.get('user_id') and m['user_id'] not in owner_slack_ids:
         return {**key, 'channel_id': m.get('channel_id'), 'user_id': m['user_id']}
-    if event['kind'] in ('whatsapp.message', 'x.dm') and not m.get('from_me') and (m.get('chat_id') or m.get('conversation_id')):
+    if event['kind'] in ('whatsapp.message', 'linkedin.message', 'x.dm') and not m.get('from_me') and (m.get('chat_id') or m.get('conversation_id')):
         return {**key, 'conversation': m.get('chat_id') or m['conversation_id'], 'sender': m.get('sender_id') or m.get('from') or ''}
     return None
 
@@ -3813,7 +3817,7 @@ def card(row):
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed')),None)
     if action_state and row['status']=='prepared':
         status={'queued':'Sending your approved draft…','sending':'Sending your approved draft…',
-                'sent':('Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':action_state.get('error'),'failed':action_state.get('error')}.get(action_state['status'],status)
+                'sent':('LinkedIn message sent.' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':action_state.get('error'),'failed':action_state.get('error')}.get(action_state['status'],status)
     try:
         handed = json.loads(row['awaiting']) if row.get('awaiting') else {}
     except (ValueError, TypeError):
@@ -3860,7 +3864,7 @@ def controls(row):
     if row['status']=='prepared':
         for action in actions:
             state=action.get('state') or row.get('action_status',{})
-            if action['kind'] in ('email','email_demo','slack','prepare') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation'):
+            if action['kind'] in ('email','email_demo','linkedin','slack','prepare') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation'):
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
                 buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
             elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
@@ -4596,7 +4600,10 @@ class App:
             with self.store.connect() as db:
                 emails=db.execute("SELECT e.metadata FROM events e JOIN json_each(?) ids ON ids.value=e.id WHERE e.kind='gmail.message' ORDER BY e.occurred_at DESC",(row['event_ids'],)).fetchall()
             options=thread_recipients(emails,[a.get('email','') for a in self.config['accounts']])
-            action=next_actions.validate(args.get('next_actions',args.get('next_action')),self.config,json.loads(row['account_ids']),options)
+            with self.store.connect() as db:
+                threads={m['conversation_id']:m.get('chat_name') or 'LinkedIn conversation' for m in (json.loads(r[0]) for r in db.execute(
+                    "SELECT e.metadata FROM events e JOIN json_each(?) ids ON ids.value=e.id WHERE e.kind='linkedin.message' ORDER BY e.occurred_at",(row['event_ids'],)))}
+            action=next_actions.validate(args.get('next_actions',args.get('next_action')),self.config,json.loads(row['account_ids']),options,threads)
             if any(item['kind']=='email_demo' for item in next_actions.actions(action)):
                 with self.store.connect() as db:
                     evidence=db.execute('SELECT e.kind,e.metadata FROM events e JOIN suggestions s ON s.id=? JOIN json_each(s.event_ids) ids ON ids.value=e.id',(args['suggestion_id'],)).fetchall()
@@ -4621,8 +4628,8 @@ class App:
                         raise ValueError('Prepared ahead: the draft is saved; the owner sends it themselves')
                 # The owner asked for it to be sent: queue the draft exactly as their Send tap would
                 # (same sender, signature and attachments), without a second confirmation.
-                ready=[a for a in next_actions.actions(action) if a['kind'] in ('email','slack') and not a.get('to_options')]
-                if not ready:raise ValueError('send_now needs an email or Slack draft with its recipients filled in')
+                ready=[a for a in next_actions.actions(action) if a['kind'] in ('email','linkedin','slack') and not a.get('to_options')]
+                if not ready:raise ValueError('send_now needs an email, LinkedIn or Slack draft with its recipients filled in')
                 saved['send']=self.store.confirm_action(args['suggestion_id'],ready[0]['revision'],'assistant:'+uuid.uuid4().hex,'assistant')
             return saved
         if name == 'revise_draft':
@@ -4764,7 +4771,7 @@ class App:
                     LOG.info('sync account=%s mode=%s changed=%d filtered=%d', account['id'], result['mode'], result['events'], result.get('filtered', 0))
                     state = self.store.checkpoint(account['id'])
                     if result.get('more') or state['mode'] != 'incremental' or state.get('page_token'):
-                        delay = 0 if source else 5
+                        delay = 30 if account.get('service') in ('linkedin', 'x') else 0 if source else 5
                 except SourceError as error:
                     if self.stop.is_set():
                         break
@@ -4910,7 +4917,7 @@ class App:
                 LOG.error('delivery error=%s', type(error).__name__)
 
     def action_step(self,transport=None):
-        transport=transport or next_actions.ActionTransport(next_actions.EmailTransport(self.config,credential,gog_read),next_actions.SlackTransport(self.config,credential))
+        transport=transport or next_actions.ActionTransport(next_actions.EmailTransport(self.config,credential,gog_read),next_actions.LinkedInTransport(self.config),next_actions.SlackTransport(self.config,credential))
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             for candidate in db.execute("SELECT j.id,j.revision,s.status,s.next_action FROM action_jobs j JOIN suggestions s ON s.id=j.suggestion_id WHERE j.status IN ('queued','blocked')").fetchall():
@@ -4932,11 +4939,16 @@ class App:
                 else:
                     # Keep checking Sent mail, every five minutes for a day, then hourly.
                     wait=dt.timedelta(minutes=5 if dt.datetime.fromisoformat(job['created_at'])>dt.datetime.fromisoformat(now())-dt.timedelta(days=1) else 60)
-                    db.execute("UPDATE action_jobs SET status='uncertain',error=?,retry_at=? WHERE id=? AND status IN ('sending','uncertain')",('I couldn’t confirm whether this Slack message was sent. I’m checking the conversation; I won’t send it again.' if action['kind']=='slack' else 'I couldn’t confirm whether this email was sent. I’m checking Sent mail; I won’t send it again.',(dt.datetime.fromisoformat(now())+wait).isoformat(),job['id']))
+                    db.execute("UPDATE action_jobs SET status='uncertain',error=?,retry_at=? WHERE id=? AND status IN ('sending','uncertain')",('I couldn’t confirm whether this '+('LinkedIn' if action['kind']=='linkedin' else 'Slack')+' message was sent. I’m checking the conversation; I won’t send it again.' if action['kind'] in ('linkedin','slack') else 'I couldn’t confirm whether this email was sent. I’m checking Sent mail; I won’t send it again.',(dt.datetime.fromisoformat(now())+wait).isoformat(),job['id']))
             return
         try:transport.preflight(action)
+        except next_actions.LinkedInBusy:
+            # The shared browser is in use: wait, nothing was sent and the approval stands.
+            with self.store.connect() as db:
+                db.execute("UPDATE action_jobs SET retry_at=?,updated_at=? WHERE id=? AND status='queued'",((dt.datetime.fromisoformat(now())+dt.timedelta(minutes=2)).isoformat(),now(),job['id']))
+            return 'waiting'
         except Exception as error:
-            reason=str(error) if isinstance(error,ValueError) else ('Slack' if action['kind']=='slack' else 'Gmail')+' could not be checked. Nothing was sent.'
+            reason=str(error) if isinstance(error,ValueError) else ({'linkedin':'LinkedIn','slack':'Slack'}.get(action['kind'],'Gmail')+' could not be checked. Nothing was sent.')
             with self.store.connect() as db:
                 db.execute("UPDATE action_jobs SET status='blocked',error=?,updated_at=? WHERE id=? AND status='queued'",(reason,now(),job['id']))
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
@@ -4958,7 +4970,7 @@ class App:
             return 'waiting'
         with self.store.connect() as db:
             status='sent' if result.get('message_id') else 'failed' if result.get('rejected') else 'uncertain'
-            what,where=('this Slack message','Slack') if action['kind']=='slack' else ('this email','Gmail')
+            what,where={'linkedin':('this LinkedIn message','LinkedIn'),'slack':('this Slack message','Slack')}.get(action['kind'],('this email','Gmail'))
             error={'sent':None,'failed':f"{where} refused {what} (error {result.get('rejected')}). Nothing was sent; you can change it or tap Send again.",
                    'uncertain':f'I couldn’t confirm whether {what} was sent. I won’t resend it.'}[status]
             db.execute('UPDATE action_jobs SET status=?,message_id=?,error=?,updated_at=?,retry_at=? WHERE id=?',
