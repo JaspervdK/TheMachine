@@ -90,6 +90,10 @@ Choose the useful NEXT ACTION on the finished result, not more preparation for i
 
 Reply in a conversation from the task's linkedin.message evidence: `{kind:linkedin,label:Send reply,account_id:<task LinkedIn account>,conversation_id:<its metadata.conversation_id>,body:<message>}`; or, only when the owner named the person and gave or confirmed their linkedin.com/in/<slug>: `{kind:linkedin,label:Send,account_id:...,profile:<slug>,to_name:<name as on the profile>,body:...}`. Plain text, short, the owner's voice, no signature.
 
+### X reply or message (the task's X account)
+
+Reply to a post from this task's x.mention evidence with `{kind:x,label:Reply on X,account_id:<task X account ID>,reply_to:<that event's metadata.tweet_id>,body:<reply>}`, or answer an x.dm with `{kind:x,label:Send,account_id:...,conversation_id:<its metadata.conversation_id>,body:...}`. Plain text, no media; a reply at most 280 characters (links count 23), a DM 10000. Public replies stay short and keep private or customer details out. It's sent through the owner's own x.com session after their Send now, or send_now when they asked you to send it.
+
 ### Slack message, and handing a task to someone
 
 A Slack direct message from the owner's own account: `{kind:slack,label:Send to Sam,account_id:<the company's Slack account>,to_email:<their work email>,to_name:<their name as in Slack>,body:<message>}`, or `user_id:<metadata.user_id of their Slack signal>` instead of to_email. Plain text, short, the owner's voice; links as [text](https://url). The send checks the name against Slack.
@@ -101,7 +105,7 @@ When the owner asks to hand the task to someone ("ask Sam", "let the accountant 
 - A local follow-up is appropriate only if the current result isn't already the draft it would revise: `{kind:prepare,label:Draft support email,instructions:<concrete next local preparation>}`.
 - A follow-up `{kind:prepare,label:Apply fix,instructions:...}` runs another Do it turn with those exact instructions under the same limits; use it only when the change is a separate step the owner should start.
 - A useful verified original link can say Open the automation or View proposal.
-- Never label anything Pay or Create event, or Send unless it is the email, LinkedIn or Slack Send action.
+- Never label anything Pay or Create event, or Send or Reply unless it is the email, LinkedIn, Slack or X send action.
 
 ## Saving
 

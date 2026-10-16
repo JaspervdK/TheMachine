@@ -15,6 +15,7 @@ import shutil
 import re
 import subprocess
 import tempfile
+import unicodedata
 from urllib.parse import urlsplit
 
 SEND_SCOPES = {'https://www.googleapis.com/auth/gmail.send',
@@ -83,9 +84,22 @@ def attachment_bytes(record, config):
 
 
 # Owner-approved sends: each needs the Send review and Send now (Telegram) or the dashboard dialog.
-SEND_KINDS = ('email', 'email_demo', 'linkedin', 'slack')
-TEXT_KINDS = ('linkedin', 'slack')  # a message without a subject
+SEND_KINDS = ('email', 'email_demo', 'linkedin', 'slack', 'x')
+TEXT_KINDS = ('linkedin', 'slack', 'x')  # a message without a subject
 LINKEDIN_INBOX = Path(__file__).resolve().parent / 'integrations/linkedin_inbox.py'
+X_INBOX = Path(__file__).resolve().parent / 'integrations/x_inbox.py'
+X_URLISH = re.compile(r'(?:https?://)?(?:[\w-]+\.)+[a-zA-Z]{2,}(?:/\S*)?')
+
+
+def x_length(text):
+    """Length as X counts a post (like x_inbox.py): every link 23, CJK and emoji 2."""
+    text = unicodedata.normalize('NFC', text)
+    return 23 * len(X_URLISH.findall(text)) + sum(1 if o <= 4351 or 8192 <= o <= 8205 or 8208 <= o <= 8223 or 8242 <= o <= 8247 else 2
+                                                   for o in map(ord, X_URLISH.sub('', text)))
+
+
+def text_length(action, body):
+    return x_length(body) if action['kind'] == 'x' and action.get('reply_to') else len(body)
 
 
 def canonical(value):
@@ -109,12 +123,16 @@ def visible_actions(value):
 
 
 def label(value):
+    if value['kind'] == 'x' and not value.get('label'):
+        return 'Reply on X' if value.get('reply_to') else 'Send'
     return value.get('label') or {'email':'Send','email_demo':'Send','linkedin':'Send','slack':'Send','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
 
 
 def preview(value):
     if value['kind'] == 'linkedin':
         return linkedin_preview(value)
+    if value['kind'] == 'x':
+        return x_preview(value)
     if value['kind'] == 'slack':
         return 'Slack message to ' + value['to_name'] + (' (' + value['to_email'] + ')' if value.get('to_email') else '') + '\n\n' + value['body'] + delegate_note(value)
     return email_preview(value) if value['kind'] in ('email','email_demo') else value['instructions']
@@ -123,6 +141,14 @@ def preview(value):
 def linkedin_preview(action):
     to = action['to_name'] + (' (linkedin.com/in/' + action['profile'] + ')' if action.get('profile') else '')
     return 'LinkedIn message to ' + to + '\n\n' + action['body']
+
+
+def x_preview(action):
+    if action.get('reply_to'):
+        quoted = ' '.join((action.get('to_text') or '').split())
+        quoted = quoted if len(quoted) <= 200 else quoted[:199] + '…'
+        return 'Reply on X as @' + action['handle'] + ' to @' + action['to_screen_name'] + (': “' + quoted + '”' if quoted else '') + '\n\n' + action['body']
+    return 'X message as @' + action['handle'] + ' to ' + action['to_name'] + '\n\n' + action['body']
 
 
 def delegate_note(action):
@@ -148,13 +174,13 @@ def delegation(value, result, name=None):
         result['to_name'] = name
 
 
-def validate(value, config, allowed_accounts, recipient_options=None, linkedin_threads=None):
+def validate(value, config, allowed_accounts, recipient_options=None, linkedin_threads=None, x_threads=None):
     if value is None:
         return None
     if isinstance(value,list):
         if not 1<=len(value)<=3:raise ValueError('Offer one to three useful next actions, not a menu of everything')
         if any(not isinstance(item,dict) for item in value):raise ValueError('Each next action must be one concrete choice')
-        choices=[validate(item,config,allowed_accounts,recipient_options,linkedin_threads) for item in value]
+        choices=[validate(item,config,allowed_accounts,recipient_options,linkedin_threads,x_threads) for item in value]
         if len({item['revision'] for item in choices})!=len(choices) or len({label(item).lower() for item in choices})!=len(choices):
             raise ValueError('Next actions must be distinct concrete choices')
         return {'kind':'menu','actions':choices}
@@ -288,6 +314,37 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
         if not isinstance(body, str) or not body.strip() or len(body) > 8000 or '\x00' in body:
             raise ValueError('Provide the concrete LinkedIn message, at most 8000 characters')
         result['body'] = body.strip()
+    elif value.get('kind') == 'x':
+        # An X reply to a post, or a DM, from this task's own X signals; integrations/x_inbox.py sends it
+        # through the owner's signed-in x.com session in the OpenClaw browser, only after their Send now.
+        if set(value) - {'kind', 'label', 'account_id', 'reply_to', 'conversation_id', 'body'}:
+            raise ValueError('Unsupported X fields; plain text only, no media')
+        account = next((a for a in config['accounts'] if a['id'] == value.get('account_id') and a.get('service') == 'x'), None)
+        if not account or account['id'] not in allowed_accounts:
+            raise ValueError('Use the X account belonging to this task')
+        result = {'kind': 'x', 'account_id': account['id'], 'handle': account['handle']}
+        if value.get('label'):
+            if not re.match(r'(?:Send|Reply)\b', value['label']):
+                raise ValueError('X button labels must say Send or Reply, such as Reply on X')
+            result['label'] = value['label']
+        threads = x_threads or {}
+        if bool(value.get('reply_to')) == bool(value.get('conversation_id')):
+            raise ValueError('An X next action needs either reply_to (a post id) or conversation_id (a DM), not both')
+        if value.get('reply_to'):
+            post = (threads.get('mentions') or {}).get(str(value['reply_to']))
+            if not post or post.get('account_id') != account['id']:
+                raise ValueError('Reply only to a post from this task’s own X mentions (reply_to is its tweet_id)')
+            result.update(reply_to=str(value['reply_to']), to_screen_name=post['screen_name'], to_name=post.get('name') or '@' + post['screen_name'],
+                          to_text=post.get('text') or '', max_length=25000 if account.get('long_posts') else 280)
+        else:
+            chat = (threads.get('dms') or {}).get(str(value['conversation_id']))
+            if not chat or chat.get('account_id') != account['id']:
+                raise ValueError('Send DMs only in an X conversation from this task’s own messages')
+            result.update(conversation_id=str(value['conversation_id']), to_name=chat['name'], max_length=10000)
+        body = value.get('body')
+        if not isinstance(body, str) or not body.strip() or '\x00' in body or text_length(result, body.strip()) > result['max_length']:
+            raise ValueError(f"Provide the concrete X {'reply' if value.get('reply_to') else 'message'}, at most {result['max_length']} characters (links count 23)")
+        result['body'] = body.strip()
     elif value.get('kind') == 'slack':
         # A Slack direct message from the owner's own Slack account, mostly to hand a task to a
         # colleague. Any Slack account in the task's boundary; sent only after the owner's Send now.
@@ -322,7 +379,7 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
         result['body'] = body.strip()
         delegation(value, result)
     else:
-        raise ValueError('Only email drafts, LinkedIn and Slack messages, local preparation and original-page links are supported; no payments or arbitrary writes')
+        raise ValueError('Only email drafts, LinkedIn, Slack and X messages, local preparation and original-page links are supported; no payments or arbitrary writes')
     result['revision'] = hashlib.sha256(canonical(result).encode()).hexdigest()[:12]
     return result
 
@@ -356,10 +413,11 @@ def check(value, result='', own_addresses=()):
 def revise(action, subject=None, body=None):
     """The owner's own edit of a ready draft: same recipients, account and attachments, new text and revision."""
     if action['kind'] not in ('email',) + TEXT_KINDS:
-        raise ValueError('Only email, LinkedIn and Slack drafts can be edited')
+        raise ValueError('Only email, LinkedIn, Slack and X drafts can be edited')
     result = {k: v for k, v in action.items() if k != 'revision'}
     if body is not None:
-        if not isinstance(body, str) or not body.strip() or len(body) > (8000 if action['kind'] in TEXT_KINDS else 12000) or '\x00' in body:
+        if (not isinstance(body, str) or not body.strip() or '\x00' in body
+                or text_length(action, body.strip()) > action.get('max_length', 8000 if action['kind'] in TEXT_KINDS else 12000)):
             raise ValueError('The draft needs some text, within the size limit')
         result['body'] = body.strip() if action['kind'] in TEXT_KINDS else closing_spaced(body)
     if subject is not None and action['kind'] not in TEXT_KINDS:
@@ -634,6 +692,85 @@ class LinkedInTransport:
         return {'message_id': out.get('message') or 'linkedin:' + job['id']} if out.get('found') else {}
 
 
+class XBusy(LinkedInBusy):
+    """The OpenClaw browser (or X's account switcher) is busy: try again shortly; nothing was sent."""
+
+
+class XTransport:
+    """Sends one owner-approved X reply or DM through integrations/x_inbox.py (config "x_inbox"
+    overrides the path), in the owner's own signed-in x.com session in the OpenClaw browser. The job
+    id is the token: the reader logs the intent before writing and never sends a token twice; an
+    unclear outcome is checked on X, never resent."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def cli(self, action):
+        return self.config.get('x_inbox', str(X_INBOX))
+
+    def account(self, action):
+        return next(a for a in self.config['accounts'] if a['id'] == action['account_id'])
+
+    def args(self, action):
+        account = self.account(action)
+        target = ['--reply-to', action['reply_to']] if action.get('reply_to') else ['--conversation', action['conversation_id']]
+        return ['send', '--handle', account['handle'], '--primary', account.get('primary', account['handle']), *target, '--text', action['body'],
+                *(['--long'] if action.get('reply_to') and account.get('long_posts') else [])]
+
+    def run(self, action, args, timeout=300):
+        result = subprocess.run([self.cli(action), *args], capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 2 and 'busy' in result.stderr.lower():
+            raise XBusy()
+        return result
+
+    def preflight(self, action):
+        if action['kind'] != 'x':
+            raise ValueError('Only an owner-approved X reply or message can use the X transport')
+        result = self.run(action, [*self.args(action), '--json'])
+        if result.returncode:
+            err = result.stderr.lower()
+            raise ValueError('X is signed out in the OpenClaw browser. Nothing was sent.' if 'signed out' in err or 'not signed in' in err
+                             else 'That X post is no longer available. Nothing was sent.' if 'no longer available' in err
+                             else 'I can’t send in this encrypted X chat yet. Nothing was sent.' if 'encrypted' in err
+                             else 'That X conversation isn’t in the DM inbox any more. Nothing was sent.' if 'not in the x dm inbox' in err
+                             else 'That X conversation is read-only. Nothing was sent.' if 'read-only' in err
+                             else 'X’s rate limit was reached. Nothing was sent; tap Send again later.' if 'rate limit' in err
+                             else 'That text is longer than X allows. Nothing was sent.' if 'longer than x allows' in err
+                             else 'I couldn’t reach X. Nothing was sent; tap Send again.')
+        try:
+            out = json.loads(result.stdout)
+            ok = out['reply_to']['id'] == action['reply_to'] if action.get('reply_to') else out['conversation']['id'] == action['conversation_id']
+        except (ValueError, KeyError, TypeError):
+            ok = False
+        if not ok:
+            raise ValueError('I couldn’t check the X ' + ('post' if action.get('reply_to') else 'conversation') + '. Nothing was sent.')
+
+    def send(self, action, job):
+        try:
+            result = self.run(action, [*self.args(action), '--token', 'assistant-' + job['id'], '--yes', '--json'])
+        except XBusy:
+            return {'not_sent': True}
+        try:
+            out = json.loads(result.stdout or '{}')
+        except ValueError:
+            return {}
+        if out.get('sent') == 'sent':
+            return {'message_id': ('x:' if action.get('reply_to') else 'xdm:') + str(out.get('id') or job['id'])}
+        if out.get('sent') in ('failed', 'not-sent'):
+            return {'rejected': out.get('status') or out.get('error') or 'refused'}
+        return {}  # Unknown outcome: never resend; reconcile checks X.
+
+    def reconcile(self, action, job):
+        result = self.run(action, ['verify', '--token', 'assistant-' + job['id']])
+        if result.returncode:
+            return {}
+        try:
+            out = json.loads(result.stdout)
+        except ValueError:
+            return {}
+        return {'message_id': ('x:' if action.get('reply_to') else 'xdm:') + str(out.get('id') or job['id'])} if out.get('found') else {}
+
+
 def slack_text(body):
     """Plain draft text in Slack's own format: [text](https://url) links become <url|text>."""
     text = body.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -738,16 +875,20 @@ class SlackTransport:
 
 
 class ActionTransport:
-    """Routes an approved send to Gmail, LinkedIn or Slack by its kind."""
+    """Routes an approved send to Gmail, LinkedIn, Slack or X by its kind."""
 
-    def __init__(self, email, linkedin, slack=None):
-        self.email, self.linkedin, self.slack = email, linkedin, slack
+    def __init__(self, email, linkedin, slack=None, x=None):
+        self.email, self.linkedin, self.slack, self.x = email, linkedin, slack, x
 
     def pick(self, action):
         if action['kind'] == 'slack':
             if not self.slack:
                 raise ValueError('Slack sending isn’t set up. Nothing was sent.')
             return self.slack
+        if action['kind'] == 'x':
+            if not self.x:
+                raise ValueError('X sending isn’t set up. Nothing was sent.')
+            return self.x
         return self.linkedin if action['kind'] == 'linkedin' else self.email
 
     def preflight(self, action):

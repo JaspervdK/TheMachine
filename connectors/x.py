@@ -12,8 +12,10 @@ per X account:
 `primary` is the account the browser should normally be on. To read another signed-in account
 x-inbox switches to it and always switches back; since a switch changes the cookies of every
 x.com tab, runs go one at a time and only switch while no other job holds the browser lease.
-Optional: "active_hours": [7, 23] (local time, the default) and config "x_inbox" for the path
-to the reader. Encrypted X Chat isn't read.
+Optional: "active_hours": [7, 23] (local time, the default), "long_posts": true (the account has
+X Premium: replies up to 25000 characters) and config "x_inbox" for the path to the reader.
+Encrypted X Chat isn't read. Replies and DMs go out only as an owner-approved `x` next action
+(next_actions.XTransport).
 """
 import datetime as dt
 import hashlib

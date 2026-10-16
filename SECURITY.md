@@ -25,8 +25,9 @@ Never include actual tokens, messages or a production database.
 - **Do it grants broad account and machine access for the accepted task.** The plugin's
   guards are not a sandbox. Source messages are untrusted and may contain prompt injection.
   Read the README's security model before activating reviews or delivery.
-- Emails and Slack messages are sent only after the owner approves that exact draft (Send now),
-  and a send with an unclear outcome is checked, never repeated. Connectors only read.
+- Emails, Slack and LinkedIn messages, and X replies and messages are sent only after the owner
+  approves that exact draft (Send now), and a send with an unclear outcome is checked, never
+  repeated. Connectors only read.
 - Fresh installs collect configured sources with reviews and delivery disabled.
   `./install.sh --activate` explicitly enables both after setup.
 - Backups contain private evidence and may include secrets. Protect them like the live data.
