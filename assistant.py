@@ -4374,7 +4374,7 @@ def weekly_recap(store, config, current=None, usage=None):
             elif kind == 'whatsapp.message' and str(m.get('chat_id', '')).endswith('@g.us'):
                 where = m.get('chat_name') or 'WhatsApp group'
             elif kind == 'android.notification':
-                where = (m.get('app_name') or str(m.get('package_name') or 'app').rsplit('.', 1)[-1]) + ' notifications'
+                where = str(m.get('app_name') or m.get('package_name') or 'app').rsplit('.', 1)[-1] + ' notifications'  # com.Slack → Slack
             elif kind in ('gmail.message', 'salesflare.email') and re.search(r'(?i)no-?reply|notification|alert|digest|news|mailer|updates?@', sender):
                 where = sender
             else:
