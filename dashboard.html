@@ -315,7 +315,9 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .all-clear{flex-direction:column;justify-content:center;text-align:center;gap:6px;padding:34px 16px 18px;border:0}
 .all-clear img.sleepy,.all-clear img.sticker{width:76px;height:76px;opacity:1}
 /* Inbox zero: poke the sleeping robot, or play a round of Catch the Zzz. */
-.poke{background:none;border:0;padding:0;min-height:0;box-shadow:none;border-radius:50%}.poke:hover{background:none}
+.poke{background:none;border:0;padding:0;min-height:0;box-shadow:none;border-radius:50%}.poke:hover,.poke:active{background:none;transform:none}
+/* No grey tap rectangle on Android; keyboard focus still gets a round ring. */
+.poke,.zz,.all-clear .play{-webkit-tap-highlight-color:transparent}.poke:focus,.zz:focus{outline:none}.poke:focus-visible{outline:2px solid var(--amber);outline-offset:4px}
 .wobble{animation:wobble .5s ease-in-out}
 @keyframes wobble{25%{transform:rotate(-9deg) scale(1.06)}60%{transform:rotate(7deg)}}
 .all-clear .play{margin-top:10px}
