@@ -132,12 +132,12 @@ class RecapAndPreferences(unittest.TestCase):
         self.assertIn('Your draft: Dear Sir',edits);self.assertIn('The owner changed it to: Hi Tom, here it is.',edits)
         self.assertIn('The owner changed it to: Hi Tom',a.preparation_prompt({'job_id':'j'*16,'suggestion_id':self.sid},'',None,edits))
         recap=a.weekly_recap(self.store,{},None,None)
-        self.assertIn('**What I noticed:** 0 drafts sent as written, 1 changed by you first; snoozed more than once: Review the Q4 budget; 1 dismissed within minutes.',recap)
+        self.assertIn('**What I noticed**\n• Drafts: 0 sent as written, 1 changed by you first\n• 1 dismissed within minutes\n• Snoozed more than once:\n\u00a0\u00a0\u00a0◦ Review the Q4 budget\n',recap)
 
     def test_recap_content(self):
         text=a.weekly_recap(self.store,{},None,{'input':1e6,'cacheRead':9e6,'output':4e4,'runs':3,'usd':3.3})
-        self.assertIn('1 new',text);self.assertIn('dismissed 1',text);self.assertIn('$3.30',text)
-        self.assertIn('#leads (work, 24 this week)',text)
+        self.assertTrue(text.startswith('**Your week with The Machine**\n'));self.assertIn('• 1 new:',text);self.assertIn('1 dismissed',text);self.assertIn('$3.30',text)
+        self.assertIn('• #leads (work): 24 this week',text)
 
     def test_recap_goes_out_once_on_friday_afternoon(self):
         sent=[]

@@ -4374,7 +4374,7 @@ def weekly_recap(store, config, current=None, usage=None):
             elif kind == 'whatsapp.message' and str(m.get('chat_id', '')).endswith('@g.us'):
                 where = m.get('chat_name') or 'WhatsApp group'
             elif kind == 'android.notification':
-                where = m.get('app_name') or m.get('package_name')
+                where = (m.get('app_name') or str(m.get('package_name') or 'app').rsplit('.', 1)[-1]) + ' notifications'
             elif kind in ('gmail.message', 'salesflare.email') and re.search(r'(?i)no-?reply|notification|alert|digest|news|mailer|updates?@', sender):
                 where = sender
             else:
@@ -4387,39 +4387,49 @@ def weekly_recap(store, config, current=None, usage=None):
     waits = sorted((dt.datetime.fromisoformat(first[x['id']]) - dt.datetime.fromisoformat(x['created_at'])).total_seconds() / 60
                    for x in sug if x['id'] in first)
     open_now = collections.Counter(x['status'] for x in sug if x['status'] not in ('completed', 'rejected'))
-    lines = ['**Weekly assistant recap**', '',
-             f"**Suggestions:** {len(sug)} new. You accepted {choices['accept']}, marked {choices['complete']} done, dismissed {choices['reject']} and snoozed {choices['snooze']}."
-             + (f" Typical time to your first response: {round(waits[len(waits) // 2])} minutes." if waits else '')
-             + (f" Still open: {sum(open_now.values())} ({', '.join(f'{n} {k}' for k, n in open_now.items())})." if open_now else '')]
-    if preps:
-        lines.append(f"**Preparations:** {preps.get('done', 0)} ready, {preps.get('blocked', 0)} stuck, {preps.get('cancelled', 0)} stopped by you.")
-    lines.append(f"**Reviews:** {reviewed} signals reviewed in {len(batches)} batches ({runs} service runs); {collected} collected this week. Waiting now: {backlog}" + (f" ({aside} set aside)." if aside else '.'))
-    if usage:
-        lines.append(f"**Tokens:** {usage['input'] / 1e6:.1f}M input, {usage['cacheRead'] / 1e6:.1f}M cached, {usage['output'] / 1e3:.0f}K output "
-                     f"over {usage['runs']} sessions. At Azure list price (GPT-6.1 Sol, Sweden Central) that's about ${usage['usd']:.2f}; "
-                     "today it runs on your subscription.")
+    # Short sections with a bold heading and one point per line, so it reads at a glance on a phone.
+    n = lambda v: f'{v:,}'
+    tz = local_tz()
+    start_local, end_local = dt.datetime.fromisoformat(since).astimezone(tz), current.astimezone(tz)
+    span = f"{start_local.day}–{end_local.day} {end_local:%b}" if (start_local.month, start_local.year) == (end_local.month, end_local.year) else f"{start_local.day} {start_local:%b} – {end_local.day} {end_local:%b}"
+    lines = ['**Your week with The Machine**', span]
     week, before = store.quality(7, current.isoformat()), store.quality(7, since)
     if week['hit_rate'] is not None:
-        trend = lambda then: '' if then is None else f" (week before: {then}%)"
-        line = (f"**Hit rate:** {week['worth_it']} of {week['worth_it'] + week['dismissed']} cards you decided on were worth it, {week['hit_rate']}%"
-                + trend(before['hit_rate']) + '.')
-        if week['do_it']:
-            line += f" Do it got it right the first time {week['first_time']} of {week['do_it']} times" + trend(before['first_time_rate']) + '.'
-        lines.append(line)
+        then = f" (week before: {before['hit_rate']}%)" if before['hit_rate'] is not None else ''
+        lines += ['', f"**{week['hit_rate']}% worth it**{then}",
+                  f"{week['worth_it']} of the {week['worth_it'] + week['dismissed']} cards you decided on were worth it."
+                  + (f" Do it got it right the first time {week['first_time']} of {week['do_it']} times"
+                     + (f" (week before: {before['first_time_rate']}%)" if before['first_time_rate'] is not None else '') + '.' if week['do_it'] else '')]
+    cards = [f"• {n(len(sug))} new: {choices['accept']} accepted, {choices['complete']} done, {choices['reject']} dismissed, {choices['snooze']} snoozed"]
+    if waits:
+        cards.append(f"• You usually responded within {round(waits[len(waits) // 2])} min")
+    if open_now:
+        cards.append(f"• Open now: {sum(open_now.values())} ({', '.join(f'{v} {k}' for k, v in open_now.items())})")
+    if preps:
+        cards.append(f"• Do it: {preps.get('done', 0)} ready, {preps.get('cancelled', 0)} stopped by you, {preps.get('blocked', 0) or 'none'} stuck")
+    lines += ['', '**Cards**', *cards]
     learned = store.behaviour(7)
-    parts = []
+    noticed = []
     if learned['sent_as_written'] or learned['sent_edited']:
-        parts.append(f"{learned['sent_as_written']} drafts sent as written, {learned['sent_edited']} changed by you first")
-    if learned['snoozed_again']:
-        parts.append('snoozed more than once: ' + ', '.join(t for t, _ in learned['snoozed_again'][:3]))
+        noticed.append(f"• Drafts: {learned['sent_as_written']} sent as written, {learned['sent_edited']} changed by you first")
     if learned['quick_dismissed']:
-        parts.append(f"{len(learned['quick_dismissed'])} dismissed within minutes")
-    if parts:
-        lines.append('**What I noticed:** ' + '; '.join(parts) + '. Your next reviews and drafts take this into account.')
-    busy = [(k, n) for k, n in noise.most_common() if k and n >= 20][:3]
+        noticed.append(f"• {len(learned['quick_dismissed'])} dismissed within minutes")
+    if learned['snoozed_again']:
+        noticed.append('• Snoozed more than once:')
+        noticed += ['\u00a0\u00a0\u00a0◦ ' + t for t, _ in learned['snoozed_again'][:3]]
+    if noticed:
+        lines += ['', '**What I noticed**', *noticed, "I'll take this into account in my next reviews and drafts."]
+    names = {x['id']: x.get('display_name') or x.get('email') or x['id'] for x in config.get('accounts', [])}
+    busy = [(k, v) for k, v in noise.most_common() if k and v >= 20][:3]
     if busy:
-        lines.append('**Busy without results:** ' + '; '.join(f"{where} ({account}, {n} this week)" for (account, where), n in busy)
-                     + '. Say if any of these should be filtered.')
+        lines += ['', '**Busy without results**', *(f"• {where} ({names.get(account, account)}): {n(v)} this week" for (account, where), v in busy),
+                  'Tell me if any of these should be filtered.']
+    lines += ['', '**Behind the scenes**',
+              f"• {n(reviewed)} signals reviewed in {n(len(batches))} batches over {n(runs)} runs",
+              f"• {n(collected)} new this week, {n(backlog)} waiting" + (f" ({n(aside)} set aside)" if aside else '')]
+    if usage:
+        lines.append(f"• Tokens: {usage['input'] / 1e6:.1f}M in, {usage['cacheRead'] / 1e6:.1f}M cached, {usage['output'] / 1e3:.0f}K out over {usage['runs']} sessions."
+                     f" About ${usage['usd']:.2f} at Azure list price (GPT-6.1 Sol, Sweden Central); it runs on your subscription.")
     return '\n'.join(lines)
 
 
