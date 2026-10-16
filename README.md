@@ -6,12 +6,6 @@ A private, self-hosted assistant inbox for [OpenClaw](https://docs.openclaw.ai).
 
 ## Try the dashboard
 
-**[Open the live demo](https://jeroencorthout.github.io/TheMachine/)**: sample data only, runs in your browser.
-
-<img src="docs/demo.gif" alt="Reading a prepared result, tapping Do it and marking a task done in the demo" width="360">
-
-Or run it locally:
-
 ```bash
 git clone https://github.com/JeroenCorthout/TheMachine.git
 cd TheMachine

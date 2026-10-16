@@ -66,27 +66,6 @@ def demo_page(note='Buttons only change this local demo; nothing is sent or run.
     return html.replace("const pushOK='serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;", "const pushOK=false;")
 
 
-def build(out):
-    """A static copy for any web host: the API runs in the browser (demo-shim.js) on the same sample data."""
-    out = Path(out)
-    (out / 'brand').mkdir(parents=True, exist_ok=True)
-    state = sample_state()
-    data = {'state':state, 'built_at':dt.datetime.now(dt.timezone.utc).isoformat(), **sample_responses(state)}
-    shim = '<script>window.DEMO=' + json.dumps(data).replace('</', '<\\/') + ';\n' + (ROOT / 'demo-shim.js').read_text() + '</script>'
-    html = demo_page('Buttons only change this page in your browser; nothing is sent or run. Reload to start over.')
-    html = html.replace('<base href="__BASE__">', '<base href="./">' + shim, 1)
-    (out / 'index.html').write_text(html)
-    for file in (ROOT / 'brand').iterdir():
-        if file.is_file():
-            (out / 'brand' / file.name).write_bytes(file.read_bytes())
-    for alias, name in BRAND_ALIASES.items():
-        if not (ROOT / 'brand' / alias).is_file():
-            (out / 'brand' / alias).write_bytes((ROOT / 'brand' / name).read_bytes())
-    (out / 'manifest.webmanifest').write_bytes((ROOT / 'manifest.webmanifest').read_bytes())
-    (out / '.nojekyll').write_text('')
-    return out
-
-
 class DemoServer(ThreadingHTTPServer):
     def __init__(self, port=8788):
         self.state = sample_state()
@@ -182,11 +161,7 @@ class DemoHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port',type=int,default=8788)
-    parser.add_argument('--build',metavar='DIR',help='write a static demo site to DIR instead of serving')
     args = parser.parse_args()
-    if args.build:
-        print(f'Static demo written to {build(args.build)}/')
-        return
     with DemoServer(args.port) as server:
         print(f'Demo: http://127.0.0.1:{server.server_port}/ (Ctrl+C to stop; changes disappear)',flush=True)
         try:
