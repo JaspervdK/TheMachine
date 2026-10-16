@@ -6,6 +6,8 @@ import {OPENCLAW} from './openclaw-root.mjs';
 // Playwright comes with OpenClaw; PLAYWRIGHT_CORE and CHROMIUM_PATH override the defaults.
 const {chromium}=await import(process.env.PLAYWRIGHT_CORE||OPENCLAW+'/node_modules/playwright-core/index.mjs');
 import {forceReplyPayload} from './openclaw-plugin/change-prompt.ts';
+// The Send preview's header rows as 'From: …' lines.
+const sendHead=page=>page.evaluate(()=>[...document.querySelectorAll('#send-head>div')].map(d=>d.children[0].textContent+': '+d.children[1].textContent).join('\n'));
 const payload=forceReplyPayload('sendMessage',{chat_id:'1000001',text:'Change'},'123','1000001');
 assert.equal(payload.reply_markup.force_reply,true);assert.equal(payload.reply_parameters.message_id,123);
 assert.throws(()=>forceReplyPayload('sendMessage',{chat_id:'another'},'123','1000001'));
@@ -125,9 +127,9 @@ await running.locator('.steps li').getByText('Collect retention settings').waitF
 const first=await running.locator('.elapsed').textContent();await page.waitForTimeout(1100);assert.notEqual(await running.locator('.elapsed').textContent(),first);
 await page.screenshot({path:'/tmp/261012-preparing-progress.png'});
 await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();const send=page.locator('#send-dialog');await send.waitFor({state:'visible'});
-assert.match(await page.locator('#send-preview').textContent(),/^From: owner@example.com\nTo: will@vendor.example\n/);
-await send.getByLabel('will@vendor.example').uncheck();assert.ok(await page.locator('#send-confirm').isDisabled());assert.match(await page.locator('#send-preview').textContent(),/To: \(choose above\)/);
-await send.getByLabel('ann@example.com').check();assert.match(await page.locator('#send-preview').textContent(),/To: ann@example.com\nSubject: Pick/);
+assert.match(await sendHead(page),/^From: owner@example.com\nTo: will@vendor.example\n/);
+await send.getByLabel('will@vendor.example').uncheck();assert.ok(await page.locator('#send-confirm').isDisabled());assert.match(await sendHead(page),/To: \(choose above\)/);
+await send.getByLabel('ann@example.com').check();assert.match(await sendHead(page),/To: ann@example.com\nSubject: Pick/);
 await page.screenshot({path:'/tmp/261012-send-recipients.png'});
 await page.locator('#send-confirm').click();await send.waitFor({state:'hidden'});
 const sent=posts.at(-1);assert.equal(sent.revision,'abcdef123456');assert.deepEqual(sent.recipients,['ann@example.com']);
@@ -174,7 +176,7 @@ await page.locator('#task-'+ids[1]).getByRole('button',{name:'Try again',exact:t
 await page.locator('#task-'+ids[2]).getByRole('button',{name:'Read result',exact:true}).click();await page.getByText('Full draft with',{exact:false}).waitFor();assert.equal(await page.locator('#result-content script').count(),0);await page.locator('#result-copy').click();assert.ok((await page.evaluate(()=>window.copied)).includes('Full draft with'));await page.getByRole('button',{name:'Close result'}).click();
 suggestions[2].next_action={kind:'email',revision:'abcdef123456',from:'owner@example.com',to:['recipient@example.com'],cc:['cc@example.com'],bcc:[],subject:'Exact subject',body:'Exact email draft <script>not executable</script>',attachments:[{name:'credit <note>.pdf',sha256:'ab'.repeat(32),size:8754,type:'application/pdf'}]};
 await page.evaluate(()=>refresh());await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();
-await page.locator('#send-dialog').waitFor({state:'visible'});assert.match(await page.locator('#send-preview').textContent(),/From: owner@example.com/);assert.match(await page.locator('#send-preview').textContent(),/Exact email draft/);assert.equal(await page.locator('#send-preview script').count(),0);
+await page.locator('#send-dialog').waitFor({state:'visible'});assert.match(await sendHead(page),/From: owner@example.com/);assert.match(await page.locator('#send-preview').textContent(),/Exact email draft/);assert.equal(await page.locator('#send-preview script').count(),0);
 {const link=page.locator('#send-files a.attachment');assert.equal(await link.count(),1);assert.equal(await link.getAttribute('href'),'api/draft-attachment?id='+suggestions[2].id+'&sha='+'ab'.repeat(32));assert.match(await link.textContent(),/credit <note>\.pdf9 KB/);}
 const beforeApproval=posts.length;await page.locator('#send-cancel').click();assert.equal(posts.length,beforeApproval);
 // The same draft files open from Read result and Read email too.
@@ -184,7 +186,7 @@ await page.evaluate(id=>openEmail(id),ids[2]);const e=page.locator('#email-conte
 await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();await page.locator('#send-confirm').click();await page.locator('#send-dialog').waitFor({state:'hidden'});assert.equal(posts.at(-1).revision,'abcdef123456');assert.equal(posts.at(-1).suggestion_id,ids[2]);
 // Edit the draft yourself: Send saves the edit first, then sends that exact new revision.
 {await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();await page.locator('#send-edit').click();
-assert.equal(await page.locator('#send-body').inputValue(),suggestions[2].next_action.body);assert.doesNotMatch(await page.locator('#send-preview').textContent(),/Subject:/);
+assert.equal(await page.locator('#send-body').inputValue(),suggestions[2].next_action.body);assert.doesNotMatch(await sendHead(page),/Subject:/);assert.ok(await page.locator('#send-preview').isHidden());
 await page.locator('#send-body').fill('My own words.');await page.locator('#send-confirm').click();await page.locator('#send-dialog').waitFor({state:'hidden'});
 assert.deepEqual([posts.at(-2).body,posts.at(-2).revision,posts.at(-2).subject],['My own words.','abcdef123456',suggestions[2].next_action.subject]);assert.equal(posts.at(-1).revision,'fedcba654321');
 await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();assert.equal(await page.locator('#send-editor').isHidden(),true);await page.locator('#send-cancel').click();}
