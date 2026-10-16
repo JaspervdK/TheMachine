@@ -12,7 +12,7 @@ cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 ```
 
-Read [Requirements](#requirements) first. The installer checks prerequisites, asks for your owner identity and source choices, writes the config and secrets, installs the systemd user service and the OpenClaw plugin, and ends with a health check and the remaining manual steps (connecting Gmail, exposing the dashboard on your tailnet). Fresh installs collect configured sources but leave AI reviews and Telegram delivery **off**. Once you have connected the sources, checked `assistant sources` and read [Security model](#security-model), run `./install.sh --activate`. Run the installer again to upgrade; `./install.sh --uninstall` removes it again (see [Install](#install)).
+Read [Requirements](#requirements) first. The installer checks prerequisites, asks for your owner identity and source choices, writes the config and secrets, installs the systemd user service and the OpenClaw plugin, and ends with a health check and the remaining manual steps (connecting Gmail, exposing the dashboard on your tailnet). Fresh installs collect configured sources but leave AI reviews and Telegram delivery **off**. To see what it would do for you first, run `./install.sh --preview`: your agent reviews the last 7 days of signals once and the resulting cards appear in the terminal and on the dashboard, with nothing sent and nothing done in your accounts. Once you have connected the sources, checked `assistant sources` and read [Security model](#security-model), run `./install.sh --activate`. Run the installer again to upgrade; `./install.sh --uninstall` removes it again (see [Install](#install)).
 
 Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Requirements](#requirements) · [Install](#install) · [Configuration](#configuration) · [Sources](#sources) · [Reviews](#reviews) · [Telegram and the dashboard](#telegram-and-the-dashboard) · [Do it](#do-it) · [Security model](#security-model) · [Command line](#command-line) · [Operations](#operations) · [Adding a source](#adding-a-source) · [Known limitations](#known-limitations) · [Tests](#tests)
 
@@ -84,6 +84,7 @@ Python's standard library and SQLite are enough: no database server, queue, web 
 ./install.sh                      # interactive install, or upgrade
 ./install.sh --non-interactive    # same, answers from environment variables (below)
 ./install.sh --no-start           # write files/link plugin; do not start service or reload plugin
+./install.sh --preview            # existing install: one review of the last 7 days, shown only (assistant preview)
 ./install.sh --activate           # existing install: enable AI reviews and Telegram delivery
 ./install.sh --skip-plugin        # leave the OpenClaw plugin alone
 ./install.sh --uninstall          # remove service, plugin and CLI link; keep your data
@@ -109,7 +110,7 @@ What it does, in order:
 - **Other sources**: fill the IDs in `config.json` and put their API keys in the credential files it names (see [Sources](#sources)).
 - **Dashboard**: `tailscale serve --bg --https=443 --set-path /assistant http://127.0.0.1:8787`, then open `https://<dashboard_host>/assistant/`. For a custom domain use `deploy/Caddyfile` and `deploy/caddy-machine.service`.
 - **Tell the agent about you**: create `USER.md` in your OpenClaw workspace (see below).
-- **Activate after setup**: check `assistant sources`, resolve source errors and read the security model; then run `./install.sh --activate`. To start with one source, set `ASSISTANT_CONNECTORS=gateway ./install.sh` (Gateway failures only), or choose just `gmail` in the wizard. Add other accounts from `config.example.json` when ready.
+- **Preview, then activate**: check `assistant sources` and resolve source errors. `./install.sh --preview` (or `assistant preview`) runs one regular review of the last 7 days and prints its cards, with progress while the agent works (usually a few minutes). The cards are real and stay on the dashboard, but they are never sent to Telegram, not even after activation, and nothing is prepared ahead; reviews and delivery stay off. Then read the security model and run `./install.sh --activate`. To start with one source, set `ASSISTANT_CONNECTORS=gateway ./install.sh` (Gateway failures only), or choose just `gmail` in the wizard. Add other accounts from `config.example.json` when ready.
 - Restart after config edits: `systemctl --user restart personal-assistant.service`.
 
 ### Your own instructions: USER.md and overlays
@@ -225,6 +226,7 @@ Read this before you turn on delivery.
 | `assistant reviews` | Review backlog and recent runs |
 | `assistant feedback` | Recent decisions and written feedback |
 | `assistant prepare <id> --file brief.md` | Save a preparation on an accepted task |
+| `assistant preview` | Before activation: one review of the last 7 days; prints the cards, sends nothing |
 | `assistant raw <action> '<json>'` | Any other non-owner service action |
 
 ## Operations

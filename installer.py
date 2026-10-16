@@ -3,6 +3,7 @@
 
     ./install.sh                     interactive install, or upgrade of an existing install
     ./install.sh --non-interactive   read answers from ASSISTANT_* environment variables
+    ./install.sh --preview           one review of the last 7 days, shown only; nothing is sent
     ./install.sh --uninstall         remove the service, plugin and CLI link; keep data
     ./install.sh --uninstall --purge also delete the data directory (config, database, secrets)
 
@@ -513,7 +514,9 @@ def next_steps(config, healthy, started):
               '  - Keep `Do it` in mind: it lets the agent act with your accounts. Read README "Security model".',
               '  - After editing config.json: systemctl --user restart ' + UNIT_NAME]
     if not config.get('delivery_enabled') or not config.get('review_worker', {}).get('enabled'):
-        lines.append('  - Once sources are connected and Security model is understood: ./install.sh --activate')
+        lines += ['  - See what it would suggest: ./install.sh --preview (one review of the last 7 days by your agent;',
+                  '    the cards show here and on the dashboard; nothing is sent and nothing is done in your accounts)',
+                  '  - Once sources are connected and Security model is understood: ./install.sh --activate']
     say('\n'.join(lines))
 
 
@@ -567,6 +570,7 @@ def main(argv=None):
     parser.add_argument('--no-start', action='store_true', help='install files but do not enable or start the service')
     parser.add_argument('--skip-plugin', action='store_true', help='do not install the OpenClaw plugin')
     parser.add_argument('--activate', action='store_true', help='enable reviews and Telegram delivery on an existing install')
+    parser.add_argument('--preview', action='store_true', help='existing install: one review of the last 7 days, shown only (assistant preview)')
     parser.add_argument('--health-timeout', type=float, default=30)
     args = parser.parse_args(argv)
     interactive = not args.non_interactive and sys.stdin.isatty()
@@ -575,6 +579,11 @@ def main(argv=None):
         parser.error('--purge only works with --uninstall')
     if args.activate and (args.no_start or args.uninstall or not paths.config.exists()):
         parser.error('--activate needs an existing installation and a running service (no --no-start/--uninstall)')
+    if args.preview:
+        if args.activate or args.uninstall or not paths.config.exists():
+            parser.error('--preview needs an existing installation and a running service (no --activate/--uninstall)')
+        # Installs nothing and changes no config: the CLI asks the running service for one preview review.
+        return subprocess.call([sys.executable, str(ROOT / 'cli.py'), '--config', str(paths.config), 'preview'])
     if args.uninstall:
         return uninstall(paths, args.purge, interactive)
     ok, facts = check_prerequisites()

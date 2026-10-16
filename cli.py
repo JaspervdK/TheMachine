@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Command line for The Machine's personal assistant.
 
-Reads tasks, evidence, sources and review history from the running service and
-can save a preparation for an accepted task. Owner decisions (accept, snooze,
+Reads tasks, evidence, sources and review history from the running service,
+can save a preparation for an accepted task, and runs a first-run preview review. Owner decisions (accept, snooze,
 done, dismiss, feedback) stay with Telegram and the dashboard; the service
 refuses them from here.
 """
@@ -12,6 +12,7 @@ import importlib.util
 import json
 import sys
 import textwrap
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -256,6 +257,85 @@ def cmd_prepare(config, args):
     print(f"Saved as Ready for you: {task['title']}. The Telegram card is updated and you'll get one notification.")
 
 
+PREVIEW_POLL = 10
+
+
+def dashboard_url(config):
+    return f"https://{config['dashboard_host']}{config.get('dashboard_path', '/')}" if config.get('dashboard_host') else None
+
+
+def preview_cards(status, run):
+    # Cards this preview saved: shown only (delivery 'previewed'), created during the run.
+    shown = {d['suggestion_id'] for d in status.get('deliveries', []) if d['status'] == 'previewed'}
+    return sorted((s for s in status['suggestions'] if s['id'] in shown and s['created_at'] >= run['started_at']), key=lambda s: s['created_at'])
+
+
+def preview_progress(run, cards):
+    elapsed = int((dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(run['started_at'])).total_seconds())
+    phase = {'starting': 'starting the review in OpenClaw', 'recovering': 'OpenClaw is not answering; waiting for it'}.get(
+        run['status'], f"reviewing {run['claimed_count']} signals" if run.get('claimed_count') else 'your agent is reading the signals')
+    return f"  {elapsed // 60}m {elapsed % 60:02d}s · {phase} · {len(cards)} suggestion{'s' if len(cards) != 1 else ''} so far"
+
+
+def cmd_preview(config, args):
+    started = call(config, 'preview_review')
+    if not args.json:
+        print('A preview is already running; following it.' if started.get('attached') else
+              f"Reviewing {started['signals']} signals from the last {assistant.PREVIEW_DAYS} days with your OpenClaw agent"
+              + (f" ({started['waiting']} are waiting; the rest are reviewed once activated)" if started['waiting'] > started['signals'] else '') + '.')
+        print('Nothing is sent to Telegram and nothing is done in your accounts. This usually takes a few minutes.\n')
+    settings = config.get('review_worker') or {}
+    # The service stops a run after timeout + outage grace; wait a little longer for its verdict.
+    deadline = time.monotonic() + settings.get('timeout_seconds', 1500) + settings.get('outage_grace_seconds', 600) + 120
+    tty, last = sys.stdout.isatty() and not args.json, None
+    try:
+        while True:
+            status = call(config, 'status', {'full': True})
+            run = next((r for r in status.get('review_runs', []) if r['run_id'] == started['run_id']), None)
+            if not run:
+                raise CliError('The preview run is missing from the service status; see assistant reviews.')
+            cards = preview_cards(status, run)
+            if run['status'] in assistant.REVIEW_TERMINAL:
+                break
+            line = preview_progress(run, cards)
+            if tty:
+                print('\r' + line.ljust(78), end='', flush=True)
+            elif not args.json and line.split(' · ', 1)[1] != last:
+                print(line, flush=True)
+                last = line.split(' · ', 1)[1]
+            if time.monotonic() > deadline:
+                raise CliError('The preview is still running. It continues in the service: run assistant preview again to follow it.')
+            time.sleep(PREVIEW_POLL)
+    except KeyboardInterrupt:
+        print('\nStopped following. The review keeps running in the service; run assistant preview again to follow it.')
+        return
+    finally:
+        if tty:
+            print()
+    if args.json:
+        return out_json({'run': run, 'cards': cards})
+    failed = run['status'] != 'ok' or not run.get('review_saved')
+    if cards:
+        print(f"{len(cards)} suggestion{'s' if len(cards) != 1 else ''} from your recent signals:\n")
+        for n, card in enumerate(cards, 1):
+            print(f"{n}. {card['title'].replace('**', '')}" + (f"  (due {card['due']})" if card.get('due') else ''))
+            print(wrap(card['body'].replace('**', ''), '   '))
+            if card.get('source_line'):
+                print('   ' + card['source_line'])
+            print()
+    elif not failed:
+        print(f"The review checked {run.get('checked_count', 0)} signals and found nothing worth your time right now. "
+              'That happens on a quiet week; regular reviews will keep looking once activated.\n')
+    dashboard = dashboard_url(config)
+    print('These are real suggestions from your own signals. Nothing was sent and no action was taken in any account.')
+    print('Reviews and Telegram delivery are still off. ' + (f'The cards are on the dashboard: {dashboard} ' if dashboard else '')
+          + "(assistant tasks lists them too); they won't be sent to Telegram later.")
+    print('When you want this every day, with Telegram cards and Do it: ./install.sh --activate')
+    if failed:
+        error = run.get('error') or run.get('last_error') or ('ended without saving its review' if run['status'] == 'ok' else run['status'])
+        raise CliError(f"The preview review didn't finish ({error}). See assistant reviews and openclaw logs, then run assistant preview again.")
+
+
 def cmd_raw(config, args):
     out_json(call(config, args.action, json.loads(args.args) if args.args else {}))
 
@@ -263,7 +343,7 @@ def cmd_raw(config, args):
 def parser():
     p = argparse.ArgumentParser(prog='assistant', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
                                 epilog='Examples:\n  assistant tasks\n  assistant show 7b61\n  assistant search "Acme"\n'
-                                       '  assistant prepare 7b61 --file brief.md')
+                                       '  assistant prepare 7b61 --file brief.md\n  assistant preview')
     p.add_argument('--config', default=str(assistant.DEFAULT_CONFIG), help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest='command', required=True, metavar='command')
 
@@ -304,6 +384,7 @@ def parser():
     source = c.add_mutually_exclusive_group(required=True)
     source.add_argument('--body')
     source.add_argument('--file', help='file with the text, or - for stdin')
+    add('preview', f'First run: one review of the last {assistant.PREVIEW_DAYS} days, shown here and on the dashboard; nothing is sent', cmd_preview)
     c = add('raw', 'Call any non-owner service action with JSON args', cmd_raw)
     c.add_argument('action')
     c.add_argument('args', nargs='?', help='JSON object')

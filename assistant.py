@@ -309,6 +309,12 @@ def metadata_page(row, offset):
 
 REVIEW_SESSION_PREFIX = 'agent:main:assistant-review-signals-'
 REVIEW_TERMINAL = ('ok', 'error', 'aborted', 'lost', 'timed_out')
+PREVIEW_DAYS = 7  # what `assistant preview` reviews on a new install
+
+
+def active_preview(db):
+    """The owner's one-off first-run review (`assistant preview`), while it runs."""
+    return db.execute("SELECT run_id,started_at FROM review_runs WHERE preview=1 AND status IN ('starting','running','recovering')").fetchone()
 
 
 def service_review_ended(db, analysis):
@@ -1487,6 +1493,8 @@ class Store:
             for column in ['retry_at', 'unavailable_since', 'error_phase', 'last_error', 'last_error_phase', 'error_at']:
                 if column not in worker_columns:
                     db.execute('ALTER TABLE review_runs ADD COLUMN ' + column + ' TEXT')
+            if 'preview' not in worker_columns:
+                db.execute('ALTER TABLE review_runs ADD COLUMN preview INTEGER NOT NULL DEFAULT 0')
             if 'due' not in columns:
                 db.execute('ALTER TABLE suggestions ADD COLUMN due TEXT')
             if 'handled_hint' not in columns:
@@ -1827,7 +1835,7 @@ class Store:
                     'occurred_at': row['occurred_at'], 'title': row['title'], 'body': '',
                     'metadata': json.loads(row['metadata']), 'deleted': True}
 
-    def events(self, account_ids, query='', limit=40, pending=False, event_ids=None, reviewable=False):
+    def events(self, account_ids, query='', limit=40, pending=False, event_ids=None, reviewable=False, since=''):
         if not account_ids:
             raise ValueError('Explicit account_ids are required')
         limit = max(len(set(event_ids)), 1) if event_ids is not None else min(max(int(limit), 1), RUN_SIGNAL_BUDGET)
@@ -1840,6 +1848,9 @@ class Store:
                 args.append(SET_ASIDE_AFTER)
         else:
             sql += ' AND e.deleted=0'
+        if since:
+            sql += ' AND e.occurred_at>=?'
+            args.append(since)
         if query:
             sql += ' AND e.id IN (SELECT rowid FROM event_search WHERE event_search MATCH ?)'
             # Treat search input as words, not arbitrary FTS operators.
@@ -1925,7 +1936,10 @@ class Store:
                             'note': f'Catch-up is bounded to {RUN_SIGNAL_BUDGET} signals per heartbeat. Continue on the next existing heartbeat.'}
                 limit = min(int(limit), RUN_SIGNAL_BUDGET - claimed)
             limit = min(max(int(limit), 1), RUN_SIGNAL_BUDGET)
-            counts = {a: db.execute('SELECT count(*) FROM events WHERE account_id=? AND analyzed_version<version AND deferrals<?', (a, SET_ASIDE_AFTER)).fetchone()[0] for a in accounts}
+            # A preview reviews the last week only; older backlog waits for the regular reviews.
+            since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=PREVIEW_DAYS)).isoformat() if owner_run and db.execute(
+                'SELECT 1 FROM review_runs WHERE run_id=? AND preview=1', (owner_run,)).fetchone() else ''
+            counts = {a: db.execute('SELECT count(*) FROM events WHERE account_id=? AND analyzed_version<version AND deferrals<? AND occurred_at>=?', (a, SET_ASIDE_AFTER, since)).fetchone()[0] for a in accounts}
             quotas = {a: 0 for a in accounts}
             # One slot per nonempty account, then weighted by remaining backlog.
             for account in accounts:
@@ -1947,8 +1961,8 @@ class Store:
             interrupted = db.execute('''SELECT a.id review_id,e.* FROM analyses a, json_each(a.items) j
                 JOIN events e ON e.id=json_extract(j.value,'$.id')
                 WHERE a.status='abandoned' AND coalesce(a.finished_at,a.started_at)>=? AND coalesce(json_extract(j.value,'$.excluded'),0)=0
-                  AND e.analyzed_version<e.version AND e.deferrals<? ORDER BY a.started_at,j.key''',
-                ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat(), SET_ASIDE_AFTER)).fetchall()
+                  AND e.analyzed_version<e.version AND e.deferrals<? AND e.occurred_at>=? ORDER BY a.started_at,j.key''',
+                ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat(), SET_ASIDE_AFTER, since)).fetchall()
             for account in accounts:
                 quota = quotas[account]
                 picked = []
@@ -1962,8 +1976,8 @@ class Store:
                 # Alternate oldest backlog and newest/upcoming signals. New arrivals
                 # cannot indefinitely starve old imports, or vice versa. Signals deferred
                 # once wait behind fresh ones; set-aside signals are not offered again.
-                oldest = [dict(r) for r in db.execute('SELECT * FROM events WHERE account_id=? AND analyzed_version<version AND deferrals<? ORDER BY deferrals,ingested_at,id LIMIT ?', (account, SET_ASIDE_AFTER, limit))]
-                newest = self.events([account], limit=limit, pending=True, reviewable=True)
+                oldest = [dict(r) for r in db.execute('SELECT * FROM events WHERE account_id=? AND analyzed_version<version AND deferrals<? AND occurred_at>=? ORDER BY deferrals,ingested_at,id LIMIT ?', (account, SET_ASIDE_AFTER, since, limit))]
+                newest = self.events([account], limit=limit, pending=True, reviewable=True, since=since)
                 for i in range(remaining):
                     queue = oldest if i % 2 == 0 else newest
                     candidate = next((r for r in queue if r['id'] not in selected), None)
@@ -2130,12 +2144,17 @@ class Store:
             if due and deliver_after and dt.datetime.fromisoformat(deliver_after).astimezone(local_tz()).date().isoformat() > due:
                 urgent = True
                 deliver_after = delivery_time(when, digest_at, work=work, urgent=True)
+            # Saved by a preview review: shown on the dashboard only. Never sent (not now and not
+            # as a backlog after --activate) and never prepared ahead.
+            preview = bool(active_preview(db))
+            if preview:
+                ahead, deliver_after = False, None
             suggestion_id = uuid.uuid4().hex[:16]
             db.execute('INSERT INTO suggestions(id,dedupe_key,title,body,event_ids,account_ids,created_at,deliver_after,source_line,urgent,due) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                        (suggestion_id, dedupe_key[:240], title[:300], body[:5000], encoded(event_ids),
                         encoded(sorted({r['account_id'] for r in rows})), now(), deliver_after, source_line(sorted([dict(r) for r in rows],key=lambda r:event_ids.index(r['id']))), int(urgent), due))
             db.execute('INSERT INTO deliveries(suggestion_id,status,updated_at) VALUES(?,?,?)',
-                       (suggestion_id, 'queued', now()))
+                       (suggestion_id, 'previewed' if preview else 'queued', now()))
             if ahead:
                 # Prepared ahead: the work starts now, research and drafting only, and the card
                 # reaches the owner once it's ready. Sending or changing anything still waits for
@@ -2146,7 +2165,7 @@ class Store:
                 db.execute("UPDATE suggestions SET status='accepted',early=1 WHERE id=?", (suggestion_id,))
                 self.queue_preparation(db, suggestion_id, decision_id)
         return {'id': suggestion_id, 'status': 'accepted' if ahead else 'pending', 'duplicate': False, 'deliver_after': deliver_after,
-                **({'prepared_ahead': True} if ahead else {})}
+                **({'prepared_ahead': True} if ahead else {}), **({'preview': True} if preview else {})}
 
     def ahead_room(self, per_day):
         since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=1)).isoformat()
@@ -4188,6 +4207,8 @@ class App:
             return self.store.begin_analysis(selected, args.get('limit', 40), args.get('_review_session'), args.get('_review_run'))
         if name == 'finish_analysis':
             return self.store.finish_analysis(args['analysis_id'], args.get('summary', ''), args.get('_review_session'), args.get('_review_run'), args.get('reviewed_ids'))
+        if name == 'preview_review':
+            return self.start_preview()
         if name == 'review_context':
             return self.store.review_context(args['owner_session'], args.get('owner_run'))
         if name == 'review_failed':
@@ -4759,8 +4780,12 @@ class App:
         """Start one isolated review turn when a batch of reviewable signals waits, independent of the
         heartbeat and the main chat session. One run at a time, with a gap between runs."""
         settings = self.config.get('review_worker') or {}
-        if not settings.get('enabled'):
-            return None
+        enabled = settings.get('enabled')
+        if not enabled:
+            # Reviews off: only the owner's one-off preview runs (and is monitored) here.
+            with self.store.connect() as db:
+                if not active_preview(db):
+                    return None
         runner = runner or self.preparation_gateway
         stamp = dt.datetime.fromisoformat(now())
         with self.store.connect() as db:
@@ -4768,10 +4793,14 @@ class App:
             run = db.execute("SELECT * FROM review_runs WHERE status IN ('starting','running','recovering') ORDER BY started_at LIMIT 1").fetchone()
             if run:
                 run = dict(run)
+                if not enabled and not run['preview']:
+                    return None
                 if run['retry_at'] and run['retry_at'] > now():
                     return None
                 if run['status'] == 'starting' and run['updated_at'] > (stamp - dt.timedelta(minutes=1)).isoformat() and run['attempts']:
                     return None  # wait a minute before retrying an unconfirmed admission
+            elif not enabled:
+                return None
             else:
                 active = db.execute("SELECT * FROM analyses WHERE status IN ('running','retryable') ORDER BY started_at LIMIT 1").fetchone()
                 recovery = active and service_review_ended(db, active)
@@ -4837,6 +4866,30 @@ class App:
                 db.execute("UPDATE review_runs SET status=CASE WHEN ? THEN 'recovering' ELSE status END,error=?,error_phase=NULL,retry_at=NULL,unavailable_since=NULL,updated_at=? WHERE run_id=?",
                            (int(action == 'stop'), 'completion_unconfirmed' if action == 'stop' else None, now(), run['run_id']))
         return result
+
+    def start_preview(self):
+        """`assistant preview`: one regular review run (same session, prompt and tool) over the last
+        week's signals, for a new install with reviews still off. Its cards are shown on the dashboard
+        only (see Store.suggest); review_step monitors the run. Config stays as it is."""
+        if (self.config.get('review_worker') or {}).get('enabled'):
+            raise ValueError('Reviews are already on: new suggestions arrive by themselves. See assistant tasks or the dashboard.')
+        accounts = [a['id'] for a in self.config['accounts']]
+        since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=PREVIEW_DAYS)).isoformat()
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            run = db.execute("SELECT run_id,started_at,preview FROM review_runs WHERE status IN ('starting','running','recovering') LIMIT 1").fetchone()
+            if run and run['preview']:
+                return {'run_id': run['run_id'], 'started_at': run['started_at'], 'attached': True}  # follow the running preview
+            if run or db.execute("SELECT 1 FROM analyses WHERE status='running' AND coalesce(resumed_at,started_at)>?",
+                                 ((dt.datetime.fromisoformat(now()) - dt.timedelta(hours=1)).isoformat(),)).fetchone():
+                raise ValueError('Another review is running. Try again when it has finished (assistant reviews).')
+            waiting = db.execute('SELECT count(*) FROM events WHERE analyzed_version<version AND deferrals<? AND occurred_at>=? AND account_id IN ('
+                                 + ','.join('?' for _ in accounts) + ')', (SET_ASIDE_AFTER, since, *accounts)).fetchone()[0] if accounts else 0
+            if not waiting:
+                raise ValueError(f'No unreviewed signals from the last {PREVIEW_DAYS} days yet. Check assistant sources; the first import can take a few minutes.')
+            run_id, started = uuid.uuid4().hex, now()
+            db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,preview) VALUES(?,'starting',?,?,1)", (run_id, started, started))
+        return {'run_id': run_id, 'started_at': started, 'waiting': waiting, 'signals': min(waiting, RUN_SIGNAL_BUDGET)}
 
     def recap_step(self, sender=None, current=None):
         """Send the weekly recap once, Fridays from 16:00."""
