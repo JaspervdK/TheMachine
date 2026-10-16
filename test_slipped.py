@@ -26,6 +26,8 @@ class Slipped(unittest.TestCase):
         self.store = a.Store(Path(self.tmp.name) / 'events.sqlite')
         self.store.accounts = ACCOUNTS
         self.store.commit_page('work', {}, [
+            # Sam has written before, so this isn't outreach.
+            mail('h1', '2026-09-01T09:00:00+00:00', 'Sam <sam@client.example>', 'owner@example.com', 'Hello', 'Nice meeting you.', 't0'),
             # The owner's question to Sam, unanswered for 8 days: offered.
             sent('s1', '2026-10-08T09:00:00+00:00', 'Sam <sam@client.example>', 'Contract', 'Can you send the signed contract?', 't1'),
             # Answered: not offered.
@@ -75,16 +77,23 @@ class Slipped(unittest.TestCase):
         with patch.object(a, 'now', return_value='2026-10-17T10:00:00+00:00'):
             self.assertEqual(self.store.slipped('run-5'), '')
 
-    def test_a_batch_of_same_day_emails_is_one_line(self):
-        self.store.commit_page('work', {}, [sent(f'b{i}', '2026-10-12T08:00:00+00:00', f'ceo{i}@co{i}.example', f'Re: Example / Company {i}',
-                                                 'Would you be open to a call?', f'tb{i}') for i in range(4)])
+    def test_outreach_is_left_out(self):
+        # A batch to people who know the owner, cold emails, and questions only in a link: none are offered.
+        known = [mail(f'k{i}', '2026-09-01T09:00:00+00:00', f'ceo{i}@co{i}.example', 'owner@example.com', 'Hi', 'Hello', f'tk{i}') for i in range(4)]
+        self.store.commit_page('work', {}, known + [
+            *[sent(f'b{i}', '2026-10-12T08:00:00+00:00', f'ceo{i}@co{i}.example', f'Re: Example / Company {i}', 'Would you be open to a call?', f'tb{i}') for i in range(4)],
+            sent('c1', '2026-10-09T09:00:00+00:00', 'lee@prospect.example', 'Prospect x Example', 'Open to a partnership?', 'tc1'),
+            sent('c2', '2026-10-10T09:00:00+00:00', 'lee@prospect.example', 'Re: Prospect x Example', 'Any thoughts?', 'tc1'),
+            sent('u1', '2026-10-09T09:00:00+00:00', 'ceo0@co0.example', 'Thanks', 'Thanks!\n<https://track.example/s/?u=tel:123>', 'tu1')])
+        # Someone who pitched the owner and got a question back is a conversation, not their outreach.
+        self.store.commit_page('work', {}, [mail('p1', '2026-10-07T09:00:00+00:00', 'Pat <pat@vendor.example>', 'owner@example.com', 'Collab', 'Shall we work together?', 'tp1'),
+                                            sent('p2', '2026-10-08T09:00:00+00:00', 'pat@vendor.example', 'Re: Collab', 'What do you have in mind?', 'tp1')])
         with patch.object(a, 'now', return_value=NOW):
-            lines = self.store.slipped('run-1').splitlines()
-        batch = [line for line in lines if '4 emails' in line]
-        self.assertEqual(len(batch), 1)
-        self.assertIn('Treat them as one batch: at most one card.', batch[0])
-        with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM slipped WHERE run_id='run-1'").fetchone()[0], 6)
+            text = self.store.slipped('run-1')
+        self.assertNotIn('ceo', text)
+        self.assertNotIn('lee@prospect.example', text)
+        self.assertIn('emailed pat@vendor.example "Re: Collab"', text)
+        self.assertIn('emailed sam@client.example "Contract"', text)
 
     def test_review_prompt_section(self):
         self.assertNotIn('Possibly slipped', a.review_prompt('r', ['work']))

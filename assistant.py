@@ -2275,7 +2275,8 @@ class Store:
         def new_text(body):
             text = (body or '').split('[Quoted earlier messages', 1)[0]
             text = re.split(r'\n(?:On .{5,200} wrote:|Op .{5,200} schreef .{0,40}:|-----Original Message-----)', text, maxsplit=1)[0]
-            return '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('>'))
+            text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('>'))
+            return re.sub(r'(?:https?://|www\.)\S+', '', text)  # a ? in a link (tracking, signatures) isn't a question
         found = {'sent': [], 'asked': []}
         with self.connect() as db:
             done = {r[0] for r in db.execute("SELECT x.event_id FROM slipped x WHERE x.run_id IN (SELECT owner_run FROM analyses WHERE status='complete') OR x.offered_at>?", (ago(0.25),))}
@@ -2304,24 +2305,24 @@ class Store:
                 elif row['mine']:
                     to = [x.lower() for x in re.findall(r'[^\s<>"\',;]+@[^\s<>"\',;]+', m.get('to') or '')]
                     people = [x for x in to if x not in own and not robot.match(x)]
+                    # Not outreach: in a thread the other person started, or to someone who had
+                    # written to the owner before the owner started this thread.
+                    first = db.execute("SELECT occurred_at,instr(metadata,'\"SENT\"')>0 mine FROM events WHERE account_id=? AND kind='gmail.message' "
+                                       "AND json_extract(metadata,'$.thread_id')=? ORDER BY occurred_at LIMIT 1", (row['account_id'], m.get('thread_id'))).fetchone()
+                    if first and first['mine']:
+                        people = [x for x in people if db.execute("SELECT 1 FROM events WHERE kind='gmail.message' AND occurred_at<? AND instr(metadata,'\"SENT\"')=0 "
+                                                                  "AND instr(lower(json_extract(metadata,'$.from')),?)>0 LIMIT 1", (first['occurred_at'], x)).fetchone()]
                     if people:
                         found['sent'].append((row, ', '.join(people[:3])))
             day = lambda row: dt.datetime.fromisoformat(row['occurred_at']).astimezone(local_tz()).strftime('%a %-d %b')
             waited = lambda row: (current - dt.datetime.fromisoformat(row['occurred_at'])).days
-            # Three or more unanswered emails sent the same day with the same subject pattern are one
-            # batch (outreach): one line.
+            # Three or more emails sent the same day with the same subject pattern are outreach: left out.
             batches = {}
             for row, who in found['sent']:
                 shape = ' '.join(re.sub(r'(?i)^(?:(?:re|fwd?|aw|wg|tr)\s*:\s*)+', '', row['title'] or '').lower().split()[:2])
                 batches.setdefault((row['account_id'], day(row), shape), []).append((row, who))
-            items = []
-            for (account, when, _), group in batches.items():
-                if len(group) >= 3:
-                    examples = '; '.join(f"{who} \"{r['title'][:80]}\"" for r, who in group[:3])
-                    items.append(([r for r, _ in group], f"- No answer for {waited(group[0][0])} days to {len(group)} emails the owner sent on {when}, for example {examples} "
-                                  f"({account}, events {', '.join(str(r['id']) for r, _ in group[:12])}{', …' if len(group) > 12 else ''}). Treat them as one batch: at most one card."))
-                else:
-                    items += [([r], f"- No answer for {waited(r)} days: the owner emailed {who} \"{r['title'][:120]}\" on {when} ({account}, event {r['id']}).") for r, who in group]
+            items = [([r], f"- No answer for {waited(r)} days: the owner emailed {who_} \"{r['title'][:120]}\" on {when} ({account}, event {r['id']}).")
+                     for (account, when, _), group in batches.items() if len(group) < 3 for r, who_ in group]
             items = items[-limit:] + [([r], f"- Waiting {waited(r)} days on the owner: {who} asked \"{r['title'][:120]}\" on {day(r)} ({r['account_id']}, event {r['id']}).")
                                       for r, who in found['asked'][-limit:]]
             for rows_, _ in items:
