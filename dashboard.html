@@ -626,12 +626,15 @@ const POKES=['Mmh… five more minutes.','I’m up! Nothing needs you right now.
 let pokes=0,pokeLine='',pokeAwake=false,pokeTimer;
 // The game is offered on the fourth poke, when the robot suggests it, not before.
 const PLAY_AFTER=POKES.length,PLAY_BUTTON='<button class="play" type="button">▶ Play a mini game <small>Catch the Zzz · 20s</small></button>';
-function poke(){if(pokes<POKES.length)pokeLine=POKES[pokes];else{let next;do next=POKE_MORE[Math.floor(Math.random()*POKE_MORE.length)];while(next===pokeLine);pokeLine=next}pokes++;pokeAwake=true;$('#suggestions .poke-hint')?.remove();if(pokes>=PLAY_AFTER&&!$('#suggestions .all-clear .play'))$('#suggestions .all-clear')?.insertAdjacentHTML('beforeend',PLAY_BUTTON);
+function poke(){if(pokes<POKES.length)pokeLine=POKES[pokes];else{let next;do next=POKE_MORE[Math.floor(Math.random()*POKE_MORE.length)];while(next===pokeLine);pokeLine=next}pokes++;pokeAwake=true;localStorage.setItem('pokes-total',(+localStorage.getItem('pokes-total')||0)+1);$('#suggestions .poke-hint')?.remove();if(pokes>=PLAY_AFTER&&!$('#suggestions .all-clear .play'))$('#suggestions .all-clear')?.insertAdjacentHTML('beforeend',PLAY_BUTTON);
 const img=$('#suggestions .all-clear img.sleepy'),line=$('#suggestions .poke-line');if(line)line.textContent=pokeLine;if(img){img.src='brand/wave.webp';img.classList.remove('wobble');void img.offsetWidth;img.classList.add('wobble')}
 clearTimeout(pokeTimer);pokeTimer=setTimeout(()=>{pokeAwake=false;pokeLine='';const i=$('#suggestions .all-clear img.sleepy'),l=$('#suggestions .poke-line');if(i)i.src='brand/sleepy.webp';if(l)l.textContent='I’ll add something when it’s useful.'},6000)}
-// Until the first poke, the robot sometimes mumbles a hint, so people find out they can.
+// Until the first poke, the robot sometimes mumbles a hint, so people find out they can;
+// not on a fresh install, where "all clear" only means nothing has come in yet. Once you've poked
+// three times (counted on this device), it hints at most once a week.
 const POKE_HINTS=['Don’t poke the robot.','Please don’t poke me.','Zzz… no poking.'];
-function pokeHint(){const b=$('#suggestions .all-clear .poke');if(!b||pokes||document.hidden||b.querySelector('.poke-hint'))return;
+function pokeHint(){const b=$('#suggestions .all-clear .poke');if(!b||pokes||document.hidden||b.querySelector('.poke-hint')||!(state.suggestions||[]).some(closed))return;
+if(+localStorage.getItem('pokes-total')>=3&&Date.now()-(+localStorage.getItem('poke-hint-at')||0)<7*864e5)return;localStorage.setItem('poke-hint-at',Date.now());
 const h=document.createElement('span');h.className='poke-hint';h.setAttribute('aria-hidden','true');h.textContent=POKE_HINTS[Math.floor(Math.random()*POKE_HINTS.length)];b.append(h);setTimeout(()=>h.remove(),3400)}
 setTimeout(pokeHint,4000);setInterval(()=>{if(Math.random()<.4)pokeHint()},25000);
 let game=null;
