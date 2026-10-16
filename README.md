@@ -2,19 +2,7 @@
 
 A private, self-hosted assistant inbox for [OpenClaw](https://docs.openclaw.ai). It reads your email, calendar, chat and phone notifications, has your own OpenClaw agent look for what actually needs you, and sends a few short suggestions to Telegram. Tap **Do it** and the agent carries the task out.
 
-**Early release:** intended for a single owner who already uses OpenClaw. Managed installation is Linux-only. All screenshots and demo content below are synthetic.
-
-## Try the dashboard
-
-```bash
-git clone https://github.com/JeroenCorthout/TheMachine.git
-cd TheMachine
-python3 demo.py
-```
-
-Open **http://127.0.0.1:8788/**. Only Python 3.12+ is needed: no OpenClaw, accounts, API keys or installation. Buttons change a disposable in-memory demo; nothing is sent or run. Stop with Ctrl+C. Use `--port 8789` if the port is busy.
-
-![Dashboard with synthetic example tasks](docs/dashboard.jpg)
+**Early release:** intended for a single owner who already uses OpenClaw. Managed installation is Linux-only.
 
 ## Quick start
 

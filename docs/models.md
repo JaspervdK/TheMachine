@@ -17,8 +17,8 @@ They resolve their model the same way your chats do: `agents.defaults.model.prim
   agents: {
     defaults: {
       model: {
-        primary: "anthropic/claude-sonnet-4-6",
-        fallbacks: ["openai/gpt-5", "ollama/qwen3:32b"],
+        primary: "openai/gpt-6.1-sol",
+        fallbacks: ["anthropic/claude-sonnet-5-5", "ollama/gemma4"],
       },
     },
   },
