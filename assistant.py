@@ -3451,16 +3451,18 @@ def sync_slack(store, config, account, source=None):
                     state['phase'] = 'discover'
     store.commit_page(account['id'], state, events)
     if isinstance(source, Slack):
-        remember_slack_names(store, source, events)
+        remember_slack_names(store, source, events, state.get('channels') or ())
     more = state['mode'] != 'incremental' or state['index'] != 0 or bool(state.get('scan'))
     return {'mode': state['mode'], 'events': len(events), 'more': more}
 
 
-def remember_slack_names(store, source, events, per_page=3):
+def remember_slack_names(store, source, events, channels=(), per_page=3):
     """Names and emails for the people graph: Slack messages carry only user IDs. A few lookups per
-    page, each once a month; the email joins the person to their mail. Best effort."""
+    page (new senders, then the people behind known DMs), each once a month; the email joins the
+    person to their mail. Best effort."""
     users = {e['metadata'].get('user_id') for e in events} | {
-        m[1] for e in events for m in [re.fullmatch(r'DM ([UW][A-Z0-9]+)', e['metadata'].get('channel_name') or '')] if m}
+        m[1] for name in [e['metadata'].get('channel_name') for e in events] + [c.get('name') for c in channels]
+        for m in [re.fullmatch(r'DM ([UW][A-Z0-9]+)', name or '')] if m}
     wanted = store.names_to_check(['slack:' + u for u in users if u and u not in (source.account.get('user_id'),)])
     for identifier in wanted[:per_page]:
         try:

@@ -109,6 +109,19 @@ class Graph(unittest.TestCase):
         ann = self.node('email:ann@client.com')
         self.assertEqual((ann['name'], ann['ids']), ('Ann Example', ['Slack', 'ann@client.com']))
 
+    def test_slack_names_are_looked_up_a_few_at_a_time_once_a_month(self):
+        calls = []
+        slack = object.__new__(a.Slack); slack.account = {'user_id': 'U0OWNER'}
+        slack.get = lambda method, params: calls.append(params['user']) or {'user': {'profile': {'real_name': 'Name ' + params['user'], 'email': params['user'].lower() + '@acme.com'}}}
+        channels = [{'name': 'DM U0A'}, {'name': 'DM U0B'}, {'name': 'general'}, {'name': 'My notes'}]
+        events = [{'metadata': {'user_id': 'U0C', 'channel_name': 'general'}}, {'metadata': {'user_id': 'U0OWNER', 'channel_name': 'general'}}]
+        a.remember_slack_names(self.store, slack, events, channels, per_page=2)
+        a.remember_slack_names(self.store, slack, events, channels, per_page=2)
+        a.remember_slack_names(self.store, slack, events, channels, per_page=2)
+        self.assertEqual(calls, ['U0A', 'U0B', 'U0C'])
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT name,email FROM identity_names WHERE identifier='slack:U0A'").fetchone()[:], ('Name U0A', 'u0a@acme.com'))
+
     def test_projects_from_review_and_cards_spread_to_threads_and_people(self):
         self.add(mail(3, 'Ann <ann@client.com>', 'sam@acme.com', thread='deal'), mail(2, 'Sam <sam@acme.com>', 'ann@client.com, Bob <bob@client.com>', ('SENT',), thread='deal'),
                  mail(1, 'Zed <zed@else.com>', 'sam@acme.com'))
