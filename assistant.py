@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from zoneinfo import ZoneInfo
+import embeddings
 import next_actions
 import preparation_state
 
@@ -1558,6 +1559,7 @@ class Store:
             # events_pending index cannot serve; this keeps them off a full scan.
             db.execute('CREATE INDEX IF NOT EXISTS events_pending_account ON events(account_id,ingested_at,id) WHERE analyzed_version<version')
             db.execute('CREATE INDEX IF NOT EXISTS analyses_owner ON analyses(owner_run,owner_session)')
+            db.execute(embeddings.SCHEMA)  # after the monotonic-ID migration, which rebuilds events
 
     def ensure_monotonic_event_ids(self):
         # Purged evidence IDs remain in review/suggestion provenance. Never let
@@ -4543,7 +4545,7 @@ class App:
             proposal_id = self.store.tool_approval_proposal(args['id'], args['title'], args['detail'])
             root = 'https://' + host + self.config.get('dashboard_path', '/')
             return {'id': proposal_id, 'url': root.rstrip('/') + '/approval?id=' + proposal_id}
-        if name in ['events', 'begin_analysis'] and (not selected or not set(selected) <= set(accounts)):
+        if name in ['events', 'begin_analysis', 'related'] and (not selected or not set(selected) <= set(accounts)):
             raise ValueError('Choose explicit configured account_ids; cross-account reads must be intentional')
         if name == 'status':
             result = self.store.snapshot(self.config['accounts'])
@@ -4563,8 +4565,28 @@ class App:
             for suggestion in result.get('suggestions', []):
                 suggestion['snooze_choices'] = snooze_choices(self.is_work(suggestion.get('account_ids')))
             return result if args.get('full') else compact_status(result)
+        if name == 'related':
+            if not embeddings.settings(self.config):
+                raise ValueError('Related signals by meaning are not set up; search with events and a query')
+            if not args.get('event_ids') and not str(args.get('query') or '').strip():
+                raise ValueError('Give event_ids, a query or both')
+            found, semantic = self.related(selected, args.get('event_ids') or (), str(args.get('query') or ''),
+                                           min(int(args.get('limit') or 8), embeddings.MAX_LIMIT), args.get('exclude_event_ids') or ())
+            score = dict(found)
+            rows = sorted(self.store.events(selected, event_ids=list(score)), key=lambda r: list(score).index(r['id']))
+            result = event_page(rows, int(args.get('body_offset') or 0), int(args.get('row_offset') or 0))
+            for view in result['events']:
+                view['similarity'] = score.get(view['id'])
+            return {**result, 'semantic': semantic}
+        if name == 'events' and args.get('semantic') and str(args.get('query') or '').strip() and args.get('event_ids') is None and embeddings.settings(self.config):
+            # Meaning and keywords fused, best first; the plain keyword search stays the default.
+            found, _ = self.related(selected, (), str(args['query']), min(int(args.get('limit') or 40), 40))
+            order = [i for i, _ in found]
+            args = {**args, 'event_ids': order, 'query': ''}
         if name == 'events':
             rows = self.store.events(selected, args.get('query', ''), args.get('limit', 40), event_ids=args.get('event_ids'))
+            if args.get('semantic') and args.get('event_ids') is not None:
+                rows.sort(key=lambda r: args['event_ids'].index(r['id']) if r['id'] in args['event_ids'] else 0)
             # The CLI reads whole rows; agent tool results must stay under OpenClaw's size cut.
             if args.get('full'):
                 return rows
@@ -5079,6 +5101,11 @@ class App:
                 job['ahead']=bool(db.execute('SELECT early FROM suggestions WHERE id=?',(job['suggestion_id'],)).fetchone()[0])
             self.store.note_rule_files(RULE_FILES)
             request['message']=preparation_prompt(job,self.store.facts_text(),self.config,self.store.draft_edits_text(),self.store.facts_text(kind='draft'))
+            if embeddings.settings(self.config):
+                try:
+                    lines=self.related_lines(job['suggestion_id'])
+                    if len(request['message'])+len(lines)<19500:request['message']+=lines  # the runner refuses over 20,000
+                except Exception as error:LOG.error('related error=%s',type(error).__name__)
             if request['session_job_id'] != job['job_id']:
                 request['message']+='\nThis continues the SAME session, with earlier work in context. Before changing anything in an app, read assistant_signals preparation_history (offset 0, then any next_offset): a compact list of earlier calls. Summaries are shortened: when reconciling a call, request preparation_history with its call_ref, offset 0 and any next_offset for exact saved parameters and receipts. If detail_complete=false, check the retained transcript or original app for the missing suffix. Do not repeat an external step that already happened; check uncertain ones against the app first. If the owner\'s latest note asks for something different (a rewrite, another approach), do that. Saving your result or a blocker is always allowed.'
         result=runner(request)
@@ -5345,6 +5372,36 @@ class App:
             try:self.recap_step()
             except Exception as error:LOG.error('recap error=%s',type(error).__name__)
 
+    def embedding_worker(self):
+        """Small background passes: vectors for new and changed signals, newest first. Never blocks
+        ingestion (no transaction spans the embedding call); failures wait and retry."""
+        wait=10
+        while not self.stop.wait(wait):
+            try:wait=5 if embeddings.embed_pending(self.store.connect,embeddings.settings(self.config),16)==16 else 60
+            except Exception as error:
+                LOG.error('embeddings error=%s',error if isinstance(error,embeddings.EmbeddingError) else type(error).__name__);wait=300
+
+    def related(self, accounts, event_ids=(), query='', limit=8, exclude=()):
+        """([(event_id, similarity)], semantic) within the given accounts. With the embedding server
+        down a query still gets keyword matches."""
+        try:return embeddings.related(self.store.connect,embeddings.settings(self.config),accounts,event_ids,query,limit,exclude=exclude),True
+        except embeddings.EmbeddingError as error:
+            LOG.error('related error=%s',error)
+            if not query.strip():return [],False
+            with self.store.connect() as db:
+                return [(i,None) for i in embeddings.fts_ids(db,accounts,query,limit) if i not in {*map(int,event_ids),*map(int,exclude)}],False
+
+    def related_lines(self, suggestion_id, limit=8):
+        """A short "Possibly related" list for a preparation: the task's own accounts, not its evidence."""
+        with self.store.connect() as db:
+            row=db.execute('SELECT account_ids,event_ids FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
+        accounts,ids=json.loads(row['account_ids'] or '[]'),json.loads(row['event_ids'] or '[]')
+        if not accounts or not ids:return ''
+        found,_=self.related(accounts,ids,'',limit)
+        rows={r['id']:r for r in self.store.events(accounts,event_ids=[i for i,_ in found])} if found else {}
+        lines=[f"- {i} ({rows[i]['account_id']}) {source_line([rows[i]])[8:]} · {clamp(' '.join(rows[i]['title'].split()),100)}" for i,_ in found if i in rows]
+        return ('\n\nPossibly related (found by meaning in this task\'s accounts; read any that matter with events, its account and event_ids):\n'+'\n'.join(lines)) if lines else ''
+
     def serve(self):
         app = self
 
@@ -5517,6 +5574,8 @@ class App:
         threading.Thread(target=self.preparation_worker, daemon=True).start()
         threading.Thread(target=self.action_worker, daemon=True).start()
         threading.Thread(target=self.review_worker, daemon=True).start()
+        if embeddings.settings(self.config):
+            threading.Thread(target=self.embedding_worker, daemon=True).start()
         server.timeout = 1
         LOG.info('service started; loopback only; accounts=%d', len(self.config['accounts']))
         while not self.stop.is_set():
@@ -5527,10 +5586,17 @@ class App:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument('command', choices=['serve', 'status', 'call', 'sync-once'])
+    parser.add_argument('command', choices=['serve', 'status', 'call', 'sync-once', 'embed-backfill'])
     parser.add_argument('--input', type=Path, help='JSON action request file; use - for stdin')
+    parser.add_argument('--batch', type=int, default=16, help='embed-backfill: events per embedding call')
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
+    if args.command == 'embed-backfill':
+        # Safe next to the running service (it embeds newest first, this oldest first).
+        if not embeddings.settings(config):
+            raise SystemExit('Set "embeddings" in the config first (see README, Related signals).')
+        embeddings.backfill(Store(config['database']).connect, embeddings.settings(config), max(1, args.batch), out=lambda line: print(line, flush=True))
+        return
     if args.command == 'call':
         import sys
         request = sys.stdin.read() if str(args.input) == '-' else args.input.read_text()

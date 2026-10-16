@@ -1,0 +1,41 @@
+# Optional example systemd *user* unit: a local embedding server for related signals
+# (README, "Related signals (optional, local embeddings)"). Loopback only, low priority.
+# Copy to ~/.config/systemd/user/, set the three paths/names below (or put them in
+# ~/.config/embeddinggemma.env), then:
+#   systemctl --user daemon-reload && systemctl --user enable --now embeddinggemma
+# and add to config.json:
+#   "embeddings": {"url": "http://127.0.0.1:8792", "model": "embeddinggemma-300m", "dims": 256}
+# The service refuses a server that reports another model name than "model", and re-embeds
+# when "model" or "dims" change.
+[Unit]
+Description=The Machine: local EmbeddingGemma embeddings (llama.cpp llama-server, loopback only)
+After=default.target
+
+[Service]
+Type=simple
+# Any llama.cpp llama-server build with --embedding support. OpenClaw ships one for its local
+# memory search under ~/.openclaw/tools/llama.cpp/<build>/<platform>/llama-server.
+Environment=EMBED_SERVER=%h/.local/bin/llama-server
+# An EmbeddingGemma GGUF, e.g. embeddinggemma-300M-Q8_0.gguf from ggml-org/embeddinggemma-300M-GGUF.
+# If OpenClaw's memory search already uses one (memory.search.local.modelPath in openclaw.json,
+# often ~/.cache/qmd/models/), point at that file instead of downloading another copy.
+Environment=EMBED_MODEL_PATH=%h/.cache/qmd/models/hf_ggml-org_embeddinggemma-300M-Q8_0.gguf
+# The name the server reports in /v1/models; must equal "model" in config.json.
+Environment=EMBED_MODEL_NAME=embeddinggemma-300m
+Environment=EMBED_PORT=8792
+Environment=EMBED_THREADS=4
+EnvironmentFile=-%h/.config/embeddinggemma.env
+ExecStart=/bin/sh -c 'exec "$EMBED_SERVER" -m "$EMBED_MODEL_PATH" --alias "$EMBED_MODEL_NAME" --embedding --no-webui --host 127.0.0.1 --port "$EMBED_PORT" -c 8192 -b 2048 -ub 2048 -np 4 -t "$EMBED_THREADS" -lv 2'
+Restart=on-failure
+RestartSec=30
+# Background work: yield the CPU and disk to everything else.
+Nice=10
+CPUWeight=20
+CPUQuota=300%
+MemoryMax=2G
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -57,6 +57,12 @@
     "weekday": 5,
     "at": "16:00"
   },
+  "embeddings": {
+    "enabled": false,
+    "url": "http://127.0.0.1:8792",
+    "model": "embeddinggemma-300m",
+    "dims": 256
+  },
   "accounts": [
     {
       "id": "work-gmail",

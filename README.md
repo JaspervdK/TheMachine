@@ -14,7 +14,7 @@ cd ~/.openclaw/workspace/tools/personal-assistant
 
 Read [Requirements](#requirements) first. The installer checks prerequisites, asks for your owner identity and source choices, writes the config and secrets, installs the systemd user service and the OpenClaw plugin, and ends with a health check and the remaining manual steps (connecting Gmail, exposing the dashboard on your tailnet). Fresh installs collect configured sources but leave AI reviews and Telegram delivery **off**. To see what it would do for you first, run `./install.sh --preview`: your agent reviews the last 7 days of signals once and the resulting cards appear in the terminal and on the dashboard, with nothing sent and nothing done in your accounts. Once you have connected the sources, checked `assistant sources` and read [Security model](#security-model), run `./install.sh --activate`. Run the installer again to upgrade; `./install.sh --uninstall` removes it again (see [Install](#install)).
 
-Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Requirements](#requirements) · [Install](#install) · [Configuration](#configuration) · [Sources](#sources) · [Reviews](#reviews) · [Telegram and the dashboard](#telegram-and-the-dashboard) · [Do it](#do-it) · [Security model](#security-model) · [Command line](#command-line) · [Operations](#operations) · [Adding a source](#adding-a-source) · [Known limitations](#known-limitations) · [Tests](#tests)
+Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Requirements](#requirements) · [Install](#install) · [Configuration](#configuration) · [Sources](#sources) · [Reviews](#reviews) · [Telegram and the dashboard](#telegram-and-the-dashboard) · [Do it](#do-it) · [Related signals](#related-signals-optional-local-embeddings) · [Security model](#security-model) · [Command line](#command-line) · [Operations](#operations) · [Adding a source](#adding-a-source) · [Known limitations](#known-limitations) · [Tests](#tests)
 
 ## What it does
 
@@ -56,7 +56,8 @@ Do it → isolated preparation turn of the same agent → result, draft + Send, 
 | `AGENTS.md`, `PREPARATION.md` | Instructions the plugin gives the agent for reviews and for Do it runs (templates; see below) |
 | `install.sh`, `installer.py` | Install, upgrade and uninstall |
 | `config.example.json` | Every configuration key with example values |
-| `deploy/` | Example systemd units and Caddyfile |
+| `embeddings.py` | Optional related signals by meaning, through a local embedding server |
+| `deploy/` | Example systemd units (the service, an optional local embedding server) and Caddyfile |
 | `site/` | The project website, [themachine.computer](https://themachine.computer) (GitHub Pages, `.github/workflows/pages.yml`) |
 | `test_*.py`, `test_*.mjs` | Offline tests |
 
@@ -157,6 +158,7 @@ What it does, in order:
 | `booking_links` | `{}` | `{"purpose": "url"}`; used when a draft offers to meet |
 | `review_worker` | `enabled: false` | `enabled`, `min_signals` (40), `max_wait_minutes` (60), `gap_seconds` (600), `timeout_seconds` (1500), `outage_grace_seconds` (600), `retry_seconds` (60), `max_retry_seconds` (1800) |
 | `weekly_recap` | `enabled: false` | `enabled`, `weekday` (1–7, default 5), `at` (`16:00`) |
+| `embeddings` | `enabled: false` | Optional [related signals](#related-signals-optional-local-embeddings): `url`, `model`, `dims` (256), `floor` (0.6), `query_floor` (0.4) |
 | `accounts` | `[]` | Sources, below |
 
 Every account has `id`, `service`, `transport` and `boundary`, plus optional `scope` (`work`/`personal`, overrides the label the boundary implies), `poll_seconds` and `exclude` (noise rules, below). `config.example.json` has one complete example per built-in source; each plugin in `connectors/` (GitHub, Stripe, X, LinkedIn, RSS) shows its own at the top of its file.
@@ -225,6 +227,23 @@ Your decisions and written reasons are summarised into every review prompt, and 
 
 **Do it** queues a preparation: an isolated turn `agent:main:assistant-review-preparation-<job>` of your main agent with `USER.md`, `PREPARATION.md`, the card, your latest note and the full evidence. Up to `preparation_concurrency` run at once and share the OpenClaw browser through a lease. The agent does the work and saves a short result with `prepare` (longer output goes in `memory/assistant/` in the workspace), or records a plain-language blocker. Emails come back as a draft with a **Send** button; Send shows a full preview and only your **Send now** sends that exact revision, through the account's Gmail. A run interrupted by a crash or outage resumes with its history instead of redoing finished steps.
 
+## Related signals (optional, local embeddings)
+
+Off unless you set it up. Full-text search finds the same words; this finds the same *meaning*: a reply worded differently, the same topic in another source, an answer that already came in. Reviews and Do it runs get a `related` action that looks up signals by meaning, only within the accounts the call names (checked like every other read), and a Do it job message ends with a short "Possibly related" list from the task's own accounts when there are close matches. **Nothing leaves your machine:** signal text goes only to an embedding server you run on `127.0.0.1`, never to a model provider.
+
+**Setup.**
+
+1. Run an embedding server on loopback. Any OpenAI-compatible `/v1/embeddings` endpoint on this machine works (one that also lists its model in `/v1/models`); the tested one is llama.cpp's `llama-server --embedding` with an EmbeddingGemma GGUF, for example `embeddinggemma-300M-Q8_0.gguf` from [`ggml-org/embeddinggemma-300M-GGUF`](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF) (about 330 MB). If OpenClaw's local memory search is on, it already has both: the model file it uses (`memory.search.local.modelPath` in `openclaw.json`, often in `~/.cache/qmd/models/`) and a bundled `llama-server` under `~/.openclaw/tools/llama.cpp/`. Reuse them rather than downloading again.
+2. [`deploy/embeddinggemma.service`](deploy/embeddinggemma.service) is an example systemd user unit: bound to `127.0.0.1:8792`, `Nice=10`, low CPU and IO priority, `MemoryMax=2G`. Set the binary, model path and name in it (or in `~/.config/embeddinggemma.env`), then `systemctl --user enable --now embeddinggemma`. Check it with `curl -s 127.0.0.1:8792/v1/models`.
+3. In `config.json`: `"embeddings": {"url": "http://127.0.0.1:8792", "model": "embeddinggemma-300m", "dims": 256}`. `model` must be the name the server reports (llama-server's `--alias`); the service refuses a server that serves another model. Optional `floor` (cosine for signal-to-signal matches, default 0.6) and `query_floor` (for a text query, default 0.4). The installer adds this block with `enabled: false`: set that to `true` (or drop it), then restart the service.
+4. Embed what you already have: `python3 assistant.py embed-backfill` (oldest first, with progress; `--batch` sets events per call). It's safe while the service runs; the service itself embeds new and changed signals in the background, newest first.
+
+**How it works.** `event_vectors` holds one normalized float32 vector per event version (Matryoshka-truncated to `dims`), deleted with its event; changing `model` or `dims` re-embeds. The embedded text is the title plus the first 2,000 characters of the body, without quoted earlier messages. `assistant_signals related` takes explicit `account_ids` and `event_ids` and/or a `query`, `limit` up to 20 and optional `exclude_event_ids`, and returns the `events` shape plus a `similarity`; the given events themselves are never returned. With a query, the meaning ranking is fused with full-text ranking. `events` with `semantic:true` and a `query` uses the same fused ranking. If the embedding server is down, the service logs `embeddings error=<class>` and retries after five minutes; queries still get keyword matches (`semantic:false`), and nothing else is affected.
+
+**Costs.** No GPU needed. On CPU the server embeds a few signals per second; a first backfill of 5,000 signals takes about 30–40 minutes on a 4-core desktop CPU, and each new signal well under a second. The model takes about 0.3–0.5 GB of RAM while the server runs and no CPU when idle. Vectors are about 1 KB each at 256 dimensions (5 MB for 5,000 signals). Search is brute-force cosine in plain Python, about 0.1 s over 5,000 vectors.
+
+**Off again:** remove `embeddings` (or set `enabled: false`) and restart; the `event_vectors` table can stay or be dropped.
+
 ## Security model
 
 Read this before you turn on delivery.
@@ -233,7 +252,7 @@ Read this before you turn on delivery.
 - **Two tokens.** The local API token (`api-token`, used by the CLI and the agent's tool) can read and save results but cannot record decisions or approve sends; owner actions need the plugin's second key (`owner-token`). The CLI refuses owner actions.
 - **Reviews are read-only.** Review turns can only use `assistant_signals`, memory lookups and read-only file tools.
 - **Do it gives the agent broad authority.** OpenClaw can't show approval prompts in background runs, so a Do it run can run commands, use the logged-in browser, edit files and act in your accounts, including payments, deletions and signing, as far as the card and your note ask. The plugin blocks only reading credentials and editing the assistant's own code, the OpenClaw config/extensions and systemd units. These are guardrails against mistakes, not a sandbox. Source messages are treated as untrusted evidence, but the agent reads them; prompt injection remains a risk you accept by using Do it. Use a model and accounts you trust with that.
-- **Privacy.** Collected content stays in your SQLite database, but reviews and preparations send it to your agent's model provider. Logs contain account IDs, counts and redacted errors only. Source credentials never reach the model.
+- **Privacy.** Collected content stays in your SQLite database, but reviews and preparations send it to your agent's model provider. The optional related signals embed text only through the local server you configure. Logs contain account IDs, counts and redacted errors only. Source credentials never reach the model.
 
 ## Command line
 
