@@ -2388,17 +2388,24 @@ class Store:
             edited_revisions = {r[0] for r in db.execute('SELECT new_revision FROM draft_edits')}
             # As is: no edit in the dashboard and no Change or Try again before the send.
             # A note that only said keep going or asked for something else didn't change the draft.
-            sent = [r['revision'] in edited_revisions or r['changed'] for r in db.execute(
-                "SELECT j.revision,EXISTS(SELECT 1 FROM decisions d LEFT JOIN note_kinds k ON k.decision_id=d.id WHERE d.suggestion_id=j.suggestion_id AND d.choice='other' "
+            # The drafting rules last changed: a saved draft rule, or an edit to PREPARATION.md.
+            rules_at = db.execute("SELECT max(at) FROM rule_changes WHERE kind='draft_rule' OR (kind='file' AND text='PREPARATION.md edited')").fetchone()[0]
+            sends = [(r['updated_at'], bool(r['revision'] in edited_revisions or r['changed'])) for r in db.execute(
+                "SELECT j.revision,j.updated_at,EXISTS(SELECT 1 FROM decisions d LEFT JOIN note_kinds k ON k.decision_id=d.id WHERE d.suggestion_id=j.suggestion_id AND d.choice='other' "
                 "AND coalesce(k.kind,'') NOT IN ('continue','new_ask') AND d.source IN ('telegram','dashboard') AND d.created_at<j.created_at) changed "
                 "FROM action_jobs j WHERE j.status='sent' AND j.updated_at>=?", (since,))]
+            sent = [changed for _, changed in sends]
+            after = [changed for at, changed in sends if rules_at and at > rules_at]
             snoozed = db.execute("SELECT s.title,count(*) n FROM decisions d JOIN suggestions s ON s.id=d.suggestion_id WHERE d.choice='snooze' "
                                  "AND d.source IN ('telegram','dashboard') AND d.created_at>=? GROUP BY d.suggestion_id HAVING n>=2 ORDER BY n DESC", (since,)).fetchall()
             quick = [r[0] for r in db.execute("SELECT s.title FROM decisions d JOIN suggestions s ON s.id=d.suggestion_id WHERE d.choice='reject' AND d.feedback='' "
                                               "AND d.source IN ('telegram','dashboard') AND d.created_at>=? AND "
                                               "(julianday(d.created_at)-julianday(coalesce(s.deliver_after,s.created_at)))*1440 BETWEEN 0 AND 10", (since,))]
         return {'edits': sorted(edits.values(), key=lambda e: e['at'], reverse=True), 'sent_as_written': sent.count(False),
-                'sent_edited': sent.count(True), 'snoozed_again': [(r[0], r[1]) for r in snoozed], 'quick_dismissed': quick}
+                'sent_edited': sent.count(True),
+                # Only meaningful when some of these sends came before the latest rule change.
+                'since_rules': {'at': rules_at, 'as_written': after.count(False), 'edited': after.count(True)} if rules_at and len(after) < len(sent) else None,
+                'snoozed_again': [(r[0], r[1]) for r in snoozed], 'quick_dismissed': quick}
 
     def quality(self, days=30, until=None, since=None):
         """How good the cards were, so changes to the rules can be judged by results.
@@ -4412,6 +4419,11 @@ def weekly_recap(store, config, current=None, usage=None):
     noticed = []
     if learned['sent_as_written'] or learned['sent_edited']:
         noticed.append(f"• Drafts: {learned['sent_as_written']} sent as written, {learned['sent_edited']} changed by you first")
+        if learned['since_rules']:
+            s, day = learned['since_rules'], dt.datetime.fromisoformat(learned['since_rules']['at']).astimezone(tz)
+            done = s['as_written'] + s['edited']
+            noticed.append(f"\u00a0\u00a0\u00a0◦ Since the writing rules last changed ({day:%a} {day.day} {day:%b}): "
+                           + (f"{s['as_written']} of {done} sent as written" if done else 'none sent yet'))
     if learned['quick_dismissed']:
         noticed.append(f"• {len(learned['quick_dismissed'])} dismissed within minutes")
     if learned['snoozed_again']:

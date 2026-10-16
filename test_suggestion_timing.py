@@ -107,6 +107,26 @@ class RecapAndPreferences(unittest.TestCase):
         text=self.store.preference_summary()
         self.assertIn('Dismissed:',text);self.assertIn('Prepare a retention brief (owner wrote: "not useful for me")',text)
 
+    def test_recap_shows_drafts_since_the_writing_rules_last_changed(self):
+        t=lambda hours:(dt.datetime.fromisoformat(a.now())-dt.timedelta(hours=hours)).isoformat()
+        job="INSERT INTO action_jobs(id,suggestion_id,revision,payload,status,created_at,updated_at,approval_id,source,rfc_message_id) VALUES(?,?,?,'{}','sent',?,?,'x','dashboard','')"
+        early=self.store.suggest('e','Answer Ann','Body.',[2])['id']
+        self.store.decide(early,'other','Less formal','d8','telegram')
+        with self.store.connect() as db:
+            db.execute("UPDATE decisions SET created_at=? WHERE suggestion_id=?",(t(4),early))
+            db.execute(job,('j4',early,'r4',t(3),t(3)))
+            db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'file','PREPARATION.md edited','abc')",(t(2),))
+        self.assertIn('◦ Since the writing rules last changed (',a.weekly_recap(self.store,{},None,None))
+        self.assertIn('): none sent yet',a.weekly_recap(self.store,{},None,None))
+        later=self.store.suggest('l','Answer Bo','Body.',[3])['id']
+        with self.store.connect() as db: db.execute(job,('j5',later,'r5',t(1),t(1)))
+        b=self.store.behaviour(7);self.assertEqual((b['since_rules']['as_written'],b['since_rules']['edited']),(1,0))
+        recap=a.weekly_recap(self.store,{},None,None)
+        self.assertIn('• Drafts: 1 sent as written, 1 changed by you first\n\u00a0\u00a0\u00a0◦ Since the writing rules last changed (',recap)
+        self.assertIn('): 1 of 1 sent as written\n',recap)
+        with self.store.connect() as db: db.execute("DELETE FROM action_jobs WHERE id='j4'")  # every send after the change: nothing to compare
+        self.assertIsNone(self.store.behaviour(7)['since_rules'])
+
     def test_behaviour_feeds_reviews_preparations_and_recap(self):
         snoozy=self.store.suggest('s','Review the Q4 budget','Body.',[2])['id']
         quick=self.store.suggest('q','Read the newsletter digest','Body.',[3])['id']

@@ -190,6 +190,7 @@ pre{white-space:pre-wrap;font:.76rem/1.5 var(--mono);color:var(--muted);backgrou
 /* Events */
 .search{display:grid;grid-template-columns:minmax(180px,240px) 1fr auto;gap:8px;padding:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow);margin-bottom:18px}
 .search input,.search select{background:var(--sunken);border-color:var(--border)}
+.search>*{min-width:0;max-width:100%;box-sizing:border-box} /* a long account name must not push the fields past the panel */
 .event-head{display:flex;align-items:flex-start;gap:12px}
 .event-head>div{min-width:0;flex:1}
 .event-head small{display:block;margin-top:2px}
