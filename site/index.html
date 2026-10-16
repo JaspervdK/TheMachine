@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Machine: an open-source assistant that reads everything and only bothers you when it matters</title>
+<meta name="description" content="The Machine reads your email, calendar, chats and phone notifications, finds the few things that need you, and sends them to Telegram as short cards. Tap Do it and your own OpenClaw agent carries the task out. Open source and self-hosted.">
+<meta name="theme-color" content="#131518">
+<meta property="og:title" content="The Machine">
+<meta property="og:description" content="An open-source, self-hosted assistant inbox for OpenClaw. It reads everything and only bothers you when it matters.">
+<meta property="og:image" content="https://themachine.computer/assets/og.jpg">
+<meta property="og:url" content="https://themachine.computer/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<script>
+// Dashboard links from before the owner's dashboard moved to my.themachine.computer (and the
+// installed app, which opens this origin) still land there.
+if (/^#(result|card|send|snooze|snooze-custom)=/.test(location.hash) || matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches)
+  location.replace('https://my.themachine.computer/' + location.search + location.hash);
+</script>
+<style>
+:root{--bg:#131518;--surface:#1c1f24;--surface-2:#23272e;--line:#c7b5e22e;--mint:#BCCBA8;--cream:#F5E5BF;--amber:#FFD76B;--orange:#ECA45B;--lavender:#C7B5E2;--text:#f4f2ec;--muted:#c9ccc3;--faint:#9da197;
+--mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;--sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font:17px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--mint)}
+a:hover{color:var(--cream)}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+header{position:sticky;top:0;z-index:5;background:#131518e6;backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav{display:flex;align-items:center;gap:28px;height:64px}
+nav .logo{display:flex;align-items:center;gap:10px;margin-right:auto;text-decoration:none}
+nav .logo img{height:22px;display:block}
+nav a.link{color:var(--muted);text-decoration:none;font-size:15px}
+nav a.link:hover{color:var(--text)}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:12px 20px;border-radius:12px;font-weight:600;font-size:16px;text-decoration:none;border:1px solid transparent;transition:transform .15s ease}
+.btn:hover{transform:translateY(-1px)}
+.btn.primary{background:var(--mint);color:#1a1d17}
+.btn.primary:hover{color:#1a1d17;background:#cad8b6}
+.btn.ghost{border-color:var(--line);color:var(--text)}
+.btn.small{padding:8px 14px;font-size:14px;border-radius:10px}
+.hero{display:grid;grid-template-columns:1.1fr .9fr;gap:48px;align-items:center;padding-top:88px;padding-bottom:72px}
+.eyebrow{font:600 13px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--amber)}
+h1{font-size:clamp(40px,6vw,64px);line-height:1.04;letter-spacing:-.025em;margin:18px 0 22px;color:var(--cream)}
+h1 em{font-style:normal;color:var(--mint)}
+.lede{font-size:20px;color:var(--muted);max-width:34em;margin:0 0 32px}
+.ctas{display:flex;gap:12px;flex-wrap:wrap}
+.tags{display:flex;gap:18px;flex-wrap:wrap;margin-top:28px;color:var(--faint);font:14px var(--mono)}
+.tags span::before{content:"✓ ";color:var(--mint)}
+.stage{position:relative;min-height:440px}
+.stage .robot{position:absolute;right:-10px;top:-30px;width:290px;filter:drop-shadow(0 30px 40px #0008)}
+.card{background:var(--surface-2);border:1px solid var(--line);border-radius:18px;padding:18px 18px 14px;box-shadow:0 20px 50px #0007;max-width:380px}
+.stage .card{position:absolute;left:0;bottom:0}
+.card .from{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--faint);margin-bottom:10px}
+.card .from img{width:28px;height:28px;border-radius:50%;background:#2d3238}
+.card b.t{display:block;color:var(--text);font-size:17px;margin-bottom:6px}
+.card p{margin:0 0 6px;font-size:15.5px;color:var(--muted);line-height:1.5}
+.card p strong{color:var(--amber)}
+.card .src{font-size:13px;color:var(--faint);margin-bottom:12px}
+.card .buttons{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.card .buttons span{background:#ffffff10;border-radius:9px;padding:8px 6px;text-align:center;font-size:14px;color:var(--text)}
+.card .buttons span.go{grid-column:1/-1;background:var(--mint);color:#1a1d17;font-weight:600}
+section{padding:80px 0;border-top:1px solid var(--line)}
+h2{font-size:clamp(30px,4vw,42px);line-height:1.12;letter-spacing:-.02em;margin:12px 0 16px;color:var(--cream)}
+.sub{color:var(--muted);max-width:42em;margin:0 0 44px;font-size:18.5px}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:18px}
+.step{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:22px}
+.step img{width:84px;height:84px;display:block;margin:-6px 0 8px -6px}
+.step .n{font:600 12px var(--mono);color:var(--amber);letter-spacing:.1em}
+.step h3{margin:4px 0 8px;font-size:19px}
+.step p{margin:0;color:var(--muted);font-size:15.5px}
+.catches{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.catch{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px 20px}
+.catch b{display:block;margin-bottom:4px}
+.catch span{color:var(--muted);font-size:15.5px}
+.sources{display:flex;flex-wrap:wrap;gap:10px}
+.sources span,.sources a{text-decoration:none;color:var(--text);border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:9px 16px;font-size:15.5px}
+.sources a.more{border-style:dashed;color:var(--mint)}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:start}
+ul.points{list-style:none;padding:0;margin:0;display:grid;gap:16px}
+ul.points li{padding-left:34px;position:relative;color:var(--muted)}
+ul.points li b{color:var(--text)}
+ul.points li::before{content:"";position:absolute;left:0;top:7px;width:16px;height:16px;border-radius:4px;background:var(--mint);box-shadow:0 0 0 4px #bccba826}
+pre{background:#0d0f11;border:1px solid var(--line);border-radius:16px;padding:22px 24px;overflow:auto;font:15px/1.7 var(--mono);color:var(--cream);margin:0 0 18px}
+pre .c{color:var(--faint)}
+.req{color:var(--faint);font-size:15px}
+.final{text-align:center;padding:96px 0}
+.final img{width:150px;margin-bottom:6px}
+.final .ctas{justify-content:center}
+footer{border-top:1px solid var(--line);padding:32px 0 48px;color:var(--faint);font-size:14.5px}
+footer .wrap{display:flex;gap:24px;flex-wrap:wrap;align-items:center}
+footer .wrap span{margin-right:auto}
+footer a{color:var(--muted);text-decoration:none}
+@media (max-width:900px){
+  .hero{grid-template-columns:1fr;padding-top:56px;gap:24px}
+  .stage{min-height:380px;max-width:420px}
+  .steps{grid-template-columns:1fr 1fr}
+  .catches{grid-template-columns:1fr 1fr}
+  .split{grid-template-columns:1fr}
+  nav a.link{display:none}
+}
+@media (max-width:560px){
+  .steps,.catches{grid-template-columns:1fr}
+  .stage{min-height:500px}
+  .stage .robot{width:200px;right:0;top:0}
+  body{font-size:16px}
+}
+</style>
+</head>
+<body>
+<header><div class="wrap"><nav>
+  <a class="logo" href="#"><img src="assets/wordmark-light.svg" alt="The Machine"></a>
+  <a class="link" href="#how">How it works</a>
+  <a class="link" href="#sources">Sources</a>
+  <a class="link" href="#private">Privacy</a>
+  <a class="btn small ghost" href="https://github.com/JeroenCorthout/TheMachine">GitHub</a>
+</nav></div></header>
+
+<main>
+<div class="wrap hero">
+  <div>
+    <div class="eyebrow">Open source · for OpenClaw</div>
+    <h1>It reads everything.<br><em>It only bothers you when it matters.</em></h1>
+    <p class="lede">The Machine reads your email, calendar, chats and phone notifications, finds the few things that actually need you, and sends them to Telegram as short cards. Tap <b>Do it</b> and your own agent carries the task out.</p>
+    <div class="ctas">
+      <a class="btn primary" href="https://github.com/JeroenCorthout/TheMachine#quick-start">Get started</a>
+      <a class="btn ghost" href="#how">See how it works</a>
+    </div>
+    <div class="tags"><span>Self-hosted</span><span>Your own model</span><span>MIT licensed</span></div>
+  </div>
+  <div class="stage" aria-hidden="true">
+    <img class="robot" src="assets/the-machine.webp" alt="">
+    <div class="card">
+      <div class="from"><img src="assets/favicon.png" alt="">The Machine</div>
+      <b class="t">Follow up with Alex about pricing</b>
+      <p>Alex asked about the annual plan on Tuesday and hasn’t had a reply. Their trial ends <strong>Friday</strong>. I can draft a short answer with the numbers.</p>
+      <div class="src">Source: email from Alex · Tue 13 Oct</div>
+      <div class="buttons"><span class="go">Do it</span><span>Change</span><span>Snooze</span><span>Dismiss</span></div>
+    </div>
+  </div>
+</div>
+
+<section id="how"><div class="wrap">
+  <div class="eyebrow">How it works</div>
+  <h2>A colleague who reads the firehose for you</h2>
+  <p class="sub">A small service collects your signals into one private database. Your OpenClaw agent reviews them in the background and only speaks up when something is worth your time.</p>
+  <div class="steps">
+    <div class="step"><img src="assets/thinking.webp" alt=""><div class="n">01 · COLLECT</div><h3>Reads, never writes</h3><p>Incremental, read-only collectors for each account. Everything lands in one SQLite file with full-text search.</p></div>
+    <div class="step"><img src="assets/input.webp" alt=""><div class="n">02 · REVIEW</div><h3>Finds what needs you</h3><p>It checks whether something is already handled, really yours, and worth it before it says anything. Saying nothing is normal.</p></div>
+    <div class="step"><img src="assets/wrench.webp" alt=""><div class="n">03 · DO IT</div><h3>Does the actual work</h3><p>Drafts the reply, makes the fix, does the research, or asks a colleague and waits for their answer. The result lands on the same card.</p></div>
+    <div class="step"><img src="assets/done.webp" alt=""><div class="n">04 · LEARN</div><h3>Gets better with you</h3><p>Dismissals, snoozes and the notes you write steer later reviews. Tell it something once and it remembers.</p></div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <div class="eyebrow">What it catches</div>
+  <h2>The things that fall through the cracks</h2>
+  <p class="sub">Not another notification feed. Each card says what matters and what it can do next, in two or three sentences.</p>
+  <div class="catches">
+    <div class="catch"><b>Questions waiting on you</b><span>A customer asked something days ago and nobody replied yet.</span></div>
+    <div class="catch"><b>Your own promises</b><span>“I’ll send it Friday.” On Friday morning, the draft is ready.</span></div>
+    <div class="catch"><b>Other people’s promises</b><span>The contract that was due yesterday, with a friendly nudge drafted.</span></div>
+    <div class="catch"><b>Emails that slipped</b><span>Your question nobody answered, without flagging your outreach.</span></div>
+    <div class="catch"><b>Deadlines and bills</b><span>An invoice to pay by hand, with the amount, the IBAN and the due date.</span></div>
+    <div class="catch"><b>Things it can fix</b><span>A broken automation or a wrong setting, fixed and tested when you tap Do it.</span></div>
+  </div>
+</div></section>
+
+<section id="sources"><div class="wrap">
+  <div class="eyebrow">Sources</div>
+  <h2>Everywhere work happens</h2>
+  <p class="sub">Each account has its own boundary, so work and personal never mix. A new source is one small Python file.</p>
+  <div class="sources">
+    <span>Gmail</span><span>Google Calendar</span><span>Slack</span><span>WhatsApp</span><span>Android notifications</span><span>GitHub</span><span>Stripe</span><span>RSS</span><span>Salesflare CRM</span><span>OpenClaw Gateway</span>
+    <a class="more" href="https://github.com/JeroenCorthout/TheMachine/blob/main/docs/adding-a-source.md">+ add your own</a>
+  </div>
+</div></section>
+
+<section id="private"><div class="wrap split">
+  <div>
+    <div class="eyebrow">Private by design</div>
+    <h2>Your data stays on your machine</h2>
+    <p class="sub" style="margin-bottom:0">The service has no model of its own. All reading and thinking happens in the OpenClaw agent you already run, with the model provider you chose. Local models work too.</p>
+  </div>
+  <ul class="points">
+    <li><b>One private database.</b> Plain SQLite in your home directory. No cloud, no account, no telemetry.</li>
+    <li><b>Nothing goes out without you.</b> Emails and Slack messages are sent only after you approve that exact draft. A send that might have failed is checked, never repeated.</li>
+    <li><b>Do it means exactly that.</b> Tapping Do it approves what the card offered, and nothing beyond it.</li>
+    <li><b>Dashboard on your tailnet.</b> It only serves your own Tailscale identity. There’s no public endpoint.</li>
+    <li><b>Quiet when you are.</b> Quiet hours at night, work waits for Monday, and one morning digest for everything that can wait.</li>
+  </ul>
+</div></section>
+
+<section id="start"><div class="wrap split">
+  <div>
+    <div class="eyebrow">Get started</div>
+    <h2>Try it on last week first</h2>
+    <p class="sub">The preview has your agent review the last seven days once and shows the cards it would have sent. Nothing is sent and nothing is done in your accounts.</p>
+    <p class="req">Linux with systemd · Python 3.12+ · Node.js 24 or 26 · OpenClaw 2026.10.2+ with its Telegram channel · Tailscale for the dashboard.</p>
+  </div>
+  <div>
+<pre><span class="c"># install next to your OpenClaw workspace</span>
+git clone https://github.com/JeroenCorthout/TheMachine.git \
+  ~/.openclaw/workspace/tools/personal-assistant
+cd ~/.openclaw/workspace/tools/personal-assistant
+./install.sh
+
+<span class="c"># see what it would tell you, without sending anything</span>
+./install.sh --preview
+
+<span class="c"># happy? turn on reviews and Telegram</span>
+./install.sh --activate</pre>
+    <a class="btn ghost" href="https://github.com/JeroenCorthout/TheMachine#readme">Read the full guide</a>
+  </div>
+</div></section>
+
+<section class="final"><div class="wrap">
+  <img src="assets/sleep.webp" alt="">
+  <h2>Let it read. You get on with your day.</h2>
+  <p class="sub" style="margin:0 auto 32px">Early release, for people who already run OpenClaw. Feedback and connectors are very welcome.</p>
+  <div class="ctas"><a class="btn primary" href="https://github.com/JeroenCorthout/TheMachine">Star it on GitHub</a></div>
+</div></section>
+</main>
+
+<footer><div class="wrap">
+  <span>The Machine · MIT licensed · built on <a href="https://docs.openclaw.ai">OpenClaw</a></span>
+  <a href="https://github.com/JeroenCorthout/TheMachine">GitHub</a>
+  <a href="https://github.com/JeroenCorthout/TheMachine/blob/main/SECURITY.md">Security</a>
+  <a href="https://github.com/JeroenCorthout/TheMachine/blob/main/docs/models.md">Models</a>
+</div></footer>
+</body>
+</html>

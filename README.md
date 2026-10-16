@@ -2,7 +2,7 @@
 
 A private, self-hosted assistant inbox for [OpenClaw](https://docs.openclaw.ai). It reads your email, calendar, chat and phone notifications, has your own OpenClaw agent look for what actually needs you, and sends a few short suggestions to Telegram. Tap **Do it** and the agent carries the task out.
 
-**Early release:** intended for a single owner who already uses OpenClaw. Managed installation is Linux-only.
+Website: [themachine.computer](https://themachine.computer). **Early release:** intended for a single owner who already uses OpenClaw. Managed installation is Linux-only.
 
 ## Quick start
 
@@ -57,6 +57,7 @@ Do it → isolated preparation turn of the same agent → result, draft + Send, 
 | `install.sh`, `installer.py` | Install, upgrade and uninstall |
 | `config.example.json` | Every configuration key with example values |
 | `deploy/` | Example systemd units and Caddyfile |
+| `site/` | The project website, [themachine.computer](https://themachine.computer) (GitHub Pages, `.github/workflows/pages.yml`) |
 | `test_*.py`, `test_*.mjs` | Offline tests |
 
 Python's standard library and SQLite are enough: no database server, queue, web framework or extra scheduler. Runtime data lives in `~/.local/share/personal-assistant/`: `config.json`, `events.sqlite`, tokens and receipts.
