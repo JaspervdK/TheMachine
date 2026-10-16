@@ -7,7 +7,7 @@ open https://x.com/login`); add more accounts with X's own account switcher. One
 per X account:
 
     {"id": "me-x", "service": "x", "transport": "x-inbox", "boundary": "work",
-     "handle": "yourhandle", "primary": "yourhandle", "poll_seconds": 900}
+     "handle": "yourhandle", "primary": "yourhandle", "poll_seconds": 3600}
 
 `primary` is the account the browser should normally be on. To read another signed-in account
 x-inbox switches to it and always switches back; since a switch changes the cookies of every
