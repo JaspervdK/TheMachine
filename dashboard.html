@@ -321,6 +321,9 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .wobble{animation:wobble .5s ease-in-out}
 @keyframes wobble{25%{transform:rotate(-9deg) scale(1.06)}60%{transform:rotate(7deg)}}
 .all-clear .play{margin-top:10px}
+.poke{position:relative}#suggestions .all-clear{padding-top:50px}
+.poke-hint{position:absolute;left:50%;translate:-50% 0;bottom:calc(100% + 6px);white-space:nowrap;padding:5px 10px;border-radius:12px;background:var(--surface-2);border:1px solid var(--border-strong);color:var(--cream);font-size:.8rem;font-weight:600;pointer-events:none;animation:poke-hint 3.4s ease forwards}
+@keyframes poke-hint{0%{opacity:0;transform:translateY(6px) scale(.9)}12%,85%{opacity:1;transform:none}100%{opacity:0}}
 #game-dialog{width:min(420px,calc(100vw - 24px))}
 .game-score{margin:0 0 10px;color:var(--muted);font-size:.9rem}.game-score b{color:var(--cream)}
 .game-field{position:relative;height:320px;border-radius:16px;background:var(--sunken);overflow:hidden;touch-action:manipulation;user-select:none;-webkit-user-select:none}
@@ -622,6 +625,11 @@ let pokes=0,pokeLine='',pokeAwake=false,pokeTimer;
 function poke(){if(pokes<POKES.length)pokeLine=POKES[pokes];else{let next;do next=POKE_MORE[Math.floor(Math.random()*POKE_MORE.length)];while(next===pokeLine);pokeLine=next}pokes++;pokeAwake=true;
 const img=$('#suggestions .all-clear img.sleepy'),line=$('#suggestions .poke-line');if(line)line.textContent=pokeLine;if(img){img.src='brand/wave.webp';img.classList.remove('wobble');void img.offsetWidth;img.classList.add('wobble')}
 clearTimeout(pokeTimer);pokeTimer=setTimeout(()=>{pokeAwake=false;pokeLine='';const i=$('#suggestions .all-clear img.sleepy'),l=$('#suggestions .poke-line');if(i)i.src='brand/sleepy.webp';if(l)l.textContent='I’ll add something when it’s useful.'},6000)}
+// Until the first poke, the robot sometimes mumbles a hint, so people find out they can.
+const POKE_HINTS=['Don’t poke the robot.','Please don’t poke me.','Zzz… no poking.'];
+function pokeHint(){const b=$('#suggestions .all-clear .poke');if(!b||pokes||document.hidden||b.querySelector('.poke-hint'))return;
+const h=document.createElement('span');h.className='poke-hint';h.setAttribute('aria-hidden','true');h.textContent=POKE_HINTS[Math.floor(Math.random()*POKE_HINTS.length)];b.append(h);setTimeout(()=>h.remove(),3400)}
+setTimeout(pokeHint,4000);setInterval(()=>{if(Math.random()<.4)pokeHint()},25000);
 let game=null;
 const zzzBest=()=>+localStorage.getItem('zzz-best')||0;
 function openGame(){stopGame();$('#game-field').querySelectorAll('.zz').forEach(z=>z.remove());$('#game-best').textContent=zzzBest();$('#game-score').textContent=0;$('#game-time').textContent=20;$('#game-bot').src='brand/sleepy.webp';
