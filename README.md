@@ -18,7 +18,7 @@ Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Req
 
 ## What it does
 
-- **Collects** signals from Gmail, Google Calendar, Slack, the Salesflare CRM, Android notifications (through the OpenClaw node app), WhatsApp (through a local `wacli` store) and the OpenClaw Gateway's own failures, plus GitHub, Stripe and RSS through [connector plugins](docs/adding-a-source.md). Collection is incremental and read-only by default; everything goes into one private SQLite database with full-text search.
+- **Collects** signals from Gmail, Google Calendar, Slack, the Salesflare CRM, Android notifications (through the OpenClaw node app), WhatsApp (through a local `wacli` store) and the OpenClaw Gateway's own failures, plus GitHub, Stripe, X and RSS through [connector plugins](docs/adding-a-source.md). Collection is incremental and read-only by default; everything goes into one private SQLite database with full-text search.
 - **Reviews** waiting signals in isolated turns of your existing OpenClaw main agent. The agent saves a suggestion only when something is worth your time: an unanswered request, a deadline, a problem it can fix, or an email of yours that slipped.
 - **Delivers** suggestions as Telegram cards through your existing OpenClaw bot, with a phone-friendly dashboard (installable as an app, with optional push notifications) on your tailnet.
 - **Acts** when you tap **Do it**: the agent drafts the email or Slack message (with a Send button), makes the fix, does the research, or hands the task to a colleague and waits for their reply, and reports back on the same card. **Change** lets you reply with instructions; **Snooze**, **Dismiss** and **Mark done** work as you'd expect, and your choices steer later reviews.
@@ -28,7 +28,7 @@ The service itself contains no model. All interpretation happens in your OpenCla
 ## Architecture
 
 ```text
-Gmail · Calendar · Slack · CRM · Android notifications · WhatsApp · OpenClaw Gateway · plugins (GitHub, Stripe, RSS)
+Gmail · Calendar · Slack · CRM · Android notifications · WhatsApp · OpenClaw Gateway · plugins (GitHub, Stripe, X, RSS)
                 │  (read-only collectors, one thread and checkpoint per account)
                 ▼
 assistant.py (systemd user service) → private SQLite + full-text search, local API on 127.0.0.1
@@ -78,6 +78,7 @@ Python's standard library and SQLite are enough: no database server, queue, web 
   - **Caddy** only to serve the dashboard on a custom domain (`deploy/Caddyfile`).
   - `wacli` for WhatsApp; a Maton connection for Slack (allowed to post as you, to send Slack messages); a Salesflare API key.
   - The `gh` CLI logged in as you for GitHub; a restricted read-only key (or a Maton connection) for Stripe.
+  - For X: your X accounts signed in to the OpenClaw browser (profile `openclaw`).
   - The OpenClaw Android app paired as a node for phone notifications.
 
 ## Install
@@ -190,6 +191,7 @@ Plugin accounts aren't set up by the installer: add them to `accounts` by hand, 
 - **OpenClaw Gateway:** failed agent runs on Telegram, refused hand-offs and failed Telegram sends, grouped per half hour with secrets redacted.
 - **GitHub:** notifications on threads you take part in (review requests, mentions, assignments, comments, threads you opened), each with the issue or PR and its latest comment. GET requests only; nothing is marked read. Each run checks that `gh` is logged in as `login`. Optional failed workflow runs per repository.
 - **Stripe:** only events worth a look are stored: failed payments, disputes, ended subscriptions, scheduled cancellations, past due or unpaid, and new subscriptions of at least `large_subscription_monthly` a month. GET on the account, events and customers only; it never refunds, retries or changes anything. Each run checks the key belongs to `stripe_account`. For a direct key, create a restricted key with read access to Events, Customers and Account.
+- **X:** replies, mentions and the DM inbox for each X account signed in to the OpenClaw browser (`connectors/x.py` with `integrations/x_inbox.py`), read through X's own web API from a background tab, so nothing is marked seen. Several accounts can share the browser through X's account switcher: x-inbox switches to the one it reads and always back to `primary`, one run at a time, and only while no other job holds the browser lease. Encrypted X Chat isn't read. No API key needed.
 - **RSS/Atom:** the example plugin; see [Adding a source](docs/adding-a-source.md).
 
 ## Reviews

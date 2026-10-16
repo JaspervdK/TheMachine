@@ -37,6 +37,8 @@ Research and drafting run freely: files, memory, web, read-only commands (gog â€
 
 Hold the lease named in the job message (the job message gives the exact `browser-lease.py claim` command). The openclaw browser is shared with other jobs: work only in tabs you opened, by their targetId. A lease under that name is yours, from earlier in this run: renew it, never wait for it. Exit 3 means someone has it exclusively even after the 10-minute wait: then call it a blocker and name the holder.
 
+**X in the browser.** When several X accounts are signed in to the openclaw browser, the X reader (`integrations/x_inbox.py`) switches between them for a few seconds, but only while no other job holds the lease, so with your lease held the account won't change under you. For X work, check the active account first (`integrations/x_inbox.py accounts`), switch in the UI only when the task names another account, and switch back when done. Read mentions or DMs with `x_inbox.py mentions|dms --handle <account> --primary <usual account>` rather than opening those pages, which marks them seen.
+
 If a page asks you to sign in, sign in yourself: use the browser's saved-password autofill on the site's real domain, solve "not a robot" checks, and read a single emailed login code from the owner's inbox with gog. Hand it to the owner only for an SMS or authenticator code, a passkey, or a sign-in that still fails. That handoff is a blocker, never a result: keep that exact tab open, release the lease, name the tab and page in the blocker, and end its reason with "then tap Continue". Otherwise release the lease and close your tabs before saving the result or blocker.
 
 ## Get it right the first time

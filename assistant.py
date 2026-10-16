@@ -2034,7 +2034,7 @@ class Store:
     def conversation_context(self, rows, limit=4, hours=48):
         """Up to four earlier messages from the same chat for each Slack/WhatsApp signal, so a
         short reply ("let me check") is reviewed with what it answers."""
-        keys = {'slack.message': 'channel_id', 'whatsapp.message': 'chat_id'}
+        keys = {'slack.message': 'channel_id', 'whatsapp.message': 'chat_id', 'x.dm': 'conversation_id', 'x.mention': 'conversation_id'}
         context = {}
         with self.connect() as db:
             for row in rows:
@@ -3541,7 +3541,7 @@ def sync_source(store, config, account):
 # optional KINDS {kind: label}. Loaded by validated name only. See docs/adding-a-source.md.
 CONNECTORS = ROOT / 'connectors'
 CONNECTOR_HELPERS = types.SimpleNamespace(
-    SourceError=SourceError, now=lambda: now(), credential=lambda config, name: credential(config, name),
+    SourceError=SourceError, now=lambda: now(), credential=lambda config, name: credential(config, name), local_tz=lambda: local_tz(),
     iso=lambda stamp: dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat())
 _connectors = {}
 
@@ -3582,8 +3582,8 @@ def awaiting_key(event, owner_slack_ids=()):
         return {**key, 'thread_id': m.get('thread_id'), 'from': _address(m.get('from'))}
     if event['kind'] == 'slack.message' and m.get('user_id') and m['user_id'] not in owner_slack_ids:
         return {**key, 'channel_id': m.get('channel_id'), 'user_id': m['user_id']}
-    if event['kind'] == 'whatsapp.message' and not m.get('from_me') and m.get('chat_id'):
-        return {**key, 'conversation': m['chat_id'], 'sender': m.get('sender_id') or m.get('from') or ''}
+    if event['kind'] in ('whatsapp.message', 'x.dm') and not m.get('from_me') and (m.get('chat_id') or m.get('conversation_id')):
+        return {**key, 'conversation': m.get('chat_id') or m['conversation_id'], 'sender': m.get('sender_id') or m.get('from') or ''}
     return None
 
 
@@ -3596,7 +3596,7 @@ def awaiting_match(watch, event, owner_slack_ids=()):
         return 'SENT' not in m.get('labels', []) and (m.get('thread_id') == watch.get('thread_id') or _address(m.get('from')) == watch['from'])
     if watch['kind'] == 'slack.message':
         return m.get('channel_id') == watch['channel_id'] and m.get('user_id') == watch['user_id']
-    if m.get('from_me') or m.get('chat_id') != watch['conversation']:
+    if m.get('from_me') or (m.get('chat_id') or m.get('conversation_id')) != watch['conversation']:
         return False
     # In a group chat only the person who promised counts.
     return not watch['sender'] or (m.get('sender_id') or m.get('from') or '') == watch['sender']

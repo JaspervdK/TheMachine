@@ -4,7 +4,7 @@ A source (connector) reads one account of one service and stores what it finds a
 
 There are two ways to add one:
 
-- **A connector plugin**: one Python file in `connectors/`, named after its service. No changes to `assistant.py`. This is the way for most sources. [`connectors/rss.py`](../connectors/rss.py) is a complete example; [`github.py`](../connectors/github.py) (a CLI) and [`stripe.py`](../connectors/stripe.py) (an API with a key, filtering what's worth storing) are two more.
+- **A connector plugin**: one Python file in `connectors/`, named after its service. No changes to `assistant.py`. This is the way for most sources. [`connectors/rss.py`](../connectors/rss.py) is a complete example; [`github.py`](../connectors/github.py) (a CLI) and [`stripe.py`](../connectors/stripe.py) (an API with a key, filtering what's worth storing) are two more, and [`x.py`](../connectors/x.py) reads through the signed-in OpenClaw browser.
 - **A built-in source**: a branch in `sync_source` in `assistant.py`, for sources that need deeper integration (realtime threads, special review handling).
 
 This guide covers the plugin.
@@ -40,6 +40,7 @@ The service calls `sync` every `poll_seconds` (default 300) in the account's own
 | `helpers.SourceError(category, status=None, retry_after=None)` | Raise on any failure. `category` is a short label like `rss_http`; it's shown on the dashboard, so never put message content or secrets in it. `retry_after` (seconds) delays the next try. |
 | `helpers.iso(timestamp)` | A Unix timestamp as the UTC ISO string `occurred_at` expects. |
 | `helpers.now()` | The current time as that string. |
+| `helpers.local_tz()` | The owner's time zone (config `timezone`), for things like active hours. |
 | `helpers.credential(config, name)` | The secret named `name` in `config['credentials']` (or systemd's `LoadCredential`), as text. Use it for API keys instead of reading files yourself. |
 
 ## 3. Events
