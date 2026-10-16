@@ -49,7 +49,7 @@ class ConnectorPlugins(unittest.TestCase):
         self.assertEqual([r['title'] for r in rows], ['Release 1.0', 'Release 2.0'])
         self.assertEqual(rows[1]['body'], 'New things')
         self.assertEqual(rows[1]['occurred_at'], '2026-10-14T07:00:00+00:00')
-        self.assertEqual(json.loads(rows[1]['metadata'])['url'], 'https://example.com/2')
+        self.assertEqual(json.loads(rows[1]['metadata'])['source_url'], 'https://example.com/2')
         self.assertEqual(self.store.checkpoint('work-feed')['etag'], '"v1"')
         with patch('urllib.request.urlopen', return_value=Response(RSS)):
             a.sync_source(self.store, {}, FEED)

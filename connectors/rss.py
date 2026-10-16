@@ -73,7 +73,7 @@ def item_event(account, node, helpers):
             'occurred_at': helpers.iso(stamp),
             'title': title[:1000],
             'body': re.sub(r'\s+', ' ', body).strip()[:40000],
-            'metadata': {'url': link, 'feed': account['url'], 'guid': guid},
+            'metadata': {'source_url': link, 'feed': account['url'], 'guid': guid},
             'deleted': False}
 
 

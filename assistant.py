@@ -3434,7 +3434,7 @@ def sync_source(store, config, account):
 # optional KINDS {kind: label}. Loaded by validated name only. See docs/adding-a-source.md.
 CONNECTORS = ROOT / 'connectors'
 CONNECTOR_HELPERS = types.SimpleNamespace(
-    SourceError=SourceError, now=lambda: now(),
+    SourceError=SourceError, now=lambda: now(), credential=lambda config, name: credential(config, name),
     iso=lambda stamp: dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat())
 _connectors = {}
 

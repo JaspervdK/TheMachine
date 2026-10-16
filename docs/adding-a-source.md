@@ -4,7 +4,7 @@ A source (connector) reads one account of one service and stores what it finds a
 
 There are two ways to add one:
 
-- **A connector plugin**: one Python file in `connectors/`, named after its service. No changes to `assistant.py`. This is the way for most sources. [`connectors/rss.py`](../connectors/rss.py) is a complete example.
+- **A connector plugin**: one Python file in `connectors/`, named after its service. No changes to `assistant.py`. This is the way for most sources. [`connectors/rss.py`](../connectors/rss.py) is a complete example; [`github.py`](../connectors/github.py) (a CLI) and [`stripe.py`](../connectors/stripe.py) (an API with a key, filtering what's worth storing) are two more.
 - **A built-in source**: a branch in `sync_source` in `assistant.py`, for sources that need deeper integration (realtime threads, special review handling).
 
 This guide covers the plugin.
@@ -19,7 +19,7 @@ This guide covers the plugin.
 - `id` is the account's own ID. Its checkpoint, health and events are keyed by it.
 - `service` picks the connector: `rss` loads `connectors/rss.py`.
 - `boundary` (`work` or `personal`) keeps signals apart in reviews and on the dashboard.
-- Any other keys (`url` here) are yours to read in the connector. Keep secrets out of `config.json`: read them from a file under the data directory or from the environment, and document which.
+- Any other keys (`url` here) are yours to read in the connector. Keep secrets out of `config.json`: name a credential (`"credential": "stripe"`) and read it with `helpers.credential`.
 
 ## 2. The module
 
@@ -40,6 +40,7 @@ The service calls `sync` every `poll_seconds` (default 300) in the account's own
 | `helpers.SourceError(category, status=None, retry_after=None)` | Raise on any failure. `category` is a short label like `rss_http`; it's shown on the dashboard, so never put message content or secrets in it. `retry_after` (seconds) delays the next try. |
 | `helpers.iso(timestamp)` | A Unix timestamp as the UTC ISO string `occurred_at` expects. |
 | `helpers.now()` | The current time as that string. |
+| `helpers.credential(config, name)` | The secret named `name` in `config['credentials']` (or systemd's `LoadCredential`), as text. Use it for API keys instead of reading files yourself. |
 
 ## 3. Events
 
@@ -53,7 +54,7 @@ Each event is a dict with exactly these fields:
 | `occurred_at` | When it happened, UTC ISO. |
 | `title` | A short line (max 1000 chars): subject, chat name, item title. |
 | `body` | The text (max 40000 chars). Plain text; strip HTML. Omit one-time codes and passwords. |
-| `metadata` | JSON with what reviews need: `url` (a link to open the original, shown as Open), sender, thread or conversation IDs, `from_me` for the owner's own messages. |
+| `metadata` | JSON with what reviews need: `source_url` (an https link to open the original, shown as Open), sender, thread or conversation IDs, `from_me` for the owner's own messages. |
 | `deleted` | `True` when the item was removed at the source. |
 
 When an item changes, send it again with the same `source_id`: the service stores a new version and reviews see it again. Unchanged items are skipped by content hash, so rereading is cheap and safe.

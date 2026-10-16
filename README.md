@@ -173,6 +173,9 @@ Collectors read existing source content. The optional Salesflare `join_pipelines
 | `android` | OpenClaw Android app paired as a node | `transport: openclaw-feed`, `node_id`, `reconcile_seconds`, `direct_fallback`, `fallback_seconds` |
 | `whatsapp` | `wacli` with a synced local store | `store`, `identity_sha256` (sha256 of the linked JID; the collector refuses a different account) |
 | `gateway` | journald | `unit` (default `openclaw-gateway.service`), `bootstrap_hours` |
+| `github` (plugin) | `gh` CLI logged in as you | `login`, `repos` (optional filter), `ci_repos` + `ci_branch` (failed runs) |
+| `stripe` (plugin) | A restricted read-only Stripe key, or a Maton Stripe connection | `transport` (`api` or `maton`), `credential` (+ `credential_variable`, `connection_id` for Maton), `stripe_account`, `large_subscription_monthly` (500) |
+| `rss` (plugin) | — | `url` |
 
 - **Gmail:** follows Gmail history after a seven-day import; replays the retained window when history expires. Replies keep their new text whole and only 3,000 characters of quoted history. Sending approved drafts and snoozing threads use separate workers and only scopes already granted.
 - **Calendar:** seven past and thirty future days, recurring events expanded, incremental sync token with a daily full refresh. A missing event is "unavailable", not "cancelled". Context for email and preparation, not a reminder feed.
@@ -181,6 +184,9 @@ Collectors read existing source content. The optional Salesflare `join_pipelines
 - **Android:** the plugin peeks OpenClaw's event queue for notifications from your phone node, with periodic direct reads to catch gaps. Repeated updates merge into one episode; one-time codes are omitted. Not a complete history.
 - **WhatsApp:** reads your existing `wacli` store (`auth status`, `messages list` only), rereading the last seven days.
 - **OpenClaw Gateway:** failed agent runs on Telegram, refused hand-offs and failed Telegram sends, grouped per half hour with secrets redacted.
+- **GitHub:** notifications on threads you take part in (review requests, mentions, assignments, comments, threads you opened), each with the issue or PR and its latest comment. GET requests only; nothing is marked read. Each run checks that `gh` is logged in as `login`. Optional failed workflow runs per repository.
+- **Stripe:** only events worth a look are stored: failed payments, disputes, ended subscriptions, scheduled cancellations, past due or unpaid, and new subscriptions of at least `large_subscription_monthly` a month. GET on the account, events and customers only; it never refunds, retries or changes anything. Each run checks the key belongs to `stripe_account`. For a direct key, create a restricted key with read access to Events, Customers and Account.
+- **RSS/Atom:** the example plugin; see [Adding a source](docs/adding-a-source.md).
 
 ## Reviews
 
