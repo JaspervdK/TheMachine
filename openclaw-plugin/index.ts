@@ -12,7 +12,7 @@ const button = (id: string, text: string, choice: string) => ({ text,
   callback_data: buildCallback(`assistant:${id}:${choice}`) });
 const taskActions=(item:any)=>{
  const choices=item.next_actions||(item.next_action?.kind==='menu'?item.next_action.actions:item.next_action?[item.next_action]:[]);
- const emailReady=choices.some((a:any)=>['email','email_demo'].includes(a.kind));
+ const emailReady=choices.some((a:any)=>['email','email_demo','slack'].includes(a.kind));
  return choices.filter((a:any)=>a.kind!=='prepare'||(!emailReady&&!/^Draft (shorter|longer|another|alternative|follow-up)\b/i.test(a.label||'')));
 };
 const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action']);
@@ -29,13 +29,23 @@ function cardButtons(item: any) {
     : ['accepted', 'prepared', 'instructions'].includes(item.status)
       ? [...(item.preparation_status==='blocked' ? [[retryLabel(item.preparation_reason),'retry']] : []),['Mark done', 'complete'], ['Snooze', 'snooze'], ['Change', 'other'], ['Not needed', 'reject']]
       : [['Do it', 'accept'], ['Mark done', 'complete'], ['Snooze', 'snooze'], ['Change', 'other'], ['Not needed', 'reject']];
-  const rows=[];
+  const buttons:any[]=[];
   if(item.status==='prepared')for(const action of taskActions(item)){
-    if(action.kind==='open')rows.push([{text:action.label,url:action.url}]);
-    else if(['email','email_demo','prepare'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation'].includes((action.state||item.action_status)?.status))
-      rows.push([button(item.id,action.label||(action.kind==='prepare'?'Prepare next step':'Send'),(action.kind==='prepare'?'next_':'send_')+action.revision)]);
+    if(action.kind==='open')buttons.push({text:action.label,url:action.url});
+    else if(['email','email_demo','slack','prepare'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation'].includes((action.state||item.action_status)?.status))
+      buttons.push(button(item.id,action.label||(action.kind==='prepare'?'Prepare next step':'Send'),(action.kind==='prepare'?'next_':'send_')+action.revision));
   }
-  for(let i=0;i<choices.length;i+=3)rows.push(choices.slice(i,i+3).map(([text,choice])=>button(item.id,text,choice)));
+  return packRows([...buttons,...choices.map(([text,choice])=>button(item.id,text,choice))]);
+}
+
+// Fewer rows: fill each row with up to three buttons that fit a phone's width, in order, so a
+// Send shares its row with Mark done. Same rule as controls() in assistant.py.
+function packRows(buttons:any[]){
+  const rows:any[][]=[];let width=0;
+  for(const b of buttons){
+    const w=b.text.length+2,last=rows.at(-1);
+    if(last&&last.length<3&&width+w<=32){last.push(b);width+=w}else{rows.push([b]);width=w}
+  }
   return rows;
 }
 
@@ -43,6 +53,10 @@ function sendReview(item:any,draft:any,dashboardBase=''){
  // Edit opens the same draft in the dashboard editor; Send then sends exactly the edited text.
  const edit=dashboardBase?[{text:'Edit',url:`${dashboardBase}#send=${item.id}&revision=${draft.revision}&edit=1`}]:[];
  const demo=draft.kind==='email_demo';
+ // Handing it to someone: say the card waits for their reply.
+ const waits=draft.delegate?[`After sending, this card waits ${draft.wait_days} day${draft.wait_days>1?'s':''} for ${draft.to_name?draft.to_name+'’s':'a'} reply; it closes when they answer.`]:[];
+ if(draft.kind==='slack')return {text:['Send this Slack message?',`To: ${draft.to_name}${draft.to_email?` (${draft.to_email})`:''}`,'',draft.body,...(waits.length?['',...waits]:[])].join('\n'),
+   buttons:[[button(item.id,'Send now','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')]]};
  // No verified recipient: one Send button per address the service found in the thread.
  const options:string[]=draft.to_options||[];
  const lines=[demo?'Demo email preview · nothing will be sent':options.length?'Who should get this email?':`Send this email?`,`From: ${draft.from}`,`To: ${options.length?'you choose below':draft.to.join(', ')}`];
@@ -51,6 +65,7 @@ function sendReview(item:any,draft:any,dashboardBase=''){
  if(draft.signature)lines.push('','+ your Gmail signature');
  if(draft.attachments?.length)lines.push('',`Attachments: ${draft.attachments.map((a:any)=>`${a.name} (${a.size<1024?a.size+' B':a.size<1048576?Math.round(a.size/1024)+' KB':(a.size/1048576).toFixed(1)+' MB'})`).join(', ')}`);
  if(draft.snooze_days)lines.push(`After sending, the thread leaves your inbox for ${draft.snooze_days} day${draft.snooze_days>1?'s':''} (a weekday morning; a reply brings it back sooner).`);
+ lines.push(...waits);
  if(options.length)return {text:lines.join('\n'),buttons:[...options.slice(0,4).map((address,i)=>[button(item.id,`Send to ${address}`.slice(0,60),`confirm_${draft.revision}_${i}`)]),
    [...(options.length>1&&dashboardBase?[{text:'Choose several',url:`${dashboardBase}#send=${item.id}&revision=${draft.revision}`}]:[]),...edit,button(item.id,'Cancel','back')]]};
  return {text:lines.join('\n'),buttons:[demo?[button(item.id,'Back','back')]:[button(item.id,'Send now','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')]]};
@@ -150,10 +165,10 @@ export default definePluginEntry({
         }
         if(choice.startsWith('send_')||choice.startsWith('confirm_')||choice.startsWith('next_')){
           const [,revision,pick]=choice.split('_'),draft=taskActions(item).find((a:any)=>a.revision===revision);
-          if(item.status!=='prepared'||!draft||!['email','email_demo','prepare'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation'].includes((draft.state||item.action_status)?.status)){
+          if(item.status!=='prepared'||!draft||!['email','email_demo','slack','prepare'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation'].includes((draft.state||item.action_status)?.status)){
             await ctx.respond.editButtons({buttons:cardButtons(item)});return {handled:true};
           }
-          if((choice.startsWith('next_')&&draft.kind!=='prepare')||(choice.startsWith('confirm_')&&draft.kind!=='email')||(choice.startsWith('send_')&&!['email','email_demo'].includes(draft.kind)))return {handled:true};
+          if((choice.startsWith('next_')&&draft.kind!=='prepare')||(choice.startsWith('confirm_')&&!['email','slack'].includes(draft.kind))||(choice.startsWith('send_')&&!['email','email_demo','slack'].includes(draft.kind)))return {handled:true};
           if(choice.startsWith('send_')){
             if(sendReview(item,draft,`https://${config.dashboard_host}${config.dashboard_path||'/'}`).text.length>3200){
               await ctx.respond.editButtons({buttons:[[{text:'Review and send',url:`https://${config.dashboard_host}${config.dashboard_path||'/'}#send=${id}&revision=${revision}`},button(id,'Cancel','back')]]});
@@ -174,7 +189,7 @@ export default definePluginEntry({
         if ((closed && choice!=='undo') ||
             (choice==='undo' && (!closed || !item.undo_until || Date.parse(item.undo_until)<=Date.now())) ||
             (choice==='retry' && (item.preparation_status!=='blocked' || !['accepted','instructions'].includes(item.status))) ||
-            (choice==='complete' && !['accepted','prepared','instructions'].includes(item.status))) {
+            (choice==='complete' && !['pending','accepted','prepared','instructions','snoozed'].includes(item.status))) {
           await ctx.respond.editButtons({buttons:cardButtons(item)});
           return {handled:true};
         }

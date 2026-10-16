@@ -67,6 +67,14 @@ delete item.next_actions;
 item.next_action={kind:'email_demo',label:'Send',revision:'abcdef123456',from:'the-machine@example.invalid',to:['alex@example.invalid'],subject:'Demo reply',body:'Thanks for the proposal.'};
 await handler(ctx('send_abcdef123456'));const demoPreview=edits.pop();assert.match(demoPreview.text,/nothing will be sent/);assert.deepEqual(demoPreview.buttons.flat().map(b=>b.text),['Back']);
 const demoChoices=choices.length;await handler(ctx('confirm_abcdef123456'));assert.equal(choices.length,demoChoices);delete item.next_action;
+// Handing it to a colleague on Slack: the Send shares a row with Mark done, and the preview says the card waits.
+item.status='prepared';item.next_action={kind:'slack',label:'Send to Sam',revision:'abcdef123456',account_id:'slack',to_email:'sam@example.com',to_name:'Sam',body:'Could you check the invoice?',delegate:true,wait_days:3};
+await handler(ctx('back'));assert.deepEqual(edits.pop().buttons.map(row=>row.map(b=>b.text)),[['Send to Sam','Mark done','Snooze'],['Change','Not needed']]);
+{const before=choices.length;await handler(ctx('send_abcdef123456'));const r=edits.pop();
+ assert.equal(r.text,'Send this Slack message?\nTo: Sam (sam@example.com)\n\nCould you check the invoice?\n\nAfter sending, this card waits 3 days for Sam’s reply; it closes when they answer.');
+ assert.deepEqual(r.buttons.flat().map(b=>b.text).filter(t=>t!=='Edit'),['Send now','Cancel']);assert.equal(choices.length,before);
+ await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');edits.pop();}
+item.status='pending';await handler(ctx('back'));assert.deepEqual(edits.pop().buttons.map(row=>row.map(b=>b.text)),[['Do it','Mark done','Snooze'],['Change','Not needed']]);
 delete item.next_action;
 item.status='pending';await handler(ctx('reject'));assert.equal(choices.length,0);assert.deepEqual(edits.pop().buttons.flat().map(b=>b.text),['Not relevant','Wrong facts','Other reason…','No reason','Cancel']);
 await handler(ctx('dismiss_handled'));{const d=choices.pop();assert.equal(d.choice,'reject');assert.equal(d.feedback,'Already handled');}
@@ -76,7 +84,9 @@ item.status='pending';item.snooze_choices=[['2h','2 hours'],['tomorrow','Monday 
 const countBeforeStale=choices.length;
 item.status='instructions';await handler(ctx('undo'));assert.equal(choices.length,countBeforeStale);assert.equal(edits.pop().buttons.flat().at(-1).text,'Not needed');
 item.status='completed';item.undo_until=new Date(Date.now()-1000).toISOString();await handler(ctx('undo'));assert.equal(choices.length,countBeforeStale);assert.deepEqual(edits.pop().buttons,[]);
-item.status='pending';await handler(ctx('complete'));await handler(ctx('retry'));assert.equal(choices.length,countBeforeStale);
+item.status='pending';await handler(ctx('retry'));assert.equal(choices.length,countBeforeStale);
+// Mark done works on a new card too: it was already handled without Do it.
+await handler(ctx('complete'));assert.equal(choices.pop().choice,'complete');assert.equal(choices.length,countBeforeStale);
 const savedCall=globalThis.fixtureCall;globalThis.fixtureCall=async(action,args)=>{if(action==='decide')throw Object.assign(new Error('A newer decision replaced this action'),{status:400});return savedCall(action,args)};
 item.status='completed';item.undo_until=new Date(Date.now()+300000).toISOString();await handler(ctx('undo'));assert.equal(choices.length,countBeforeStale);assert.equal(edits.pop().buttons.flat()[0].text,'Undo');
 globalThis.fixtureCall=async(action,args)=>{if(action==='decide')throw Object.assign(new Error('Server unavailable'),{status:503});return savedCall(action,args)};

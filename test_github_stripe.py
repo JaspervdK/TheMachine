@@ -156,10 +156,10 @@ class Stripe(Base):
         self.assertEqual(str(caught.exception), 'connection_identity_mismatch')
         # A restricted key straight to Stripe: same reads, no Maton header to check.
         direct = stripe.Source({}, {**STRIPE, 'transport': 'api', 'credential_variable': None}, H)
-        with patch.object(a, 'credential', return_value='rk_live_secret'), patch('urllib.request.urlopen', opener(None)):
+        with patch.object(a, 'credential', return_value='restricted-key'), patch('urllib.request.urlopen', opener(None)):
             self.assertEqual(direct.get('v1/account'), {'id': 'acct_1'})
         self.assertEqual(seen[-1].full_url, 'https://api.stripe.com/v1/account')
-        self.assertEqual(seen[-1].get_header('Authorization'), 'Bearer rk_live_secret')
+        self.assertEqual(seen[-1].get_header('Authorization'), 'Bearer restricted-key')
         self.assertIsNone(seen[-1].get_header('Maton-connection'))
 
 

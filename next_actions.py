@@ -83,7 +83,8 @@ def attachment_bytes(record, config):
 
 
 # Owner-approved sends: each needs the Send review and Send now (Telegram) or the dashboard dialog.
-SEND_KINDS = ('email', 'email_demo')
+SEND_KINDS = ('email', 'email_demo', 'slack')
+TEXT_KINDS = ('slack',)  # a message without a subject
 
 
 def canonical(value):
@@ -107,11 +108,36 @@ def visible_actions(value):
 
 
 def label(value):
-    return value.get('label') or {'email':'Send','email_demo':'Send','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
+    return value.get('label') or {'email':'Send','email_demo':'Send','slack':'Send','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
 
 
 def preview(value):
+    if value['kind'] == 'slack':
+        return 'Slack message to ' + value['to_name'] + (' (' + value['to_email'] + ')' if value.get('to_email') else '') + '\n\n' + value['body'] + delegate_note(value)
     return email_preview(value) if value['kind'] in ('email','email_demo') else value['instructions']
+
+
+def delegate_note(action):
+    if not action.get('delegate'):
+        return ''
+    return f"\n\nAfter sending, the card waits {action['wait_days']} day{'s' if action['wait_days'] > 1 else ''} for {action['to_name'] + '’s' if action.get('to_name') else 'a'} reply; it closes when they answer."
+
+
+def delegation(value, result, name=None):
+    """Hand the task to someone: after the send, the card waits for their reply and closes when
+    they answer; without one it comes back after wait_days."""
+    if 'wait_days' in value and not value.get('delegate'):
+        raise ValueError('wait_days goes with delegate:true')
+    if not value.get('delegate'):
+        return
+    if value['delegate'] is not True:
+        raise ValueError('delegate is true or left out')
+    days = value.get('wait_days', 3)
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 14:
+        raise ValueError('wait_days is a whole number of days from 1 to 14')
+    result.update(delegate=True, wait_days=days)
+    if name:
+        result['to_name'] = name
 
 
 def validate(value, config, allowed_accounts, recipient_options=None):
@@ -159,7 +185,8 @@ def validate(value, config, allowed_accounts, recipient_options=None):
         result={'kind':'email_demo','label':'Send','from':'the-machine@example.invalid',
                 'to':['alex@example.invalid'],'cc':[],'bcc':[],'subject':value['subject'],'body':value['body']}
     elif value.get('kind') == 'email':
-        fields = {'kind', 'label','account_id', 'to', 'cc', 'bcc', 'subject', 'body', 'thread_id', 'in_reply_to', 'references', 'signature', 'snooze_days', 'attachments'}
+        fields = {'kind', 'label','account_id', 'to', 'cc', 'bcc', 'subject', 'body', 'thread_id', 'in_reply_to', 'references', 'signature', 'snooze_days', 'attachments',
+                  'delegate', 'wait_days', 'to_name'}
         if set(value) - fields:
             raise ValueError('Unsupported email fields')
         if not isinstance(value.get('signature', True), bool):
@@ -214,8 +241,49 @@ def validate(value, config, allowed_accounts, recipient_options=None):
         if days:
             # After sending, the thread leaves the inbox until then; a reply brings it back sooner.
             result['snooze_days'] = days
+        if value.get('delegate') and len(result['to']) != 1:
+            raise ValueError('Hand a task to one person: delegate needs exactly one To address')
+        if 'to_name' in value and not value.get('delegate'):
+            raise ValueError('to_name goes with delegate:true')
+        name = value.get('to_name')
+        if name is not None and (not isinstance(name, str) or not 1 <= len(name.strip()) <= 100 or '\n' in name):
+            raise ValueError('to_name is the person’s name')
+        delegation(value, result, name and name.strip())
+    elif value.get('kind') == 'slack':
+        # A Slack direct message from the owner's own Slack account, mostly to hand a task to a
+        # colleague. Any Slack account in the task's boundary; sent only after the owner's Send now.
+        if set(value) - {'kind', 'label', 'account_id', 'user_id', 'to_email', 'to_name', 'body', 'delegate', 'wait_days'}:
+            raise ValueError('Unsupported Slack message fields')
+        boundaries = {a.get('boundary') for a in config['accounts'] if a['id'] in allowed_accounts}
+        account = next((a for a in config['accounts'] if a['id'] == value.get('account_id') and a.get('service') == 'slack'), None)
+        if not account or (account['id'] not in allowed_accounts and account.get('boundary') not in boundaries):
+            raise ValueError('Use the Slack account of this task’s company')
+        result = {'kind': 'slack', 'account_id': account['id']}
+        if value.get('label'):
+            if value['label'] != 'Send' and not value['label'].startswith('Send '):
+                raise ValueError('Slack button labels must say Send, such as Send to Sam')
+            result['label'] = value['label']
+        if bool(value.get('user_id')) == bool(value.get('to_email')):
+            raise ValueError('A Slack message needs either the person’s Slack user_id (from a Slack signal) or their work email as to_email')
+        if value.get('user_id'):
+            if not isinstance(value['user_id'], str) or not re.fullmatch(r'[UW][A-Z0-9]{6,20}', value['user_id']):
+                raise ValueError('user_id is a Slack user ID such as U012ABC34')
+            result['user_id'] = value['user_id']
+        else:
+            if not isinstance(value['to_email'], str) or len(value['to_email']) > 254 or not re.fullmatch(r'[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+', value['to_email']):
+                raise ValueError('to_email is one email address')
+            result['to_email'] = value['to_email'].lower()
+        name = value.get('to_name')
+        if not isinstance(name, str) or not 2 <= len(name.strip()) <= 100 or '\n' in name:
+            raise ValueError('Give to_name: the person’s name as shown in Slack; the send checks it')
+        result['to_name'] = name.strip()
+        body = value.get('body')
+        if not isinstance(body, str) or not body.strip() or len(body) > 8000 or '\x00' in body:
+            raise ValueError('Provide the concrete Slack message, at most 8000 characters')
+        result['body'] = body.strip()
+        delegation(value, result)
     else:
-        raise ValueError('Only email drafts, local preparation and original-page links are supported; no payments or arbitrary writes')
+        raise ValueError('Only email drafts, Slack messages, local preparation and original-page links are supported; no payments or arbitrary writes')
     result['revision'] = hashlib.sha256(canonical(result).encode()).hexdigest()[:12]
     return result
 
@@ -248,14 +316,14 @@ def check(value, result='', own_addresses=()):
 
 def revise(action, subject=None, body=None):
     """The owner's own edit of a ready draft: same recipients, account and attachments, new text and revision."""
-    if action['kind'] != 'email':
-        raise ValueError('Only email drafts can be edited')
+    if action['kind'] not in ('email',) + TEXT_KINDS:
+        raise ValueError('Only email and Slack drafts can be edited')
     result = {k: v for k, v in action.items() if k != 'revision'}
     if body is not None:
-        if not isinstance(body, str) or not body.strip() or len(body) > 12000 or '\x00' in body:
+        if not isinstance(body, str) or not body.strip() or len(body) > (8000 if action['kind'] in TEXT_KINDS else 12000) or '\x00' in body:
             raise ValueError('The draft needs some text, within the size limit')
-        result['body'] = closing_spaced(body)
-    if subject is not None:
+        result['body'] = body.strip() if action['kind'] in TEXT_KINDS else closing_spaced(body)
+    if subject is not None and action['kind'] not in TEXT_KINDS:
         if not isinstance(subject, str) or not subject.strip() or len(subject) > 250 or '\r' in subject or '\n' in subject or '\x00' in subject:
             raise ValueError('The subject needs one line of text')
         result['subject'] = subject
@@ -331,7 +399,7 @@ def email_preview(action):
     return ('\n'.join(lines) + '\nSubject: ' + action['subject'] + '\n\n' + action['body']
             + ('\n\n+ your Gmail signature' if action.get('signature') else '')
             + ('\n\nAttachments: ' + attachment_list(action) if action.get('attachments') else '')
-            + ('\n' + snooze_note(action) if action.get('snooze_days') else ''))
+            + ('\n' + snooze_note(action) if action.get('snooze_days') else '') + delegate_note(action))
 
 
 def snooze_note(action):
@@ -462,6 +530,132 @@ class EmailTransport:
         if len(messages) == 1:
             return {'message_id': messages[0]['id']}
         return {}  # Absence or ambiguity never means it is safe to resend.
+
+
+def slack_text(body):
+    """Plain draft text in Slack's own format: [text](https://url) links become <url|text>."""
+    text = body.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    return re.sub(r'\[([^\]\n]+)\]\((https://[^)\s]+)\)', lambda m: '<' + m[2].replace('&amp;', '&') + '|' + m[1] + '>', text)
+
+
+def same_person(name, user):
+    """The name in the draft is the Slack user's name: every word of it appears in their real or display name."""
+    profile = user.get('profile') or {}
+    known = ' '.join(str(x or '') for x in (user.get('real_name'), profile.get('real_name'), profile.get('display_name'), user.get('name'))).lower()
+    words = set(re.findall(r'\w+', known))
+    wanted = re.findall(r'\w+', name.lower())
+    return bool(wanted) and all(w in words for w in wanted)
+
+
+class SlackTransport:
+    """Sends one owner-approved Slack direct message as the owner, through the Maton Slack connection.
+    Separate from the read-only Slack source: only these methods (look up, open the DM, post, read it
+    back), and only a direct message to one person; never a channel post."""
+    METHODS = {'users.info': 'GET', 'users.lookupByEmail': 'GET', 'conversations.open': 'POST', 'chat.postMessage': 'POST', 'conversations.history': 'GET'}
+
+    def __init__(self, config, credential):
+        self.config, self.credential = config, credential
+
+    def account(self, action):
+        return next(a for a in self.config['accounts'] if a['id'] == action['account_id'] and a.get('service') == 'slack')
+
+    def call(self, action, method, params):
+        import urllib.parse
+        import urllib.request
+        account = self.account(action)
+        secret = self.credential(self.config, account['credential'])
+        found = re.findall(r'^' + re.escape(account['credential_variable']) + r'=(.*)$', secret, re.M)
+        if len(found) != 1:
+            raise RuntimeError('Slack credential unavailable')
+        headers = {'Authorization': 'Bearer ' + found[0].strip().strip('"\''), 'Maton-Connection': account['connection_id'], 'Accept': 'application/json'}
+        url = 'https://api.maton.ai/slack/api/' + method
+        if self.METHODS[method] == 'GET':
+            request = urllib.request.Request(url + '?' + urllib.parse.urlencode(params), headers=headers)
+        else:
+            request = urllib.request.Request(url, data=json.dumps(params).encode(), method='POST',
+                                             headers={**headers, 'Content-Type': 'application/json; charset=utf-8'})
+        with urllib.request.urlopen(request, timeout=45) as response:
+            if response.headers.get('Maton-Connection') != account['connection_id']:
+                raise RuntimeError('Slack connection mismatch')
+            return json.load(response)
+
+    def person(self, action):
+        reply = (self.call(action, 'users.info', {'user': action['user_id']}) if action.get('user_id')
+                 else self.call(action, 'users.lookupByEmail', {'email': action['to_email']}))
+        if not reply.get('ok'):
+            raise ValueError('I couldn’t find ' + action['to_name'] + ' in Slack. Nothing was sent.')
+        user = reply['user']
+        if user.get('deleted') or user.get('is_bot'):
+            raise ValueError(action['to_name'] + '’s Slack account is deactivated or a bot. Nothing was sent.')
+        if not same_person(action['to_name'], user):
+            raise ValueError(f"That Slack user is {user.get('real_name') or user.get('name')}, not {action['to_name']}. Nothing was sent.")
+        return user['id']
+
+    def preflight(self, action):
+        if action['kind'] != 'slack':
+            raise ValueError('Only an owner-approved Slack message can use the Slack transport')
+        self.person(action)
+
+    def channel(self, action, user_id):
+        reply = self.call(action, 'conversations.open', {'users': user_id})
+        if not reply.get('ok'):
+            raise RuntimeError('Slack direct message unavailable')
+        return reply['channel']['id']
+
+    def send(self, action, job):
+        import urllib.error
+        try:
+            user_id = self.person(action)
+            channel = self.channel(action, user_id)
+        except urllib.error.HTTPError as error:
+            if 400 <= error.code < 500 and error.code not in (408, 429):
+                return {'rejected': error.code}  # refused for good; nothing was posted
+            return {'not_sent': True}
+        except Exception:
+            return {'not_sent': True}  # nothing was posted yet; try again shortly
+        try:
+            reply = self.call(action, 'chat.postMessage', {'channel': channel, 'text': slack_text(action['body']), 'unfurl_links': False})
+        except urllib.error.HTTPError as error:
+            # A refused request (4xx) posted nothing; a server error might have.
+            return {'rejected': error.code} if 400 <= error.code < 500 and error.code != 408 else {}
+        except Exception:
+            return {}  # unknown outcome: reconcile checks the conversation, never resends
+        if reply.get('ok'):
+            return {'message_id': f"slack:{channel}:{reply['ts']}", 'channel_id': channel, 'user_id': user_id}
+        return {'rejected': reply.get('error') or 'unknown'}
+
+    def reconcile(self, action, job):
+        user_id = self.person(action)
+        channel = self.channel(action, user_id)
+        since = datetime.datetime.fromisoformat(job['created_at']).timestamp() - 60
+        reply = self.call(action, 'conversations.history', {'channel': channel, 'oldest': f'{since:.6f}', 'limit': 50})
+        owner = self.account(action).get('user_id')
+        text = slack_text(action['body'])
+        found = [m for m in reply.get('messages', []) if m.get('user') == owner and m.get('text') == text]
+        return {'message_id': f"slack:{channel}:{found[0]['ts']}", 'channel_id': channel, 'user_id': user_id} if len(found) == 1 else {}
+
+
+class ActionTransport:
+    """Routes an approved send to Gmail or Slack by its kind."""
+
+    def __init__(self, email, slack=None):
+        self.email, self.slack = email, slack
+
+    def pick(self, action):
+        if action['kind'] == 'slack':
+            if not self.slack:
+                raise ValueError('Slack sending isn’t set up. Nothing was sent.')
+            return self.slack
+        return self.email
+
+    def preflight(self, action):
+        return self.pick(action).preflight(action)
+
+    def send(self, action, job):
+        return self.pick(action).send(action, job)
+
+    def reconcile(self, action, job):
+        return self.pick(action).reconcile(action, job)
 
 
 SNOOZE_LABEL = 'Snoozed'

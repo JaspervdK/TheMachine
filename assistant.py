@@ -149,6 +149,25 @@ def queue_thread_snooze(db, action, job):
                    (job['id'],action['account_id'],action['thread_id'],thread_return_time(action['snooze_days']),now(),now()))
 
 
+def queue_delegate_wait(db, action, job, result):
+    """A task handed to someone: once the message is sent, the card waits for their answer. It
+    closes when they reply (settle_awaiting) and comes back after wait_days if not."""
+    if not action.get('delegate'):
+        return
+    row = db.execute('SELECT status FROM suggestions WHERE id=?', (job['suggestion_id'],)).fetchone()
+    if not row or row['status'] != 'prepared':
+        return
+    if action['kind'] == 'slack':
+        if not result.get('channel_id') or not result.get('user_id'):
+            return
+        watch = {'kind': 'slack.message', 'channel_id': result['channel_id'], 'user_id': result['user_id']}
+    else:
+        watch = {'kind': 'gmail.message', 'from': action['to'][0].lower(), 'thread_id': action.get('thread_id'), 'reply_to': job.get('rfc_message_id') or ''}
+    watch.update(account_id=action['account_id'], since=now(), delegated=True, name=action.get('to_name') or action['to'][0])
+    db.execute("UPDATE suggestions SET awaiting=?,status='snoozed',snoozed_until=?,resume_status='prepared',undo_until=NULL WHERE id=?",
+               (encoded(watch), thread_return_time(action['wait_days']), job['suggestion_id']))
+
+
 def snooze_choices(work=False):
     """The quick snooze options with labels for when each lands; work skips the weekend."""
     local_now = dt.datetime.fromisoformat(now()).astimezone(local_tz())
@@ -2040,7 +2059,7 @@ class Store:
         """Signals answering a message the owner sent from a card, so the review comes back
         with the answer and a take instead of leaving it to the inbox."""
         with self.connect() as db:
-            sent = db.execute("SELECT j.suggestion_id,j.payload,j.rfc_message_id,j.updated_at,s.title FROM action_jobs j JOIN suggestions s ON s.id=j.suggestion_id "
+            sent = db.execute("SELECT j.suggestion_id,j.payload,j.rfc_message_id,j.message_id,j.updated_at,s.title FROM action_jobs j JOIN suggestions s ON s.id=j.suggestion_id "
                               "WHERE j.status='sent' AND j.updated_at>=?", ((dt.datetime.fromisoformat(now()) - dt.timedelta(days=60)).isoformat(),)).fetchall()
         by_key = {}
         for job in sent:
@@ -2051,12 +2070,16 @@ class Store:
                     by_key[('rfc', job['rfc_message_id'])] = card
                 if action.get('thread_id'):
                     by_key[('thread', action['account_id'], action['thread_id'])] = card
+            elif action.get('kind') == 'slack' and str(job['message_id'] or '').startswith('slack:'):
+                by_key[('slack', action['account_id'], job['message_id'].split(':')[1])] = card
         found = {}
         for row in rows:
             m = row['metadata'] if isinstance(row['metadata'], dict) else json.loads(row['metadata'])
             card = None
             if row['kind'] == 'gmail.message' and 'SENT' not in m.get('labels', []):
                 card = by_key.get(('rfc', str(m.get('in-reply-to') or '').strip())) or by_key.get(('thread', row['account_id'], m.get('thread_id')))
+            elif row['kind'] == 'slack.message' and m.get('user_id') not in self.owner_user_ids:
+                card = by_key.get(('slack', row['account_id'], m.get('channel_id')))
             if card and row['occurred_at'] > card['sent_at']:
                 found[row['id']] = card
         return found
@@ -2223,6 +2246,21 @@ class Store:
                        ('followed-up:' + row['id'], row['id'], 'complete', f"They followed up: {answer['title'][:150]} (signal {answer['id']})", 'assistant', stamp))
             db.execute("UPDATE deliveries SET status='cancelled',reminder=0,updated_at=? WHERE suggestion_id=?", (stamp, row['id']))
             db.execute("UPDATE preparations SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status IN ('queued','starting','running','blocked')", (stamp, row['id']))
+        # A task handed to someone closes when they answer; their answer is reviewed as a reply to
+        # this card, so anything left for the owner gets a new card.
+        for row in db.execute("SELECT id,awaiting FROM suggestions WHERE status IN ('snoozed','prepared') AND json_extract(awaiting,'$.delegated')=1").fetchall():
+            watch = json.loads(row['awaiting'])
+            answer = next((e for e in db.execute('SELECT id,account_id,kind,occurred_at,title,metadata FROM events WHERE account_id=? AND kind=? AND occurred_at>? AND deleted=0 ORDER BY occurred_at',
+                                                 (watch['account_id'], watch['kind'], watch['since'])) if awaiting_match(watch, dict(e), self.owner_user_ids)), None)
+            if not answer:
+                continue
+            stamp = now()
+            db.execute("UPDATE suggestions SET status='completed',completed_from='prepared',snoozed_until=NULL,resume_status=NULL,awaiting=? WHERE id=?",
+                       (encoded({**watch, 'answered': answer['title'][:150]}), row['id']))
+            db.execute("INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)",
+                       ('answered:' + row['id'], row['id'], 'complete', f"{watch['name']} replied: {answer['title'][:150]} (signal {answer['id']})", 'assistant', stamp))
+            db.execute("UPDATE deliveries SET reminder=0,needs_edit=1,updated_at=? WHERE suggestion_id=?", (stamp, row['id']))
+            db.execute("UPDATE deliveries SET status='cancelled' WHERE suggestion_id=? AND status='queued'", (row['id'],))
 
     def preference_summary(self, days=30, limit=3500):
         """What the owner did with recent suggestions, so reviews learn what's worth the owner's time."""
@@ -2750,7 +2788,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
-            if not row or row['status']!='prepared' or not action or action['kind']!='email':
+            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','slack'):
                 raise ValueError('This draft changed or is no longer ready. Use its current buttons.')
             if db.execute("SELECT 1 FROM action_jobs WHERE suggestion_id=? AND status IN ('sending','uncertain','sent')",(suggestion_id,)).fetchone():
                 raise ValueError('This draft is already being sent or was sent.')
@@ -2775,7 +2813,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
-            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','prepare'):
+            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','slack','prepare'):
                 raise ValueError('This result changed or is no longer ready. Use its current buttons.')
             if action.get('to_options'):
                 # The owner picked who gets it, only from the addresses the service found in the thread.
@@ -3482,6 +3520,9 @@ def awaiting_key(event, owner_slack_ids=()):
 
 def awaiting_match(watch, event, owner_slack_ids=()):
     m = event['metadata'] if isinstance(event['metadata'], dict) else json.loads(event['metadata'])
+    if watch['kind'] == 'gmail.message' and watch.get('delegated'):
+        return ('SENT' not in m.get('labels', []) and _address(m.get('from')) == watch['from'] and
+                ((watch.get('thread_id') and m.get('thread_id') == watch['thread_id']) or (watch.get('reply_to') and watch['reply_to'] in (m.get('in-reply-to') or ''))))
     if watch['kind'] == 'gmail.message':
         return 'SENT' not in m.get('labels', []) and (m.get('thread_id') == watch.get('thread_id') or _address(m.get('from')) == watch['from'])
     if watch['kind'] == 'slack.message':
@@ -3703,7 +3744,18 @@ def card(row):
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed')),None)
     if action_state and row['status']=='prepared':
         status={'queued':'Sending your approved draft…','sending':'Sending your approved draft…',
-                'sent':'Email sent.'+thread_snooze_note(action_state),'uncertain':action_state.get('error'),'blocked':action_state.get('error'),'failed':action_state.get('error')}.get(action_state['status'],status)
+                'sent':('Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':action_state.get('error'),'failed':action_state.get('error')}.get(action_state['status'],status)
+    try:
+        handed = json.loads(row['awaiting']) if row.get('awaiting') else {}
+    except (ValueError, TypeError):
+        handed = {}
+    if handed.get('delegated'):
+        if row['status'] == 'snoozed' and row.get('snoozed_until'):
+            status = f"Sent to {handed['name']}. Waiting for their reply until " + dt.datetime.fromisoformat(row['snoozed_until']).astimezone(local_tz()).strftime('%a %-d %b') + '; it closes when they answer.'
+        elif row['status'] == 'completed' and handed.get('answered'):
+            status = f"{handed['name']} replied, so I closed this."
+        elif row['status'] == 'prepared':
+            status = f"No reply from {handed['name']} yet."
     if row.get('handled_hint') and row['status'] not in ('completed','rejected'):
         try:
             status = ('Looks handled: ' + json.loads(row['handled_hint'])['reason'] + ' Mark it done if so.\n' + status).strip()
@@ -3735,16 +3787,24 @@ def controls(row):
     else:
         choices = [('Do it','accept'),('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
-    blocks=[]
+    buttons=[]
     if row['status']=='prepared':
         for action in actions:
             state=action.get('state') or row.get('action_status',{})
-            if action['kind'] in ('email','email_demo','prepare') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation'):
+            if action['kind'] in ('email','email_demo','slack','prepare') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation'):
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
-                blocks.append({'type':'buttons','buttons':[{'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}}]})
-            elif action['kind']=='open':blocks.append({'type':'buttons','buttons':[{'label':action['label'],'action':{'type':'url','url':action['url']}}]})
-    for offset in range(0,len(choices),3):
-        blocks.append({'type':'buttons','buttons':[{'label':label,'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}} for label,choice in choices[offset:offset+3]]})
+                buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
+            elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
+    buttons+=[{'label':label,'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}} for label,choice in choices]
+    # Fewer rows: up to three buttons per row that fit a phone's width, in order, so a Send
+    # shares its row with Mark done. Same rule as packRows in the plugin.
+    blocks,width=[],0
+    for button in buttons:
+        size=len(button['label'])+2
+        if blocks and len(blocks[-1]['buttons'])<3 and width+size<=32:
+            blocks[-1]['buttons'].append(button);width+=size
+        else:
+            blocks.append({'type':'buttons','buttons':[button]});width=size
     if not blocks:blocks=[{'type':'buttons','buttons':[]}]
     return {'blocks':blocks}
 
@@ -4489,8 +4549,8 @@ class App:
                         raise ValueError('Prepared ahead: the draft is saved; the owner sends it themselves')
                 # The owner asked for it to be sent: queue the draft exactly as their Send tap would
                 # (same sender, signature and attachments), without a second confirmation.
-                ready=[a for a in next_actions.actions(action) if a['kind']=='email' and not a.get('to_options')]
-                if not ready:raise ValueError('send_now needs an email draft with its recipients filled in')
+                ready=[a for a in next_actions.actions(action) if a['kind'] in ('email','slack') and not a.get('to_options')]
+                if not ready:raise ValueError('send_now needs an email or Slack draft with its recipients filled in')
                 saved['send']=self.store.confirm_action(args['suggestion_id'],ready[0]['revision'],'assistant:'+uuid.uuid4().hex,'assistant')
             return saved
         if name == 'revise_draft':
@@ -4778,7 +4838,7 @@ class App:
                 LOG.error('delivery error=%s', type(error).__name__)
 
     def action_step(self,transport=None):
-        transport=transport or next_actions.EmailTransport(self.config,credential,gog_read)
+        transport=transport or next_actions.ActionTransport(next_actions.EmailTransport(self.config,credential,gog_read),next_actions.SlackTransport(self.config,credential))
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             for candidate in db.execute("SELECT j.id,j.revision,s.status,s.next_action FROM action_jobs j JOIN suggestions s ON s.id=j.suggestion_id WHERE j.status IN ('queued','blocked')").fetchall():
@@ -4795,16 +4855,16 @@ class App:
             with self.store.connect() as db:
                 if result.get('message_id'):
                     db.execute("UPDATE action_jobs SET status='sent',message_id=?,error=NULL,updated_at=? WHERE id=? AND status IN ('sending','uncertain')",(result['message_id'],now(),job['id']))
-                    queue_thread_snooze(db,action,job)
+                    queue_thread_snooze(db,action,job);queue_delegate_wait(db,action,job,result)
                     db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
                 else:
                     # Keep checking Sent mail, every five minutes for a day, then hourly.
                     wait=dt.timedelta(minutes=5 if dt.datetime.fromisoformat(job['created_at'])>dt.datetime.fromisoformat(now())-dt.timedelta(days=1) else 60)
-                    db.execute("UPDATE action_jobs SET status='uncertain',error=?,retry_at=? WHERE id=? AND status IN ('sending','uncertain')",('I couldn’t confirm whether this email was sent. I’m checking Sent mail; I won’t send it again.',(dt.datetime.fromisoformat(now())+wait).isoformat(),job['id']))
+                    db.execute("UPDATE action_jobs SET status='uncertain',error=?,retry_at=? WHERE id=? AND status IN ('sending','uncertain')",('I couldn’t confirm whether this Slack message was sent. I’m checking the conversation; I won’t send it again.' if action['kind']=='slack' else 'I couldn’t confirm whether this email was sent. I’m checking Sent mail; I won’t send it again.',(dt.datetime.fromisoformat(now())+wait).isoformat(),job['id']))
             return
         try:transport.preflight(action)
         except Exception as error:
-            reason=str(error) if isinstance(error,ValueError) else 'Gmail could not be checked. Nothing was sent.'
+            reason=str(error) if isinstance(error,ValueError) else ('Slack' if action['kind']=='slack' else 'Gmail')+' could not be checked. Nothing was sent.'
             with self.store.connect() as db:
                 db.execute("UPDATE action_jobs SET status='blocked',error=?,updated_at=? WHERE id=? AND status='queued'",(reason,now(),job['id']))
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
@@ -4826,12 +4886,12 @@ class App:
             return 'waiting'
         with self.store.connect() as db:
             status='sent' if result.get('message_id') else 'failed' if result.get('rejected') else 'uncertain'
-            what,where=('this email','Gmail')
+            what,where=('this Slack message','Slack') if action['kind']=='slack' else ('this email','Gmail')
             error={'sent':None,'failed':f"{where} refused {what} (error {result.get('rejected')}). Nothing was sent; you can change it or tap Send again.",
                    'uncertain':f'I couldn’t confirm whether {what} was sent. I won’t resend it.'}[status]
             db.execute('UPDATE action_jobs SET status=?,message_id=?,error=?,updated_at=?,retry_at=? WHERE id=?',
                 (status,result.get('message_id'),error,now(),None if status=='failed' else (dt.datetime.fromisoformat(now())+dt.timedelta(minutes=5)).isoformat(),job['id']))
-            if status=='sent':queue_thread_snooze(db,action,job)
+            if status=='sent':queue_thread_snooze(db,action,job);queue_delegate_wait(db,action,job,result)
             db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
         return status
 

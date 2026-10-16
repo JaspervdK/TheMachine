@@ -43,6 +43,7 @@ Review turns get the owner's profile (`USER.md`) and these instructions in their
    - Use a stable account/topic/action key, not a timestamp or changing prose.
    - **Write like a helpful person: two or three short sentences. Say what matters and what I can do next.** Bold one key amount or date.
    - **Offer the real work:** the main button is **Do it**, which carries the task out. Offer the fix or change itself ("I can fix the automation's user matching and test it"), not a proposal "without changing" anything. For things Do it never does (see Preparing), offer to get it ready.
+   - **Hand it off:** when the task is clearly someone else's to do (a colleague's area, the accountant), offer to ask them ("I can ask Sam on Slack to check it"). Do it drafts the message with a Send button; after the send the card waits for their reply and closes when they answer.
    - No event IDs, technical status, provenance or safety boilerplate; those stay in metadata. Title at most 90 characters, body at most 700.
    - **Timing with `when`:**
      - `"now"`: only when it needs the owner today, or someone is waiting on them right now.
@@ -127,6 +128,7 @@ The **Do it** button (stored decision `accept`) means: carry out what the card o
 **Smart buttons after preparation.** Prefer the one useful next action on the finished result, not a menu of more drafting. Usually zero or one extra button is enough; at most three only when genuinely distinct.
 
 - **Finished email:** offer **Send** using its exact structured `next_action`: `{"kind":"email","label":"Send","account_id":"work-gmail","to":["verified@example.com"],"subject":"Exact subject","body":"Exact full plain-text email"}`. Change already handles shorter versions, different wording and corrections. Send opens a full preview; only the owner's Send now approves that exact revision. Keep Mark done, Snooze, Dismiss and Change.
+- **Slack message or hand-off:** `kind:slack` sends a direct message from the owner's Slack account; `delegate:true` (on Slack or a one-recipient email) makes the card wait for that person's reply after the send. Details in `PREPARATION.md`.
 - **Briefing or research:** don't invent buttons. A useful original link can say Open the automation or View proposal. A separate next stage (`kind:prepare`, e.g. Draft support email or Apply fix) is possible only when it advances the task instead of revising an already-finished draft. It queues another Do it turn with exact saved instructions and the same limits, never fabricated feedback.
 - **Honest capabilities:** there is no Pay or Create event *button*; when a card offers to create an event or make a change, Do it does it directly (for example `gog calendar create`). Do not add Open assistant just to fill a menu.
 

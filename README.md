@@ -48,7 +48,7 @@ Do it → isolated preparation turn of the same agent → result, draft + Send, 
 | `assistant.py` | Collectors, SQLite store, local API, dashboard server, Telegram outbox, review and preparation workers |
 | `dashboard.html`, `sw.js`, `manifest.webmanifest`, `brand/` | Owner dashboard and installable web app |
 | `cli.py` | The `assistant` command line |
-| `next_actions.py` | Approved email sends (Gmail via `gog`) |
+| `next_actions.py` | Approved sends: email (Gmail via `gog`) and Slack direct messages (Maton) |
 | `preparation_state.py`, `rollout_health.py` | Preparation bookkeeping and health checks |
 | `openclaw-plugin/` | `personal-assistant-bridge`: the `assistant_signals` tool, Telegram buttons and replies, Android feed capture, review/preparation guards |
 | `*.mjs` | Small Node helpers that call the OpenClaw Gateway (`openclaw-root.mjs` finds the installed package) |
@@ -194,12 +194,14 @@ The service starts reviews itself (`review_worker.enabled`). When at least `min_
 
 Your decisions and written reasons are summarised into every review prompt, and lasting facts you state are saved (`remember_fact`) and listed, removable, on the dashboard. Style notes that hold beyond one card (signatures, formatting, tone) become **draft rules** that every later draft follows. Each Do it result says whether it's finished or what it needs from you, and the run sorts your Change notes (style, missing fact, keep going, new ask). The Feedback tab shows the split, the hit rate per day or week, and markers where the rules changed.
 
+**Slack messages and hand-offs.** A Do it result can carry a Slack direct message from your own Slack account (the Maton Slack connection, as your user) to one person, named by Slack `user_id` or work email, with their name. `SlackTransport` in `next_actions.py` is separate from the read-only Slack source and can only look the person up (`users.info`, `users.lookupByEmail`), open the DM, post one message and read that DM back. Before sending it checks that the Slack name matches and that it's an active person, not a bot. An unclear outcome stays uncertain and is checked by finding exactly one message from you with that text in the DM; it's never resent. `delegate:true` (on Slack, or an email to one address) hands the task over: after the send the card is snoozed for `wait_days` (default 3; a weekday at 09:00) with a watch on that person. When they reply (in that DM, or in that email thread or to that email), the card closes itself and their reply is reviewed as an answer to the card; without a reply it comes back saying so. Sending needs a Maton Slack connection that is allowed to post as you.
+
 ## Telegram and the dashboard
 
 **Telegram** uses OpenClaw's existing bot and message route, never a second poller.
 - The outbox records intent before sending. A send with an unknown outcome is held as `uncertain` and reconciled against the chat; it is never resent blindly.
 - Quiet hours are 23:00–08:00 local time. Non-urgent work cards wait for Monday on weekends. Several cards may go out together; only the first buzzes.
-- Buttons: **Do it**, **Change**, **Snooze** (2 hours, tomorrow, 3 days, 1 week, pick a date), **Dismiss** (with a reason), **Mark done**, **Undo** (five minutes). They edit the existing card instead of sending new messages; a finished Do it sends one short Ready notice.
+- Buttons: **Do it**, **Change**, **Snooze** (2 hours, tomorrow, 3 days, 1 week, pick a date), **Dismiss** (with a reason), **Mark done**, **Undo** (five minutes). They edit the existing card instead of sending new messages; a finished Do it sends one short Ready notice. Each row holds up to three buttons that fit a phone's width, in order, so a Send shares its row with Mark done (`controls()` in `assistant.py` and `packRows` in the plugin follow the same rule).
 - **Change** opens Telegram's native reply box. Only a reply to that exact prompt, within ten minutes, counts as instructions. `/assistant_feedback <id> <text>` is the fallback.
 
 **The dashboard** shows the same cards grouped as Needs your decision, Ready for you, Preparing and Coming back later, with Work/Personal filters, deadlines, sources and their health, review runs, feedback and learned facts. It can be installed as a phone app and send push notifications mirroring Telegram. It is served on `127.0.0.1:<port>` and reached through Tailscale Serve or Caddy; see [Security model](#security-model).
