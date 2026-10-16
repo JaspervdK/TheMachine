@@ -173,7 +173,7 @@ async function contextFile(path: string, heading: string, limit = 20000) {
 }
 export const ownerContext = () => contextFile(`${WORKSPACE}/USER.md`, 'About the owner (USER.md)');
 // Standing Do it rules; prepended here because the runner caps the job message at 20000 characters.
-const preparationRules = () => contextFile(`${APP_DIR}/PREPARATION.md`, 'Preparation rules (tools/personal-assistant/PREPARATION.md)', 30000);  // the whole file: every rule applies to each Do it
+const preparationRules = () => contextFile(`${APP_DIR}/PREPARATION.md`, 'Preparation rules (tools/personal-assistant/PREPARATION.md)');
 const assistantInstructions = () => contextFile(`${APP_DIR}/AGENTS.md`, 'Assistant instructions (tools/personal-assistant/AGENTS.md)', 50000);  // the whole file: its later sections (lessons, troubleshooting) matter too
 
 // The review run that currently owns each session, recorded by the prompt hook. The tool's own

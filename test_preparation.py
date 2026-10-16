@@ -111,7 +111,7 @@ class Preparation(unittest.TestCase):
         self.assertLess(len(a.preparation_prompt(job,'- '+'f'*3000+'\n…')),limit-2000)
         self.assertLess(len(a.preparation_prompt({**job,'ahead':True},'- '+'f'*3000+'\n…',None,'- '+'e'*4500)),limit-2000)
         # The plugin's contextFile shortens anything longer, so the rules must fit whole.
-        cap=int(__import__('re').search(r"PREPARATION\.md\)', (\d+)\)",(a.ROOT/'openclaw-plugin/review-recovery.ts').read_text())[1])
+        cap=int(__import__('re').search(r'async function contextFile\(path: string, heading: string, limit = (\d+)\)',(a.ROOT/'openclaw-plugin/review-recovery.ts').read_text())[1])
         self.assertLess(len((a.ROOT/'PREPARATION.md').read_text().strip()),cap)
         agents_cap=int(__import__('re').search(r"AGENTS\.md`, '[^']*', (\d+)\)",(a.ROOT/'openclaw-plugin/review-recovery.ts').read_text())[1])
         self.assertLess(len((a.ROOT/'AGENTS.md').read_text().strip()),agents_cap)
