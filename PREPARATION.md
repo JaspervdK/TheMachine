@@ -1,6 +1,6 @@
 # Preparation rules
 
-Standing rules for every Do it (preparation) run, prepended by the plugin; the job message only carries the suggestion, job ID, owner's next step and facts. Keep it under 20000 characters (the plugin's context limit, checked by test_preparation.py).
+Standing rules for every Do it (preparation) run, prepended by the plugin; the job message only carries the suggestion, job ID, owner's next step and facts. Keep it under 30000 characters (the plugin's context limit, checked by test_preparation.py).
 
 A template: keep it general, and put personal preferences (tone of voice, booking links, tools, people and companies) in the workspace's `USER.md` or your own overlay of this file.
 
