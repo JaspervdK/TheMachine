@@ -220,6 +220,23 @@ def validate(value, config, allowed_accounts, recipient_options=None):
     return result
 
 
+def revise(action, subject=None, body=None):
+    """The owner's own edit of a ready draft: same recipients, account and attachments, new text and revision."""
+    if action['kind'] != 'email':
+        raise ValueError('Only email drafts can be edited')
+    result = {k: v for k, v in action.items() if k != 'revision'}
+    if body is not None:
+        if not isinstance(body, str) or not body.strip() or len(body) > 12000 or '\x00' in body:
+            raise ValueError('The draft needs some text, within the size limit')
+        result['body'] = closing_spaced(body)
+    if subject is not None:
+        if not isinstance(subject, str) or not subject.strip() or len(subject) > 250 or '\r' in subject or '\n' in subject or '\x00' in subject:
+            raise ValueError('The subject needs one line of text')
+        result['subject'] = subject
+    result['revision'] = hashlib.sha256(canonical(result).encode()).hexdigest()[:12]
+    return result
+
+
 def closing_spaced(body):
     """Owner standard: a blank line between the closing ("Regards,") and the name."""
     lines = body.rstrip().split('\n')

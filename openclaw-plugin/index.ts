@@ -40,6 +40,8 @@ function cardButtons(item: any) {
 }
 
 function sendReview(item:any,draft:any,dashboardBase=''){
+ // Edit opens the same draft in the dashboard editor; Send then sends exactly the edited text.
+ const edit=dashboardBase?[{text:'Edit',url:`${dashboardBase}#send=${item.id}&revision=${draft.revision}&edit=1`}]:[];
  const demo=draft.kind==='email_demo';
  // No verified recipient: one Send button per address the service found in the thread.
  const options:string[]=draft.to_options||[];
@@ -50,8 +52,8 @@ function sendReview(item:any,draft:any,dashboardBase=''){
  if(draft.attachments?.length)lines.push('',`Attachments: ${draft.attachments.map((a:any)=>`${a.name} (${a.size<1024?a.size+' B':a.size<1048576?Math.round(a.size/1024)+' KB':(a.size/1048576).toFixed(1)+' MB'})`).join(', ')}`);
  if(draft.snooze_days)lines.push(`After sending, the thread leaves your inbox for ${draft.snooze_days} day${draft.snooze_days>1?'s':''} (a weekday morning; a reply brings it back sooner).`);
  if(options.length)return {text:lines.join('\n'),buttons:[...options.slice(0,4).map((address,i)=>[button(item.id,`Send to ${address}`.slice(0,60),`confirm_${draft.revision}_${i}`)]),
-   [...(options.length>1&&dashboardBase?[{text:'Choose several',url:`${dashboardBase}#send=${item.id}&revision=${draft.revision}`}]:[]),button(item.id,'Cancel','back')]]};
- return {text:lines.join('\n'),buttons:[demo?[button(item.id,'Back','back')]:[button(item.id,'Send now','confirm_'+draft.revision),button(item.id,'Cancel','back')]]};
+   [...(options.length>1&&dashboardBase?[{text:'Choose several',url:`${dashboardBase}#send=${item.id}&revision=${draft.revision}`}]:[]),...edit,button(item.id,'Cancel','back')]]};
+ return {text:lines.join('\n'),buttons:[demo?[button(item.id,'Back','back')]:[button(item.id,'Send now','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')]]};
 }
 
 async function settings() {

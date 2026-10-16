@@ -21,6 +21,53 @@ class Preparation(unittest.TestCase):
 
     def accept(self):self.store.decide(self.sid,'accept','','click','telegram')
 
+    def deliver(self,sent):
+        # Pinned to midday: deliver_one sends nothing in quiet hours (23:00-08:00).
+        class Noon(a.dt.datetime):
+            @classmethod
+            def now(cls,tz=None):return a.dt.datetime(2026,10,14,12,tzinfo=a.local_tz()).astimezone(tz or a.dt.timezone.utc)
+        with patch.object(a.dt,'datetime',Noon),patch.object(a,'telegram',side_effect=lambda *x,**k:(sent.append(x),{'messageId':'7'})[1]):
+            a.deliver_one(self.store,self.app.config,edit_cards=False)
+
+    def q(self,sql,*args):
+        with self.store.connect() as db:return dict(db.execute(sql,args).fetchone())
+
+    def ahead(self,key='ahead'):
+        self.app.config={'accounts':[]}
+        return self.app.action('suggest',{'dedupe_key':key,'title':'Reply to Tom','body':'I can draft the reply.','event_ids':[1],'when':'now','prepare_ahead':True})
+
+    def test_prepared_ahead_card_arrives_ready_and_waits_for_the_owner(self):
+        made=self.ahead();sid=made['id'];self.assertEqual((made['status'],made['prepared_ahead']),('accepted',True))
+        sent=[]
+        self.deliver(sent)
+        self.assertEqual(sent,[])  # not delivered while it's being prepared
+        calls=[];self.app.preparation_step(lambda r:calls.append(r) or {'status':'admitted'})
+        message=next(c['message'] for c in calls if c.get('message'))
+        self.assertIn('The owner has NOT tapped Do it yet',message);self.assertIn('never use send_now',message)
+        job=self.q('SELECT job_id FROM preparations WHERE suggestion_id=?',sid)['job_id']
+        with self.assertRaises(ValueError):  # the draft is saved, but only the owner sends it
+            self.app.action('prepare',{'suggestion_id':sid,'job_id':job,'body':'Draft ready.','send_now':True})
+        self.app.action('prepare',{'suggestion_id':sid,'job_id':job,'body':'Draft ready.'})
+        row=self.q('SELECT status,early FROM suggestions WHERE id=?',sid)
+        self.assertEqual(row,{'status':'prepared','early':1})
+        self.deliver(sent)
+        self.assertEqual((len(sent),sent[0][2]),(1,'send'));self.assertIn('Prepared ahead, so you only need to approve it.',a.card(sent[0][1]))
+        self.store.decide(sid,'other','Shorter please','d-change','telegram')  # the owner's own Change runs with full Do it authority
+        with self.store.connect() as db:db.execute("UPDATE preparation_runs SET status='ok',finished_at=?",(a.now(),))  # the first run ended
+        calls.clear();self.app.preparation_step(lambda r:calls.append(r) or {'status':'admitted'})
+        self.assertIn('the owner tapped Do it',next(c['message'] for c in calls if c.get('message')))
+
+    def test_stuck_prepared_ahead_card_arrives_as_a_normal_suggestion_and_daily_cap(self):
+        sid=self.ahead()['id']
+        with self.store.connect() as db:db.execute("UPDATE preparations SET status='blocked' WHERE suggestion_id=?",(sid,))
+        self.app.preparation_step(lambda r:{'status':'admitted'})
+        row=self.q('SELECT s.status,s.early,p.status prep FROM suggestions s JOIN preparations p ON p.suggestion_id=s.id WHERE s.id=?',sid)
+        self.assertEqual(row,{'status':'pending','early':0,'prep':'cancelled'})
+        self.app.config={'accounts':[],'prepare_ahead_per_day':1}
+        self.assertEqual(self.app.action('suggest',{'dedupe_key':'x2','title':'T','body':'B','event_ids':[1],'prepare_ahead':True})['status'],'pending')
+        self.app.config={'accounts':[],'prepare_ahead':False}
+        self.assertEqual(self.app.action('suggest',{'dedupe_key':'x3','title':'T','body':'B','event_ids':[1],'prepare_ahead':True})['status'],'pending')
+
     def test_finished_run_browser_lease_is_released_others_untouched(self):
         lease=Path(self.temp.name)/'workspace/data/browser-lease/lease.json';lease.parent.mkdir(parents=True)
         self.accept();owner='assistant-'+self.job()['job_id'][:8]
@@ -62,6 +109,7 @@ class Preparation(unittest.TestCase):
         self.accept();job=dict(self.job(),next_step='x'*2000)
         limit=int(__import__('re').search(r'message\.length>(\d+)',(a.ROOT/'preparation-run.mjs').read_text())[1])
         self.assertLess(len(a.preparation_prompt(job,'- '+'f'*3000+'\n…')),limit-2000)
+        self.assertLess(len(a.preparation_prompt({**job,'ahead':True},'- '+'f'*3000+'\n…',None,'- '+'e'*4500)),limit-2000)
         # The plugin's contextFile shortens anything longer, so the rules must fit whole.
         cap=int(__import__('re').search(r'async function contextFile\(path: string, heading: string, limit = (\d+)\)',(a.ROOT/'openclaw-plugin/review-recovery.ts').read_text())[1])
         self.assertLess(len((a.ROOT/'PREPARATION.md').read_text().strip()),cap)

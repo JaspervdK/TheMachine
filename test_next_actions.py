@@ -67,6 +67,38 @@ class NextActions(unittest.TestCase):
         self.assertEqual(self.action_job()['status'],'sent');self.assertEqual(self.row()['status'],'prepared')
         self.assertNotIn('Send',[b['label'] for b in a.controls(self.row())['blocks'][0]['buttons']])
 
+    def test_owner_edit_sends_exactly_the_edited_draft_and_is_remembered(self):
+        old=self.ready();app=self.app()
+        with self.assertRaises(ValueError):  # only the owner in the dashboard edits drafts
+            app.action('revise_draft',{'suggestion_id':self.sid,'revision':old['revision'],'body':'x'})
+        same=app.action('revise_draft',{'suggestion_id':self.sid,'revision':old['revision'],'body':old['body']},owner_dashboard=True)
+        self.assertEqual(same,{'status':'unchanged','revision':old['revision']})
+        r=app.action('revise_draft',{'suggestion_id':self.sid,'revision':old['revision'],'subject':'Shorter subject','body':'My own words.\n\nCheers,\nAlex'},owner_dashboard=True)
+        self.assertNotEqual(r['revision'],old['revision']);row=self.row()['next_action']
+        self.assertEqual((row['subject'],row['to'],row['from'],row['revision']),('Shorter subject',['recipient@example.com'],'owner@example.com',r['revision']))
+        with self.assertRaises(ValueError):self.confirm(old['revision'])
+        self.confirm(r['revision']);sent=[]
+        app.action_step(self.transport(send=lambda action,job:(sent.append(action),{'message_id':'ok'})[1]))
+        self.assertEqual([s['body'] for s in sent],['My own words.\n\nCheers,\n\nAlex'])
+        with self.store.connect() as db:
+            edit=dict(db.execute('SELECT * FROM draft_edits').fetchone())
+        self.assertEqual((edit['before_body'],edit['after_subject'],edit['source']),('Exact approved draft.','Shorter subject','dashboard'))
+        with self.assertRaises(ValueError):  # sent drafts stay as sent
+            app.action('revise_draft',{'suggestion_id':self.sid,'revision':r['revision'],'body':'Later change'},owner_dashboard=True)
+
+    def test_answers_to_a_card_send_are_flagged_for_the_review(self):
+        self.ready(thread_id='abc123',in_reply_to='<orig@x>');self.confirm();app=self.app()
+        app.action_step(self.transport(send=lambda *_:{'message_id':'gm1'}))
+        rfc=self.action_job()['rfc_message_id']
+        later=(a.dt.datetime.fromisoformat(a.now())+a.dt.timedelta(minutes=5)).isoformat()
+        mail=lambda sid,meta:{'account_id':'work','source_id':sid,'kind':'gmail.message','occurred_at':later,'title':'Re: Verified subject','body':'Sounds good, but Tuesday?','metadata':meta,'deleted':False}
+        self.store.commit_page('work',{},[mail('r1',{'in-reply-to':rfc,'labels':['INBOX']}),mail('r2',{'thread_id':'abc123','labels':['INBOX']}),
+                                          mail('r3',{'thread_id':'abc123','labels':['SENT']}),mail('r4',{'thread_id':'other','labels':['INBOX']})])
+        events=self.store.begin_analysis(['work'],limit=40)['events']
+        with self.store.connect() as db:ids=dict(db.execute("SELECT source_id,id FROM events").fetchall())
+        got={sid for sid in ('r1','r2','r3','r4') if any(e['id']==ids[sid] and e.get('answers_your_card',{}).get('suggestion_id')==self.sid for e in events)}
+        self.assertEqual(got,{'r1','r2'})  # the owner's own sent copy and other threads are not answers
+
     def test_old_draft_confirmation_rejected_and_queue_cancelled(self):
         old=self.ready();self.confirm()
         self.app().action('prepare',{'suggestion_id':self.sid,'body':'Revised reply','next_action':self.draft(body='New exact body')})

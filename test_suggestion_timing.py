@@ -107,6 +107,24 @@ class RecapAndPreferences(unittest.TestCase):
         text=self.store.preference_summary()
         self.assertIn('Dismissed:',text);self.assertIn('Prepare a retention brief (owner wrote: "not useful for me")',text)
 
+    def test_behaviour_feeds_reviews_preparations_and_recap(self):
+        snoozy=self.store.suggest('s','Review the Q4 budget','Body.',[2])['id']
+        quick=self.store.suggest('q','Read the newsletter digest','Body.',[3])['id']
+        self.store.decide(snoozy,'snooze','','d2','telegram');self.store.decide(snoozy,'accept','','d3','telegram');self.store.decide(snoozy,'snooze','','d4','dashboard')
+        self.store.decide(quick,'reject','','d5','telegram')
+        with self.store.connect() as db:
+            db.execute("INSERT INTO draft_edits VALUES('e1',?,'aaa','bbb','email','Re: x','Dear Sir, please find attached the long version.','Re: x','Hi Tom, here it is.','dashboard',?)",(self.sid,a.now()))
+            db.execute("INSERT INTO action_jobs(id,suggestion_id,revision,payload,status,created_at,updated_at,approval_id,source,rfc_message_id) VALUES('j1',?,'bbb','{}','sent',?,?,'x','dashboard','')",(self.sid,a.now(),a.now()))
+        text=self.store.preference_summary()
+        self.assertIn('Drafts: 0 sent as written, 1 edited by the owner first.',text)
+        self.assertIn('- Review the Q4 budget (2x)',text);self.assertIn('without a note (not worth their time):\n- Read the newsletter digest',text)
+        self.assertNotIn('Prepare a retention brief',text.split('How the owner acted')[1])  # a written note is not a quick dismissal
+        edits=self.store.draft_edits_text()
+        self.assertIn('Your draft: Dear Sir',edits);self.assertIn('The owner changed it to: Hi Tom, here it is.',edits)
+        self.assertIn('The owner changed it to: Hi Tom',a.preparation_prompt({'job_id':'j'*16,'suggestion_id':self.sid},'',None,edits))
+        recap=a.weekly_recap(self.store,{},None,None)
+        self.assertIn('**What I noticed:** 0 drafts sent as written, 1 edited by you first; snoozed more than once: Review the Q4 budget; 1 dismissed within minutes.',recap)
+
     def test_recap_content(self):
         text=a.weekly_recap(self.store,{},None,{'input':1e6,'cacheRead':9e6,'output':4e4,'runs':3,'usd':3.3})
         self.assertIn('1 new',text);self.assertIn('dismissed 1',text);self.assertIn('$3.30',text)

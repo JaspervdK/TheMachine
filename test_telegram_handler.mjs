@@ -44,11 +44,12 @@ item.status='pending';const before=replies.length;await handler(ctx('other'));aw
 item.status='prepared';item.next_action={kind:'email',revision:'abcdef123456',from:'owner@example.com',to:['recipient@example.com'],cc:[],bcc:[],subject:'Verified subject',body:'Exact draft'};
 await handler(ctx('back'));buttons=edits.pop().buttons.flat();assert.equal(buttons[0].text,'Send');assert.ok(buttons.every(b=>!b.callback_data||Buffer.byteLength(b.callback_data)<=64));
 const beforeSend=choices.length;await handler(ctx('send_abcdef123456'));const review=edits.pop();assert.match(review.text,/From: owner@example.com/);assert.match(review.text,/Exact draft/);assert.equal(choices.length,beforeSend);
+assert.deepEqual(review.buttons.flat().map(b=>b.text),['Send now','Edit','Cancel']);assert.match(review.buttons.flat()[1].url,/#send=[a-f0-9]{16}&revision=abcdef123456&edit=1$/);
 await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');edits.pop();
 await handler(ctx('confirm_000000000000'));assert.equal(choices.length,beforeSend);edits.pop();delete item.next_action;
 item.next_action={kind:'email',revision:'abcdef123456',from:'owner@example.com',to:[],to_options:['will@vendor.example','ann@example.com'],cc:[],bcc:[],subject:'Pick',body:'Draft'};
 {await handler(ctx('send_abcdef123456'));const pick=edits.pop();assert.match(pick.text,/Who should get this email/);const b=pick.buttons.flat();
- assert.deepEqual(b.map(x=>x.text),['Send to will@vendor.example','Send to ann@example.com','Choose several','Cancel']);assert.ok(b.every(x=>!x.callback_data||Buffer.byteLength(x.callback_data)<=64));
+ assert.deepEqual(b.map(x=>x.text),['Send to will@vendor.example','Send to ann@example.com','Choose several','Edit','Cancel']);assert.equal(b.find(x=>x.text==='Edit').url.endsWith('&edit=1'),true);assert.ok(b.every(x=>!x.callback_data||Buffer.byteLength(x.callback_data)<=64));
  const before=choices.length;await handler(ctx('confirm_abcdef123456'));assert.equal(choices.length,before);edits.pop();  // An old plain Send now shows the choice again.
  await handler(ctx('confirm_abcdef123456_5'));assert.equal(choices.length,before);edits.pop();
  await handler(ctx('confirm_abcdef123456_1'));assert.deepEqual(choices.pop().recipients,['ann@example.com']);edits.pop();}
