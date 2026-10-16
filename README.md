@@ -280,6 +280,19 @@ Read this before you turn on delivery.
 - **Backups:** use SQLite's backup API (`sqlite3 events.sqlite ".backup copy.sqlite"`); never copy the live file without its WAL.
 - **Rollback:** disable a source by removing its account from `config.json`; disable reviews with `review_worker.enabled: false`; stop delivery with `delivery_enabled: false`; disable the plugin with `openclaw plugins disable personal-assistant-bridge`. Keep the database.
 
+### Catch-up and search guarantees
+
+- **GitHub:** at most five 50-item pages per run, with a frozen `since`/`before` window and a persisted next page. The completed checkpoint advances only after that window drains; events and paging state commit together. New arrivals go into the next window. Previous-page fingerprints are checked before and after a continuation; shifted pages replay that window instead of skipping older items. The five-page work budget remains, with extra read-only anchor checks.
+- **Stripe:** at most ten 100-item pages per run. The fixed time window and `starting_after` cursor survive restarts and failed reads. The next window overlaps the completed second (`created[gte]`); event IDs deduplicate replays.
+- **X mentions:** at most four pages per read. An unfinished `mention_catchup` retains the bottom cursor and original floor, without advancing the completed post ID. Catch-up resumes at the configured X polling interval, not an increased rate.
+- **Coverage:** all three connectors retain incomplete coverage in their checkpoint while more pages wait. A successful bounded read is not a claim of complete catch-up; inspect Sync details.
+- **X account switching:** the existing browser lease reserves selection, work and restoration atomically, including primary-account reads and sends. No real-Chrome focus or desktop input. Other jobs wait until cleanup releases the lease. Inventory and public-reply previews/verifications remain shared and never switch accounts.
+- **Semantic freshness:** seed/candidate vectors must match their event version, model and dimensions. Changed seeds refresh on demand; stale candidates wait for backfill. Slow old requests cannot overwrite newer vectors, and an in-flight changed/deleted seed is not used. Keyword fallback and account isolation remain.
+
+These are collection/retrieval fixes, not additional approval requirements. Normal owner-authorized work keeps its existing permissions. Regression tests use disposable databases/leases and the actual X reader JavaScript with synthetic responses; no real sends or browser connections.
+
+**Downgrading:** do not run older collectors while `catchup` or `page.mention_catchup` is nonempty: old readers ignore that continuation. Keep the service stopped or hold the affected source until cursor-aware code is restored. Preserve the live database, receipts and owner choices; never reset a checkpoint or restore a backup over newer decisions.
+
 ## Adding a source
 
 Sources can be added as a single-file plugin in `connectors/` without touching `assistant.py`. [docs/adding-a-source.md](docs/adding-a-source.md) walks through one, with [`connectors/rss.py`](connectors/rss.py) (RSS and Atom feeds) as a working example. The rules for any source:

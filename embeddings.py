@@ -117,10 +117,10 @@ def pending(db, settings, limit, newest=True):
 
 
 def save(db, settings, rows, vectors):
-    # An event deleted meanwhile has nothing to attach to; a newer version is picked up next pass.
+    # A slow older request must not overwrite a newer version's vector.
     db.executemany('INSERT OR REPLACE INTO event_vectors(event_id,version,model,dims,vector) '
-                   'SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM events WHERE id=?)',
-                   [(r['id'], r['version'], settings.get('model', ''), len(v), pack(v), r['id']) for r, v in zip(rows, vectors)])
+                   'SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM events WHERE id=? AND version=? AND deleted=0)',
+                   [(r['id'], r['version'], settings.get('model', ''), len(v), pack(v), r['id'], r['version']) for r, v in zip(rows, vectors)])
 
 
 def embed_pending(connect, settings, limit=16, newest=True):
@@ -193,29 +193,35 @@ def related(connect, settings, accounts, event_ids=(), query='', limit=8, floor=
     skip = set(seeds) | {int(i) for i in exclude or ()}
     with connect() as db:
         rows = [dict(r) for r in db.execute(
-            'SELECT e.id,e.version,e.title,e.body,v.vector,v.model,v.dims FROM events e LEFT JOIN event_vectors v ON v.event_id=e.id '
-            'WHERE e.account_id IN (' + marks + ') AND e.id IN (' + ','.join('?' for _ in seeds) + ')', (*accounts, *seeds))] if seeds else []
-    probes = [unpack(r['vector']) for r in rows if r['vector'] and r['model'] == model and r['dims'] == dims]
-    missing = [r for r in rows if not (r['vector'] and r['model'] == model and r['dims'] == dims)]
+            'SELECT e.id,e.version,e.title,e.body,v.version vector_version,v.vector,v.model,v.dims FROM events e LEFT JOIN event_vectors v ON v.event_id=e.id '
+            'WHERE e.deleted=0 AND e.account_id IN (' + marks + ') AND e.id IN (' + ','.join('?' for _ in seeds) + ')', (*accounts, *seeds))] if seeds else []
+    current = lambda r: r['vector'] and r['vector_version'] == r['version'] and r['model'] == model and r['dims'] == dims
+    probes = [(r['id'], r['version'], unpack(r['vector'])) for r in rows if current(r)]
+    missing = [r for r in rows if not current(r)]
     texts = [document(r['title'], r['body']) for r in missing] + ([QUERY_PREFIX + query.strip()[:BODY_CHARS]] if query.strip() else [])
     if texts:
         vectors = embed(settings, texts, timeout)
         if missing:  # just arrived: embed now, and keep the vector
             with connect() as db:
                 save(db, settings, missing, vectors[:len(missing)])
-        probes += vectors[:len(missing)]
+        probes += [(r['id'], r['version'], v) for r, v in zip(missing, vectors)]
     asked = vectors[len(missing)] if query.strip() else None
     scored = []  # (margin over its floor, similarity, event_id)
     if probes or asked:
         with connect() as db:
+            # A seed may have changed/deleted while its embedding request was running.
+            versions = {r[0]: r[1] for r in db.execute('SELECT id,version FROM events WHERE deleted=0 AND id IN (' + ','.join('?' for _ in seeds) + ')', seeds)} if seeds else {}
+            live_probes = [vector for event_id, version, vector in probes if versions.get(event_id) == version]
             for event_id, blob in db.execute(
                     'SELECT v.event_id,v.vector FROM event_vectors v JOIN events e ON e.id=v.event_id '
-                    'WHERE e.account_id IN (' + marks + ') AND e.deleted=0 AND v.model=? AND v.dims=?', (*accounts, model, dims)):
+                    'WHERE e.account_id IN (' + marks + ') AND e.deleted=0 AND v.version=e.version AND v.model=? AND v.dims=?', (*accounts, model, dims)):
                 if event_id in skip:
                     continue
                 vector = unpack(blob)
-                best = max([(c - floor, c) for c in (cosine(p, vector) for p in probes)] +
-                           [(c - query_floor, c) for c in ([cosine(asked, vector)] if asked else [])])
+                comparisons = [(c - floor, c) for c in (cosine(p, vector) for p in live_probes)] + [(c - query_floor, c) for c in ([cosine(asked, vector)] if asked else [])]
+                if not comparisons:
+                    continue
+                best = max(comparisons)
                 if best[0] >= 0:
                     scored.append((*best, event_id))
     scored.sort(reverse=True)

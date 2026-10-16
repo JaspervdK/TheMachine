@@ -47,7 +47,7 @@ class FakeStripe(stripe.Source):
         if path == 'v1/account':
             return {'id': self.account_id}
         if path == 'v1/events':
-            return {'data': [e for e in self.events if e['created'] > params['created[gt]']], 'has_more': False}
+            return {'data': [e for e in self.events if params['created[gte]'] <= e['created'] <= params['created[lte]']], 'has_more': False}
         if path.startswith('v1/customers/'):
             return {'name': 'Acme BV', 'email': 'billing@acme.example'}
         raise AssertionError(path)
@@ -114,8 +114,8 @@ class Stripe(Base):
     def test_replay_adds_nothing_and_reads_from_the_checkpoint(self):
         stripe.sync(self.store, {'bootstrap_days': 30000}, STRIPE, H, FakeStripe(STRIPE_EVENTS))
         source = FakeStripe(STRIPE_EVENTS)
-        self.assertEqual(stripe.sync(self.store, {}, STRIPE, H, source)['read'], 0)
-        self.assertEqual([p['created[gt]'] for path, p in source.calls if path == 'v1/events'], [1792000500])
+        self.assertEqual(stripe.sync(self.store, {}, STRIPE, H, source)['read'], 1)
+        self.assertEqual([p['created[gte]'] for path, p in source.calls if path == 'v1/events'], [1792000499])
         self.assertEqual(len(self.stored()), 3)
 
     def test_wrong_stripe_account_is_refused_before_reading(self):

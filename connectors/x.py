@@ -115,7 +115,8 @@ def sync(store, config, account, helpers, source=None):
     since = state.get('since_ms') or int((current - dt.timedelta(days=int(config.get('bootstrap_days', 7)))).timestamp() * 1000)
     data = source.page(since, state.get('page') or {})
     found = events(account, data, helpers)
-    state.update(mode='incremental', since_ms=since, page=data['state'], read_items=len(found), coverage_complete=True,
-                 coverage='Mentions, replies and DM inbox caught up for @' + account['handle'] + '.')
+    more = bool(data['state'].get('mention_catchup'))
+    state.update(mode='incremental', since_ms=since, page=data['state'], read_items=len(found), coverage_complete=not more,
+                 coverage=('Older mentions are still being collected for @' if more else 'Mentions, replies and DM inbox caught up for @') + account['handle'] + '.')
     store.commit_page(account['id'], state, found)
-    return {'mode': 'incremental', 'events': len(found)}
+    return {'mode': 'incremental', 'events': len(found), 'more': more}

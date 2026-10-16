@@ -11,6 +11,7 @@ Optional: "repos": ["owner/repo", ...] to keep only those repositories; "ci_repo
 path to the CLI.
 """
 import datetime as dt
+import hashlib
 import json
 import re
 import subprocess
@@ -71,11 +72,26 @@ def sync(store, config, account, helpers, source=None):
     since = state.get('since') or (dt.datetime.fromisoformat(helpers.now()) - dt.timedelta(days=int(config.get('bootstrap_days', 7)))).strftime('%Y-%m-%dT%H:%M:%SZ')
     repos = {r.lower() for r in account.get('repos', [])}
     me = account['login'].lower()
-    events, newest = [], since
-    for page in range(1, 6):
-        items = source.get(f'notifications?all=true&participating=true&per_page=50&page={page}&since={since}') or []
+    window = state.get('catchup') or {'since': since, 'before': dt.datetime.fromisoformat(helpers.now()).strftime('%Y-%m-%dT%H:%M:%SZ'), 'page': 1, 'newest': since}
+    def page_items(page):
+        return source.get(f"notifications?all=true&participating=true&per_page=50&page={page}&since={window['since']}&before={window['before']}") or []
+    def fingerprint(items):
+        return hashlib.sha256(json.dumps([(n.get('id'), n.get('updated_at')) for n in items]).encode()).hexdigest()
+    # An old numeric continuation has no shift proof; safely replay its window once.
+    if window['page'] > 1 and not window.get('anchor'):
+        window['page'] = 1
+    count, read, more = 0, 0, False
+    for _ in range(5):
+        anchor = window.get('anchor')
+        if anchor and fingerprint(page_items(anchor['page'])) != anchor['fingerprint']:
+            window['page'] = 1
+            window.pop('anchor', None)
+            anchor = None
+        page = window['page']
+        items = page_items(page)
+        events = []
         for n in items:
-            newest = max(newest, n.get('updated_at') or newest)
+            window['newest'] = max(window['newest'], n.get('updated_at') or window['newest'])
             repo = (n.get('repository') or {}).get('full_name', '')
             if n.get('reason') not in REASONS or (repos and repo.lower() not in repos):
                 continue
@@ -101,8 +117,27 @@ def sync(store, config, account, helpers, source=None):
                            'body': body[:40000], 'deleted': False,
                            'metadata': {'repo': repo, 'reason': n.get('reason'), 'type': subject.get('type'), 'number': detail.get('number'),
                                         'state': status, 'from': author, 'from_me': author.lower() == me, 'source_url': url}})
-        if len(items) < 50:
+        read += len(items)
+        count += len(events)
+        # Check again after this read: a notification can leave the frozen window
+        # between the first anchor check and fetching the next numbered page.
+        shifted = anchor and fingerprint(page_items(anchor['page'])) != anchor['fingerprint']
+        more = len(items) == 50 or bool(shifted)
+        if more:
+            window['page'] = 1 if shifted else page + 1
+            if shifted:
+                window.pop('anchor', None)
+            else:
+                window['anchor'] = {'page': page, 'fingerprint': fingerprint(items)}
+            state.update(mode='incremental', since=since, catchup=window)
+        else:
+            state.update(mode='incremental', since=window['newest'])
+            state.pop('catchup', None)
+        state.update(coverage_complete=not more, coverage='Older GitHub notifications are still being collected.' if more else 'GitHub notification pages caught up.')
+        store.commit_page(account['id'], state, events)
+        if not more:
             break
+    events = []
     for repo in account.get('ci_repos', []):
         branch = account.get('ci_branch', 'main')
         runs = (source.get(f"repos/{repo}/actions/runs?branch={branch}&status=failure&per_page=20&created=%3E{since[:10]}") or {}).get('workflow_runs', [])
@@ -112,5 +147,6 @@ def sync(store, config, account, helpers, source=None):
                            'occurred_at': utc(run['updated_at']), 'title': f"[{repo.split('/')[-1]}] {run.get('name', 'CI')} failed on {branch}"[:1000],
                            'body': f"Commit: {((run.get('head_commit') or {}).get('message') or '')[:2000]}\nBy: {actor}",
                            'deleted': False, 'metadata': {'repo': repo, 'from': actor, 'from_me': actor.lower() == me, 'source_url': run.get('html_url', '')}})
-    store.commit_page(account['id'], {'mode': 'incremental', 'since': newest}, events)
-    return {'mode': 'incremental', 'events': len(events)}
+    if events:
+        store.commit_page(account['id'], state, events)
+    return {'mode': 'incremental', 'events': count + len(events), 'read': read, 'more': more}

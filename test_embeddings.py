@@ -112,6 +112,57 @@ class Embeddings(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.app.action('related', {'account_ids': ['work']})
 
+    def test_changed_candidate_is_not_ranked_with_its_old_vector(self):
+        self.embed_all()
+        seed, candidate = self.ids('work', '1'), self.ids('work', '2')
+        self.assertIn(candidate, [i for i, _ in emb.related(self.store.connect, SETTINGS, ['work'], [seed])])
+        self.store.commit_page('work', {}, [event('2', 'Garden weekend', 'Plant tulips roses daffodils outdoors')])
+        self.assertNotIn(candidate, [i for i, _ in emb.related(self.store.connect, SETTINGS, ['work'], [seed])])
+
+    def test_changed_seed_is_embedded_before_matching(self):
+        self.store.commit_page('work', {}, [event('garden', 'Garden weekend', 'Plant tulips roses daffodils outdoors')])
+        self.embed_all()
+        seed, garden = self.ids('work', '1'), self.ids('work', 'garden')
+        self.store.commit_page('work', {}, [event('1', 'Garden plan', 'Plant tulips roses daffodils outdoors')])
+        before = self.calls.call_count
+        found = emb.related(self.store.connect, SETTINGS, ['work'], [seed])
+        self.assertEqual(found[0][0], garden)
+        self.assertEqual(self.calls.call_count, before + 1)
+        self.assertEqual(self.vectors()[seed]['version'], 2)
+
+    def test_old_embedding_completion_cannot_replace_a_newer_vector(self):
+        self.embed_all()
+        seed = self.ids('work', '1')
+        with self.store.connect() as db:
+            old = dict(db.execute('SELECT id,version,title,body FROM events WHERE id=?', (seed,)).fetchone())
+        old_vector = emb.unpack(self.vectors()[seed]['vector'])
+        self.store.commit_page('work', {}, [event('1', 'Garden plan', 'Plant tulips roses daffodils outdoors')])
+        self.embed_all()
+        current = self.vectors()[seed]
+        with self.store.connect() as db:
+            emb.save(db, SETTINGS, [old], [old_vector])
+        self.assertEqual(self.vectors()[seed], current)
+
+    def test_seed_changed_during_embedding_is_not_used_or_saved(self):
+        self.embed_all()
+        seed = self.ids('work', '1')
+        self.store.commit_page('work', {}, [event('1', 'Invoice overdue', 'Please pay the invoice')])
+        def request(settings, texts, timeout=120):
+            self.store.commit_page('work', {}, [event('1', 'Garden plan', 'Plant tulips roses daffodils outdoors')])
+            return fake_request(settings, texts, timeout)
+        self.calls.side_effect = request
+        self.assertEqual(emb.related(self.store.connect, SETTINGS, ['work'], [seed]), [])
+        self.assertEqual(self.vectors()[seed]['version'], 1)
+
+    def test_deleted_seed_does_not_trigger_embedding_or_matching(self):
+        self.embed_all()
+        seed = self.ids('work', '1')
+        with self.store.connect() as db:
+            db.execute('UPDATE events SET deleted=1 WHERE id=?', (seed,))
+        before = self.calls.call_count
+        self.assertEqual(emb.related(self.store.connect, SETTINGS, ['work'], [seed]), [])
+        self.assertEqual(self.calls.call_count, before)
+
     def test_hybrid_fuses_keyword_and_meaning(self):
         self.embed_all()
         offsite, lunch = self.ids('work', '4'), self.ids('work', '3')

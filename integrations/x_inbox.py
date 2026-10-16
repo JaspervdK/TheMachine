@@ -25,11 +25,11 @@ tab lets out only that one request, with exactly the approved text and post. A D
 the DM inbox API (dm/new2), like x.com does. Every send is logged before and after in SENDS_LOG;
 a --token that already has an entry is never sent again.
 
-Encrypted X Chat conversations aren't read or sent to; only the DM inbox is. Holds the shared
-browser lease (integrations/browser-lease.py) while it runs and always closes its own tab. Used
+Encrypted X Chat conversations aren't read or sent to; only the DM inbox is. Holds the
+browser lease (exclusive during account selection/restoration) and always closes its own tab. Used
 by connectors/x.py and next_actions.XTransport.
 """
-import argparse, fcntl, json, re, subprocess, sys, time, unicodedata, urllib.parse, uuid, os
+import argparse, fcntl, importlib.util, json, re, subprocess, sys, time, unicodedata, urllib.parse, uuid, os
 from datetime import datetime
 from pathlib import Path
 
@@ -40,7 +40,7 @@ NEUTRAL_URL = 'https://x.com/robots.txt'
 # An account switch changes the cookies of every x.com tab in that browser, so x-inbox runs go
 # one at a time, and a run that has to switch waits while another job holds the browser.
 RUN_LOCK = Path.home() / '.local/state/x-inbox/run.lock'
-HARMLESS = ('x-inbox-', 'linkedin-inbox-')  # readers that never use x.com as the owner
+LEASE_API = None
 SENDS_LOG = Path.home() / '.local/share/x-inbox/sends.jsonl'
 REPLY_LIMIT, LONG_LIMIT, DM_LIMIT = 280, 25000, 10000  # long posts need X Premium on that account
 
@@ -92,7 +92,10 @@ async () => {
   try {
     await switchTo(target.id);
     // Mentions and replies: the Notifications → Mentions tab. Reading doesn't mark them seen.
-    let cursor = null, sinceId = String(P.state.mention_since_id || '0'), top = sinceId;
+    const backlog = P.state.mention_catchup || {};
+    let cursor = backlog.cursor || null, sinceId = String(backlog.since_id || P.state.mention_since_id || '0'), top = String(backlog.top || sinceId);
+    const sinceMs = backlog.since_ms ?? P.since;
+    let mentionsDone = false;
     for (let page = 0; page < 4; page++) {
       const j = await call('/i/api/2/notifications/mentions.json?tweet_mode=extended&include_ext_alt_text=true&count=40' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
       const tweets = (j.globalObjects || {}).tweets || {}, users = (j.globalObjects || {}).users || {};
@@ -102,7 +105,7 @@ async () => {
         if (t.user_id_str === target.id || !mentioned) continue;
         const at = Date.parse(t.created_at); oldest = Math.min(oldest, at);
         if (!newer(t.id_str, sinceId)) { reachedKnown = true; continue; }
-        if (at < P.since) continue;
+        if (at < sinceMs) continue;
         if (newer(t.id_str, top)) top = t.id_str;
         const u = users[t.user_id_str] || {}, parent = t.in_reply_to_status_id_str && tweets[t.in_reply_to_status_id_str];
         out.mentions.push({id: t.id_str, at, text: expand(t), lang: t.lang, conversation_id: t.conversation_id_str,
@@ -114,9 +117,10 @@ async () => {
       const entries = JSON.stringify(j.timeline || {});
       cursor = (entries.match(/"cursor":\{"value":"([^"]+)","cursorType":"Bottom"/) || [])[1];
       // Stop once a page reaches what was read before or the start of the window.
-      if (!cursor || !Object.keys(tweets).length || reachedKnown || oldest < P.since) break;
+      if (!cursor || !Object.keys(tweets).length || reachedKnown || oldest < sinceMs) { mentionsDone = true; break; }
     }
-    out.state.mention_since_id = top;
+    if (mentionsDone) { out.state.mention_since_id = top; delete out.state.mention_catchup; }
+    else out.state.mention_catchup = {cursor, since_id: sinceId, top, since_ms: sinceMs};
     // DMs: the DM inbox (not X Chat, which is end-to-end encrypted). Reading doesn't mark anything read.
     const q = 'include_groups=true&include_inbox_timelines=true&dm_users=true&include_conversation_info=true&count=50';
     let box = null;
@@ -271,7 +275,8 @@ async () => {
   let res;
   try { res = await work(); }
   catch (e) { keep = false; res = {...out, error: e.code || 'query-failed', status: e.status, detail: String(e.detail || e.message || e).slice(0, 200)}; }
-  if (!keep) { try { await switchTo((primary || target).id); } catch (e) { res.switch_back = 'failed'; } }
+  // A read-only preview/verification must not restore some other job's account.
+  if (!keep && (P.switch || P.mode === 'back')) { try { await switchTo((primary || target).id); } catch (e) { res.switch_back = 'failed'; } }
   return res;
 }
 """
@@ -362,7 +367,17 @@ def evaluate(target, js, timeout_ms=90000):
         raise Fail('unexpected browser output: ' + out.strip()[:200])
 
 
-def lease(action):
+def lease(action, exclusive=False):
+    if action == 'claim' and exclusive:
+        # Same atomic lease admission as the CLI, without real-Chrome window focus.
+        global LEASE_API
+        if LEASE_API is None:
+            spec = importlib.util.spec_from_file_location('x_browser_lease', LEASE)
+            LEASE_API = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(LEASE_API)
+        LEASE_API.STATE.parent.mkdir(parents=True, exist_ok=True)
+        ok, state = LEASE_API.claim(OWNER, 10, exclusive=True)
+        return subprocess.CompletedProcess([], 0 if ok else 3, LEASE_API.describe(state) or 'free', '')
     args = ['python3', str(LEASE), action, '--owner', OWNER] + ([] if action == 'release' else ['--minutes', '10'])
     return subprocess.run(args, capture_output=True, text=True, timeout=30)
 
@@ -382,13 +397,8 @@ def one_at_a_time(wait=180):
             time.sleep(2)
 
 
-def other_holders():
-    status = lease('status').stdout.strip()
-    return [] if status == 'free' else [o for o in (part.split(' ')[0] for part in status.split(', ')) if o and o != OWNER and not o.startswith(HARMLESS)]
-
-
 def with_tab(url, fn, switching=False):
-    claim = lease('claim')
+    claim = lease('claim', exclusive=switching)
     if claim.returncode == 3:
         raise Fail('the OpenClaw browser is busy (' + lease('status').stdout.strip() + '); try again later')
     if claim.returncode:
@@ -396,9 +406,6 @@ def with_tab(url, fn, switching=False):
     label = 'x-inbox-' + uuid.uuid4().hex[:6]
     opened, target = False, label
     try:
-        busy = switching and other_holders()
-        if busy:
-            raise Fail('the OpenClaw browser is busy (' + ', '.join(busy) + '); not switching X accounts now')
         receipt = oc('open', '--label', label, url)
         opened = True
         match = re.search(r'^(?:id|tab):\s*(\S+)', receipt, re.M)
@@ -426,7 +433,8 @@ def run(mode, **params):
         raise Fail('the X tab did not load in time; try again')
     lock = one_at_a_time()
     try:
-        switching = mode == 'sync' and str(params.get('handle', '')).lower() != str(params.get('primary', '')).lower()
+        # Even a primary-account read can restore a non-primary active account.
+        switching = mode != 'accounts'
         res = with_tab(NEUTRAL_URL, go, switching)
     finally:
         lock.close()
@@ -551,7 +559,9 @@ def cmd_send(a):
     token = a.token or 'x-' + uuid.uuid4().hex
     request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'x-inbox:' + token))
     # Switching accounts needs the browser to itself (no other job's tabs); a reply preview needs no switch.
-    switching = handle.lower() != primary.lower() and bool(a.yes or a.check or a.conversation)
+    # The active browser account may not be primary: protected reads/sends select their
+    # target explicitly. A public reply preview remains shared and never switches.
+    switching = bool(a.yes or a.check or a.conversation)
     stay = switching and bool(a.yes or a.check)
     base = {'handle': handle, 'primary': primary, 'reply_to': a.reply_to or '', 'conversation': a.conversation or '', 'text': text, 'request_id': request_id}
     wrote = []
@@ -653,7 +663,7 @@ def cmd_verify(a):
     if intent.get('reply_to'):
         js, switching = x_js('verify-reply', switch=False, reply_to=intent['reply_to'], **params), False
     else:
-        switching = handle.lower() != primary.lower()
+        switching = True
         js = x_js('verify-dm', switch=switching, conversation=intent['conversation'], request_id=intent.get('request_id', ''), **params)
     lock = one_at_a_time()
     try:

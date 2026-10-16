@@ -411,6 +411,15 @@ class XInboxSend(unittest.TestCase):
         self.assertEqual(self.steps(), ['tab', 'resolve', 'compose-check', 'back'])
         self.assertEqual(self.navigated[0][-1], 'https://x.com/intent/post?in_reply_to=' + MENTION_ID + '&text=Yes%20%26%20no%3F')
         self.assertFalse(self.log.exists())
+        # The primary account also needs custody: another run may have left
+        # the global X session on a brand account before this command starts.
+        self.calls.clear()
+        code, _, _ = self.main('send', '--handle', 'JeroenCorthout', '--primary', 'JeroenCorthout',
+                               '--reply-to', MENTION_ID, '--text', 'Yes!', '--check')
+        self.assertEqual(code, 0)
+        self.assertEqual(self.calls[0], ('tab', True))
+        self.assertTrue(self.calls[1][1]['switch'])
+        self.assertFalse(self.log.exists())
 
     def test_reply_logs_intent_before_the_one_click_and_switches_back(self):
         code, out, _ = self.send('--reply-to', MENTION_ID, '--text', 'Yes!', '--token', 'assistant-J1', '--yes', '--json')

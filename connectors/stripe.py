@@ -172,14 +172,33 @@ def sync(store, config, account, helpers, source=None):
     source.verify()
     state = store.checkpoint(account['id']) or {}
     since = int(state.get('since') or time.time() - 86400 * int(config.get('bootstrap_days', 7)))
-    params, found = {'limit': 100, 'types[]': list(TYPES), 'created[gt]': since}, []
+    window = state.get('catchup') or {'after': max(0, since - 1), 'before': int(time.time()), 'newest': since}
+    params = {'limit': 100, 'types[]': list(TYPES), 'created[gte]': window['after'], 'created[lte]': window['before']}
+    if window.get('cursor'):
+        params['starting_after'] = window['cursor']
+    read, count, more = 0, 0, False
     for _ in range(10):  # newest first; a quiet account needs one page
         page = source.get('v1/events', params)
-        found += page.get('data', [])
-        if not page.get('has_more') or not page.get('data'):
+        items = page.get('data', [])
+        if page.get('has_more') and not items:
+            raise helpers.SourceError('stripe_invalid_page')
+        events = [e for e in (event(account, item, source, helpers) for item in reversed(items)) if e]
+        read += len(items)
+        count += len(events)
+        window['newest'] = max([window['newest']] + [int(item.get('created') or 0) for item in items])
+        more = bool(page.get('has_more'))
+        if more:
+            cursor = items[-1]['id']
+            if cursor == window.get('cursor'):
+                raise helpers.SourceError('stripe_invalid_cursor')
+            window['cursor'] = cursor
+            state.update(mode='incremental', since=since, catchup=window)
+            params['starting_after'] = cursor
+        else:
+            state.update(mode='incremental', since=window['newest'])
+            state.pop('catchup', None)
+        state.update(coverage_complete=not more, coverage='Older Stripe events are still being collected.' if more else 'Stripe event pages caught up.')
+        store.commit_page(account['id'], state, events)
+        if not more:
             break
-        params['starting_after'] = page['data'][-1]['id']
-    events = [e for e in (event(account, item, source, helpers) for item in reversed(found)) if e]
-    newest = max([since] + [int(item.get('created') or 0) for item in found])
-    store.commit_page(account['id'], {'mode': 'incremental', 'since': newest}, events)
-    return {'mode': 'incremental', 'events': len(events), 'read': len(found)}
+    return {'mode': 'incremental', 'events': count, 'read': read, 'more': more}
