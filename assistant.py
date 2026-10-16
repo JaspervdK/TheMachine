@@ -2262,14 +2262,14 @@ class Store:
         return {'edits': sorted(edits.values(), key=lambda e: e['at'], reverse=True), 'sent_as_written': sent.count(False),
                 'sent_edited': sent.count(True), 'snoozed_again': [(r[0], r[1]) for r in snoozed], 'quick_dismissed': quick}
 
-    def quality(self, days=30, until=None):
+    def quality(self, days=30, until=None, since=None):
         """How good the cards were, so changes to the rules can be judged by results.
 
         Worth it: the owner tapped Do it or Send, or marked it done. Not needed: dismissed. Do it right
         first time: no Change and no Try again after the first Do it. Cards that closed themselves (a
         follow-up that arrived) don't count."""
         end = until or now()
-        since = (dt.datetime.fromisoformat(end) - dt.timedelta(days=days)).isoformat()
+        since = since or (dt.datetime.fromisoformat(end) - dt.timedelta(days=days)).isoformat()
         with self.connect() as db:
             cards = [dict(r) for r in db.execute(
                 "SELECT s.id,s.status,(SELECT e.kind FROM events e WHERE e.id=json_extract(s.event_ids,'$[0]')) kind FROM suggestions s "
@@ -2306,7 +2306,20 @@ class Store:
         before = self.quality(days, (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat())
         b = self.behaviour(days)
         return {**current, 'previous': {k: before[k] for k in ('hit_rate', 'first_time_rate', 'cards')},
-                'sent_as_written': b['sent_as_written'], 'sent_edited': b['sent_edited']}
+                'sent_as_written': b['sent_as_written'], 'sent_edited': b['sent_edited'], 'trend': self.quality_trend()}
+
+    def quality_trend(self, days=14, weeks=8):
+        """Hit rate per local day and per week (from Monday), oldest first, so progress shows.
+        A card counts in the day it was made, with how it was decided since."""
+        zone = local_tz()
+        today = dt.datetime.fromisoformat(now()).astimezone(zone).date()
+        def bucket(start, end):
+            utc = lambda d: dt.datetime.combine(d, dt.time(), zone).astimezone(dt.timezone.utc).isoformat()
+            q = self.quality(until=utc(end), since=utc(start))
+            return {'start': start.isoformat(), **{k: q[k] for k in ('worth_it', 'dismissed', 'open', 'hit_rate', 'do_it', 'first_time_rate')}}
+        monday = today - dt.timedelta(days=today.weekday())
+        return {'daily': [bucket(today - dt.timedelta(days=i), today - dt.timedelta(days=i - 1)) for i in range(days - 1, -1, -1)],
+                'weekly': [bucket(monday - dt.timedelta(weeks=i), monday - dt.timedelta(weeks=i - 1)) for i in range(weeks - 1, -1, -1)]}
 
     def quality_text(self, days=30):
         """Which sources' cards were worth it, for reviews. Only sources with enough decided cards."""

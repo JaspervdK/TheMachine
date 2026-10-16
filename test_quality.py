@@ -113,6 +113,22 @@ class HitRate(Base):
         self.assertIn('**Hit rate:** 3 of 6 cards you decided on were worth it, 50%.', recap)
         self.assertIn('Do it got it right the first time 1 of 2 times.', recap)
 
+    def test_trend_per_local_day_and_week(self):
+        at = {'a': '2026-10-14T21:30:00+00:00', 'b': '2026-10-14T22:30:00+00:00', 'c': '2026-10-12T08:00:00+00:00', 'd': '2026-10-08T08:00:00+00:00'}
+        ids = {k: self.card(k, 'gmail.message', choice) for k, choice in [('a', 'accept'), ('b', 'reject'), ('c', 'accept'), ('d', 'reject')]}
+        with self.store.connect() as db:
+            for k, sid in ids.items():
+                db.execute('UPDATE suggestions SET created_at=? WHERE id=?', (at[k], sid))
+                db.execute('UPDATE decisions SET created_at=? WHERE suggestion_id=?', (at[k], sid))
+        with patch.object(a, 'now', return_value='2026-10-15T10:00:00+00:00'):
+            t = self.store.quality_trend()
+        days = {d['start']: d for d in t['daily']}
+        self.assertEqual((len(t['daily']), t['daily'][-1]['start'], len(t['weekly']), t['weekly'][-1]['start']), (14, '2026-10-15', 8, '2026-10-12'))
+        self.assertEqual((days['2026-10-14']['worth_it'], days['2026-10-14']['dismissed']), (1, 0))  # 23:30 local
+        self.assertEqual((days['2026-10-15']['dismissed'], days['2026-10-15']['hit_rate']), (1, 0))  # 00:30 local
+        self.assertEqual([(w['worth_it'], w['dismissed'], w['hit_rate']) for w in t['weekly'][-2:]], [(0, 1, 0), (2, 1, 67)])
+        self.assertIn('trend', self.store.quality_report())
+
 
 class CheckBeforeSaving(Base):
     def setUp(self):
