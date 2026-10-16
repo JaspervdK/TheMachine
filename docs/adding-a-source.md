@@ -73,6 +73,8 @@ When an item changes, send it again with the same `source_id`: the service store
 
 - The account appears under Sources with its health, last read and errors. It gets a generic icon unless you add one to `ICONS` in `dashboard.html`.
 - `exclude` rules (`senders`, `titles`, `text`) work on plugin events too. See Noise rules in the README.
+- Every event opens in the dashboard's reader with its title, sender (`sender_display` or `from`, "You" when `from_me`) and body, so a readable plain-text `body` is all it needs.
+- To put the people in your events on the Graph tab, add a branch for your `kind` to `touches()` in [`graph.py`](../graph.py): it returns who took part, with a stable identifier (`email:`, `wa:`, or your own prefix), a name and their role (you wrote to them, they wrote to you, a meeting, or just present). Without it the source works as before; it just adds no people.
 
 ## 6. Tests
 
