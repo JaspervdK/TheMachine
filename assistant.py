@@ -53,6 +53,10 @@ BRAND_ASSETS = {
     '/brand/sleepy.webp': ROOT / 'brand/app-icon-192.png',
     '/brand/sad.webp': ROOT / 'brand/app-icon-192.png',
     '/brand/thinking.webp': ROOT / 'brand/app-icon-192.png',
+    # Inbox-zero game: poked awake, catching a Z, a new best.
+    '/brand/wave.webp': ROOT / 'brand/app-icon-192.png',
+    '/brand/laugh.webp': ROOT / 'brand/app-icon-192.png',
+    '/brand/party.webp': ROOT / 'brand/app-icon-192.png',
     # Home-screen app icons; maskable ones keep the robot inside Android's crop.
     '/brand/app-icon-192.png': ROOT / 'brand/app-icon-192.png',
     '/brand/app-icon-maskable-192.png': ROOT / 'brand/app-icon-maskable-192.png',
