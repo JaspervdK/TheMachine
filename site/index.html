@@ -80,9 +80,9 @@ h1 em{font-style:normal;color:var(--mint)}
 .card p.note.ok{color:var(--mint);font-weight:600}
 .card p.asked{font-size:14.5px;color:var(--text);margin:0 0 8px;overflow-wrap:anywhere}
 .card p.asked strong{color:var(--lavender)}
-.card .steps{list-style:none;margin:4px 0 10px;padding:0;font-size:13.5px;color:var(--muted)}
-.card .steps li::before{content:"› ";color:var(--lavender)}
-.card .steps li:last-child{color:var(--text)}
+.card .prep-steps{list-style:none;margin:4px 0 10px;padding:0;display:grid;gap:3px;line-height:1.35;font-size:13.5px;color:var(--muted)}
+.card .prep-steps li::before{content:"› ";color:var(--lavender)}
+.card .prep-steps li:last-child{color:var(--text)}
 .card .progress{height:3px;border-radius:3px;background:#ffffff12;overflow:hidden;margin:2px 0 8px}
 .card .progress i{display:block;height:100%;width:40%;background:linear-gradient(90deg,transparent,var(--lavender),transparent);animation:demo-slide 1.3s ease-in-out infinite}
 @keyframes demo-slide{from{transform:translateX(-100%)}to{transform:translateX(250%)}}
@@ -417,7 +417,7 @@ function view(){
   if(v==='preparing'){
     const steps=S.steps.slice(0,S.step).map(s=>`<li>${s}</li>`).join('');
     return head(chip('Preparing','lavender'))+(S.prepKind==='change'?youAsked()+'<p class="note">Got it — I’m preparing your update. I’ll send it here when it’s ready.</p>':intro)
-      +`<p class="note">Preparing… <span class="elapsed">0:00</span></p><div class="progress" aria-hidden="true"><i></i></div><ul class="steps">${steps}</ul>`+srcLine()+foot;
+      +`<p class="note">Preparing… <span class="elapsed">0:00</span></p><div class="progress" aria-hidden="true"><i></i></div><ul class="prep-steps">${steps}</ul>`+srcLine()+foot;
   }
   if(v==='ready')return content('ready')+pack([['send','Send','go'],['done','Mark done'],['snooze','Snooze'],['change','Change'],['dismiss','Dismiss']])+foot;
   if(v==='sending')return content('ready')+'<p class="note">Sending your approved draft…</p><div class="progress" aria-hidden="true"><i></i></div>'+foot;
@@ -499,7 +499,7 @@ function prepare(kind){
   go('preparing',{prepKind:kind,steps,step:0,started:Date.now()});
   const el=()=>$('.elapsed');
   tick=setInterval(()=>{const t=Math.floor((Date.now()-S.started)/1000),e=el();if(e)e.textContent=Math.floor(t/60)+':'+pad(t%60)},250);
-  steps.forEach((_,i)=>later(450+i*700,()=>{S.step=i+1;const ul=$('.steps');if(ul){const li=document.createElement('li');li.textContent=steps[i];ul.appendChild(li)}}));
+  steps.forEach((_,i)=>later(450+i*700,()=>{S.step=i+1;const ul=$('.prep-steps');if(ul){const li=document.createElement('li');li.textContent=steps[i];ul.appendChild(li)}}));
   later(450+steps.length*700+300,()=>{S.draft=compose(S.mods);go('ready',{base:'ready'})});
 }
 function reset(){
