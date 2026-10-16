@@ -115,15 +115,24 @@ class RecapAndPreferences(unittest.TestCase):
         with self.store.connect() as db:
             db.execute("INSERT INTO draft_edits VALUES('e1',?,'aaa','bbb','email','Re: x','Dear Sir, please find attached the long version.','Re: x','Hi Tom, here it is.','dashboard',?)",(self.sid,a.now()))
             db.execute("INSERT INTO action_jobs(id,suggestion_id,revision,payload,status,created_at,updated_at,approval_id,source,rfc_message_id) VALUES('j1',?,'bbb','{}','sent',?,?,'x','dashboard','')",(self.sid,a.now(),a.now()))
+        changed=self.store.suggest('c','Answer Sam','Body.',[4])['id']  # a Change before the send counts too, one after doesn't
+        sent_as_is=self.store.suggest('n','Answer Kim','Body.',[5])['id']
+        self.store.decide(changed,'other','Shorter','d6','telegram')
+        with self.store.connect() as db:
+            for job,sid in (('j2',changed),('j3',sent_as_is)):
+                db.execute("INSERT INTO action_jobs(id,suggestion_id,revision,payload,status,created_at,updated_at,approval_id,source,rfc_message_id) VALUES(?,?,?,'{}','sent',?,?,'x','dashboard','')",(job,sid,job,a.now(),a.now()))
+        self.store.decide(sent_as_is,'other','Thanks','d7','telegram')
+        b=self.store.behaviour();self.assertEqual((b['sent_as_written'],b['sent_edited']),(1,2))
+        with self.store.connect() as db: db.execute("DELETE FROM action_jobs WHERE id IN ('j2','j3')")
         text=self.store.preference_summary()
-        self.assertIn('Drafts: 0 sent as written, 1 edited by the owner first.',text)
+        self.assertIn('Drafts: 0 sent as written, 1 changed by the owner first (Change, Try again or an edit).',text)
         self.assertIn('- Review the Q4 budget (2x)',text);self.assertIn('without a note (not worth their time):\n- Read the newsletter digest',text)
         self.assertNotIn('Prepare a retention brief',text.split('How the owner acted')[1])  # a written note is not a quick dismissal
         edits=self.store.draft_edits_text()
         self.assertIn('Your draft: Dear Sir',edits);self.assertIn('The owner changed it to: Hi Tom, here it is.',edits)
         self.assertIn('The owner changed it to: Hi Tom',a.preparation_prompt({'job_id':'j'*16,'suggestion_id':self.sid},'',None,edits))
         recap=a.weekly_recap(self.store,{},None,None)
-        self.assertIn('**What I noticed:** 0 drafts sent as written, 1 edited by you first; snoozed more than once: Review the Q4 budget; 1 dismissed within minutes.',recap)
+        self.assertIn('**What I noticed:** 0 drafts sent as written, 1 changed by you first; snoozed more than once: Review the Q4 budget; 1 dismissed within minutes.',recap)
 
     def test_recap_content(self):
         text=a.weekly_recap(self.store,{},None,{'input':1e6,'cacheRead':9e6,'output':4e4,'runs':3,'usd':3.3})

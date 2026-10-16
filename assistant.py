@@ -2253,7 +2253,10 @@ class Store:
                 first = edits.setdefault(r['suggestion_id'], {'title': r['title'], 'before': r['before_body'], 'before_subject': r['before_subject'], 'at': r['created_at']})
                 first.update(after=r['after_body'], after_subject=r['after_subject'], at=r['created_at'])
             edited_revisions = {r[0] for r in db.execute('SELECT new_revision FROM draft_edits')}
-            sent = [r['revision'] in edited_revisions for r in db.execute("SELECT revision FROM action_jobs WHERE status='sent' AND updated_at>=?", (since,))]
+            # As is: no edit in the dashboard and no Change or Try again before the send.
+            sent = [r['revision'] in edited_revisions or r['changed'] for r in db.execute(
+                "SELECT j.revision,EXISTS(SELECT 1 FROM decisions d WHERE d.suggestion_id=j.suggestion_id AND d.choice IN ('other','retry') "
+                "AND d.source IN ('telegram','dashboard') AND d.created_at<j.created_at) changed FROM action_jobs j WHERE j.status='sent' AND j.updated_at>=?", (since,))]
             snoozed = db.execute("SELECT s.title,count(*) n FROM decisions d JOIN suggestions s ON s.id=d.suggestion_id WHERE d.choice='snooze' "
                                  "AND d.source IN ('telegram','dashboard') AND d.created_at>=? GROUP BY d.suggestion_id HAVING n>=2 ORDER BY n DESC", (since,)).fetchall()
             quick = [r[0] for r in db.execute("SELECT s.title FROM decisions d JOIN suggestions s ON s.id=d.suggestion_id WHERE d.choice='reject' AND d.feedback='' "
@@ -2334,7 +2337,7 @@ class Store:
         b = self.behaviour(days)
         lines = []
         if b['sent_as_written'] or b['sent_edited']:
-            lines.append(f"Drafts: {b['sent_as_written']} sent as written, {b['sent_edited']} edited by the owner first.")
+            lines.append(f"Drafts: {b['sent_as_written']} sent as written, {b['sent_edited']} changed by the owner first (Change, Try again or an edit).")
         if b['snoozed_again']:
             lines += ['Snoozed two or more times (wrong moment, or less important than it looked):'] + [f'- {t} ({n}x)' for t, n in b['snoozed_again'][:8]]
         if b['quick_dismissed']:
@@ -4179,7 +4182,7 @@ def weekly_recap(store, config, current=None, usage=None):
     learned = store.behaviour(7)
     parts = []
     if learned['sent_as_written'] or learned['sent_edited']:
-        parts.append(f"{learned['sent_as_written']} drafts sent as written, {learned['sent_edited']} edited by you first")
+        parts.append(f"{learned['sent_as_written']} drafts sent as written, {learned['sent_edited']} changed by you first")
     if learned['snoozed_again']:
         parts.append('snoozed more than once: ' + ', '.join(t for t, _ in learned['snoozed_again'][:3]))
     if learned['quick_dismissed']:
