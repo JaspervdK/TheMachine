@@ -18,17 +18,17 @@ Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Req
 
 ## What it does
 
-- **Collects** signals from Gmail, Google Calendar, Slack, the Salesflare CRM, Android notifications (through the OpenClaw node app), WhatsApp (through a local `wacli` store) and the OpenClaw Gateway's own failures. Collection is incremental and read-only by default; everything goes into one private SQLite database with full-text search.
-- **Reviews** waiting signals in isolated turns of your existing OpenClaw main agent. The agent saves a suggestion only when something is worth your time: an unanswered request, a deadline, a problem it can fix.
+- **Collects** signals from Gmail, Google Calendar, Slack, the Salesflare CRM, Android notifications (through the OpenClaw node app), WhatsApp (through a local `wacli` store) and the OpenClaw Gateway's own failures, plus GitHub, Stripe and RSS through [connector plugins](docs/adding-a-source.md). Collection is incremental and read-only by default; everything goes into one private SQLite database with full-text search.
+- **Reviews** waiting signals in isolated turns of your existing OpenClaw main agent. The agent saves a suggestion only when something is worth your time: an unanswered request, a deadline, a problem it can fix, or an email of yours that slipped.
 - **Delivers** suggestions as Telegram cards through your existing OpenClaw bot, with a phone-friendly dashboard (installable as an app, with optional push notifications) on your tailnet.
-- **Acts** when you tap **Do it**: the agent drafts the email (with a Send button), makes the fix, or does the research, and reports back on the same card. **Change** lets you reply with instructions; **Snooze**, **Dismiss** and **Mark done** work as you'd expect, and your choices steer later reviews.
+- **Acts** when you tap **Do it**: the agent drafts the email or Slack message (with a Send button), makes the fix, does the research, or hands the task to a colleague and waits for their reply, and reports back on the same card. **Change** lets you reply with instructions; **Snooze**, **Dismiss** and **Mark done** work as you'd expect, and your choices steer later reviews.
 
 The service itself contains no model. All interpretation happens in your OpenClaw agent, with your model provider: see [Bring your own model](docs/models.md) for choosing one, including local models.
 
 ## Architecture
 
 ```text
-Gmail · Calendar · Slack · CRM · Android notifications · WhatsApp · OpenClaw Gateway
+Gmail · Calendar · Slack · CRM · Android notifications · WhatsApp · OpenClaw Gateway · plugins (GitHub, Stripe, RSS)
                 │  (read-only collectors, one thread and checkpoint per account)
                 ▼
 assistant.py (systemd user service) → private SQLite + full-text search, local API on 127.0.0.1
@@ -75,7 +75,8 @@ Python's standard library and SQLite are enough: no database server, queue, web 
   - `gog` (Google Workspace CLI) for Gmail and Calendar (OAuth per account, file keyring).
   - **Tailscale** for dashboard access (the dashboard only serves your Tailscale identity).
   - **Caddy** only to serve the dashboard on a custom domain (`deploy/Caddyfile`).
-  - `wacli` for WhatsApp; a Maton connection for Slack; a Salesflare API key.
+  - `wacli` for WhatsApp; a Maton connection for Slack (allowed to post as you, to send Slack messages); a Salesflare API key.
+  - The `gh` CLI logged in as you for GitHub; a restricted read-only key (or a Maton connection) for Stripe.
   - The OpenClaw Android app paired as a node for phone notifications.
 
 ## Install
@@ -176,6 +177,8 @@ Collectors read existing source content. The optional Salesflare `join_pipelines
 | `github` (plugin) | `gh` CLI logged in as you | `login`, `repos` (optional filter), `ci_repos` + `ci_branch` (failed runs) |
 | `stripe` (plugin) | A restricted read-only Stripe key, or a Maton Stripe connection | `transport` (`api` or `maton`), `credential` (+ `credential_variable`, `connection_id` for Maton), `stripe_account`, `large_subscription_monthly` (500) |
 | `rss` (plugin) | — | `url` |
+
+Plugin accounts aren't set up by the installer: add them to `accounts` by hand, using the keys above (each connector's header has a full example), then restart the service.
 
 - **Gmail:** follows Gmail history after a seven-day import; replays the retained window when history expires. Replies keep their new text whole and only 3,000 characters of quoted history. Sending approved drafts and snoozing threads use separate workers and only scopes already granted.
 - **Calendar:** seven past and thirty future days, recurring events expanded, incremental sync token with a daily full refresh. A missing event is "unavailable", not "cancelled". Context for email and preparation, not a reminder feed.
