@@ -179,6 +179,13 @@ class Embeddings(unittest.TestCase):
         self.assertEqual(plain['events'], [])
         self.assertEqual({e['title'] for e in semantic['events'][:2]}, {'Invoice overdue', 'Invoice reminder'})
         self.assertEqual({e['account_id'] for e in semantic['events']}, {'work'})
+        # ["all"] searches every configured account, by meaning and keywords; begin_analysis still needs explicit accounts.
+        everything = self.app.action('events', {'account_ids': ['all'], 'query': 'unpaid bills invoice', 'semantic': True})
+        self.assertEqual({e['account_id'] for e in everything['events']}, {'work', 'home'})
+        self.assertIn('Invoice unpaid', {e['title'] for e in everything['events'][:3]})
+        self.assertEqual({e['account_id'] for e in self.app.action('related', {'account_ids': 'all', 'query': 'invoice'})['events']}, {'work', 'home'})
+        with self.assertRaises(ValueError):
+            self.app.action('begin_analysis', {'account_ids': ['all']})
 
     def test_server_down_falls_back_to_keywords_and_the_worker_retries_later(self):
         self.calls.side_effect = emb.EmbeddingError('unreachable')

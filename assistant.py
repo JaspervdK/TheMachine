@@ -4567,8 +4567,10 @@ class App:
             proposal_id = self.store.tool_approval_proposal(args['id'], args['title'], args['detail'])
             root = 'https://' + host + self.config.get('dashboard_path', '/')
             return {'id': proposal_id, 'url': root.rstrip('/') + '/approval?id=' + proposal_id}
+        if name in ('events', 'related') and selected in ('all', ['all']):
+            selected = accounts  # search everything, asked for explicitly
         if name in ['events', 'begin_analysis', 'related'] and (not selected or not set(selected) <= set(accounts)):
-            raise ValueError('Choose explicit configured account_ids; cross-account reads must be intentional')
+            raise ValueError('Choose explicit configured account_ids (or ["all"] to search every account with events or related); cross-account reads must be intentional')
         if name == 'status':
             result = self.store.snapshot(self.config['accounts'])
             # Read only the existing heartbeat's runtime facts, never conversation
@@ -5497,7 +5499,9 @@ class App:
                 elif path.path == '/api/events':
                     args = urllib.parse.parse_qs(path.query)
                     try:
-                        self.output(200, app.action('events', {'account_ids': args.get('account', []), 'query': args.get('q', [''])[0], 'full': True}))
+                        query = args.get('q', [''])[0]
+                        # With words, search by meaning and keywords together; "all" searches every account.
+                        self.output(200, app.action('events', {'account_ids': args.get('account', []), 'query': query, 'semantic': bool(query.strip()), 'full': True}))
                     except (ValueError, sqlite3.OperationalError):
                         self.output(400, {'error': 'Select accounts and use a valid search'})
                 elif path.path == '/api/progress':
