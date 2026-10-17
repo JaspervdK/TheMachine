@@ -1,6 +1,6 @@
 """assistant profile: one read-only agent turn drafts USER.md lines from the owner's own messages. The
 draft waits for the owner; USER.md only changes after their yes. No Gateway, no Telegram."""
-import contextlib, datetime as dt, importlib.util, io, json, tempfile, unittest
+import concurrent.futures, contextlib, datetime as dt, importlib.util, io, json, tempfile, threading, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -100,6 +100,51 @@ class Profile(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Only 0 of your own messages'):
             self.app.action('profile_start', {})
 
+    def test_busy_chat_and_template_burst_do_not_crowd_out_email(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE events SET occurred_at=?", ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat(),))
+        self.store.commit_page('work', {}, [signal(f'busy{i}', i / 1000, kind='whatsapp.message',
+                                                   body=f'Distinct chat text {i}', from_me=True) for i in range(600)])
+        self.assertEqual(sum(i['source'] == 'email' for i in self.store.own_messages()), 8)
+        self.store.commit_page('work', {}, [signal(f'template{i}', i / 1000, body='Identical automated template email', labels=['SENT']) for i in range(500)])
+        self.assertGreaterEqual(sum(i['source'] == 'email' for i in self.store.own_messages()), 10)
+
+    def test_profile_pages_and_provenance_stay_fixed_during_ingestion(self):
+        self.store.commit_page('work', {}, [signal(f'page{i}', 100 + i, kind='whatsapp.message',
+                                                   body=f'Initial separate message {i}', from_me=True) for i in range(30)])
+        run = self.store.profile_start()
+        session = a.PROFILE_SESSION_PREFIX + run['run_id']
+        first = self.store.profile_evidence(1, session)
+        before = self.store.profile_evidence(2, session)
+        self.store.commit_page('work', {}, [signal(f'arrival{i}', i / 1000, kind='whatsapp.message',
+                                                   body=f'New separate message {i}', from_me=True) for i in range(25)])
+        self.assertEqual(self.store.profile_evidence(1, session), first)
+        self.assertEqual(self.store.profile_evidence(2, session), before)
+        self.assertFalse({i['id'] for i in first['messages']} & {i['id'] for i in before['messages']})
+        self.store.save_profile({'tone': 'Friendly'}, session)
+        self.assertEqual(self.store.profile_status(run['run_id'])['draft']['based_on'], '31 WhatsApp, 8 email, 1 Slack')
+        self.assertNotIn('evidence', self.store.profile_status(run['run_id']))
+
+    def test_two_clients_attach_to_one_profile(self):
+        barrier = threading.Barrier(2)
+        original = self.store.own_messages
+        def sample(*args, **kwargs):
+            barrier.wait(timeout=10)
+            return original(*args, **kwargs)
+        with patch.object(self.store, 'own_messages', side_effect=sample), concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            runs = list(pool.map(lambda _: self.store.profile_start(), range(2)))
+        self.assertEqual(len({r['run_id'] for r in runs}), 1)
+        self.assertEqual(sum(r.get('attached', False) for r in runs), 1)
+
+    def test_legacy_profile_keeps_its_first_snapshot(self):
+        run = self.store.profile_start()
+        with self.store.connect() as db:
+            db.execute('UPDATE profile_runs SET evidence=NULL')
+        session = a.PROFILE_SESSION_PREFIX + run['run_id']
+        first = self.store.profile_evidence(1, session)
+        self.store.commit_page('work', {}, [signal('later', 0, body='A genuinely new email', labels=['SENT'])])
+        self.assertEqual(self.store.profile_evidence(1, session), first)
+
     def test_the_service_runs_one_isolated_turn_then_keeps_the_draft(self):
         self.assertIsNone(self.app.profile_step(Runner()))  # nothing asked, nothing runs
         run_id = self.app.action('profile_start', {})['run_id']
@@ -174,6 +219,32 @@ class ProfileCommand(unittest.TestCase):
         out = self.run_cli(existing=mine)
         self.assertIn('made your own', out)
         self.assertEqual((self.workspace / 'USER.md').read_text(), mine)
+
+
+    def test_keeps_owner_edits_during_inference_and_the_save_prompt(self):
+        from types import SimpleNamespace
+        path = self.workspace / 'USER.md'
+        path.write_text('# Owner\n- Original preference.\n')
+        def call(config, action, args):
+            if action == 'profile_start':
+                path.write_text(path.read_text() + '- Edit while drafting.\n')
+                return {'run_id': 'r', 'counts': {'email': 6}}
+            return {'status': 'ok', 'draft': {'tone': 'Friendly'}}
+        prompts = []
+        def answer(prompt):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                path.write_text(path.read_text() + '- Edit at save prompt.\n')
+            return 'y'
+        args = SimpleNamespace(workspace=str(self.workspace), again=False, json=False, all=False, yes=False)
+        with patch.object(cli, 'call', side_effect=call), patch.object(cli.sys.stdin, 'isatty', return_value=True), \
+             patch('builtins.input', side_effect=answer), contextlib.redirect_stdout(io.StringIO()):
+            cli.cmd_profile({'accounts': []}, args)
+        self.assertIn('Original preference', path.read_text())
+        self.assertIn('Edit while drafting', path.read_text())
+        self.assertIn('Edit at save prompt', path.read_text())
+        self.assertIn('Friendly', path.read_text())
+        self.assertEqual(len(prompts), 2)
 
 
 if __name__ == '__main__':

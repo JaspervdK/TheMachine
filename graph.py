@@ -208,9 +208,8 @@ def thread_key(kind, m):
     if kind == 'gmail.message' and m.get('thread_id'):
         return 'gm:' + str(m['thread_id']), True
     if kind == 'slack.message' and m.get('channel_id'):
-        if m.get('thread_ts') and m.get('thread_ts') != m.get('message_ts'):
-            return 'sl:' + str(m['channel_id']) + ':' + str(m['thread_ts']), True
-        return 'sl:' + str(m['channel_id']), False
+        stamp = m.get('thread_ts') or m.get('message_ts')
+        return ('sl:' + str(m['channel_id']) + ':' + str(stamp), True) if stamp else (None, False)
     if kind in ('whatsapp.message',) and m.get('chat_id'):
         return 'wa:' + str(m['chat_id']), False
     if kind in ('linkedin.message', 'x.dm') and m.get('conversation_id'):
@@ -381,10 +380,10 @@ def build(db, config, now):
         if r['project_id'] in projects:
             labelled[r['event_id']].add(r['project_id'])
     threads = collections.defaultdict(list)
-    for event_id, _, kind, at, m in signals:
+    for event_id, account_id, kind, at, m in signals:
         key, exact = thread_key(kind, m)
         if key:
-            threads[key].append((at, event_id, exact))
+            threads[(account_id, key)].append((at, event_id, exact))
     spread = {e: set(p) for e, p in labelled.items()}
     for members in threads.values():
         tagged = [(at, labelled[e]) for at, e, _ in members if e in labelled]
@@ -416,7 +415,8 @@ def build(db, config, now):
     decided = collections.defaultdict(float)
     cards = {}
     for r in db.execute('SELECT d.suggestion_id,d.choice,d.feedback,d.created_at,s.event_ids,s.project FROM decisions d '
-                        'JOIN suggestions s ON s.id=d.suggestion_id ORDER BY d.created_at'):
+                        'JOIN suggestions s ON s.id=d.suggestion_id '
+                        'WHERE NOT EXISTS (SELECT 1 FROM decision_annotations a WHERE a.decision_id=d.id) ORDER BY d.created_at'):
         weight = DECISION_WEIGHT.get(r['choice'])
         if weight is None or (r['choice'] == 'reject' and (r['feedback'] or '').strip() not in ('', 'Not relevant', 'Wrong facts')):
             continue  # "Already handled" says nothing against the people
@@ -506,7 +506,8 @@ def build(db, config, now):
     event_rows = []
     for node, items in list(node_events.items()) + [('project:' + str(p), v) for p, v in project_events.items()]:
         if node in kept:
-            event_rows += [(node, e, at.isoformat()) for at, e in sorted(items)[-EVENTS_PER_NODE:]]
+            # Complete membership for old task evidence; only readers cap display lists.
+            event_rows += [(node, e, at.isoformat()) for at, e in sorted(items)]
     took = int((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000)
     db.execute('BEGIN IMMEDIATE')
     try:
@@ -549,7 +550,9 @@ def node_view(row, links=None):
 def project_state(row):
     if row['strength'] < 0.3:
         return 'dormant'
-    if row['trend'] is not None and row['trend'] < 0.6:
+    # Fourteen quiet days decay heat to ~0.63. Below 0.8 means cooling,
+    # while continuing activity can offset that decay and remain active.
+    if row['trend'] is not None and row['trend'] < 0.8:
         return 'cooling'
     if row['trend'] is None or row['trend'] > 1.3:
         return 'heating up'

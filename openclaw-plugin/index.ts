@@ -137,7 +137,7 @@ export default definePluginEntry({
           // call_ref/offset select earlier details only within this host-bound run's task.
           args.job_id=run;
         }
-        if (params.action === 'save_profile') args._profile_session = key;  // only the profile turn's own draft counts
+        if (['save_profile', 'profile_evidence'].includes(params.action) && /^agent:main:assistant-review-profile-/.test(key)) args._profile_session = key;
         if (['begin_analysis', 'finish_analysis'].includes(params.action)) {
           args._review_session = key;
           const run = currentReviewRun(key);

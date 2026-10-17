@@ -4,6 +4,8 @@ A private, self-hosted assistant inbox for [OpenClaw](https://docs.openclaw.ai).
 
 Website: [themachine.computer](https://themachine.computer). **Early release:** intended for a single owner who already uses OpenClaw. Managed installation is Linux-only.
 
+**October 17 reliability fixes:** profile drafts use a fixed, mixed-source sample and preserve concurrent USER.md edits. Setup verifies connector reads before reporting success; unfinished catch-up resumes after a restart. Graph updates preserve older task context, exact account-scoped threads and valid feedback, and refresh without losing the current view. Permissions and normal polling budgets are unchanged.
+
 ## Quick start
 
 ```bash
@@ -191,7 +193,7 @@ Every account has `id`, `service`, `transport` and `boundary`, plus optional `sc
 
 **Built-in noise rules**, on top of yours (`"default_exclude": false` on an account turns them off):
 
-- **Android:** the phone's own status notices ("… is displaying over other apps", "Charging this device via USB", USB/wireless debugging, serial console; storage and security warnings still come through), and notifications from apps whose content already arrives through a source you connected (Gmail, Calendar, WhatsApp, Slack, Salesflare, LinkedIn, X, GitHub, Stripe). Without a Slack source, Slack's phone notifications stay: they are then the only copy.
+- **Android:** the phone's own status notices ("… is displaying over other apps", "Charging this device via USB", USB/wireless debugging, serial console; storage and security warnings still come through). App notifications stay even if one account from that service is connected: the phone may also use personal mailboxes or other workspaces not collected here. Use an explicit account `exclude` rule with `packages` only when you want that entire phone app excluded.
 - **Calendar:** unchanged instances of recurring placeholders: Lunch, Block(ed), Busy, Focus (time), Deep work, Home, Office, Commute, Gym, Stand up / Standup / Daily standup, Happy birthday!. A moved or one-off "Lunch with Ann" still counts.
 
 ## Sources
@@ -267,7 +269,7 @@ A living map of who you deal with and what's going on, across every account. `gr
 - **Rhythm:** each person's usual gap is the median of their last eight gaps between contact days. Someone you wrote to on at least two days has **gone quiet** when the silence is longer than three times their usual gap and at least two weeks (and under a year). Future meetings show as "next meeting".
 - **Projects** are named by the review agent (`finish_analysis` `projects: {"name": [event_ids]}`, `suggest` `project`) and with `graph` `project` + `event_ids`; `begin_analysis` returns the live names to reuse. A label spreads to the rest of its thread (email thread, Slack thread, Intercom conversation, GitHub issue, recurring meeting; chats within two days). Heat is 0.2 per signal plus your card decisions, fading by half every 21 days; the state compares now with two weeks ago (heating up, active, cooling, dormant). `close_project` ends one; naming it again reopens it.
 - **Links:** people seen together on a signal (2–8 people, half-life 45 days), a person's part in a project (0.3 per signal, 45 days), organisations by non-freemail domain (named from CRM accounts when known).
-- **Tables:** `projects`, `event_projects`, `identity_names` and `graph_merges` hold what was said; `graph_nodes`, `graph_links`, `graph_events` (the last 40 signals per node) and `graph_state` are recomputed. `suggestions.project` keeps a card's project.
+- **Tables:** `projects`, `event_projects`, `identity_names` and `graph_merges` hold what was said; `graph_nodes`, `graph_links`, `graph_events` (complete retained membership; readers display at most 40 recent signals) and `graph_state` are recomputed. `suggestions.project` keeps a card's project.
 - **Uses:** the agent's `graph` action (no args: overview; `query`; `node_id` with links, recent signals and spreading activation two hops out; `event_ids`), a "People and projects" block in each Do it job message (who the people on the task are, their rhythm, projects and who they're often with), the dashboard's Graph tab (`/api/graph`, `?q=`, `?node=`), and the weekly recap.
 
 ## Related signals (optional, local embeddings)

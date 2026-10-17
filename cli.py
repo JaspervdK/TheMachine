@@ -382,23 +382,32 @@ def cmd_profile(config, args):
     if args.json:
         return out_json(run)
     day = dt.datetime.now(TZ).date().isoformat()
-    if args.all:
-        merged, left_out = onboarding.merge_profile(current, run['draft'], day), []
-    else:
-        merged, left_out = onboarding.fit_profile(current, run['draft'], day)
-    # The section as it would be saved (merge_profile puts it last).
-    print(merged[merged.index(onboarding.PROFILE_HEADING):] if merged else onboarding.render_profile(run['draft'], day))
-    if left_out:
-        print(f'Left out to stay within the {onboarding.USER_MD_BUDGET:,} characters OpenClaw chats load (keep them with --all, or make room in USER.md):')
-        print('\n'.join(f'  - {line}' for line in left_out) + '\n')
-    if merged is None:
-        print(f'{path} already has an "{onboarding.PROFILE_HEADING}" section you made your own, so it stays as it is. Copy what you like from above.')
-        return
-    if not (args.yes or (sys.stdin.isatty() and input(f'Add this to {path}? You can edit it afterwards [Y/n]: ').strip().lower() in ('', 'y', 'yes'))):
-        print('Not saved. Run assistant profile again any time.')
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    onboarding.write_private(path, merged)
+    while True:
+        # The owner can edit USER.md while inference or the save prompt is running.
+        observed = path.read_text() if path.exists() else None
+        current = observed if observed is not None else onboarding.starter_user_md(config)
+        if onboarding.user_md_is_template(path):
+            current = current.rstrip() + '\n\n' + onboarding.starter_user_md(config)
+        if args.all:
+            merged, left_out = onboarding.merge_profile(current, run['draft'], day), []
+        else:
+            merged, left_out = onboarding.fit_profile(current, run['draft'], day)
+        print(merged[merged.index(onboarding.PROFILE_HEADING):] if merged else onboarding.render_profile(run['draft'], day))
+        if left_out:
+            print(f'Left out to stay within the {onboarding.USER_MD_BUDGET:,} characters OpenClaw chats load (keep them with --all, or make room in USER.md):')
+            print('\n'.join(f'  - {line}' for line in left_out) + '\n')
+        if merged is None:
+            print(f'{path} already has an "{onboarding.PROFILE_HEADING}" section you made your own, so it stays as it is. Copy what you like from above.')
+            return
+        if not (args.yes or (sys.stdin.isatty() and input(f'Add this to {path}? You can edit it afterwards [Y/n]: ').strip().lower() in ('', 'y', 'yes'))):
+            print('Not saved. Run assistant profile again any time.')
+            return
+        if (path.read_text() if path.exists() else None) != observed:
+            print('USER.md changed meanwhile. Keeping those edits and refreshing the draft.\n')
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        onboarding.write_private(path, merged)
+        break
     print(f'Saved to {path}. Reviews and drafts read it from the next turn on.'
           + (f' It is now {len(merged):,} characters; OpenClaw chat sessions load the first {onboarding.USER_MD_BUDGET:,}.'
              if len(merged) > onboarding.USER_MD_BUDGET else ''))

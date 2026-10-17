@@ -27,6 +27,7 @@ class OwnerBoundary(unittest.TestCase):
         self.sid = self.store.suggest('task', 'Prepare', 'I can draft this.', [1])['id']
         self.app = object.__new__(a.App)
         self.app.store, self.app.token, self.app.stop = self.store, TOKEN, threading.Event()
+        self.app.graph_dirty = threading.Event()
         self.app.owner_token = 'owner-key'
         self.app.config = {'accounts': [], 'tailscale_owner': 'owner@example.com',
                            'dashboard_host': 'machine.example:8443', 'port': 0, 'http_timeout': 1}

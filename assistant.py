@@ -1212,11 +1212,6 @@ def excluded_by_rules(rules, event):
 # Android's own status notices (not storage or security warnings, which still come through).
 ANDROID_STATUS_NOTICES = {'packages': ['android'], 'text': [r'is displaying over other apps', r'charging this device via usb',
                                                            r'usb debugging connected', r'wireless debugging connected', r'serial console enabled']}
-# Phone notifications from apps whose content already arrives through their own source.
-SOURCE_APPS = {'gmail': ['com.google.android.gm'], 'calendar': ['com.google.android.calendar'],
-               'whatsapp': ['com.whatsapp', 'com.whatsapp.w4b'], 'slack': ['com.Slack'], 'salesflare': ['org.salesflare.app'],
-               'linkedin': ['com.linkedin.android'], 'x': ['com.twitter.android'], 'github': ['com.github.android'],
-               'stripe': ['com.stripe.android.dashboard']}
 # Recurring placeholders that weren't moved or cancelled: the calendar says nothing new.
 ROUTINE_CALENDAR = {'routine_recurring': True, 'titles': ['Lunch', 'Block', 'Blocked', 'Busy', 'Focus', 'Focus time', 'Deep work', 'Home',
                                                           'Office', 'Commute', 'Gym', 'Stand up', 'Standup', 'Daily standup', 'Happy birthday!']}
@@ -1226,9 +1221,10 @@ def default_exclusions(config, account):
     if account.get('default_exclude') is False:
         return []
     if account.get('service') == 'android':
-        services = {a.get('service', 'gmail') for a in config.get('accounts', []) if a is not account}
-        packages = sorted({p for service in services for p in SOURCE_APPS.get(service, ())})
-        return [ANDROID_STATUS_NOTICES] + ([{'packages': packages}] if packages else [])
+        # One connected work account does not cover every mailbox/workspace in
+        # the phone app. Unknown account previews stay; explicit owner exclusions
+        # can still suppress a whole package when that is genuinely wanted.
+        return [ANDROID_STATUS_NOTICES]
     if account.get('service') == 'calendar':
         return [ROUTINE_CALENDAR]
     return []
@@ -1578,6 +1574,8 @@ class Store:
                 db.execute('ALTER TABLE analyses ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1')
             if 'room' not in {r['name'] for r in db.execute('PRAGMA table_info(profile_runs)')}:
                 db.execute('ALTER TABLE profile_runs ADD COLUMN room INTEGER')
+            if 'evidence' not in {r['name'] for r in db.execute('PRAGMA table_info(profile_runs)')}:
+                db.execute('ALTER TABLE profile_runs ADD COLUMN evidence TEXT')
             worker_columns = {r['name'] for r in db.execute('PRAGMA table_info(review_runs)')}
             for column in ['retry_at', 'unavailable_since', 'error_phase', 'last_error', 'last_error_phase', 'error_at']:
                 if column not in worker_columns:
@@ -2443,26 +2441,38 @@ class Store:
         """The owner's own recent messages (sent email, their chat messages), newest first and taken
         round-robin across sources so one busy chat can't drown out email. Quoted history is cut."""
         ids = sorted(self.owner_user_ids)
+        queues = collections.OrderedDict()
         with self.connect() as db:
-            rows = db.execute("SELECT id,account_id,kind,occurred_at,title,body,metadata FROM events WHERE deleted=0 AND ("
-                              "(kind='gmail.message' AND instr(metadata,'\"SENT\"')>0) OR "
-                              "(kind IN ('whatsapp.message','linkedin.message','x.dm') AND json_extract(metadata,'$.from_me')=1) OR "
-                              f"(kind='slack.message' AND json_extract(metadata,'$.user_id') IN ({','.join('?' for _ in ids)}))"
-                              ") ORDER BY occurred_at DESC LIMIT ?", (*ids, limit * 4)).fetchall()
-        queues, seen = collections.OrderedDict(), {}
-        for row in rows:
-            text = (row['body'] or '').split('[Quoted earlier messages', 1)[0].strip()
-            if len(text.split()) < 2 or PROFILE_SKIP.match(text):
-                continue
-            # A template sent to many people (outreach, listings) counts as one way of writing, not twenty.
-            # Templates share their opening (after the greeting); short chat lines only count when identical.
-            gist = ' '.join(re.sub(r'^\W*(?:hey|hi|hello|dear|hoi|dag)\b[^,\n!]{0,40}[,\n!]', '', text[:400], flags=re.I).split()).lower()[:120]
-            copies = seen.setdefault(row['kind'], [])
-            if sum(gist == other or (len(gist) > 60 and len(other) > 60 and difflib.SequenceMatcher(None, gist, other).ratio() > 0.5)
-                   for other in copies) >= PROFILE_TEMPLATE_COPIES:
-                continue
-            copies.append(gist)
-            queues.setdefault(row['kind'], []).append((row, text))
+            db.execute('BEGIN')  # one read snapshot across replenishment and all source queues
+            for kind in OWN_KINDS:
+                predicate = ("instr(metadata,'\"SENT\"')>0" if kind == 'gmail.message' else
+                             f"json_extract(metadata,'$.user_id') IN ({','.join('?' for _ in ids)})" if kind == 'slack.message' else
+                             "json_extract(metadata,'$.from_me')=1")
+                params = ids if kind == 'slack.message' else []
+                queue, copies = [], []
+                # Per-source candidates, replenished after template/media filtering.
+                # At most 40 * limit rows per source keeps even huge template archives bounded.
+                for offset in range(0, limit * 40, limit * 4):
+                    rows = db.execute("SELECT id,account_id,kind,occurred_at,title,body,metadata FROM events "
+                                      f"WHERE deleted=0 AND kind=? AND ({predicate}) "
+                                      "ORDER BY occurred_at DESC,id DESC LIMIT ? OFFSET ?",
+                                      (kind, *params, limit * 4, offset)).fetchall()
+                    for row in rows:
+                        text = (row['body'] or '').split('[Quoted earlier messages', 1)[0].strip()
+                        if len(text.split()) < 2 or PROFILE_SKIP.match(text):
+                            continue
+                        gist = ' '.join(re.sub(r'^\W*(?:hey|hi|hello|dear|hoi|dag)\b[^,\n!]{0,40}[,\n!]', '', text[:400], flags=re.I).split()).lower()[:120]
+                        if sum(gist == other or (len(gist) > 60 and len(other) > 60 and difflib.SequenceMatcher(None, gist, other).ratio() > 0.5)
+                               for other in copies) >= PROFILE_TEMPLATE_COPIES:
+                            continue
+                        copies.append(gist)
+                        queue.append((row, text))
+                        if len(queue) >= limit:
+                            break
+                    if len(queue) >= limit or len(rows) < limit * 4:
+                        break
+                if queue:
+                    queues[kind] = queue
         picked = []
         while len(picked) < limit and any(queues.values()):
             for kind, queue in queues.items():
@@ -2496,14 +2506,27 @@ class Store:
         own = {str(a.get('email', '')).lower() for a in self.accounts}
         return [{'sender': a, 'emails': n} for a, n in counts.most_common() if a not in written and a not in own][:limit]
 
-    def profile_evidence(self, page=1):
-        items = self.own_messages()
+    def profile_evidence(self, page=1, session=None):
+        run_id = str(session or '').removeprefix(PROFILE_SESSION_PREFIX)
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            run = (db.execute('SELECT run_id,evidence FROM profile_runs WHERE run_id=?', (run_id,)).fetchone() if session else
+                   db.execute("SELECT run_id,evidence FROM profile_runs WHERE status IN ('starting','running') ORDER BY started_at DESC LIMIT 1").fetchone())
+            if session and (not str(session).startswith(PROFILE_SESSION_PREFIX) or not run):
+                raise ValueError('Unknown profile run')
+            if run and run['evidence']:
+                evidence = json.loads(run['evidence'])
+            else:
+                evidence = {'messages': self.own_messages(), 'frequent_unanswered_senders': self.frequent_unanswered()}
+                if run:  # legacy active requests get one snapshot, never changing pages afterward
+                    db.execute('UPDATE profile_runs SET evidence=? WHERE run_id=?', (json.dumps(evidence), run['run_id']))
+        items = evidence['messages']
         pages = max(1, -(-len(items) // PROFILE_PAGE))
         page = min(max(int(page or 1), 1), pages)
         result = {'page': page, 'pages': pages, 'messages': items[(page - 1) * PROFILE_PAGE:page * PROFILE_PAGE]}
         if page == 1:
             result['counts'] = dict(collections.Counter(i['source'] for i in items))
-            result['frequent_unanswered_senders'] = self.frequent_unanswered()
+            result['frequent_unanswered_senders'] = evidence['frequent_unanswered_senders']
         return result
 
     def profile_start(self, again=False, room=None):
@@ -2514,14 +2537,21 @@ class Store:
                              ((dt.datetime.fromisoformat(now()) - dt.timedelta(minutes=30)).isoformat(), int(bool(again)))).fetchone()
             if run:  # follow the running draft, or show the one just made
                 return {'run_id': run['run_id'], 'started_at': run['started_at'], 'attached': True}
-        counts = collections.Counter(i['source'] for i in self.own_messages())
+        evidence = {'messages': self.own_messages(), 'frequent_unanswered_senders': self.frequent_unanswered()}
+        counts = collections.Counter(i['source'] for i in evidence['messages'])
         if sum(counts.values()) < PROFILE_MIN:
             raise ValueError(f'Only {sum(counts.values())} of your own messages are collected so far; that says too little about how you write. '
                              'Try again in a few days: assistant profile')
         run_id, started = uuid.uuid4().hex, now()
         with self.connect() as db:
-            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,room) VALUES(?,'starting',?,?,?)",
-                       (run_id, started, started, None if room is None else min(max(int(room), 400), 4000)))
+            db.execute('BEGIN IMMEDIATE')
+            run = db.execute("SELECT run_id,started_at FROM profile_runs WHERE status IN ('starting','running') OR "
+                             "(status='ok' AND finished_at>? AND NOT ?) ORDER BY started_at DESC LIMIT 1",
+                             ((dt.datetime.fromisoformat(now()) - dt.timedelta(minutes=30)).isoformat(), int(bool(again)))).fetchone()
+            if run:
+                return {'run_id': run['run_id'], 'started_at': run['started_at'], 'attached': True}
+            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,room,evidence) VALUES(?,'starting',?,?,?,?)",
+                       (run_id, started, started, None if room is None else min(max(int(room), 400), 4000), json.dumps(evidence)))
         return {'run_id': run_id, 'started_at': started, 'counts': dict(counts)}
 
     def save_profile(self, profile, session):
@@ -2531,7 +2561,8 @@ class Store:
             raise ValueError('save_profile belongs to the profile turn that assistant profile starts')
         if not isinstance(profile, dict):
             raise ValueError('profile must be an object')
-        counts = collections.Counter(i['source'].capitalize() if i['source'] == 'email' else i['source'] for i in self.own_messages())
+        counts = collections.Counter({('Email' if k == 'email' else k): v
+                                      for k, v in self.profile_evidence(1, session)['counts'].items()})
         clean = {k: sentences(profile.get(k), 300) for k in PROFILE_TEXT if sentences(profile.get(k), 300)}
         for key, most in PROFILE_LISTS.items():
             values = profile.get(key) or []
@@ -2568,6 +2599,7 @@ class Store:
         if not row:
             raise ValueError('Unknown profile run')
         row = dict(row)
+        row.pop('evidence', None)  # only paged profile_evidence returns the saved private sample
         row['draft'] = json.loads(row['draft']) if row['draft'] else None
         return row
 
@@ -4948,7 +4980,7 @@ class App:
         if name == 'profile_status':
             return self.store.profile_status(args['run_id'])
         if name == 'profile_evidence':
-            return self.store.profile_evidence(args.get('page', 1))
+            return self.store.profile_evidence(args.get('page', 1), args.get('_profile_session'))
         if name == 'save_profile':
             return self.store.save_profile(args.get('profile'), args.get('_profile_session'))
         if name == 'review_context':
@@ -5140,10 +5172,11 @@ class App:
         delay = account.get('poll_seconds', self.config.get('poll_seconds', 300))
         if delay < 600:
             return 0
-        state = self.store.checkpoint(account['id'])
+        state = self.store.checkpoint(account['id']) or {}
         with self.store.connect() as db:
             row = db.execute('SELECT last_success FROM checkpoints WHERE account_id=?', (account['id'],)).fetchone()
-        if not row or not row['last_success'] or not state or state.get('mode') != 'incremental' or state.get('page_token'):
+        unfinished = state.get('page_token') or state.get('catchup') or state.get('coverage_complete') is False
+        if not row or not row['last_success'] or not state or state.get('mode') != 'incremental' or (unfinished and account.get('service') != 'x'):
             return 0
         since = (dt.datetime.fromisoformat(now()) - dt.datetime.fromisoformat(row['last_success'])).total_seconds()
         return max(0, min(delay, delay - since))
@@ -5753,7 +5786,7 @@ class App:
         action = 'stop' if age > PROFILE_SECONDS + 300 else 'start' if run['status'] == 'starting' else 'status'
         request = {'kind': 'profile', 'job_id': run['run_id'], 'action': action}
         if action == 'start':
-            counts = collections.Counter(i['source'] for i in self.store.own_messages())
+            counts = self.store.profile_evidence(1, PROFILE_SESSION_PREFIX + run['run_id'])['counts']
             request['message'] = profile_prompt(run['run_id'], counts, run.get('room') or PROFILE_ROOM)
             with self.store.connect() as db:
                 db.execute('UPDATE profile_runs SET attempts=attempts+1,updated_at=? WHERE run_id=?', (now(), run['run_id']))

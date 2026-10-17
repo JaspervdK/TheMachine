@@ -46,7 +46,7 @@ class Exclusions(unittest.TestCase):
         phone,calendar=config['accounts'][3],config['accounts'][2]
         rules=a.default_exclusions(config,phone)
         drop=lambda package,title='New message':a.excluded_by_rules(rules,{'title':title,'body':'','metadata':{'package_name':package}})
-        self.assertTrue(drop('com.google.android.gm'));self.assertTrue(drop('com.whatsapp'));self.assertTrue(drop('com.whatsapp.w4b'))
+        self.assertFalse(drop('com.google.android.gm'));self.assertFalse(drop('com.whatsapp'));self.assertFalse(drop('com.whatsapp.w4b'))  # account coverage is unknown
         self.assertFalse(drop('com.Slack'))  # no Slack source: its phone notifications are the only copy
         self.assertFalse(drop('com.example.bank'))
         for notice in ('Chrome is displaying over other apps','Charging this device via USB','USB debugging connected',
@@ -59,6 +59,21 @@ class Exclusions(unittest.TestCase):
         self.assertFalse(a.excluded_by_rules(a.default_exclusions(config,calendar),{**lunch,'title':'Lunch with Ann'}))
         self.assertEqual(a.default_exclusions(config,{**phone,'default_exclude':False}),[])
         self.assertEqual(a.default_exclusions(config,config['accounts'][0]),[])
+
+    def test_work_mail_does_not_discard_personal_phone_mail(self):
+        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
+        store=a.Store(Path(tmp.name)/'e.sqlite')
+        phone={'id':'acc','service':'android'}
+        config={'accounts':[{'id':'work','service':'gmail','email':'owner@work.example'},phone]}
+        store.exclusions={'acc':a.default_exclusions(config,phone)}
+        notification=ev('personal-mail',package_name='com.google.android.gm')
+        notification.update(kind='android.notification',title='Personal message')
+        store.commit_page('acc',{'cursor':'next'},[notification])
+        self.assertEqual(len(store.events(['acc'])),1)
+        self.assertEqual(store.checkpoint('acc'),{'cursor':'next'})
+        store.exclusions['acc'].append({'packages':['com.google.android.gm']})
+        store.commit_page('acc',{'cursor':'later'},[{**notification,'source_id':'explicitly-excluded'}])
+        self.assertEqual(len(store.events(['acc'])),1)
 
     def test_excluded_signals_are_never_stored_and_old_copies_are_removed(self):
         tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)

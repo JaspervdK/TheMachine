@@ -92,6 +92,19 @@ class OnboardingTest(unittest.TestCase):
     def mode(self, path):
         return stat.S_IMODE(Path(path).stat().st_mode)
 
+    def test_plugin_setup_uses_the_same_helpers_as_its_collector(self):
+        from types import SimpleNamespace
+        def check(config, account, helpers):
+            self.assertIs(helpers, onboarding.assistant().CONNECTOR_HELPERS)
+            self.assertEqual(helpers.iso(0), '1970-01-01T00:00:00+00:00')
+        with mock.patch.object(onboarding.assistant(), 'load_connector', return_value=SimpleNamespace(check=check)):
+            self.assertIsNone(onboarding.check({}, {'service':'test'}))
+
+    def test_plugin_setup_without_a_read_check_is_not_reported_verified(self):
+        from types import SimpleNamespace
+        with mock.patch.object(onboarding.assistant(), 'load_connector', return_value=SimpleNamespace()):
+            self.assertEqual(onboarding.check({}, {'service':'test'}), 'source_check_unavailable')
+
     # ------------------------------------------------------------ Telegram
 
     def test_telegram_ids_come_from_openclaw_owner_first_without_touching_the_bot_token(self):
@@ -283,7 +296,8 @@ else: sys.stderr.write("HTTP 401"); sys.exit(1)''')
         self.config(slack)
         onboarding.write_private(self.data / 'maton-slack.env', 'MATON_WORK_KEY=mk\n')
         ui = FakeUI(answers=['acct_123', '1', 'conn-stripe', '1'])  # account, through Maton, connection, the saved key
-        onboarding.connect(self.path, 'stripe', ui, restart=False)
+        with mock.patch.object(onboarding.assistant().load_connector('stripe').Source, 'get', return_value={'id': 'acct_123'}):
+            onboarding.connect(self.path, 'stripe', ui, restart=False)
         stripe = self.saved()['accounts'][1]
         self.assertEqual({k: stripe[k] for k in ('transport', 'credential', 'credential_variable', 'connection_id', 'stripe_account', 'boundary')},
                          {'transport': 'maton', 'credential': 'maton-slack', 'credential_variable': 'MATON_WORK_KEY',
@@ -366,13 +380,25 @@ elif args[:2] == ["api", "call"]:
     @unittest.skipUnless(PLUGINS, 'the RSS connector is a plugin')
     def test_a_plugin_source_asks_its_own_setup_fields(self):
         self.config()
-        onboarding.connect(self.path, 'rss', FakeUI(answers=['personal', 'https://example.com/feed.xml']), restart=False)
+        with mock.patch.object(onboarding.assistant().load_connector('rss'), 'fetch', return_value=(b'<rss><channel/></rss>', {})):
+            onboarding.connect(self.path, 'rss', FakeUI(answers=['personal', 'https://example.com/feed.xml']), restart=False)
         account = self.saved()['accounts'][0]
         self.assertEqual((account['id'], account['service'], account['url'], account['boundary']),
                          ('feed', 'rss', 'https://example.com/feed.xml', 'personal:me'))
         with self.assertRaises(onboarding.SetupError) as raised:
             onboarding.connect(self.path, 'fax', FakeUI(), restart=False)
         self.assertIn('rss', raised.exception.fix)
+
+    def test_revoked_github_connection_is_not_saved_as_connected(self):
+        account = {'id': 'github', 'service': 'github', 'transport': 'gh', 'boundary': 'work:Acme', 'login': 'intended-owner', 'poll_seconds': 600}
+        config = self.config(account)
+        self.stub('gh', 'sys.stderr.write("HTTP 401: revoked sign-in\\n"); sys.exit(1)')
+        before = self.path.read_text()
+        ui = FakeUI()
+        with self.assertRaises(onboarding.SetupError):
+            onboarding.connect(self.path, 'github', ui, account_id='github', restart=False)
+        self.assertEqual(self.path.read_text(), before)
+        self.assertNotIn('connected', ui.text())
 
     def test_every_plugin_setup_is_complete(self):
         extra = [s for s in onboarding.sources() if s not in onboarding.SERVICES]

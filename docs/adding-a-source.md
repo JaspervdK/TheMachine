@@ -45,6 +45,8 @@ The service calls `sync` every `poll_seconds` (default 300) in the account's own
 
 ### Setup: `assistant connect <service>`
 
+Setup verifies a real read before saving the account configuration. A plugin can define `check(config, account, helpers)`, returning `None` on success or raising `helpers.SourceError` with a content-free error label. The check must not write source data or advance checkpoints. Existing `Source.verify()` or `Source.profile()` methods are also supported. Without a supported read check, setup reports that verification is unavailable rather than calling the account connected.
+
 Declare `SETUP` so the owner can add an account without editing JSON:
 
 ```python
@@ -58,7 +60,7 @@ SETUP = {'label': 'RSS feed',                          # name in prompts, doctor
          'maton': None}                                  # a prompt here (the Maton connection ID) offers reading through Maton instead
 ```
 
-`assistant connect` adds the account from `account`, asks each `ask` key (empty answers stop it), stores the secret, saves `config.json`, restarts the service and shows the first sync. With `credential_variable` in `account`, the secret is written as `VARIABLE=value`, and other lines in that file stay as they were. When the owner already has an account of this service, the new one starts from it instead of `account`, without the identity keys (`id`, `email`, `handle`, `login`, `url`, `connection_id`, … and your first `ask` key). `assistant doctor` treats a missing `ask` key or credential file as not set up. A test checks every connector has a complete `SETUP`.
+`assistant connect` adds the account from `account`, asks each `ask` key (empty answers stop it), stores the secret, verifies a real read, saves `config.json`, restarts the service and shows the first sync. With `credential_variable` in `account`, the secret is written as `VARIABLE=value`, and other lines in that file stay as they were. When the owner already has an account of this service, the new one starts from it instead of `account`, without the identity keys (`id`, `email`, `handle`, `login`, `url`, `connection_id`, … and your first `ask` key). `assistant doctor` treats a missing `ask` key or credential file as not set up. A test checks every connector has a complete `SETUP`.
 
 ## 3. Events
 
@@ -111,4 +113,4 @@ Then run `assistant connect <service>`: it adds the account, restarts the servic
 - [ ] Events and cursor committed together; replays don't duplicate.
 - [ ] Failures raise `SourceError` with a content-free label.
 - [ ] Fixture tests for parsing, replays, expired cursors and errors.
-- [ ] `SETUP` with what `assistant connect` should ask.
+- [ ] `SETUP` with what `assistant connect` should ask, plus a supported read-only setup check.

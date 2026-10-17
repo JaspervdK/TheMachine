@@ -677,6 +677,36 @@ def check(config, account):
             a.Android(config, account).snapshot()
         elif service == 'gateway':
             return None if shutil.which('journalctl') else 'journalctl_missing'
+        elif getattr(a, 'load_connector', None):
+            plugin = a.load_connector(service)
+            helpers = a.CONNECTOR_HELPERS
+            if callable(getattr(plugin, 'check', None)):
+                return plugin.check(config, account, helpers)
+            if not hasattr(plugin, 'Source'):
+                return 'source_check_unavailable'
+            source = plugin.Source(config, account, helpers)
+            if callable(getattr(source, 'verify', None)):
+                source.verify()
+            elif callable(getattr(source, 'profile', None)):
+                source.profile()
+            elif service in ('linkedin', 'x'):
+                source.page(int(time.time() * 1000), {})
+            else:
+                return 'source_check_unavailable'
+        else:
+            factory = {'intercom': a.Intercom, 'github': a.GitHubSource, 'stripe': a.StripeSource,
+                       'linkedin': a.LinkedIn, 'x': a.X}.get(service)
+            if not factory:
+                return 'source_check_unavailable'
+            source = factory(config, account)
+            if callable(getattr(source, 'verify', None)):
+                source.verify()
+            elif callable(getattr(source, 'profile', None)):
+                source.profile()
+            elif service in ('linkedin', 'x'):
+                source.page(int(time.time() * 1000), {})
+            else:
+                return 'source_check_unavailable'
         return None
     except a.SourceError as error:
         return str(error)

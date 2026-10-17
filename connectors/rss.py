@@ -100,3 +100,20 @@ def sync(store, config, account, helpers):
     # Unchanged items are skipped by content hash, so rereading the feed is idempotent.
     store.commit_page(account['id'], state, events)
     return {'mode': 'incremental', 'events': len(events)}
+
+
+def check(config, account, helpers):
+    """Read-only setup probe: same fetch/parser as sync, without events or a checkpoint write."""
+    if not re.fullmatch(r'https://\S+', account.get('url') or ''):
+        raise helpers.SourceError('rss_missing_url')
+    raw, _ = fetch(account['url'], {}, helpers.SourceError)
+    if raw is None or len(raw) > 5_000_000:
+        raise helpers.SourceError('rss_invalid_feed' if raw is None else 'rss_feed_too_large')
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        raise helpers.SourceError('rss_invalid_xml') from None
+    if root.tag not in ('rss', ATOM + 'feed'):
+        raise helpers.SourceError('rss_invalid_feed')
+    for node in (root.findall('./channel/item') or root.findall(ATOM + 'entry'))[:200]:
+        item_event(account, node, helpers)

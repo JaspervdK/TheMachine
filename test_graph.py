@@ -171,6 +171,62 @@ class Graph(unittest.TestCase):
         with self.store.connect() as db:
             return [r[0] for r in db.execute('SELECT source_id FROM events ORDER BY id')]
 
+    def test_slack_root_and_reply_share_project_not_neighbour_or_other_account(self):
+        channel = {'id': 'C1', 'name': 'projects', 'type': 'channel'}
+        account = {'id': 'slack', 'slack_host': 'example.invalid'}
+        stamp = str(int((NOW - dt.timedelta(days=1)).timestamp())) + '.000001'
+        root = a.slack_event(account, channel, {'ts': stamp, 'text': 'Project root', 'user': 'U1', 'reply_count': 1})
+        reply = a.slack_event(account, channel, {'ts': str(float(stamp) + 60), 'thread_ts': stamp, 'text': 'Project reply', 'user': 'U2'})
+        other = a.slack_event(account, channel, {'ts': str(float(stamp) + 120), 'text': 'Unrelated root', 'user': 'U3'})
+        foreign = {**root, 'account_id': 'other-slack'}
+        self.add(root, reply, other, foreign)
+        with self.store.connect() as db:
+            root_id, reply_id, other_id, foreign_id = [r[0] for r in db.execute('SELECT id FROM events ORDER BY id')]
+            pid = graph.label(db, [root_id], 'Exact thread', 'agent', NOW.isoformat())
+        self.build()
+        with self.store.connect() as db:
+            members = {r[0] for r in db.execute('SELECT event_id FROM graph_events WHERE node_id=?', ('project:' + str(pid),))}
+        self.assertEqual(members, {root_id, reply_id})
+        with self.store.connect() as db:
+            db.execute('DELETE FROM event_projects')
+            graph.label(db, [reply_id], 'Exact thread', 'agent', NOW.isoformat())
+        self.build()
+        with self.store.connect() as db:
+            members = {r[0] for r in db.execute('SELECT event_id FROM graph_events WHERE node_id=?', ('project:' + str(pid),))}
+        self.assertEqual(members, {root_id, reply_id})
+
+    def test_old_task_membership_is_complete_but_display_is_bounded(self):
+        old = mail(3, 'Ann Example <ann@client.com>', 'sam@acme.com')
+        self.add(old, *[mail(1, 'Ann Example <ann@client.com>', 'sam@acme.com', hour=i / 100) for i in range(45)])
+        first = self.ids([old['source_id']])[0]
+        card = self.store.suggest('older', 'Answer Ann', 'Question', [first])
+        self.build()
+        with self.store.connect() as db:
+            self.assertTrue(graph.for_events(db, [first]))
+            self.assertEqual(len(graph.detail(db, 'email:ann@client.com', graph.EVENTS_PER_NODE)['event_ids']), 40)
+        self.assertIn('Ann Example', self.app.graph_lines(card['id']))
+
+    def test_annotated_decisions_do_not_teach_graph(self):
+        self.add(mail(3, 'Ann Example <ann@client.com>', 'sam@acme.com'))
+        first = self.ids(self.sources())[0]
+        self.build()
+        baseline = self.node('email:ann@client.com')['strength']
+        card = self.store.suggest('annotation', 'Answer Ann', 'Question', [first])
+        with self.store.connect() as db:
+            db.execute('INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)', ('bad', card['id'], 'accept', '', 'telegram', at(1)))
+            db.execute('INSERT INTO decision_annotations(decision_id,status,reason) VALUES(?,?,?)', ('bad', 'misassociated', 'Wrong prompt'))
+        self.build()
+        self.assertEqual(self.node('email:ann@client.com')['strength'], baseline)
+
+    def test_quiet_project_actually_cools(self):
+        self.add(*[mail(15, 'Ann Example <ann@client.com>', 'sam@acme.com', hour=i / 100) for i in range(10)])
+        with self.store.connect() as db:
+            pid = graph.label(db, self.ids(self.sources()), 'Quiet project', 'agent', NOW.isoformat())
+        self.build()
+        self.assertEqual(self.node('project:' + str(pid))['state'], 'cooling')
+        for ratio, expected in ((1.0, 'active'), (1.5, 'heating up')):
+            self.assertEqual(graph.project_state({'strength': 1.0, 'trend': ratio}), expected)
+
     def test_going_quiet_is_measured_against_their_own_rhythm(self):
         weekly = [chat(d, '32470000001', 'Wes Weekly', mine=d % 2 == 0) for d in range(30, 120, 7)]
         self.add(*weekly, chat(30, '32470000001', 'Wes Weekly', mine=True),

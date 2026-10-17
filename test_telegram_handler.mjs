@@ -21,12 +21,12 @@ source=source.replace("import { registerHeartbeatFailureGate } from './heartbeat
 source=source.replace("import { registerReviewRecovery, currentReviewRun } from './review-recovery.ts';",'const registerReviewRecovery=()=>{};const currentReviewRun=()=>undefined;');
 source=source.replace("import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';",'const definePluginEntry=v=>v;').replace('export default definePluginEntry','globalThis.fixturePlugin=definePluginEntry');
 const fixturePath=join(fixtureDir,'handler.ts');await writeFile(fixturePath,source);
-const id='aaaaaaaaaaaaaaaa';let handler, beforeDispatch, choices=[], edits=[], replies=[];
+const id='aaaaaaaaaaaaaaaa';let handler, beforeDispatch, toolFactory, choices=[], edits=[], replies=[];
 globalThis.fixtureConfig={telegram_owner:'1000001',dashboard_host:'machine.example.ts.net',dashboard_path:'/assistant/'};
 let item={id,status:'snoozed'};
 globalThis.fixtureCall=async(action,args)=>{if(action==='refresh_card')return {queued:true};if(action==='status')return {suggestions:[item],deliveries:[{suggestion_id:id,message_id:'123',previous_message_ids:'["old"]'}]};choices.push(args);if(action==='decide')item.status=args.choice==='complete'?'completed':args.choice==='reject'?'rejected':args.choice==='snooze'?'snoozed':'accepted';return {status:item.status,snoozed_until:'2026-10-10T07:00:00Z'};};
 await import(fixturePath);
-globalThis.fixturePlugin.register({runtime:{config:{current:()=>({})}},registerTool(){},registerInteractiveHandler(h){handler=h.handler},on(name,h){if(name==='before_dispatch')beforeDispatch=h},registerCommand(){}});
+globalThis.fixturePlugin.register({runtime:{config:{current:()=>({})}},registerTool(factory){toolFactory=factory;},registerInteractiveHandler(h){handler=h.handler},on(name,h){if(name==='before_dispatch')beforeDispatch=h},registerCommand(){}});
 const ctx=(choice,message='123')=>({auth:{isAuthorizedSender:true},isGroup:false,accountId:'default',senderId:'1000001',callback:{data:`assistant:${id}:${choice}`,chatId:'1000001',messageId:message},callbackId:'unique',respond:{editButtons:async x=>edits.push(x),reply:async x=>replies.push(x),editMessage:async x=>edits.push(x),clearButtons:async()=>{}}});
 await handler(ctx('snooze'));assert.equal(choices.length,0);let buttons=edits.pop().buttons.flat();assert.equal(buttons.length,6);assert.ok(buttons.some(b=>b.url?.startsWith('https://machine.example.ts.net/assistant/#snooze-custom=')));assert.ok(buttons.filter(b=>b.callback_data).every(b=>Buffer.byteLength(b.callback_data)<=64&&decodeCallback(b.callback_data)));
 await handler(ctx('back'));assert.deepEqual(edits.pop().buttons.flat().map(b=>b.text),['Bring back','Change time','Not needed']);
@@ -107,6 +107,16 @@ globalThis.fixtureCall=async(action,args)=>{if(action==='decide')throw Object.as
 await assert.rejects(handler(ctx('undo')),/Server unavailable/);
 globalThis.fixtureCall=async(action,args)=>{assert.equal(action,'feedback_reply');assert.equal(args.timestamp,1791614021000);assert.equal(args.reply_to_id,'2982');return {handled:true};};
 const handled=await beforeDispatch({content:'I fixed it already',timestamp:1791614021000},{channelId:'telegram',accountId:'default',senderId:'1000001',conversationId:'1000001',sessionKey:'agent:main:main',messageId:'2984',replyToId:'2982'});assert.deepEqual(handled,{handled:true});
+// Both profile reads and saves use the host's run, never a model-provided one.
+{
+ const key='agent:main:assistant-review-profile-aaaaaaaaaaaaaaaa';
+ const tool=toolFactory({agentId:'main',sessionKey:key});
+ globalThis.fixtureCall=async(action,args)=>{assert.equal(args._profile_session,key);return {ok:true};};
+ for(const action of ['profile_evidence','save_profile'])await tool.execute('test',{action,args:{_profile_session:'forged',page:2}});
+ const mainTool=toolFactory({agentId:'main',sessionKey:'agent:main:main'});
+ globalThis.fixtureCall=async(action,args)=>{assert.equal(args._profile_session,undefined);return {ok:true};};
+ await mainTool.execute('test',{action:'profile_evidence',args:{_profile_session:key}});
+}
 console.log('Telegram handler: snooze menu, typed callback sizes, old recorded cards, completion and ownership passed.');
 
 await rm(fixtureDir,{recursive:true,force:true});

@@ -61,6 +61,24 @@ class Reliability(unittest.TestCase):
         self.store.commit_page('li', {'mode': 'incremental', 'page_token': 'next'}, [])
         self.assertEqual(app.resume_wait(linkedin), 0)  # catching up: go now
 
+    def test_restart_resumes_catchup_without_ignoring_x_budget_or_retry_deadline(self):
+        app = object.__new__(a.App)
+        app.config, app.store = {}, self.store
+        for service in ('github', 'stripe', 'linkedin'):
+            account = {'id': service, 'service': service, 'poll_seconds': 900}
+            self.store.commit_page(service, {'mode': 'incremental', 'catchup': {'page': 6}, 'coverage_complete': False}, [])
+            self.assertEqual(app.resume_wait(account), 0)
+            self.store.commit_page(service, {'mode': 'incremental', 'coverage_complete': True}, [])
+            self.assertGreater(app.resume_wait(account), 890)
+        self.store.commit_page('x', {'mode': 'incremental', 'page': {'mention_catchup': {'cursor': 'next'}}, 'coverage_complete': False}, [])
+        self.assertGreater(app.resume_wait({'id': 'x', 'service': 'x', 'poll_seconds': 3600}), 3590)
+        deadline = (a.dt.datetime.now(a.dt.timezone.utc) + a.dt.timedelta(minutes=20)).isoformat()
+        with self.store.connect() as db:
+            db.execute('UPDATE checkpoints SET retry_at=? WHERE account_id=?', (deadline, 'github'))
+        app.resume_wait({'id': 'github', 'service': 'github', 'poll_seconds': 900})
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT retry_at FROM checkpoints WHERE account_id='github'").fetchone()[0], deadline)
+
     def test_status_lists_sources_without_an_email(self):
         accounts = [{'id': 'openclaw-gateway', 'service': 'gateway', 'boundary': 'owner:system'},
                     {'id': 'feed', 'service': 'rss', 'boundary': 'work:Acme', 'display_name': 'Feed'}]

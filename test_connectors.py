@@ -89,6 +89,20 @@ class ConnectorPlugins(unittest.TestCase):
             a.sync_source(self.store, {}, {**FEED, 'url': 'http://example.com/feed'})
         self.assertEqual(str(caught.exception), 'rss_missing_url')
 
+    def test_setup_probe_reads_and_parses_without_saving_events_or_checkpoint(self):
+        connector = a.load_connector('rss')
+        for raw in (RSS, ATOM):
+            with patch('urllib.request.urlopen', return_value=Response(raw)):
+                self.assertIsNone(connector.check({}, FEED, a.CONNECTOR_HELPERS))
+        self.assertEqual(self.stored(), [])
+        self.assertIsNone(self.store.checkpoint('work-feed'))
+        for raw, label in ((b'<html/>', 'rss_invalid_feed'), (b'<rss', 'rss_invalid_xml'),
+                           (RSS.replace(b'Wed, 14 Oct 2026 09:00:00 +0200', b'not a date'), 'rss_invalid_timestamp')):
+            with self.subTest(label), patch('urllib.request.urlopen', return_value=Response(raw)):
+                with self.assertRaises(a.SourceError) as caught:
+                    connector.check({}, FEED, a.CONNECTOR_HELPERS)
+                self.assertEqual(str(caught.exception), label)
+
     def test_unknown_or_unsafe_service_names_are_unsupported(self):
         for service in ['nope', '../assistant', 'rss.py', 'RSS', '__init__', '']:
             with self.subTest(service), self.assertRaises(a.SourceError) as caught:
