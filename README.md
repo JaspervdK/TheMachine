@@ -112,9 +112,20 @@ What it does, in order:
 
 **Connecting a source:** `assistant connect <source>` (the installer runs the same steps). It asks only what it can't find, writes the account to `config.json` (keeping `config.json.bak`) and keys to their credential files (mode 600, typed without echo, never printed), reads the source once as the service would, and saves nothing if that read fails; it says what to fix instead. Then it restarts the service, only if that service reads this config, and shows the first sync.
 
+It fits setups that aren't the example:
+
+- **Several accounts per source** (two companies, a partner's calendar): `assistant connect gmail` asks whether to redo one or add another. A new account starts from the one you already have (same gog client, Maton key, Salesflare server, poll and active hours), never from its identity. It asks which boundary it belongs to (companies and people first, ones that source doesn't cover yet before ones it does) and follows your id naming (`globex-gmail` if yours look like `acme-gmail`).
+- **Keys you already saved** are offered by name (`MATON_WORK_KEY in maton.env`), so Stripe can use the Maton key Slack uses. A shared key file keeps its other lines: only the one `NAME=value` line changes, and a new key for one source never replaces a key another source still uses.
+- **Credential files anywhere** (`~/Private/…`, systemd `LoadCredential`): paths in `credentials` are used as they are; doctor checks that the key name is in the file.
+- **Calendars:** after sign-in it lists the calendars the account can see, so you can read a shared one (`calendar_id`).
+- **Salesflare on another server** (staging, self-hosted): when the key is rejected it asks for the API address and derives the app address.
+- **Your own dashboard domain** (Caddy, another proxy): `dashboard_host` counts when it answers, so nothing offers `tailscale serve` on top.
+- **Another Gateway unit name:** the Gateway source finds it with `systemctl --user list-unit-files`.
+- `assistant connect` on its own also lists what this machine has that no source reads yet: another Google account in gog, a `gh` login, a paired phone, a linked wacli store.
+
 - **Gmail and Calendar:** picks your gog OAuth client, or asks for a downloaded *Desktop app* client JSON (`gog auth setup` explains how to make one). Stores the gog file-keyring password you type, or a generated one, in the `gog-password` credential. Signs in with `gog auth add --readonly` for Gmail and Calendar (browserless with `--manual` over SSH). Sending approved emails later needs `gmail.send`, and thread snoozes `gmail.modify`; connecting never asks for more than read access.
-- **Slack:** your Maton API key and Slack connection ID; `team_id`, `user_id`, `email` and `slack_host` come from Slack itself.
-- **Salesflare (`crm`):** an API key; `user_id`, `team_id` and `email` come from `/me`.
+- **Slack:** your Maton API key (or one you saved before) and Slack connection ID; `team_id`, `user_id`, `email` and `slack_host` come from Slack itself.
+- **Salesflare (`crm`):** an API key (or one you saved before); `user_id`, `team_id` and `email` come from `/me`.
 - **WhatsApp:** the wacli store; offers `wacli auth` (QR code) when it isn't linked, then records `identity_sha256` from `wacli auth status`.
 - **Android:** picks your paired Android node from `openclaw nodes list`.
 - **Plugins:** each connector declares what it asks in `SETUP` (see [Adding a source](docs/adding-a-source.md)).

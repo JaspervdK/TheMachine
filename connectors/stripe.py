@@ -26,7 +26,8 @@ SETUP = {'label': 'Stripe', 'account': {'id': 'billing', 'service': 'stripe', 't
                      'poll_seconds': 900},
          'note': 'Create a restricted key in Stripe with read access to Events, Customers and Account only.',
          'ask': [('stripe_account', 'Stripe account ID (acct_…)')],
-         'secret': 'Restricted Stripe key (rk_…)'}
+         'secret': 'Restricted Stripe key (rk_…)',
+         'maton': 'Maton Stripe connection ID'}
 TYPES = ('invoice.payment_failed', 'customer.subscription.deleted', 'customer.subscription.updated',
          'customer.subscription.created', 'charge.dispute.created')
 PATHS = ('v1/account', 'v1/events', 'v1/customers/')

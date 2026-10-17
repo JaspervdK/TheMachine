@@ -61,10 +61,10 @@ If the cards look useful, say yes to **turning on reviews and Telegram cards**. 
 assistant doctor
 ```
 
-One pass over the service, the OpenClaw bridge, your Telegram approval, every source's last sync, reviews, the dashboard and `USER.md`. Every problem comes with the command that fixes it. It only reads what is on this machine.
+One pass over the service, the OpenClaw bridge, your Telegram approval, every source's last sync, reviews, the dashboard and `USER.md`. Every problem comes with the command that fixes it. It contacts none of your accounts; it only reads what is on this machine and checks that your dashboard address answers (your own domain counts, not just `tailscale serve`).
 
 ## Later
 
-- Add or redo a source: `assistant connect <source>` (`--account <id>` for a second Gmail, for example).
+- Add or redo a source: `assistant connect <source>`. With one already there it asks whether to redo it or add another (a second company, a partner's calendar); the new one reuses your client, keys and settings and follows your naming. `assistant connect` on its own also shows accounts this machine has that nothing reads yet.
 - Sending approved emails needs `gmail.send` on top of read-only access; add it with gog when you want it. Connecting never asks for more than read access.
 - Upgrade: `git pull && ./install.sh`. Your config, data and secrets are kept.

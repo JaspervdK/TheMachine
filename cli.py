@@ -351,7 +351,12 @@ def cmd_connect(config, args):
             reason = onboarding.missing(config, account)
             print(f"  {account['id']:<26} {onboarding.label(account.get('service', 'gmail')):<22} "
                   + (f'not set up ({reason}): assistant connect {onboarding.connect_name(account, config)}' if reason else 'set up'))
-        print('\nConnect or redo one: assistant connect <source> [--account <id>]')
+        found = onboarding.discover(config)
+        if found:
+            print('\nOn this machine, not connected yet:')
+            for what, command in found:
+                print(f'  {what}: {command}')
+        print('\nConnect, redo or add one: assistant connect <source> [--account <id>]')
         return
     if not sys.stdin.isatty():
         raise CliError('assistant connect asks a few questions; run it in a terminal.')

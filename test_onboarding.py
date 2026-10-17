@@ -217,6 +217,116 @@ else:
         self.assertEqual((config['accounts'][1]['email'], config['accounts'][1]['client']), ('alex@acme.test', 'work'))
         self.assertEqual(self.calls().count('auth add'), 1)
 
+    # ------------------------------------------------------------ setups that are not the example
+
+    def test_a_shared_key_file_keeps_its_other_keys_and_saved_keys_are_offered_by_name(self):
+        crm = dict(EXAMPLE['work-crm'], credential_variable='SALESFLARE_STAGING_API_KEY', api_base='https://stagingapi.example.test')
+        self.config(crm)
+        shared = self.data / 'salesflare.env'
+        onboarding.write_private(shared, '# mine\nSALESFLARE_PROD_API_KEY=prod1\nSALESFLARE_BASE_URL=https://x\nSALESFLARE_STAGING_API_KEY=old\n')
+        me = {'id': 1, 'email': 'alex@acme.test', 'team': {'id': 1}}
+        ui = FakeUI(answers=['3'], secrets=['new-staging'])  # 3 = a new key
+        with mock.patch.object(onboarding.assistant().Salesflare, 'get', lambda self, path, params=None: me):
+            onboarding.connect(self.path, 'crm', ui, restart=False)
+        self.assertEqual(shared.read_text(), '# mine\nSALESFLARE_PROD_API_KEY=prod1\nSALESFLARE_BASE_URL=https://x\nSALESFLARE_STAGING_API_KEY=new-staging\n')
+        self.assertIn('the saved SALESFLARE_STAGING_API_KEY (salesflare.env)', ui.text())
+        self.assertNotIn('prod1', ui.text())
+        account = self.saved()['accounts'][0]
+        self.assertEqual((account['api_base'], account['credential_variable']), ('https://stagingapi.example.test', 'SALESFLARE_STAGING_API_KEY'))
+        ui = FakeUI(answers=['1', '2'])  # redo it, with the saved production key
+        with mock.patch.object(onboarding.assistant().Salesflare, 'get', lambda self, path, params=None: me):
+            onboarding.connect(self.path, 'crm', ui, restart=False)
+        self.assertEqual(self.saved()['accounts'][0]['credential_variable'], 'SALESFLARE_PROD_API_KEY')
+        self.assertEqual(ui.secrets, [])
+        config = self.saved()
+        config['accounts'][0]['credential_variable'] = 'SALESFLARE_GONE_KEY'
+        self.assertEqual(onboarding.missing(config, config['accounts'][0]), 'SALESFLARE_GONE_KEY is not in salesflare.env')
+
+    def test_stripe_can_reuse_the_maton_key_slack_already_uses(self):
+        slack = dict(EXAMPLE['work-slack'], email='alex@acme.test', credential_variable='MATON_WORK_KEY', connection_id='conn-slack', team_id='T1', user_id='U1')
+        self.config(slack)
+        onboarding.write_private(self.data / 'maton-slack.env', 'MATON_WORK_KEY=mk\n')
+        ui = FakeUI(answers=['acct_123', '1', 'conn-stripe', '1'])  # account, through Maton, connection, the saved key
+        onboarding.connect(self.path, 'stripe', ui, restart=False)
+        stripe = self.saved()['accounts'][1]
+        self.assertEqual({k: stripe[k] for k in ('transport', 'credential', 'credential_variable', 'connection_id', 'stripe_account', 'boundary')},
+                         {'transport': 'maton', 'credential': 'maton-slack', 'credential_variable': 'MATON_WORK_KEY',
+                          'connection_id': 'conn-stripe', 'stripe_account': 'acct_123', 'boundary': 'work:Acme'})
+        self.assertEqual((self.data / 'maton-slack.env').read_text(), 'MATON_WORK_KEY=mk\n')
+        self.assertEqual(ui.secrets, [])
+        # A new key for one of them goes to its own file; the other keeps the shared one.
+        answers = {'auth.test': {'ok': True, 'team_id': 'T1', 'user_id': 'U1'}, 'users.info': {'ok': True, 'user': {'profile': {'email': 'alex@acme.test'}}}}
+        ui = FakeUI(answers=['1', '2', ''], secrets=['mk2'])  # redo the Slack account, a new key, same connection
+        with mock.patch.object(onboarding.assistant().Slack, 'get', lambda self, method, params=None: answers[method]):
+            onboarding.connect(self.path, 'slack', ui, restart=False)
+        config = self.saved()
+        self.assertEqual(config['accounts'][0]['credential'], 'work-slack')
+        self.assertEqual(Path(config['credentials']['work-slack']).read_text(), 'MATON_WORK_KEY=mk2\n')
+        self.assertEqual((self.data / 'maton-slack.env').read_text(), 'MATON_WORK_KEY=mk\n')
+
+    def test_a_second_company_gets_its_own_account_named_your_way(self):
+        gog = self.stub('gog', '''
+if args[:2] == ["auth", "list"]:
+    print(json.dumps({"accounts": [{"email": "me@one.test", "client": "mine"}, {"email": "me@two.test", "client": "mine"}]}))
+elif args[:3] == ["auth", "credentials", "list"]:
+    print(json.dumps({"clients": [{"client": "mine", "default": True}]}))
+elif args[:2] == ["calendar", "calendars"]:
+    print(json.dumps([{"id": "me@two.test", "summary": "Me", "primary": True}, {"id": "team@group.test", "summary": "Team", "selected": True}]))
+elif args[:2] == ["api", "call"]:
+    me = args[args.index("--account") + 1]
+    me = json.loads(args[args.index("--params") + 1]).get("calendarId", "primary").replace("primary", me)
+    print(json.dumps({"emailAddress": me, "historyId": "1", "id": me}))''')
+        one = dict(EXAMPLE['work-gmail'], id='one-gmail', email='me@one.test', boundary='work:One', client='mine', excluded_terms=['secret-1'])
+        self.config(one, EXAMPLE['personal-whatsapp'], gog=gog)
+        onboarding.write_private(self.data / 'gog-password', 'pw')
+        config = self.saved()
+        config['credentials']['gog-password'] = str(self.data / 'gog-password')
+        onboarding.write_private(self.path, json.dumps(config))
+        ui = FakeUI(answers=['2', '2', 'work:Two', ''])  # add another, something else, its name, the suggested address
+        onboarding.connect(self.path, 'gmail', ui, restart=False)
+        two = self.saved()['accounts'][-1]
+        self.assertEqual((two['id'], two['boundary'], two['email'], two['client']), ('two-gmail', 'work:Two', 'me@two.test', 'mine'))
+        self.assertNotIn('excluded_terms', two)
+        self.assertNotIn('personal:whatsapp', ui.text())
+        self.assertNotIn('auth add', self.calls())
+        ui = FakeUI(answers=['2', '', '2'])  # Two, its own Google account, then the shared team calendar
+        onboarding.connect(self.path, 'calendar', ui, restart=False)
+        calendar = self.saved()['accounts'][-1]
+        self.assertIn('Which part of your life', ui.text())
+        self.assertEqual((calendar['id'], calendar['email'], calendar['calendar_id'], calendar['display_name']),
+                         ('two-calendar', 'me@two.test', 'team@group.test', 'Team'))
+
+    def test_salesflare_on_another_server(self):
+        self.config(EXAMPLE['work-crm'])
+        def get(source, path, params=None):
+            if source.account['api_base'] != 'https://stagingapi.example.test':
+                raise onboarding.assistant().SourceError('salesflare', 401)
+            return {'id': 5, 'email': 'alex@acme.test', 'team': {'id': 6}}
+        with mock.patch.object(onboarding.assistant().Salesflare, 'get', get):
+            onboarding.connect(self.path, 'crm', FakeUI(answers=['stagingapi.example.test'], secrets=['k']), restart=False)
+        account = self.saved()['accounts'][0]
+        self.assertEqual((account['api_base'], account['app_base']), ('https://stagingapi.example.test', 'https://staging.example.test'))
+
+    def test_dashboard_on_your_own_domain_counts(self):
+        self.stub('tailscale', 'print("{}")')
+        config = {'port': 8787, 'dashboard_host': 'my.example.test', 'dashboard_path': '/'}
+        with mock.patch.object(onboarding, 'reachable', return_value=True) as probe:
+            self.assertEqual(onboarding.dashboard_url(config), 'https://my.example.test/')
+        probe.assert_called_once_with('https://my.example.test/')
+        with mock.patch.object(onboarding, 'reachable', return_value=False):
+            self.assertIsNone(onboarding.dashboard_url(config))
+
+    def test_connect_lists_what_this_machine_has_but_no_source_reads(self):
+        gog = self.stub('gog', 'print(json.dumps({"accounts": [{"email": "me@one.test"}, {"email": "new@two.test"}]}))')
+        nodes = {'paired': [{'nodeId': 'p1', 'platform': 'android', 'displayName': 'Pixel'}, {'nodeId': 'p2', 'platform': 'android'}]}
+        openclaw = self.stub('openclaw', f'print(json.dumps({nodes!r}))')
+        self.stub('gh', 'print("octo")')
+        config = self.config(dict(EXAMPLE['work-gmail'], email='me@one.test'), dict(EXAMPLE['personal-android'], node_id='p1'), gog=gog, openclaw=openclaw)
+        found = dict(onboarding.discover(config))
+        self.assertEqual(found, {'gog is signed in as new@two.test, but no source reads it': 'assistant connect gmail',
+                                 'gh is signed in as octo': 'assistant connect github',
+                                 'an Android phone is paired with OpenClaw': 'assistant connect android'})
+
     def test_a_plugin_source_asks_its_own_setup_fields(self):
         self.config()
         onboarding.connect(self.path, 'rss', FakeUI(answers=['https://example.com/feed.xml']), restart=False)

@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import closing
@@ -38,6 +39,10 @@ LABELS = {'gmail': 'Gmail', 'calendar': 'Google Calendar', 'slack': 'Slack', 'sa
 PLACEHOLDERS = {'email': 'alex@example.com', 'connection_id': '00000000-0000-0000-0000-000000000000',
                 'team_id': 'T00000000', 'user_id': 'U00000000', 'node_id': 'replace-with-your-openclaw-node-id',
                 'identity_sha256': 'sha256-of-your-linked-whatsapp-jid'}
+# Per-account identity: never copied when a new account starts from one you already have.
+IDENTITY = {'id', 'email', 'owner_emails', 'display_name', 'connection_id', 'team_id', 'user_id', 'slack_host', 'node_id',
+            'identity_sha256', 'store', 'calendar_id', 'handle', 'login', 'url', 'workspace_id', 'stripe_account',
+            'exclude', 'excluded_terms', 'scope'}
 # Redacted sync error labels -> what to do about them (first matching prefix wins).
 HINTS = (
     ('account_identity_mismatch', 'the sign-in belongs to a different account than config.json says'),
@@ -115,6 +120,37 @@ def run(args, **kwargs):
         return subprocess.run(args, timeout=kwargs.pop('timeout', 60), **kwargs)
     except (OSError, subprocess.TimeoutExpired) as error:
         return subprocess.CompletedProcess(args, 127, '', str(error))
+
+
+ENV_LINE = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=')
+
+
+def env_names(path):
+    """Variable names in a KEY=value credential file. Values are never read out."""
+    try:
+        lines = Path(path).expanduser().read_text().splitlines()
+    except OSError:
+        return []
+    return [m[1] for m in map(ENV_LINE.match, lines) if m]
+
+
+def set_env(path, variable, value):
+    """Set one KEY=value line and keep every other line (other keys, comments) as it was."""
+    path = Path(path).expanduser()
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        lines = []
+    done, out = False, []
+    for line in lines:
+        match = ENV_LINE.match(line)
+        if match and match[1] == variable:
+            if not done:
+                out.append(f'{variable}={value}')
+            done = True
+        else:
+            out.append(line)
+    write_private(path, '\n'.join(out + ([] if done else [f'{variable}={value}'])) + '\n')
 
 
 def write_private(path, text):
@@ -308,6 +344,28 @@ def suggested_sources(facts):
     return ','.join(chosen + ['gateway'])
 
 
+def discover(config):
+    """[(what, command)] for accounts this machine already has that no source reads yet.
+    Asks local tools only (gog, gh, OpenClaw, wacli); no tokens or messages are read."""
+    accounts, found = config.get('accounts', []), []
+    read = {str(a.get('email', '')).lower() for a in accounts if a.get('transport') == 'gog'}
+    for email, _ in gog_accounts(tool(config, 'gog')):
+        if email.lower() not in read:
+            found.append((f'gog is signed in as {email}, but no source reads it', 'assistant connect gmail'))
+    if not siblings(config, 'github') and shutil.which('gh') and plugin('github'):
+        login = run(['gh', 'api', 'user', '--jq', '.login'], timeout=20)
+        if login.returncode == 0 and login.stdout.strip():
+            found.append((f'gh is signed in as {login.stdout.strip()}', 'assistant connect github'))
+    nodes = {a.get('node_id') for a in siblings(config, 'android')}
+    for node in android_nodes(tool(config, 'openclaw')):
+        if node['nodeId'] not in nodes:
+            found.append((f'{node.get("displayName") or "an Android phone"} is paired with OpenClaw', 'assistant connect android'))
+    linked = whatsapp_linked(tool(config, 'wacli'), home() / '.local/share/wacli')
+    if linked and hashlib.sha256(linked.encode()).hexdigest() not in {a.get('identity_sha256') for a in siblings(config, 'whatsapp')}:
+        found.append(('wacli has a linked WhatsApp', 'assistant connect whatsapp'))
+    return found
+
+
 # ---------------------------------------------------------------- config helpers
 
 def load(path):
@@ -362,6 +420,9 @@ def missing(config, account):
         path = config.get('credentials', {}).get(name)
         if not path or not Path(path).expanduser().exists():
             return f'no {name} credential yet'
+        variable = account.get('credential_variable') if name == account.get('credential') else None
+        if variable and variable not in env_names(path):
+            return f'{variable} is not in {Path(path).name}'
     module = plugin(account.get('service', 'gmail')) if account.get('service', 'gmail') not in LABELS else None
     for key, *_ in (getattr(module, 'SETUP', None) or {}).get('ask', []):
         if not account.get(key):
@@ -373,49 +434,122 @@ def hint(error):
     return next((text for prefix, text in HINTS if str(error or '').startswith(prefix)), '')
 
 
-def new_account(config, service, account_id=None):
-    if service in LABELS:
+def siblings(config, service):
+    return [a for a in config.get('accounts', []) if a.get('service', 'gmail') == service]
+
+
+def slug(text):
+    return re.sub(r'[^a-z0-9]+', '-', str(text).lower()).strip('-') or 'account'
+
+
+def boundaries(config, service):
+    """Boundaries a new account of this service could belong to, ones it does not cover yet first.
+    Device and system boundaries (phone, WhatsApp, Gateway) are not offered for other sources."""
+    devices = {'android', 'whatsapp', 'gateway'}
+    known = [a['boundary'] for a in config.get('accounts', []) if a.get('boundary') and ':' in a['boundary']
+             and not a['boundary'].startswith('owner:') and (a.get('service', 'gmail') not in devices or a.get('service') == service)]
+    covered = {a.get('boundary') for a in siblings(config, service)}
+    people = {a.get('boundary') for a in config.get('accounts', []) if a.get('service', 'gmail') in ('gmail', 'calendar', 'slack', 'salesflare')}
+    # Boundaries with a mailbox or calendar (a company, a person) first, ones this source does not cover yet before
+    # ones it does, then the busiest.
+    return sorted(dict.fromkeys(known), key=lambda b: (b not in people, b in covered, -known.count(b)))
+
+
+def new_account(config, service, account_id=None, ui=None):
+    """A new account for this service. It starts from one you already have (same transport, keys,
+    client and settings, without its identity), else from the example; its boundary and id follow
+    your own naming."""
+    ui = ui or UI(False)
+    same = siblings(config, service)
+    if same:
+        first_ask = next(iter((getattr(plugin(service), 'SETUP', None) or {}).get('ask', [])), ('',))[0] if service not in LABELS else ''
+        account = {k: v for k, v in same[-1].items() if k not in IDENTITY and k != first_ask}
+        template_id = None
+    elif service in LABELS:
         name = next(k for k, v in SERVICES.items() if v == service)
         example = json.loads((ROOT / 'config.example.json').read_text())
         account = next(a for a in example['accounts'] if a['id'] == CONNECTORS[name])
+        template_id = account['id']
     else:
         account = dict((getattr(plugin(service), 'SETUP', None) or {}).get('account') or {'id': service, 'service': service, 'boundary': 'work'})
+        template_id = account['id']
     account = expand(json.loads(json.dumps(account)), home())
     account.pop('exclude', None)  # example noise rules are not yours
+    options = boundaries(config, service)
+    if service in ('android', 'whatsapp', 'gateway') and not same:
+        pass  # keep the example's device boundary
+    elif same or len(options) > 1:
+        choice = ui.choose('Which part of your life is this account', [(b, b) for b in options] + [(None, 'something else')]) if options else None
+        account['boundary'] = choice or ui.ask('Boundary (work:<Company> or personal:<name>)',
+                                               account.get('boundary') if ':' in str(account.get('boundary')) else 'work:')
+    elif options:
+        account['boundary'] = options[0]
+    elif str(account.get('boundary', '')).startswith('work:'):
+        account['boundary'] = ui.ask('Boundary (work:<Company> or personal:<name>)', account['boundary'])
     taken = {a['id'] for a in config.get('accounts', [])}
-    account['id'] = account_id or account['id']
+    suffix = 'crm' if service == 'salesflare' else service
+    # Your ids follow <boundary name>-<source> (acme-gmail): name this one the same way.
+    yours = any(a['id'] == f"{slug(str(a.get('boundary', '')).split(':', 1)[-1])}-{'crm' if a.get('service') == 'salesflare' else a.get('service', 'gmail')}"
+                for a in config.get('accounts', []))
+    if account_id:
+        account['id'] = account_id
+    elif template_id and template_id not in taken and not yours:
+        account['id'] = template_id
+    else:
+        account['id'] = f"{slug(str(account.get('boundary', '')).split(':', 1)[-1])}-{suffix}"
     base, number = account['id'], 2
     while account['id'] in taken:
         account['id'], number = f'{base}-{number}', number + 1
-    work = next((a['boundary'] for a in config.get('accounts', []) if str(a.get('boundary', '')).startswith('work:')), None)
-    if work and str(account.get('boundary', '')).startswith('work:'):
-        account['boundary'] = work
-    email = next((a['email'] for a in config.get('accounts', []) if a.get('email') and a['email'] != PLACEHOLDERS['email']), None)
-    if email and account.get('email') == PLACEHOLDERS['email']:
-        account['email'] = email
-        if 'owner_emails' in account:
-            account['owner_emails'] = [email]
+    if account.get('email') == PLACEHOLDERS['email']:
+        emails = [a['email'] for a in config.get('accounts', []) if a.get('email') and a['email'] != PLACEHOLDERS['email']]
+        nearby = [e for e in emails if any(a.get('email') == e and a.get('boundary') == account.get('boundary') for a in config['accounts'])]
+        if nearby or emails:
+            account['email'] = (nearby or emails)[0]
+            if 'owner_emails' in account:
+                account['owner_emails'] = [account['email']]
     if account.get('transport') == 'gog':
-        account['client'] = next((a['client'] for a in config.get('accounts', []) if a.get('transport') == 'gog'), account.get('client', 'default'))
+        account['client'] = account.get('client') if same else next(
+            (a['client'] for a in config.get('accounts', []) if a.get('transport') == 'gog'), account.get('client', 'default'))
         config.setdefault('credentials', {}).setdefault('gog-password', str(data_dir(config) / 'gog-password'))
     if account.get('credential'):
         config.setdefault('credentials', {}).setdefault(account['credential'], str(data_dir(config) / f'{account["credential"]}.env'))
     return account
 
 
-def store_secret(config, name, ui, prompt, variable=None):
-    """Ask for a key without echo and write it to its credential file (mode 600). Enter keeps a saved one."""
+def saved_keys(config, family):
+    """(credential name, variable) for keys of this family already saved in any credential file. Names only."""
+    return [(name, variable) for name, path in sorted(config.get('credentials', {}).items())
+            for variable in env_names(path) if variable.startswith(family) and re.search(r'(KEY|TOKEN|SECRET)$', variable)]
+
+
+def store_secret(config, account, ui, prompt, family=None):
+    """Ask for a key without echo and save it (mode 600). Keys of the same kind you already saved,
+    in any credential file, are offered first by name. Other lines in a shared file are kept."""
+    if family:
+        saved = sorted(saved_keys(config, family), key=lambda o: o != (account.get('credential'), account.get('credential_variable')))
+        if saved:
+            choice = ui.choose(prompt, [(o, f'the saved {o[1]} ({Path(config["credentials"][o[0]]).name})') for o in saved]
+                               + [(None, 'a new key')])
+            if choice:
+                account['credential'], account['credential_variable'] = choice
+                return
+    variable = account.get('credential_variable')
+    shared = any(a.get('id') != account['id'] and a.get('credential') == account['credential']
+                 and a.get('credential_variable') == variable for a in config.get('accounts', []))
+    if shared:  # a new key must not replace the one other sources still use
+        account['credential'] = account['id']
+    name = account['credential']
     path = Path(config.setdefault('credentials', {}).setdefault(name, str(data_dir(config) / f'{name}.env'))).expanduser()
-    if path.exists():
-        value = ui.secret(f'{prompt} (Enter keeps the saved one)')
-        if not value:
+    has = path.exists() and (variable in env_names(path) if variable else bool(path.read_text().strip()))
+    value = ui.secret(prompt + (' (Enter keeps the saved one)' if has else ''))
+    if not value:
+        if has:
             return
+        raise SetupError(f'No {prompt.split(" (")[0]} given', 'rerun this when you have it')
+    if variable:
+        set_env(path, variable, value.split('=', 1)[1].strip() if value.startswith(variable + '=') else value)
     else:
-        value = ui.secret(prompt)
-        if not value:
-            raise SetupError(f'No {prompt.split(" (")[0]} given', 'rerun this when you have it')
-    value = value.split('=', 1)[1].strip() if variable and value.startswith(variable + '=') else value
-    write_private(path, f'{variable}={value}\n' if variable else value + '\n')
+        write_private(path, value + '\n')
 
 
 def check(config, account):
@@ -456,8 +590,12 @@ def step_google(config, account, ui):
         raise SetupError('gog is not installed', 'install gog (gogcli), then run: assistant connect ' + account.get('service', 'gmail'))
     config['gog'] = config.get('gog') if config.get('gog') not in (None, 'gog') else gog
     known = gog_accounts(gog)
-    default = account['email'] if account.get('email') != PLACEHOLDERS['email'] else (known[0][0] if known else '')
-    email = ui.ask('Google account to read', default)
+    own = account.get('email') if account.get('email') not in (None, '', PLACEHOLDERS['email']) else ''
+    used = {str(a.get('email', '')).lower() for a in siblings(config, account.get('service', 'gmail')) if a['id'] != account['id']}
+    nearby = [a['email'] for a in config.get('accounts', []) if a.get('transport') == 'gog' and a.get('boundary') == account.get('boundary')
+              and a['id'] != account['id'] and a.get('email') not in (None, PLACEHOLDERS['email'])]
+    unused = [e for e, _ in known if e.lower() not in used]
+    email = ui.ask('Google account to read', own or next(iter(nearby + unused + [e for e, _ in known]), ''))
     if not email or '@' not in email:
         raise SetupError('No Google account given', 'rerun with the address you use for Gmail and Calendar')
     account['email'] = email
@@ -488,7 +626,14 @@ def step_google(config, account, ui):
         ui.say('  keyring password saved to ' + str(password) + (' (generated)' if not typed else ''))
     if check(config, account) is None:
         ui.say(f'  {email} is already authorized')
-        return
+    else:
+        sign_in(config, account, gog, ui)
+    if account.get('service') == 'calendar':
+        pick_calendar(config, account, ui)
+
+
+def sign_in(config, account, gog, ui):
+    email, client = account['email'], account['client']
     ui.say('Signing in to Google with read-only access to Gmail and Calendar'
            + (' (open the link it prints, then paste the address you land on)' if headless() else ' (a browser opens)') + '...')
     args = [gog, 'auth', 'add', email, '--client', client, '--services', 'gmail,calendar', '--readonly', '--gmail-scope', 'readonly']
@@ -500,10 +645,41 @@ def step_google(config, account, ui):
         pass
 
 
+def gog_calendars(config, account):
+    """Calendars this Google account can see (its own, shared and subscribed ones). Read-only."""
+    result = run([config['gog'], 'calendar', 'calendars', '--json', '--results-only', '--account', account['email'],
+                  '--client', account['client'], '--no-input'], env=gog_env(config), timeout=30)
+    try:
+        items = json.loads(result.stdout)
+    except ValueError:
+        return []
+    items = items if isinstance(items, list) else (items or {}).get('items') or []
+    return [c for c in items if isinstance(c, dict) and c.get('id')]
+
+
+def pick_calendar(config, account, ui):
+    """Your own calendar unless you pick a shared one (a partner's, a team's)."""
+    calendars = gog_calendars(config, account) if ui.interactive else []
+    if len(calendars) < 2:
+        return
+    name = lambda c: c.get('summaryOverride') or c.get('summary') or c['id']
+    calendars.sort(key=lambda c: (not c.get('primary'), not c.get('selected'), name(c).lower()))
+    current = account.get('calendar_id', 'primary')
+    options = [('primary' if c.get('primary') else c['id'], name(c) + (' (your own)' if c.get('primary') else '')) for c in calendars]
+    options.sort(key=lambda o: o[0] != current)
+    chosen = ui.choose('Which calendar', options)
+    if chosen == 'primary':
+        account.pop('calendar_id', None)
+    else:
+        account['calendar_id'] = chosen
+        account.setdefault('display_name', next(text for value, text in options if value == chosen))
+
+
 def step_slack(config, account, ui):
     ui.say('Slack is read through Maton (maton.ai), which holds the Slack sign-in.\n'
            'In Maton: connect Slack, then copy your API key and the Slack connection ID.')
-    store_secret(config, account['credential'], ui, 'Maton API key', account.get('credential_variable', 'MATON_API_KEY'))
+    account.setdefault('credential_variable', 'MATON_API_KEY')
+    store_secret(config, account, ui, 'Maton API key', 'MATON_')
     current = '' if account.get('connection_id') == PLACEHOLDERS['connection_id'] else account.get('connection_id', '')
     account['connection_id'] = ui.ask('Maton Slack connection ID', current)
     if not account['connection_id']:
@@ -523,11 +699,22 @@ def step_slack(config, account, ui):
 def step_salesflare(config, account, ui):
     ui.say('Salesflare: create an API key in Salesflare\'s settings (API keys).')
     account.setdefault('credential_variable', 'SALESFLARE_API_KEY')
-    store_secret(config, account['credential'], ui, 'Salesflare API key', account['credential_variable'])
-    try:
-        me = assistant().Salesflare(config, account).get('/me')
-    except assistant().SourceError as error:
-        raise SetupError(f'Salesflare did not answer: {error}', hint(error)) from None
+    store_secret(config, account, ui, 'Salesflare API key', 'SALESFLARE_')
+    account.setdefault('api_base', 'https://api.salesflare.com')
+    while True:
+        try:
+            me = assistant().Salesflare(config, account).get('/me')
+            break
+        except assistant().SourceError as error:
+            other = str(error) == 'salesflare:HTTP_401' and ui.ask(
+                f'{account["api_base"]} rejected that key. Is it for another Salesflare server (staging, self-hosted)? '
+                'Its API address, or Enter to stop')
+            if not other:
+                raise SetupError(f'Salesflare did not answer: {error}', hint(error)) from None
+            account['api_base'] = other.rstrip('/') if '://' in other else 'https://' + other.rstrip('/')
+            host = urllib.parse.urlparse(account['api_base']).netloc
+            first, _, rest = host.partition('.')
+            account['app_base'] = 'https://' + ((first.replace('api', '') or 'app') + '.' + rest if rest else host)
     account.update(user_id=me['id'], team_id=(me.get('team') or {}).get('id'), email=me['email'])
     account['owner_emails'] = sorted({me['email'], *account.get('owner_emails', [])} - {PLACEHOLDERS['email']})
     ui.say(f'  Salesflare: {me["email"]}')
@@ -566,13 +753,18 @@ def step_android(config, account, ui):
 
 
 def step_gateway(config, account, ui):
+    """The Gateway's own systemd unit, also when it is named differently here."""
+    units = run(['systemctl', '--user', 'list-unit-files', '--type=service', '--no-legend', '--plain', '*openclaw*'], timeout=15).stdout.split()
+    units = [u for u in units if u.endswith('.service')]
+    if account.get('unit') not in units and units:
+        account['unit'] = next((u for u in units if 'gateway' in u), units[0])
     account.setdefault('unit', 'openclaw-gateway.service')
 
 
 def step_plugin(config, account, ui):
     module = plugin(account.get('service', 'gmail'))
     setup = getattr(module, 'SETUP', None) or {}
-    if setup.get('note'):
+    if setup.get('note') and not setup.get('maton'):
         ui.say(setup['note'])
     for key, prompt, *rest in setup.get('ask', []):
         command = (setup.get('detect') or {}).get(key)
@@ -581,9 +773,28 @@ def step_plugin(config, account, ui):
         account[key] = ui.ask(prompt, default)
         if not account[key]:
             raise SetupError(f'No {key} given', f'rerun: assistant connect {account.get("service", "gmail")}')
-    if setup.get('secret'):
+    own_key = account.get('transport') != 'maton' and Path(config.get('credentials', {}).get(account.get('credential', ''), '/nonexistent')).expanduser().exists()
+    if setup.get('maton') and (account.get('transport') == 'maton' or saved_keys(config, 'MATON_')) and ui.choose(
+            f'How should it read {setup.get("label", account["service"])}', sorted(
+                [('maton', 'through Maton, which you already use'), ('api', 'with its own key')],
+                key=lambda o: o[0] != ('api' if own_key else 'maton'))) == 'maton':
+        account['transport'] = 'maton'
+        account['connection_id'] = ui.ask(setup['maton'], account.get('connection_id', ''))
+        if not account['connection_id']:
+            raise SetupError('No Maton connection ID given', f'copy it from Maton, then rerun: assistant connect {account["service"]}')
+        account.setdefault('credential', 'maton')
+        account.setdefault('credential_variable', 'MATON_API_KEY')
+        store_secret(config, account, ui, 'Maton API key', 'MATON_')
+    elif setup.get('secret'):
+        if setup.get('note') and setup.get('maton'):
+            ui.say(setup['note'])
+        if account.get('transport') == 'maton':
+            account.update(transport=(setup.get('account') or {}).get('transport', 'api'))
+            account.pop('connection_id', None)
+            account.pop('credential_variable', None)
+            account['credential'] = (setup.get('account') or {}).get('credential') or account['service']
         account.setdefault('credential', account.get('service', 'gmail'))
-        store_secret(config, account['credential'], ui, setup['secret'], account.get('credential_variable'))
+        store_secret(config, account, ui, setup['secret'], setup.get('family'))
 
 
 STEPS = {'gmail': step_google, 'calendar': step_google, 'slack': step_slack, 'salesflare': step_salesflare,
@@ -601,15 +812,21 @@ def connect(config_path, name, ui, account_id=None, restart=True):
     service = SERVICES.get(name, name)
     if service not in LABELS and not plugin(service):
         raise SetupError(f'Unknown source {name}', 'choose one of: ' + ', '.join(sources()))
-    same = [a for a in config.get('accounts', []) if a.get('service', 'gmail') == service]
-    account = next((a for a in same if a['id'] == account_id), None) if account_id else (
-        next((a for a in same if missing(config, a)), None) or (same[0] if same else None))
+    same = siblings(config, service)
+    if account_id:
+        account = next((a for a in same if a['id'] == account_id), None)
+    elif any(missing(config, a) for a in same):
+        account = next(a for a in same if missing(config, a))
+    elif same and ui.interactive:
+        account = ui.choose(f'You already have {label(service)}', [(a, f'redo {a["id"]}' + (f' ({a["email"]})' if a.get('email') else ''))
+                                                                   for a in same] + [(None, f'add another {label(service)} account')])
+    else:
+        account = same[0] if same else None
     existing = account is not None
-    account = json.loads(json.dumps(account)) if existing else new_account(config, service, account_id)
-    ui.say(f'\n{label(service)} ({account["id"]})')
-    inherited = any(a.get('boundary') == account.get('boundary') for a in config.get('accounts', []))
-    if not existing and not inherited and str(account.get('boundary', '')).startswith('work:'):
-        account['boundary'] = ui.ask('Boundary label (work:<Company>, or personal:<name>)', account['boundary'])
+    ui.say(f'\n{label(service)}' + (f' ({account["id"]})' if existing else ': new account'))
+    account = json.loads(json.dumps(account)) if existing else new_account(config, service, account_id, ui)
+    if not existing:
+        ui.say(f'  saving it as {account["id"]} in {account.get("boundary")}')
     STEPS.get(service, step_plugin)(config, account, ui)
     error = check(config, account)
     if error:
@@ -743,6 +960,29 @@ def dashboard_served(config):
     return None
 
 
+def reachable(url):
+    """Does anything answer HTTPS at this address (any status: login pages and 401s count)?"""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method='HEAD'), timeout=5):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def dashboard_url(config):
+    """Where the dashboard is reachable: your own dashboard_host (Caddy, a custom domain, another
+    proxy) when it answers, else the tailnet address from tailscale serve, else None."""
+    served = dashboard_served(config)
+    host = str(config.get('dashboard_host') or '')
+    if host and (not served or urllib.parse.urlparse(served).hostname != host):
+        url = f'https://{host}/{config.get("dashboard_path", "/").strip("/")}'.rstrip('/') + '/'
+        if reachable(url):
+            return url
+    return served
+
+
 def serve_command(config):
     path = config.get('dashboard_path', '/assistant/').rstrip('/') or '/'
     return ['tailscale', 'serve', '--bg', '--https=443', '--set-path', path, f'http://127.0.0.1:{config.get("port", 8787)}']
@@ -750,7 +990,7 @@ def serve_command(config):
 
 def serve_dashboard(config, ui):
     """Offer to publish the dashboard on the tailnet (only your tailnet can reach it)."""
-    served = dashboard_served(config)
+    served = dashboard_url(config)
     if served:
         ui.say(f'Dashboard: {served}')
         return served
@@ -821,8 +1061,8 @@ def ago(stamp):
 
 
 def doctor(config_path, workspace=None):
-    """Every check as (mark, text, fix): ✓ fine, ! worth a look, ✗ broken. Contacts nothing outside
-    this machine; source health comes from the service's own sync records."""
+    """Every check as (mark, text, fix): ✓ fine, ! worth a look, ✗ broken. Contacts none of your
+    accounts (only your own dashboard address); source health comes from the service's own sync records."""
     results = []
     add = lambda mark, text, fix='': results.append((mark, text, fix))
     try:
@@ -918,11 +1158,11 @@ def doctor(config_path, workspace=None):
     else:
         add('✓', f'reviews on, last one {ago(last_review)}')
     # Dashboard and USER.md
-    served = dashboard_served(config)
+    served = dashboard_url(config)
     if served:
         add('✓', f'dashboard {served}')
     else:
-        add('!', 'dashboard not found in tailscale serve', ' '.join(serve_command(config)) + ' (or a custom domain: deploy/Caddyfile)')
+        add('!', f'dashboard not reachable at {config.get("dashboard_host") or "your dashboard_host"} nor in tailscale serve', ' '.join(serve_command(config)) + ' (or a custom domain: deploy/Caddyfile)')
     path = user_md_path(workspace)
     add('✓' if path.exists() else '!', f'{path} ' + ('exists' if path.exists() else 'missing: the agent does not know who you are'),
         '' if path.exists() else 'rerun ./install.sh for a starter one, or write it yourself')

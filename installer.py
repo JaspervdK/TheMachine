@@ -537,7 +537,7 @@ def next_steps(config, healthy, started, paths=None):
     for account in config.get('accounts', []):
         if onboarding.missing(config, account):
             lines.append(f'  - Connect {onboarding.label(account.get("service", "gmail"))}: assistant connect {onboarding.connect_name(account, config)}')
-    served = onboarding.dashboard_served(config)
+    served = onboarding.dashboard_url(config)
     if served:
         lines.append(f'  - Dashboard: {served}')
     else:
