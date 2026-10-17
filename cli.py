@@ -343,8 +343,16 @@ def cmd_preview(config, args):
 
 
 def cmd_profile(config, args):
-    started = call(config, 'profile_start', {'again': bool(args.again)})
+    path = onboarding.user_md_path(args.workspace)
+    current = path.read_text() if path.exists() else onboarding.starter_user_md(config)
+    if onboarding.user_md_is_template(path):
+        current = current.rstrip() + '\n\n' + onboarding.starter_user_md(config)
+    room = onboarding.profile_room(current)
+    started = call(config, 'profile_start', {'again': bool(args.again), 'room': max(room, 0)})
     if not args.json:
+        if room < 400:
+            print(f'USER.md already uses {len(onboarding.without_profile(current)):,} of the {onboarding.USER_MD_BUDGET:,} characters OpenClaw chats load,'
+                  ' so only the most useful lines of the draft fit. Make room in USER.md, or keep everything with --all.\n')
         counts = started.get('counts') or {}
         print('Following the profile draft that is already running.' if started.get('attached') else
               'Your OpenClaw agent reads ' + ', '.join(f'{n} {k}' for k, n in sorted(counts.items(), key=lambda c: -c[1]))
@@ -374,12 +382,15 @@ def cmd_profile(config, args):
     if args.json:
         return out_json(run)
     day = dt.datetime.now(TZ).date().isoformat()
-    path = onboarding.user_md_path(args.workspace)
-    current = path.read_text() if path.exists() else onboarding.starter_user_md(config)
-    if onboarding.user_md_is_template(path):
-        current = current.rstrip() + '\n\n' + onboarding.starter_user_md(config)
-    merged = onboarding.merge_profile(current, run['draft'], day)
-    print(onboarding.render_profile(run['draft'], day))
+    if args.all:
+        merged, left_out = onboarding.merge_profile(current, run['draft'], day), []
+    else:
+        merged, left_out = onboarding.fit_profile(current, run['draft'], day)
+    # The section as it would be saved (merge_profile puts it last).
+    print(merged[merged.index(onboarding.PROFILE_HEADING):] if merged else onboarding.render_profile(run['draft'], day))
+    if left_out:
+        print(f'Left out to stay within the {onboarding.USER_MD_BUDGET:,} characters OpenClaw chats load (keep them with --all, or make room in USER.md):')
+        print('\n'.join(f'  - {line}' for line in left_out) + '\n')
     if merged is None:
         print(f'{path} already has an "{onboarding.PROFILE_HEADING}" section you made your own, so it stays as it is. Copy what you like from above.')
         return
@@ -389,7 +400,8 @@ def cmd_profile(config, args):
     path.parent.mkdir(parents=True, exist_ok=True)
     onboarding.write_private(path, merged)
     print(f'Saved to {path}. Reviews and drafts read it from the next turn on.'
-          + (f' It is now {len(merged):,} characters; OpenClaw chat sessions load the first 4,000.' if len(merged) > 4000 else ''))
+          + (f' It is now {len(merged):,} characters; OpenClaw chat sessions load the first {onboarding.USER_MD_BUDGET:,}.'
+             if len(merged) > onboarding.USER_MD_BUDGET else ''))
 
 
 def cmd_connect(config, args):
@@ -483,6 +495,7 @@ def parser():
     c = add('profile', 'Draft how you write and what matters to you from your own messages, for USER.md; you see it first', cmd_profile)
     c.add_argument('--again', action='store_true', help='make a new draft even if one was just made')
     c.add_argument('--yes', action='store_true', help='save the draft without asking')
+    c.add_argument('--all', action='store_true', help='keep every line, even past the 4,000 characters OpenClaw chats load')
     c.add_argument('--workspace', help='OpenClaw workspace with USER.md (default: OPENCLAW_WORKSPACE or ~/.openclaw/workspace)')
     c = add('connect', 'Set up a source: sign-in or key, IDs, a test read and the first sync', cmd_connect)
     c.add_argument('source', nargs='?', help='gmail, calendar, slack, crm, whatsapp, android, gateway or a connector plugin')

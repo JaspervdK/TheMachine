@@ -1203,12 +1203,12 @@ STARTER_SECTIONS = {'matters': '## What matters to me\n\n- (customers, projects,
 def render_profile(profile, day):
     """The USER.md section for a profile draft (assistant profile)."""
     lines = [PROFILE_HEADING, f'{PROFILE_MARK}{day}' + (f' · from {profile["based_on"]}' if profile.get('based_on') else '')
-             + ' · edit freely; delete this line and the next assistant profile leaves this section alone -->', '']
+             + ' · edit freely; delete this line to keep later drafts out -->', '']
     for key, title in (('role', 'Role'), ('tone', 'Tone'), ('greeting', 'Greeting'), ('sign_off', 'Sign-off'), ('habits', 'Habits')):
         if profile.get(key):
             lines.append(f'- {title}: {profile[key]}')
     if profile.get('languages'):
-        lines.append('- Languages: ' + '; '.join(profile['languages']))
+        lines.append('- Languages: ' + '; '.join(x.rstrip(' .;') for x in profile['languages']))
     if profile.get('examples'):
         lines.append('- Sounds like: ' + ' · '.join(f'"{e.strip(chr(34))}"' for e in profile['examples']))
     for key, title in (('matters', 'What matters'), ('leave_alone', 'Leave alone')):
@@ -1235,6 +1235,40 @@ def merge_profile(text, profile, day):
             text = text.replace(section, '')
     text = re.sub(r'\n{3,}', '\n\n', text).rstrip()
     return (text + '\n\n' if text else '') + render_profile(profile, day)
+
+
+USER_MD_BUDGET = 4000  # OpenClaw chat sessions load this much of USER.md
+# What goes first when a draft doesn't fit: the last examples, then the last people and projects, … the tone last.
+PROFILE_DROP = ('examples', 'matters', 'leave_alone', 'habits', 'role', 'languages', 'greeting', 'sign_off', 'tone')
+
+
+def without_profile(text):
+    """USER.md without an earlier draft section that still has its marker (the part a new draft keeps)."""
+    found = re.search(r'^' + re.escape(PROFILE_HEADING) + r'\n(.*?)(?=^## |\Z)', text or '', re.M | re.S)
+    return text[:found.start()] + text[found.end():] if found and PROFILE_MARK in found[1] else text or ''
+
+
+def profile_room(text, limit=USER_MD_BUDGET):
+    """Characters a draft section can use before USER.md passes what OpenClaw loads."""
+    return limit - len(re.sub(r'\n{3,}', '\n\n', without_profile(text)).rstrip()) - 2
+
+
+def fit_profile(text, profile, day, limit=USER_MD_BUDGET):
+    """(merged USER.md, what was left out) with the draft trimmed to fit within limit, least useful
+    lines first. Keeps at least one line; (None, []) when the owner made the section their own."""
+    profile, left_out = {k: (list(v) if isinstance(v, list) else v) for k, v in profile.items()}, []
+    merged = merge_profile(text, profile, day)
+    lines = lambda: sum(len(v) if isinstance(v, list) else 1 for k, v in profile.items() if k in PROFILE_DROP and v)
+    for key in PROFILE_DROP:
+        while merged and len(merged) > limit and profile.get(key) and lines() > 1:
+            if isinstance(profile[key], list):
+                left_out.append(f'{key.replace("_", " ")}: {profile[key].pop()}')
+                if not profile[key]:
+                    profile.pop(key)
+            else:
+                left_out.append(f'{key.replace("_", " ")}: {profile.pop(key)}')
+            merged = merge_profile(text, profile, day)
+    return merged, left_out
 
 
 def says_how_you_write(path):

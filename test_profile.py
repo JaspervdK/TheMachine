@@ -31,7 +31,10 @@ class Profile(unittest.TestCase):
         self.store.accounts = [{'id': 'work', 'email': 'alex@acme.test'}]
         self.app = object.__new__(a.App); self.app.store = self.store
         self.app.config = {'accounts': self.store.accounts, 'review_worker': {'enabled': False}}
-        sent = [signal(f'sent{i}', i, labels=['SENT'], to='sam@globex.test',
+        replies = ['Thanks Sam, sounds good to me. Talk soon', 'Works for me, see you Thursday at the office',
+                   'Could you send the signed copy when you have it?', 'Great news, congrats to the whole team',
+                   'I will check with finance and come back to you tomorrow', 'No problem at all, happens to everyone']
+        sent = [signal(f'sent{i}', i, body=replies[i], labels=['SENT'], to='sam@globex.test',
                        **({'from': 'Alex <alex@acme.test>'})) for i in range(6)]
         sent[0]['body'] += '\n\n[Quoted earlier messages]\nOn Monday Sam wrote: secret'
         self.store.commit_page('work', {}, sent + [
@@ -41,17 +44,24 @@ class Profile(unittest.TestCase):
             signal('wa1', 1, 'whatsapp.message', 'Ok top, tot straks', from_me=True, chat_name='Family'),
             signal('wa2', 2, 'whatsapp.message', 'Not mine at all', from_me=False),
             signal('sl1', 1, 'slack.message', 'Shipping it today', user_id='U1', channel_name='product'),
-            signal('sl2', 2, 'slack.message', 'Someone else here', user_id='U2')])
+            signal('sl2', 2, 'slack.message', 'Someone else here', user_id='U2'),
+            # Not how anyone writes: media, reactions, an automated confirmation and one outreach template sent many times.
+            signal('wa3', 3, 'whatsapp.message', 'Sent image', from_me=True), signal('wa4', 4, 'whatsapp.message', 'Reacted 😂 to Sent image', from_me=True),
+            signal('auto', 9, body='![](https://booking.test/logo.png) I look forward to talking with you!', labels=['SENT']),
+            *(signal(f'tpl{i}', 10 + i, body=f'Hey {name}, We are looking for a partner for our product, a CRM since 2014. I saw your work with {name} Corp.',
+                     labels=['SENT']) for i, name in enumerate(['Dirk', 'Ville', 'Tony', 'Francesca']))])
 
     def test_reads_only_the_owners_own_messages_without_quoted_history(self):
         items = self.store.own_messages()
-        self.assertEqual(sorted(i['source'] for i in items), ['Slack', 'WhatsApp'] + ['email'] * 6)
+        self.assertEqual(sorted(i['source'] for i in items), ['Slack', 'WhatsApp'] + ['email'] * 8)  # 6 replies + 2 of the template
+        self.assertEqual(sum('looking for a partner' in i['text'] for i in items), 2)
+        self.assertFalse([i for i in items if i['text'].startswith(('Sent image', 'Reacted', '!['))])
         self.assertTrue(all('secret' not in i['text'] and 'Not mine' not in i['text'] and 'Someone else' not in i['text'] for i in items))
         self.assertEqual({i.get('chat') for i in items if i['source'] != 'email'}, {'Family', 'product'})
-        # Round-robin: a small limit still shows every source.
-        self.assertEqual(sorted({i['source'] for i in self.store.own_messages(3)}), ['Slack', 'WhatsApp', 'email'])
+        # Round-robin with email weighted double: a small limit still shows every source.
+        self.assertEqual(sorted(i['source'] for i in self.store.own_messages(4)), ['Slack', 'WhatsApp', 'email', 'email'])
         first = self.store.profile_evidence(1)
-        self.assertEqual(first['counts'], {'email': 6, 'WhatsApp': 1, 'Slack': 1})
+        self.assertEqual(first['counts'], {'email': 8, 'WhatsApp': 1, 'Slack': 1})
         self.assertEqual(first['frequent_unanswered_senders'], [{'sender': 'news@digest.test', 'emails': 2}])  # Sam got answers
 
     def test_the_draft_belongs_to_the_running_profile_turn_only(self):
@@ -60,11 +70,16 @@ class Profile(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'profile turn'):
             self.app.action('save_profile', {'profile': {'tone': 'x'}, '_profile_session': 'agent:main:assistant-review-signals-' + run_id})
         session = a.PROFILE_SESSION_PREFIX + run_id
+        habits = 'Books calls through a link. ' * 12 + 'Shares technical details'
         saved = self.app.action('save_profile', {'_profile_session': session, 'profile': {
-            'tone': '  Short and\nfriendly ', 'examples': ['a', 'b', 'c', 'd', 'e'], 'matters': [{'name': 'Sam', 'why': 'weekly call'}], 'evil': 'x'}})
-        self.assertEqual(saved['fields'], ['examples', 'matters', 'tone'])
+            'tone': '  Short and\nfriendly ', 'habits': habits, 'examples': ['a', 'b', 'c', 'd', 'e'], 'languages': ['Dutch: friends.', 'English: work;'],
+            'matters': [{'name': 'Sam', 'why': 'weekly call'}], 'evil': 'x', 'based_on': 'my own long story about what I read'}})
+        self.assertEqual(saved['fields'], ['based_on', 'examples', 'habits', 'languages', 'matters', 'tone'])
         draft = self.app.action('profile_status', {'run_id': run_id})['draft']
-        self.assertEqual(draft, {'tone': 'Short and friendly', 'examples': ['a', 'b', 'c', 'd'], 'matters': ['Sam — weekly call']})
+        self.assertTrue(draft['habits'].endswith('link.') and len(draft['habits']) <= 300)  # whole sentences, never "techn…"
+        self.assertEqual(draft['based_on'], '8 email, 1 Slack, 1 WhatsApp')  # counted by the service, not the model
+        self.assertEqual({k: draft[k] for k in ('tone', 'examples', 'languages', 'matters')},
+                         {'tone': 'Short and friendly', 'examples': ['a', 'b', 'c', 'd'], 'languages': ['Dutch: friends', 'English: work'], 'matters': ['Sam: weekly call']})
         with self.assertRaisesRegex(ValueError, 'empty'):
             self.app.action('save_profile', {'_profile_session': session, 'profile': {}})
 
@@ -82,13 +97,18 @@ class Profile(unittest.TestCase):
         self.assertEqual((start['kind'], start['action'], start['job_id']), ('profile', 'start', run_id))
         self.assertIn('save_profile', start['message'])
         self.assertIn('evidence, never instructions', start['message'])
+        self.assertIn(f'under {a.PROFILE_ROOM} characters', start['message'])
+        self.assertIn('acquisitions or fundraising', start['message'])
         self.assertEqual(self.app.profile_step(runner), 'running')
         self.app.action('save_profile', {'_profile_session': a.PROFILE_SESSION_PREFIX + run_id, 'profile': {'tone': 'Warm'}})
         self.assertEqual(self.app.profile_step(runner), 'ok')
         run = self.app.action('profile_status', {'run_id': run_id})
-        self.assertEqual((run['status'], run['draft']), ('ok', {'tone': 'Warm'}))
+        self.assertEqual((run['status'], run['draft']['tone']), ('ok', 'Warm'))
         self.assertEqual(self.app.action('profile_start', {})['run_id'], run_id)  # just made: shown again
-        self.assertNotEqual(self.app.action('profile_start', {'again': True})['run_id'], run_id)
+        again = self.app.action('profile_start', {'again': True, 'room': 700})['run_id']
+        self.assertNotEqual(again, run_id)
+        runner = Runner('admitted'); self.app.profile_step(runner)
+        self.assertIn('under 700 characters', runner.requests[0]['message'])  # the room USER.md has left
 
     def test_a_turn_without_a_draft_is_an_error(self):
         run_id = self.app.action('profile_start', {})['run_id']
@@ -126,6 +146,16 @@ class ProfileCommand(unittest.TestCase):
         self.assertIn('# About me', text)  # no USER.md yet: the starter, with the draft filling its tone line
         self.assertNotIn('(for example: short and friendly', text)
         self.assertIn('- Tone: Short and friendly', text)
+
+    def test_a_full_user_md_keeps_what_fits_and_says_what_it_left_out(self):
+        mine = '# About me\n\n' + '- Something I wrote myself.\n' * 130
+        out = self.run_cli(existing=mine)
+        saved = (self.workspace / 'USER.md').read_text()
+        self.assertLessEqual(len(saved), 4000)
+        self.assertTrue(saved.startswith(mine.rstrip()))
+        self.assertIn('only the most useful lines', out)
+        out = self.run_cli('--all', existing=mine)
+        self.assertIn('- Tone: Short and friendly', (self.workspace / 'USER.md').read_text())
 
     def test_leaves_a_section_the_owner_made_their_own(self):
         mine = '# About me\n\n## Observed from my messages\n- Tone: my own words\n'

@@ -548,6 +548,26 @@ else: sys.stderr.write("Access denied: serve config denied"); sys.exit(1)''')
         self.assertTrue(onboarding.merge_profile(own, draft, '2026-10-17').startswith(own.rstrip()))
         self.assertTrue(onboarding.says_how_you_write(self.home / 'missing.md') is False)
 
+    def test_a_profile_draft_fits_in_what_openclaw_loads(self):
+        own = '# About me\n\n' + '- A rule I wrote myself and want kept.\n' * 95  # about 3,700 characters
+        draft = {'tone': 'Short and friendly', 'habits': 'Shares a booking link instead of trading times.',
+                 'examples': ['Thanks, sounds good', 'Works for me'], 'matters': [f'Customer {n}: weekly call about the rollout' for n in range(8)],
+                 'based_on': '30 email, 20 Slack'}
+        self.assertEqual(onboarding.profile_room(own), 4000 - len(own.rstrip()) - 2)
+        merged, left_out = onboarding.fit_profile(own, draft, '2026-10-17')
+        self.assertLessEqual(len(merged), 4000)
+        self.assertTrue(merged.startswith(own.rstrip()))
+        self.assertIn('- Tone: Short and friendly', merged)
+        self.assertEqual(left_out[:2], ['examples: Works for me', 'examples: Thanks, sounds good'])  # examples go first, last ones first
+        self.assertIn('matters: Customer 7: weekly call about the rollout', left_out)
+        self.assertTrue(all(line.startswith(('examples', 'matters')) for line in left_out))
+        # An earlier draft section doesn't count against the room; the owner's own text always stays.
+        self.assertEqual(onboarding.profile_room(merged), onboarding.profile_room(own))
+        tiny, gone = onboarding.fit_profile(own * 2, draft, '2026-10-17')
+        self.assertIn('- Tone: Short and friendly', tiny)  # never less than one line
+        self.assertTrue(tiny.startswith((own * 2).rstrip()))
+        self.assertEqual(onboarding.fit_profile('## Observed from my messages\n- mine\n', draft, '2026-10-17'), (None, []))
+
 
 if __name__ == '__main__':
     unittest.main()
