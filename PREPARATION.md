@@ -109,11 +109,11 @@ A card about The Machine's own error (a machine.fault signal) or another bug in 
 1. `git clone <metadata.app_dir> <metadata.fix_dir>/<job id>`, then work only in that clone.
 2. Find the cause from the code locations in the signal (type and file:line, no values), and the journal (`journalctl --user -u personal-assistant.service`) when it helps. Fix the cause, not the symptom; keep the change small.
 3. Add a test that fails without the fix, run the whole suite (`python3 scripts/test.py`, or the repo's tests), and commit with a plain message.
-4. Save `{kind:merge,label:Merge fix,clone:<the clone path>,summary:<what the fix changes, in plain words>}`. The owner sees the diff; Merge now runs the tests again, fast-forwards the running code to exactly your commit, pushes it and restarts The Machine. There is no send_now for a merge.
+4. Save `{kind:merge,label:Merge fix,clone:<the clone path>,summary:<what the fix changes, in plain words>}`. The owner sees the diff (Download complete diff retrieves the exact full proposal, even when the preview is shortened); Merge now runs the tests again, fast-forwards the running code to exactly your commit, pushes it and restarts The Machine. There is no send_now for a merge.
 
 If the running code moves on before the owner merges, the merge refuses; a Change then redoes the fix on the current code.
 
-A small fix to one of The Machine's recorded errors merges by itself, without the owner's tap: at most 3 changed Python files of the service and 50 lines besides the tests, a new test_*.py test that fails without the fix (the service checks this), and nothing in the plugin, these instructions, the database layout or the config. At most one a day. The owner can undo it for 24 hours, and it undoes itself when its code version records the same error again or a new one in the first hour. So keep fixes that small when you can, and always add the test. The prepare result says whether it was queued (`auto_merge`). A fix that merges by itself stays on this machine and is not pushed upstream; never push it, or open a pull request for it, yourself unless the owner asks.
+A small fix to one of The Machine's recorded errors merges by itself, without the owner's tap: at most 3 changed Python files of the service and 50 lines besides the tests, a new test_*.py test that exercises the recorded fault and fails without the fix (the service checks the real failure and application frames, not just an import or collection error), and nothing in the plugin, these instructions, the database layout or the config. At most one a day. The owner can undo it for 24 hours, and it undoes itself when its code version records the same error again or a new one in the first hour. So keep fixes that small when you can, and always add the test. The prepare result says whether it was queued (`auto_merge`). A fix that merges by itself stays on this machine and is not pushed upstream; never push it, or open a pull request for it, yourself unless the owner asks.
 
 ### The last step: Submit, Pay, Book…
 
@@ -125,6 +125,8 @@ When a prepared-ahead task ends in a click that commits something (submitting a 
 - `url`: the page where it happens, when there is one.
 
 The owner reviews the preview and taps Confirm; that runs a Do it turn for only this step, which stops with a blocker if anything differs from the preview. Messages keep their own send actions (email, LinkedIn, Slack, X) and fixes to The Machine `kind:merge`.
+
+Retries keep this exact confirmed step and preview. Read preparation_history and check earlier results before repeating any write. Save `finish_state:completed` only with a verified receipt or changed state; `finish_state:not_performed` only after positively confirming nothing was submitted; otherwise `finish_state:uncertain`. An uncertain attempt resumes with source reconciliation first, never a blind new submission. If sign-in is needed, retain the same finish action: after sign-in Confirm resumes it, without creating another action.
 
 ### Other buttons
 

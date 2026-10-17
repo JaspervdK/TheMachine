@@ -102,6 +102,11 @@ await handler(ctx('back'));assert.equal(edits.pop().buttons.flat()[0].text,'Subm
  assert.deepEqual(r.buttons.flat().map(b=>b.text),['Confirm','Open page','Cancel']);assert.equal(choices.length,before);
  await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');
  assert.ok(!edits.pop().buttons.flat().some(b=>b.text==='Submit claim'));}
+item.next_action.state={status:'done'};
+{const before=choices.length;await handler(ctx('back'));assert.ok(!edits.pop().buttons.flat().some(b=>b.text==='Submit claim'));
+ await handler(ctx('confirm_abcdef123456'));assert.equal(choices.length,before);edits.pop();}
+item.next_action.state={status:'needs_input'};
+await handler(ctx('back'));assert.ok(edits.pop().buttons.flat().some(b=>b.text==='Submit claim'));
 item.status='pending';await handler(ctx('back'));assert.deepEqual(edits.pop().buttons.map(row=>row.map(b=>b.text)),[['Do it','Mark done','Snooze'],['Change','Not needed']]);
 delete item.next_action;
 item.status='pending';await handler(ctx('reject'));assert.equal(choices.length,0);assert.deepEqual(edits.pop().buttons.flat().map(b=>b.text),['Not relevant','Wrong facts','Other reason…','No reason','Cancel']);

@@ -1,6 +1,8 @@
 """Explicit, revision-bound next actions. No model or arbitrary command execution."""
 import base64
+from contextlib import contextmanager
 import email.policy
+import fcntl
 import datetime
 from email.message import EmailMessage
 from email.utils import format_datetime
@@ -954,7 +956,8 @@ def merge_action(value, config):
         raise ValueError('Commit the fix in the clone: there is nothing to merge yet')
     result = {'kind': 'merge', 'label': value.get('label') or 'Merge fix', 'clone': str(clone), 'summary': ' '.join(summary.split()),
               'base': base, 'head': head, 'commits': commits, 'files': files[:200], 'stat': stat[-4000:],
-              'diff': diff if len(diff) <= MAX_DIFF else diff[:MAX_DIFF] + '\n… diff shortened; the full change is in the clone.',
+              'diff': diff if len(diff) <= MAX_DIFF else diff[:MAX_DIFF] + '\n… preview shortened; download the complete diff.',
+              'diff_clipped':len(diff)>MAX_DIFF,'diff_sha256':hashlib.sha256(diff.encode()).hexdigest(),
               'plugin': any(f.startswith('openclaw-plugin/') for f in files),
               # Lines changed outside the tests, for the safe-merge limits ('-' is a binary file).
               'lines': sum(int(a) + int(d) if a.isdigit() and d.isdigit() else 10**6
@@ -984,7 +987,7 @@ def unsafe_merge(action, config):
         return 'it adds no test'
     if not code or len(code) > 3 or not isinstance(action.get('lines'), int) or action['lines'] > 50 or action.get('commits', 99) > 5:
         return 'it is bigger than a small fix (at most 3 files and 50 lines)'
-    if SCHEMA_CHANGE.search(action.get('diff') or '') or action['diff'].endswith('the full change is in the clone.'):
+    if SCHEMA_CHANGE.search(action.get('diff') or '') or action.get('diff_clipped') or action['diff'].endswith('the full change is in the clone.'):
         return 'it may change the database'
     return None
 
@@ -993,6 +996,15 @@ def merge_preview(action):
     return ('Merge into The Machine: ' + action['summary'] + '\n\n' + action['stat']
             + ('\n\nThe OpenClaw plugin changes too: it takes effect after openclaw plugins reload personal-assistant-bridge.' if action.get('plugin') else '')
             + '\n\nMerge now runs the tests again, then updates the running code and restarts The Machine.')
+
+
+def full_merge_diff(action):
+    """Read the immutable proposal, independent of the clone's current branch/worktree."""
+    if action.get('kind')!='merge':raise ValueError('This is not a merge proposal')
+    diff=git(Path(action['clone']),'diff',action['base'],action['head'])
+    checksum=action.get('diff_sha256')
+    if checksum and hashlib.sha256(diff.encode()).hexdigest()!=checksum:raise ValueError('The saved diff is no longer available')
+    return diff
 
 
 def test_command(config, clone):
@@ -1012,6 +1024,21 @@ class MergeTransport:
         self.config, self.restart = config, restart
 
     def preflight(self, action):
+        self.check(action)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('ASSISTANT_', 'OPENCLAW_', 'GOG_'))}
+        env['PYTHONDONTWRITEBYTECODE']='1'
+        try:
+            tests = subprocess.run(test_command(self.config, Path(action['clone'])), cwd=action['clone'], env=env, capture_output=True, text=True,
+                                   timeout=int(self.config.get('self_test_seconds', 1200)))
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValueError('The tests did not finish on this fix. Nothing was merged.') from None
+        if tests.returncode:
+            raise ValueError('The tests fail on this fix. Nothing was merged; tap Change to have it fixed.')
+        if action.get('auto'):
+            action['proof']=self.proves(action, env)
+        self.check(action)  # tests may take minutes; never activate edits made meanwhile
+
+    def check(self, action):
         if action['kind'] != 'merge':
             raise ValueError('Only an owner-approved fix can use the merge transport')
         app, clone = app_dir(self.config), Path(action['clone'])
@@ -1024,35 +1051,77 @@ class MergeTransport:
                 raise ValueError('The fix changed after you reviewed it. Nothing was merged; tap Change to get it again.')
         except (OSError, subprocess.TimeoutExpired):
             raise ValueError('I could not check the fix. Nothing was merged.') from None
-        env = {k: v for k, v in os.environ.items() if not k.startswith(('ASSISTANT_', 'OPENCLAW_', 'GOG_'))}
-        try:
-            tests = subprocess.run(test_command(self.config, clone), cwd=clone, env=env, capture_output=True, text=True,
-                                   timeout=int(self.config.get('self_test_seconds', 1200)))
-        except (OSError, subprocess.TimeoutExpired):
-            raise ValueError('The tests did not finish on this fix. Nothing was merged.') from None
-        if tests.returncode:
-            raise ValueError('The tests fail on this fix. Nothing was merged; tap Change to have it fixed.')
-        if action.get('auto'):
-            self.proves(action, env)
+
+    @contextmanager
+    def custody(self):
+        app=app_dir(self.config)
+        lock=Path(git(app,'rev-parse','--absolute-git-dir').strip())/'machine-deploy.lock'
+        with lock.open('a') as handle:
+            try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise ValueError('Another merge or undo is running. Try this step again.') from None
+            try:yield
+            finally:fcntl.flock(handle,fcntl.LOCK_UN)
 
     def proves(self, action, env):
         """Merging by itself: the fix's new tests must fail on the code without the fix."""
         tests = [f for f in action['files'] if is_test(f) and f.endswith('.py')]
+        runner=r'''
+import json, pathlib, sys, traceback, unittest
+class Result(unittest.TestResult):
+    def __init__(self):super().__init__();self.failed=[]
+    def record(self,test,error):
+        frames=[]
+        for f in traceback.extract_tb(error[2]):
+            path=pathlib.Path(f.filename).resolve()
+            if path.is_relative_to(pathlib.Path.cwd()):frames.append({'file':str(path.relative_to(pathlib.Path.cwd())),'function':f.name})
+        self.failed.append({'test':test.id(),'kind':error[0].__name__,'frames':frames,'collection':isinstance(test,unittest.loader._FailedTest)})
+    def addError(self,test,error):super().addError(test,error);self.record(test,error)
+    def addFailure(self,test,error):super().addFailure(test,error);self.record(test,error)
+suite=unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:]);result=Result();suite.run(result)
+print('MACHINE_PROOF='+json.dumps({'ran':result.testsRun,'failed':result.failed,'skipped':len(result.skipped)}))
+'''
+        modules=[t[:-3].replace('/', '.') for t in tests]
+        def run_tests(root):
+            run=subprocess.run(['python3','-c',runner,*modules],cwd=root,env=env,capture_output=True,text=True,timeout=int(self.config.get('self_test_seconds',1200)))
+            if run.returncode:raise ValueError('The regression test runner did not finish')
+            return json.loads(run.stdout.rsplit('MACHINE_PROOF=',1)[1].splitlines()[0])
         with tempfile.TemporaryDirectory(prefix='machine-proof-') as tmp:
             try:
                 subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', action['clone'], tmp], check=True, capture_output=True, timeout=120)
                 git(Path(tmp), 'checkout', '--quiet', action['base'])
                 git(Path(tmp), 'checkout', action['head'], '--', *tests)
-                run = subprocess.run(['python3', '-m', 'unittest', *[t[:-3].replace('/', '.') for t in tests]], cwd=tmp, env=env,
-                                     capture_output=True, text=True, timeout=int(self.config.get('self_test_seconds', 1200)))
-            except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                before=run_tests(tmp)
+                after=run_tests(action['clone'])
+            except (ValueError, IndexError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 raise ValueError('I could not check that the new test catches the bug. Not merged by itself.') from None
-        if not run.returncode:
+        if not before['failed']:
             raise ValueError('The new test also passes without the fix, so it doesn’t prove the fix. Not merged by itself.')
+        expected={(f['file'],f['function']) for f in action.get('fault_frames',[]) if f.get('file') and f.get('function')}
+        def exercises_fault(failure):
+            frames=[f for f in failure['frames'] if not is_test(f['file'])]
+            return not failure['collection'] and bool(frames) and (not action.get('fault_kind') or failure['kind']==action['fault_kind']) and (
+                not expected or bool(expected & {(f['file'],f['function']) for f in frames}))
+        if after['failed'] or not after['ran'] or any(f['collection'] for f in before['failed']) or not any(exercises_fault(f) for f in before['failed']):
+            raise ValueError('The test did not exercise the recorded bug on the old code and pass on the fix. Not merged by itself.')
+        return {'base':action['base'],'head':action['head'],'ran':after['ran'],'failures':before['failed']}
 
     def revert(self, action):
-        """Undo a merged fix: revert its commits on top of the running code, push and restart."""
+        with self.custody():return self._revert(action)
+
+    def undo_receipt(self,action):
+        marker='Machine-Undo: '+action['head']
+        app=app_dir(self.config)
+        found=git(app,'log','--fixed-strings','--grep='+marker,'--format=%H','HEAD').splitlines()
+        for commit in found:
+            if marker not in git(app,'show','-s','--format=%B',commit).splitlines():continue
+            parent=git(app,'rev-parse',commit+'^').strip()
+            return {'message_id':'undo:'+commit,'commit':commit,'below':parent}
+
+    def _revert(self, action):
+        """Commit an action-bound undo. Push/restart only after SQLite saves this receipt."""
         app = app_dir(self.config)
+        saved=self.undo_receipt(action)
+        if saved:return saved
         name = ['-c', 'user.name=The Machine', '-c', 'user.email=the-machine@localhost']
         try:
             if git(app, 'status', '--porcelain', '--untracked-files=no'):
@@ -1065,34 +1134,41 @@ class MergeTransport:
             except ValueError:
                 subprocess.run(['git', '-C', str(app), 'revert', '--abort'], capture_output=True, timeout=60)
                 raise ValueError('Later changes touch the same lines, so I could not undo it by itself. Nothing was undone.') from None
-            git(app, *name, 'commit', '--quiet', '-m', 'Undo: ' + action['summary'][:200], timeout=60)
+            git(app, *name, 'commit', '--quiet', '-m', 'Undo: ' + action['summary'][:200]+'\n\nMachine-Undo: '+action['head'], timeout=60)
         except (OSError, subprocess.TimeoutExpired):
             raise ValueError('git did not finish undoing it. Check The Machine’s code.') from None
-        try:  # the undo goes out only where the fix went, and alone
-            shared = not subprocess.run(['git', '-C', str(app), 'merge-base', '--is-ancestor', action['head'], '@{u}'], capture_output=True, timeout=30).returncode
-        except (OSError, subprocess.TimeoutExpired):
-            shared = False
-        pushed, held = self.push(before, shared)
-        return {'pushed': pushed, 'held': held, 'restarted': bool(self.restart and self.restart())}
+        return self.undo_receipt(action)
 
     def send(self, action, job):
+        with self.custody():return self._send(action,job)
+
+    def _send(self, action, job):
         app = app_dir(self.config)
         try:
+            self.check(action)
             git(app, 'fetch', '--quiet', '--no-tags', action['clone'], 'HEAD', timeout=120)
             if git(app, 'rev-parse', 'FETCH_HEAD').strip() != action['head']:
                 return {'rejected': 'changed'}
+            self.check(action)
             git(app, 'merge', '--ff-only', '--quiet', action['head'], timeout=120)
         except (ValueError, OSError, subprocess.TimeoutExpired):
             return {'rejected': 'merge'} if self.merged(action) is False else {}
         if not self.merged(action):
             return {}
-        # A fix that merged by itself stays on this machine unless self_fix_auto_push: sharing it
-        # upstream (often the public project) is the owner's call.
-        pushed, held = self.push(action['base'], not action.get('auto') or self.config.get('self_fix_auto_push', False) is True)
-        restarted = bool(self.restart and self.restart())
-        return {'message_id': 'merge:' + action['head'][:12], 'pushed': pushed, 'held': held, 'restarted': restarted}
+        return {'message_id':'merge:'+action['head'][:12],'commit':action['head'],'below':action['base']}
 
-    def push(self, below, allowed):
+    def complete(self,action,receipt,operation='merge'):
+        """Optional effects after a durable receipt. Exact commit push, never later commits."""
+        app=app_dir(self.config);commit=receipt['commit']
+        if operation=='undo':
+            try:allowed=not subprocess.run(['git','-C',str(app),'merge-base','--is-ancestor',action['head'],'@{u}'],capture_output=True,timeout=30).returncode
+            except (OSError,subprocess.TimeoutExpired):allowed=False
+        else:allowed=not action.get('auto') or self.config.get('self_fix_auto_push',False) is True
+        pushed,held=self.push(receipt['below'],allowed,commit)
+        current=git(app,'rev-parse','HEAD').strip()==commit and not git(app,'status','--porcelain','--untracked-files=no')
+        return {'pushed':pushed,'held':held,'activation_ready':bool(current)}
+
+    def push(self, below, allowed, commit=None):
         """Push the running code to its upstream when allowed and when everything below the new
         commits is upstream already, so nothing else goes out with them. Returns (pushed, held):
         pushed is True/False after a push, None without one; held says why one was skipped."""
@@ -1108,7 +1184,8 @@ class MergeTransport:
         try:
             if subprocess.run(['git', '-C', str(app), 'merge-base', '--is-ancestor', below, '@{u}'], capture_output=True, timeout=30).returncode:
                 return None, 'unshared'
-            git(app, 'push', '--quiet', timeout=120)
+            remote,branch=git(app,'rev-parse','--symbolic-full-name','@{u}').strip().removeprefix('refs/remotes/').split('/',1)
+            git(app, 'push', '--quiet',remote,(commit or 'HEAD')+':refs/heads/'+branch, timeout=120)
             return True, None
         except (ValueError, OSError, subprocess.TimeoutExpired):
             return False, None
@@ -1124,7 +1201,7 @@ class MergeTransport:
             return None
 
     def reconcile(self, action, job):
-        return {'message_id': 'merge:' + action['head'][:12]} if self.merged(action) else {}
+        return {'message_id':'merge:'+action['head'][:12],'commit':action['head'],'below':action['base']} if self.merged(action) else {}
 
 
 class ActionTransport:

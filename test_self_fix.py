@@ -146,11 +146,14 @@ class Merge(unittest.TestCase):
         transport = self.transport()
         transport.preflight(action)
         result = transport.send(action, {'id': 'job'})
-        self.assertEqual(result, {'message_id': 'merge:' + action['head'][:12], 'pushed': True, 'held': None, 'restarted': True})
+        self.assertEqual(result['message_id'], 'merge:' + action['head'][:12])
+        self.assertEqual(self.restarts, [])  # restart waits until the receipt is committed
+        effects=transport.complete(action,result)
+        self.assertEqual(effects, {'pushed':True,'held':None,'activation_ready':True})
         self.assertEqual(git(self.app_dir, 'rev-parse', 'HEAD'), action['head'])
         self.assertEqual(git(self.upstream, 'rev-parse', 'main'), action['head'])
         self.assertIn('rows.get', (self.app_dir / 'graph.py').read_text())
-        self.assertEqual(transport.reconcile(action, {}), {'message_id': 'merge:' + action['head'][:12]})
+        self.assertEqual(transport.reconcile(action, {})['message_id'], 'merge:' + action['head'][:12])
 
     def test_nothing_is_merged_when_tests_fail_or_anything_moved(self):
         action = self.action(self.fix())
@@ -269,7 +272,8 @@ class AutoMerge(unittest.TestCase):
         git(clone, 'commit', '-qm', 'Another fix')
         action = n.validate({'kind': 'merge', 'clone': str(clone), 'summary': 'Another small fix to the service.'}, self.config, [])
         transport = self.transport()
-        result = transport.send(action, {'id': 'job'})
+        receipt = transport.send(action, {'id': 'job'})
+        result = transport.complete(action, receipt)
         self.assertEqual((result['pushed'], result['held']), (None, 'unshared'))
         self.assertEqual(git(self.upstream, 'rev-parse', 'main'), start)
         # Allowed explicitly: a fix that merges by itself is pushed like any other.
@@ -280,9 +284,10 @@ class AutoMerge(unittest.TestCase):
         (clone / 'other.py').write_text('x = 3\n')
         git(clone, 'commit', '-qam', 'Third fix')
         third = n.validate({'kind': 'merge', 'clone': str(clone), 'summary': 'A third small fix to the service.'}, self.config, [])
-        self.assertEqual(transport.send({**third, 'auto': True}, {'id': 'job'})['pushed'], True)
+        approved={**third,'auto':True}
+        self.assertEqual(transport.complete(approved,transport.send(approved,{'id':'job'}))['pushed'],True)
         self.assertEqual(git(self.upstream, 'rev-parse', 'main'), third['head'])
-        self.assertEqual(transport.revert(third)['pushed'], True)  # a shared fix shares its undo
+        self.assertEqual(transport.complete(third,transport.revert(third),'undo')['pushed'], True)  # a shared fix shares its undo
         self.assertEqual(git(self.upstream, 'rev-parse', 'main'), git(self.app_dir, 'rev-parse', 'HEAD'))
 
     def test_it_undoes_itself_when_the_fixed_error_comes_back(self):

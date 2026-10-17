@@ -59,6 +59,27 @@ class OwnerBoundary(unittest.TestCase):
 
     # HTTP layer
 
+    def test_complete_merge_diff_is_owner_only_and_bound_to_saved_revision(self):
+        import test_self_fix as sf
+        fixture=sf.Merge();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        clone=fixture.fix()
+        (clone/'large.py').write_text('long_text='+repr('x'*70000)+'\n')
+        sf.git(clone,'add','.');sf.git(clone,'commit','-qm','Large reviewed diff')
+        action=fixture.action(clone)
+        expected=sf.n.full_merge_diff(action).encode()
+        self.store.decide(self.sid,'accept','','owner','dashboard');self.store.prepare(self.sid,'Fix ready.',next_action=action)
+        port=self.serve();url='/api/merge-diff?id='+self.sid+'&revision='+action['revision']
+        def get(path,headers):
+            conn=http.client.HTTPConnection('127.0.0.1',port);conn.request('GET',path,headers=headers)
+            response=conn.getresponse();data=response.read();conn.close();return response.status,data
+        owner={'Host':'machine.example:8443','Tailscale-User-Login':'owner@example.com'}
+        self.assertEqual(get(url,{'Authorization':'Bearer '+TOKEN})[0],403)
+        self.assertEqual(get(url,owner),(200,expected))
+        self.assertEqual(get(url.replace(action['revision'],'000000000000'),owner)[0],404)
+        (clone/'large.py').write_text('newer=1\n');sf.git(clone,'commit','-qam','Clone branch moved')
+        self.assertEqual(get(url,owner),(200,expected))
+
+
     def serve(self):
         servers = []
         real = a.http.server.ThreadingHTTPServer
