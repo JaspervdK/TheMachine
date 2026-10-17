@@ -5650,7 +5650,9 @@ class App:
             error={'sent':None,'failed':f"{where} refused {what} (error {result.get('rejected')}). Nothing was sent; you can change it or tap Send again.",
                    'uncertain':f'I couldn’t confirm whether {what} was sent. I won’t resend it.'}[status]
             if action['kind']=='merge':
-                error={'sent':' '.join(note for note in ('Pushing it failed; push it yourself.' if result.get('pushed') is False else '',
+                error={'sent':' '.join(note for note in ('Pushing it failed; push it yourself.' if result.get('pushed') is False else
+                                                           'Kept on this machine, not pushed upstream: push it or open a pull request if you want to share it.' if result.get('held')=='auto' else
+                                                           'Not pushed: earlier changes here aren’t upstream yet, so push them together when you’re ready.' if result.get('held')=='unshared' else '',
                                                            '' if result.get('restarted') else 'Restart The Machine to use it.') if note) or None,
                        'failed':'The fix no longer applies to the running code. Nothing was merged; tap Change to redo it.',
                        'uncertain':'I couldn’t confirm whether the fix was merged. I won’t merge it again.'}[status]
@@ -5679,7 +5681,8 @@ class App:
         merge=merge or next_actions.MergeTransport(self.config,restart_self)
         try:
             result=merge.revert(json.loads(job['payload']))
-            note=' '.join(n for n in (job['error'] or 'Merge undone.','Pushing the undo failed; push it yourself.' if result.get('pushed') is False else '',
+            note=' '.join(n for n in (job['error'] or 'Merge undone.','Pushing the undo failed; push it yourself.' if result.get('pushed') is False else
+                                      'Not pushed: earlier changes here aren’t upstream yet.' if result.get('held')=='unshared' else '',
                                       'The Machine restarts on the previous code.' if result.get('restarted') else 'Restart The Machine to use the previous code.') if n)
             status='undone'
         except ValueError as error:

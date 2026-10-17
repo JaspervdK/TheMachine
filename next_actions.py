@@ -1059,6 +1059,7 @@ class MergeTransport:
                 raise ValueError('The Machine’s code has uncommitted changes here. Nothing was undone.')
             if self.merged(action) is not True:
                 raise ValueError('The fix is no longer in the running code. Nothing to undo.')
+            before = git(app, 'rev-parse', 'HEAD').strip()
             try:
                 git(app, *name, 'revert', '--no-edit', '--no-commit', f"{action['base']}..{action['head']}", timeout=120)
             except ValueError:
@@ -1067,19 +1068,12 @@ class MergeTransport:
             git(app, *name, 'commit', '--quiet', '-m', 'Undo: ' + action['summary'][:200], timeout=60)
         except (OSError, subprocess.TimeoutExpired):
             raise ValueError('git did not finish undoing it. Check The Machine’s code.') from None
-        pushed = None
-        try:
-            git(app, 'rev-parse', '--abbrev-ref', '@{u}')
-        except (ValueError, OSError, subprocess.TimeoutExpired):
-            pass
-        else:
-            if self.config.get('self_fix_push', True):
-                try:
-                    git(app, 'push', '--quiet', timeout=120)
-                    pushed = True
-                except (ValueError, OSError, subprocess.TimeoutExpired):
-                    pushed = False
-        return {'pushed': pushed, 'restarted': bool(self.restart and self.restart())}
+        try:  # the undo goes out only where the fix went, and alone
+            shared = not subprocess.run(['git', '-C', str(app), 'merge-base', '--is-ancestor', action['head'], '@{u}'], capture_output=True, timeout=30).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            shared = False
+        pushed, held = self.push(before, shared)
+        return {'pushed': pushed, 'held': held, 'restarted': bool(self.restart and self.restart())}
 
     def send(self, action, job):
         app = app_dir(self.config)
@@ -1092,20 +1086,32 @@ class MergeTransport:
             return {'rejected': 'merge'} if self.merged(action) is False else {}
         if not self.merged(action):
             return {}
-        pushed = None
+        # A fix that merged by itself stays on this machine unless self_fix_auto_push: sharing it
+        # upstream (often the public project) is the owner's call.
+        pushed, held = self.push(action['base'], not action.get('auto') or self.config.get('self_fix_auto_push', False) is True)
+        restarted = bool(self.restart and self.restart())
+        return {'message_id': 'merge:' + action['head'][:12], 'pushed': pushed, 'held': held, 'restarted': restarted}
+
+    def push(self, below, allowed):
+        """Push the running code to its upstream when allowed and when everything below the new
+        commits is upstream already, so nothing else goes out with them. Returns (pushed, held):
+        pushed is True/False after a push, None without one; held says why one was skipped."""
+        app = app_dir(self.config)
         try:
             git(app, 'rev-parse', '--abbrev-ref', '@{u}')
         except (ValueError, OSError, subprocess.TimeoutExpired):
-            pass
-        else:
-            if self.config.get('self_fix_push', True):
-                try:
-                    git(app, 'push', '--quiet', timeout=120)
-                    pushed = True
-                except (ValueError, OSError, subprocess.TimeoutExpired):
-                    pushed = False
-        restarted = bool(self.restart and self.restart())
-        return {'message_id': 'merge:' + action['head'][:12], 'pushed': pushed, 'restarted': restarted}
+            return None, None
+        if not self.config.get('self_fix_push', True):
+            return None, None
+        if not allowed:
+            return None, 'auto'
+        try:
+            if subprocess.run(['git', '-C', str(app), 'merge-base', '--is-ancestor', below, '@{u}'], capture_output=True, timeout=30).returncode:
+                return None, 'unshared'
+            git(app, 'push', '--quiet', timeout=120)
+            return True, None
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            return False, None
 
     def merged(self, action):
         """True when the running code contains the fix, False when it is still at the reviewed base, None if unclear."""

@@ -146,7 +146,7 @@ class Merge(unittest.TestCase):
         transport = self.transport()
         transport.preflight(action)
         result = transport.send(action, {'id': 'job'})
-        self.assertEqual(result, {'message_id': 'merge:' + action['head'][:12], 'pushed': True, 'restarted': True})
+        self.assertEqual(result, {'message_id': 'merge:' + action['head'][:12], 'pushed': True, 'held': None, 'restarted': True})
         self.assertEqual(git(self.app_dir, 'rev-parse', 'HEAD'), action['head'])
         self.assertEqual(git(self.upstream, 'rev-parse', 'main'), action['head'])
         self.assertIn('rows.get', (self.app_dir / 'graph.py').read_text())
@@ -235,8 +235,11 @@ class AutoMerge(unittest.TestCase):
         return git(self.app_dir, 'rev-parse', 'HEAD')
 
     def test_a_small_tested_fix_merges_by_itself_and_the_owner_can_undo_it(self):
+        start = git(self.upstream, 'rev-parse', 'main')
         head = self.merged()
         self.assertIn('Merged by itself and restarted. You can undo it for 24 hours', a.card(self.row()))
+        self.assertIn('Kept on this machine, not pushed upstream', a.card(self.row()))
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), start)  # sharing it is the owner's call
         self.assertIn('Undo merge', self.labels())
         with self.assertRaisesRegex(ValueError, 'owner'):  # the agent cannot undo or redo it
             self.app.action('undo_merge', {'suggestion_id': self.sid, 'approval_id': 'agent'})
@@ -245,13 +248,42 @@ class AutoMerge(unittest.TestCase):
         self.assertEqual(self.app.undo_step(self.transport()), 'undone')
         self.assertIn('rows["missing"]', (self.app_dir / 'graph.py').read_text())
         self.assertFalse((self.app_dir / 'test_graph.py').exists())
-        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), git(self.app_dir, 'rev-parse', 'HEAD'))
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), start)  # neither the fix nor its undo went out
         self.assertTrue(git(self.app_dir, 'log', '--format=%s', '-1').startswith('Undo: The graph rebuild'))
         self.assertEqual(self.restarts, [1, 1])
         self.assertIn('Merge undone. The Machine restarts on the previous code.', a.card(self.row()))
         self.assertFalse({'Merge fix', 'Undo merge'} & set(self.labels()))
         self.assertTrue(self.app.action('undo_merge', {'suggestion_id': self.sid, 'approval_id': 'again'}, owner_dashboard=True)['duplicate'])
         self.assertNotEqual(head, git(self.app_dir, 'rev-parse', 'HEAD'))
+
+    def test_a_fix_merged_by_itself_is_never_pushed_along_unless_allowed(self):
+        start = git(self.upstream, 'rev-parse', 'main')
+        self.merged()
+        # The owner's next Merge doesn't carry the unshared fix upstream either.
+        with self.store.connect() as db:
+            db.execute("UPDATE action_jobs SET updated_at='2020-01-01T00:00:00+00:00'")
+        clone = self.fixes / 'job2'
+        subprocess.run(['git', 'clone', '-q', str(self.app_dir), str(clone)], check=True, capture_output=True)
+        (clone / 'other.py').write_text('x = 2\n')
+        git(clone, 'add', '.')
+        git(clone, 'commit', '-qm', 'Another fix')
+        action = n.validate({'kind': 'merge', 'clone': str(clone), 'summary': 'Another small fix to the service.'}, self.config, [])
+        transport = self.transport()
+        result = transport.send(action, {'id': 'job'})
+        self.assertEqual((result['pushed'], result['held']), (None, 'unshared'))
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), start)
+        # Allowed explicitly: a fix that merges by itself is pushed like any other.
+        self.config['self_fix_auto_push'] = True
+        git(self.app_dir, 'push', '-q')
+        clone = self.fixes / 'job3'
+        subprocess.run(['git', 'clone', '-q', str(self.app_dir), str(clone)], check=True, capture_output=True)
+        (clone / 'other.py').write_text('x = 3\n')
+        git(clone, 'commit', '-qam', 'Third fix')
+        third = n.validate({'kind': 'merge', 'clone': str(clone), 'summary': 'A third small fix to the service.'}, self.config, [])
+        self.assertEqual(transport.send({**third, 'auto': True}, {'id': 'job'})['pushed'], True)
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), third['head'])
+        self.assertEqual(transport.revert(third)['pushed'], True)  # a shared fix shares its undo
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), git(self.app_dir, 'rev-parse', 'HEAD'))
 
     def test_it_undoes_itself_when_the_fixed_error_comes_back(self):
         head = self.merged()
