@@ -87,6 +87,19 @@ class Finish(unittest.TestCase):
         self.store.decide(self.sid,'other','Draft another claim instead.','change','dashboard')
         message=self.message();self.assertNotIn(STEP['instructions'],message);self.assertIsNone(self.job()['action_id'])
 
+    def test_finish_replaced_by_change_can_be_confirmed_again_after_a_check(self):
+        action=self.start_finish();self.ended()
+        self.store.decide(self.sid,'other','Use the Travel category.','change','dashboard')
+        self.app.preparation_step(lambda r:{'status':'admitted'})
+        self.app.action('prepare',{'suggestion_id':self.sid,'job_id':self.job()['job_id'],'body':'Ready again.',
+                                  'next_actions':[STEP],'outcome':'needs_you','needs':'Confirm','note_kind':'fact'})
+        self.ended()
+        row=self.store.snapshot([])['suggestions'][0]
+        self.assertIn(STEP['label'],[b['label'] for block in p.a.controls(row)['blocks'] for b in block['buttons']])
+        self.assertEqual(self.app.action('confirm_action',{'suggestion_id':self.sid,'revision':action['revision'],'approval_id':'again'},owner_dashboard=True),{'status':'queued'})
+        message=self.message();self.assertIn('UNKNOWN outcome',message);self.assertIn(STEP['instructions'],message)
+        with self.store.connect() as db:self.assertEqual(db.execute('SELECT count(*) FROM action_jobs').fetchone()[0],1)
+
 
 class MergeRecovery(unittest.TestCase):
     setUp=sf.AutoMerge.setUp

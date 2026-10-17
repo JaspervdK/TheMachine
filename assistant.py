@@ -2919,6 +2919,13 @@ class Store:
             return
         session_job_id = old['session_job_id'] if old else None
         if resume_action and old:action_id=old['action_id']
+        # New work replaces a confirmed final step that never saved its result. It may have
+        # gone through already, so a later Confirm checks the source first, never resubmits blindly.
+        for left in db.execute("SELECT id,payload FROM action_jobs WHERE suggestion_id=? AND status='local_preparation' AND id IS NOT ?",(suggestion_id,action_id)).fetchall():
+            payload=json.loads(left['payload'])
+            if payload['kind']!='finish':continue
+            payload['finish_result']={'state':'uncertain','body':'Replaced by new work before its result was saved.','at':now()}
+            db.execute("UPDATE action_jobs SET status='finish_uncertain',payload=?,updated_at=? WHERE id=?",(encoded(payload),now(),left['id']))
         db.execute("INSERT INTO preparations(suggestion_id,decision_id,job_id,status,created_at,updated_at) VALUES(?,?,?,'queued',?,?) ON CONFLICT(suggestion_id) DO UPDATE SET decision_id=excluded.decision_id,job_id=excluded.job_id,status='queued',created_at=excluded.created_at,updated_at=excluded.updated_at,error=NULL,reason=NULL,details=NULL,started_at=NULL,retry_at=NULL,attempts=0,auto_retries=0",
                    (suggestion_id,decision_id,uuid.uuid4().hex,now(),now()))
         db.execute('UPDATE preparations SET session_job_id=coalesce(?,job_id) WHERE suggestion_id=?',(session_job_id,suggestion_id))
