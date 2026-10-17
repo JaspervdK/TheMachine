@@ -357,6 +357,9 @@ class WizardTest(unittest.TestCase):
         self.assertEqual(sync.call_args.args[1], ['work-gmail', 'openclaw-gateway'])
         serve.assert_called_once()
         self.assertTrue((home / 'ws/USER.md').exists())
+        calls = [c.args[0] for c in preview.call_args_list]
+        self.assertEqual([c[4] for c in calls], ['profile', 'preview'])  # profile reads the first sync, before the preview
+        self.assertEqual(calls[0][-2:], ['--workspace', str(home / 'ws')])
         self.assertEqual(preview.call_args.args[0][-1], 'preview')
         self.assertTrue(config['delivery_enabled'] and config['review_worker']['enabled'])
         self.assertTrue(json.loads(paths.config.read_text())['delivery_enabled'])

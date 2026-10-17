@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -514,6 +515,38 @@ else: sys.stderr.write("Access denied: serve config denied"); sys.exit(1)''')
         self.assertTrue(text.startswith('# USER.md - User Model'))
         self.assertIn('Name: Alex Owner', text)
         self.assertFalse(onboarding.offer_user_md({'accounts': []}, FakeUI(), workspace))
+
+    def test_a_profile_draft_fills_the_starter_blanks_and_never_overwrites_the_owner(self):
+        config = {'owner_name': 'Alex Owner', 'accounts': [dict(EXAMPLE['work-gmail'], email='alex@acme.test')]}
+        starter = onboarding.starter_user_md(config)
+        path = self.home / 'profile' / 'USER.md'
+        path.parent.mkdir()
+        path.write_text(starter)
+        self.assertFalse(onboarding.says_how_you_write(path))
+        draft = {'role': 'Founder at Acme', 'tone': 'Short and friendly', 'languages': ['Dutch: team', 'English: customers'],
+                 'examples': ['Thanks, sounds good'], 'matters': ['Sam (Globex): weekly call'], 'based_on': '12 sent emails'}
+        merged = onboarding.merge_profile(starter, draft, '2026-10-17')
+        for gone in ('- Role: \n', '- Languages: \n', '(for example: short and friendly', '(customers, projects, people'):
+            self.assertNotIn(gone, merged)
+        for kept in ('Name: Alex Owner', 'Sign-off: Alex', '## Leave alone', '- Role: Founder at Acme', '- Languages: Dutch: team; English: customers',
+                     '"Thanks, sounds good"', '### What matters\n- Sam (Globex): weekly call', '2026-10-17 · from 12 sent emails'):
+            self.assertIn(kept, merged)
+        path.write_text(merged)
+        self.assertTrue(onboarding.says_how_you_write(path))
+        # A later draft replaces only its own section, while the marker line is still there.
+        mine = merged.replace('## Leave alone', '## Leave alone\n\n- Recruiters')
+        again = onboarding.merge_profile(mine, {'tone': 'Warm'}, '2026-11-01')
+        self.assertEqual(again.count(onboarding.PROFILE_HEADING), 1)
+        self.assertIn('- Recruiters', again)
+        self.assertIn('- Tone: Warm', again)
+        self.assertNotIn('Founder at Acme', again)
+        # Once the owner deletes the marker, the section is theirs.
+        adopted = re.sub(r'^<!-- assistant profile.*\n', '', merged, flags=re.M)
+        self.assertIsNone(onboarding.merge_profile(adopted, {'tone': 'Warm'}, '2026-11-01'))
+        # Text the owner wrote under their own headings stays word for word.
+        own = '# About me\n\n- Tone: blunt, always in English\n\n## Food\n\n- vegetarian\n'
+        self.assertTrue(onboarding.merge_profile(own, draft, '2026-10-17').startswith(own.rstrip()))
+        self.assertTrue(onboarding.says_how_you_write(self.home / 'missing.md') is False)
 
 
 if __name__ == '__main__':

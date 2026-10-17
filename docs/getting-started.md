@@ -50,7 +50,9 @@ The installer offers to publish the dashboard on your tailnet (`tailscale serve`
 
 ## 4. Tell the agent who you are
 
-The installer offers a starter `USER.md` in your OpenClaw workspace with your name, companies and email (added under OpenClaw's template if that is all it has). Fill in the empty lines (tone, languages, who matters, what to leave alone): reviews and drafts read it every time.
+The installer offers a starter `USER.md` in your OpenClaw workspace with your name, companies and email (added under OpenClaw's template if that is all it has). Reviews and drafts read it every time.
+
+Then it offers to fill in the rest from what you actually write: your agent reads your own recent messages once (read-only, nothing is sent) and drafts your role, languages, tone, greeting and sign-off, what matters to you and what to leave alone. You see the draft first; it's saved only if you say yes, and it never overwrites what you wrote. Redo it later with `assistant profile`, or edit `USER.md` yourself. Check: `USER.md` has an "Observed from my messages" section.
 
 ## 5. Preview, then turn it on
 

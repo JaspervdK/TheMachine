@@ -29,6 +29,13 @@ assert.notEqual((await hooks.before_tool_call({toolName:'exec',toolKind:'code_mo
 assert.equal(await hooks.before_tool_call({toolName:'openclawassistant_signals',params:{action:'begin_analysis',args:{}}},ctx),undefined);  // no rewrite under Code Mode names
 assert.notEqual((await hooks.before_tool_call({toolName:'memory_search',params:{}},ctx))?.block,true);
 assert.equal(await hooks.before_tool_call({toolName:'browser',params:{}},main),undefined);  // main session unaffected
+// Profile drafts (assistant profile) read the same way and get only the owner's USER.md, not review instructions.
+const profileCtx={...ctx,sessionKey:'agent:main:assistant-review-profile-'+'b'.repeat(32),runId:'profile-run'};
+const profileContext=(await hooks.before_prompt_build({},profileCtx)).prependContext;
+assert.ok(profileContext.includes('## About the owner (USER.md)'));assert.ok(!profileContext.includes('analysis_page'));
+assert.equal((await hooks.before_tool_call({toolName:'write',params:{}},profileCtx)).block,true);
+assert.equal((await hooks.before_tool_call({toolName:'message',params:{}},profileCtx)).block,true);
+assert.notEqual((await hooks.before_tool_call({toolName:'assistant_signals',params:{action:'profile_evidence',args:{}}},profileCtx))?.block,true);
 assert.ok((await hooks.before_prompt_build({},ctx)).prependContext.includes('exactly NO_REPLY'));
 // Codex refuses a tool call whose parameters a hook rewrote, so the hook never returns params;
 // the tool binds ownership from the run the prompt hook recorded for this session.

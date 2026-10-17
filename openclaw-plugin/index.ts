@@ -16,7 +16,7 @@ const taskActions=(item:any)=>{
  return choices.filter((a:any)=>a.kind!=='prepare'||(!emailReady&&!/^Draft (shorter|longer|another|alternative|follow-up)\b/i.test(a.label||'')));
 };
 const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action']);
-const TOOL_ACTIONS = ['status', 'events', 'begin_analysis', 'analysis_page', 'finish_analysis', 'suggest', 'prepare', 'preparation_blocked', 'preparation_history', 'remember_fact', 'looks_handled', 'related', 'graph'];
+const TOOL_ACTIONS = ['status', 'events', 'begin_analysis', 'analysis_page', 'finish_analysis', 'suggest', 'prepare', 'preparation_blocked', 'preparation_history', 'remember_fact', 'looks_handled', 'related', 'graph', 'profile_evidence', 'save_profile'];
 // dismiss_handled stays for older cards; the service records that reason as done.
 const DISMISS_REASONS: Record<string,string> = {dismiss_irrelevant:'Not relevant', dismiss_handled:'Already handled', dismiss_wrong:'Wrong facts'};
 
@@ -130,13 +130,14 @@ export default definePluginEntry({
         const args = {...(params.args || {})};
         delete args.full;  // whole rows and full status are for the local CLI and dashboard, not size-limited tool results
         // Session and run identity are host-owned; never trust model-supplied labels.
-        delete args._review_session; delete args._review_run;
+        delete args._review_session; delete args._review_run; delete args._profile_session;
         if (params.action==='preparation_history') {
           const run=currentReviewRun(key);
           if (!/^agent:main:assistant-review-preparation-/.test(key) || !run) throw new Error('History belongs to the current preparation');
           // call_ref/offset select earlier details only within this host-bound run's task.
           args.job_id=run;
         }
+        if (params.action === 'save_profile') args._profile_session = key;  // only the profile turn's own draft counts
         if (['begin_analysis', 'finish_analysis'].includes(params.action)) {
           args._review_session = key;
           const run = currentReviewRun(key);

@@ -1192,6 +1192,60 @@ def starter_user_md(config):
         '- (newsletters, tools or people the assistant should ignore)', ''])
 
 
+PROFILE_HEADING = '## Observed from my messages'
+PROFILE_MARK = '<!-- assistant profile '
+# Empty starter lines a profile draft covers; they go when the draft is saved, so nothing says the same twice.
+STARTER_BLANKS = {'role': r'- Role: *', 'languages': r'- Languages: *', 'tone': r'- Tone: *(?:\(for example[^\n]*\))? *'}
+STARTER_SECTIONS = {'matters': '## What matters to me\n\n- (customers, projects, people you never want to keep waiting)\n',
+                    'leave_alone': '## Leave alone\n\n- (newsletters, tools or people the assistant should ignore)\n'}
+
+
+def render_profile(profile, day):
+    """The USER.md section for a profile draft (assistant profile)."""
+    lines = [PROFILE_HEADING, f'{PROFILE_MARK}{day}' + (f' · from {profile["based_on"]}' if profile.get('based_on') else '')
+             + ' · edit freely; delete this line and the next assistant profile leaves this section alone -->', '']
+    for key, title in (('role', 'Role'), ('tone', 'Tone'), ('greeting', 'Greeting'), ('sign_off', 'Sign-off'), ('habits', 'Habits')):
+        if profile.get(key):
+            lines.append(f'- {title}: {profile[key]}')
+    if profile.get('languages'):
+        lines.append('- Languages: ' + '; '.join(profile['languages']))
+    if profile.get('examples'):
+        lines.append('- Sounds like: ' + ' · '.join(f'"{e.strip(chr(34))}"' for e in profile['examples']))
+    for key, title in (('matters', 'What matters'), ('leave_alone', 'Leave alone')):
+        if profile.get(key):
+            lines += ['', f'### {title}', *(f'- {item}' for item in profile[key])]
+    return '\n'.join(lines) + '\n'
+
+
+def merge_profile(text, profile, day):
+    """USER.md with the draft as its own section: replaces an earlier draft section whose marker line is
+    still there, drops the empty starter lines it covers, and never touches anything the owner wrote.
+    None when the owner made an earlier draft section their own (marker deleted)."""
+    text = text or ''
+    found = re.search(r'^' + re.escape(PROFILE_HEADING) + r'\n(.*?)(?=^## |\Z)', text, re.M | re.S)
+    if found:
+        if PROFILE_MARK not in found[1]:
+            return None
+        text = text[:found.start()] + text[found.end():]
+    for key, pattern in STARTER_BLANKS.items():
+        if profile.get(key):
+            text = re.sub(r'^' + pattern + r'\n', '', text, flags=re.M)
+    for key, section in STARTER_SECTIONS.items():
+        if profile.get(key):
+            text = text.replace(section, '')
+    text = re.sub(r'\n{3,}', '\n\n', text).rstrip()
+    return (text + '\n\n' if text else '') + render_profile(profile, day)
+
+
+def says_how_you_write(path):
+    """False for a USER.md that is only the starter: no draft section and the tone still blank."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return False
+    return PROFILE_HEADING in text or not re.search(r'^' + STARTER_BLANKS['tone'] + r'$', text, re.M)
+
+
 def offer_user_md(config, ui, workspace=None):
     path = user_md_path(workspace)
     template = user_md_is_template(path)
@@ -1338,9 +1392,12 @@ def doctor(config_path, workspace=None):
         add('!', f'dashboard not reachable at {config.get("dashboard_host") or "your dashboard_host"} nor in tailscale serve', ' '.join(serve_command(config)) + ' (or a custom domain: deploy/Caddyfile)')
     path = user_md_path(workspace)
     known = path.exists() and not user_md_is_template(path)
-    add('✓' if known else '!', f'{path} ' + ('exists' if known else
-        ('is still the OpenClaw template' if path.exists() else 'missing') + ': the agent does not know who you are'),
-        '' if known else 'rerun ./install.sh for a starter one, or write it yourself')
+    if known and not says_how_you_write(path):
+        add('!', f'{path} does not say how you write yet', 'assistant profile (drafts it from your own messages; you see it first)')
+    else:
+        add('✓' if known else '!', f'{path} ' + ('exists' if known else
+            ('is still the OpenClaw template' if path.exists() else 'missing') + ': the agent does not know who you are'),
+            '' if known else 'rerun ./install.sh for a starter one, or write it yourself')
     return results
 
 

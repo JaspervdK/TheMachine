@@ -612,6 +612,10 @@ def guided(paths, since, ui=None):
             onboarding.first_sync(config, ready, since, ui, wait=45)
     onboarding.serve_dashboard(config, ui)
     onboarding.offer_user_md(config, ui, paths.workspace)
+    if ready and not onboarding.says_how_you_write(onboarding.user_md_path(paths.workspace)) and ui.yes(
+            'Draft how you write and what matters to you from your own recent messages? Your agent reads them once;'
+            ' you see the draft before USER.md changes', True):
+        subprocess.call([sys.executable, str(ROOT / 'cli.py'), '--config', str(paths.config), 'profile', '--workspace', str(paths.workspace)])
     if config.get('delivery_enabled') and config.get('review_worker', {}).get('enabled'):
         return config
     if ready and ui.yes('Run a preview now? Your agent reviews the last 7 days and shows the cards here and on the dashboard;'
@@ -646,6 +650,8 @@ def next_steps(config, healthy, started, paths=None):
     user_md = onboarding.user_md_path(paths.workspace)
     if not user_md.exists() or onboarding.user_md_is_template(user_md):
         lines.append(f'  - Tell the agent about you: create USER.md in {paths.workspace} (name, companies, tone, preferences)')
+    elif not onboarding.says_how_you_write(user_md):
+        lines.append('  - Let your agent draft how you write and what matters to you from your own messages: assistant profile (you see it first)')
     lines += ['  - Keep `Do it` in mind: it lets the agent act with your accounts. Read README "Security model".',
               '  - After editing config.json: systemctl --user restart ' + UNIT_NAME]
     if not config.get('delivery_enabled') or not config.get('review_worker', {}).get('enabled'):

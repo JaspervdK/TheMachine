@@ -2,7 +2,8 @@
 """Command line for The Machine's personal assistant.
 
 Reads tasks, evidence, sources and review history from the running service,
-can save a preparation for an accepted task, and runs a first-run preview review. Sets up
+can save a preparation for an accepted task, runs a first-run preview review and drafts USER.md
+lines from your own messages (profile, shown before saving). Sets up
 sources (connect) and checks the whole setup (doctor). Owner decisions (accept, snooze,
 done, dismiss, feedback) stay with Telegram and the dashboard; the service
 refuses them from here.
@@ -341,6 +342,56 @@ def cmd_preview(config, args):
         raise CliError(f"The preview review didn't finish ({error}). See assistant reviews and openclaw logs, then run assistant preview again.")
 
 
+def cmd_profile(config, args):
+    started = call(config, 'profile_start', {'again': bool(args.again)})
+    if not args.json:
+        counts = started.get('counts') or {}
+        print('Following the profile draft that is already running.' if started.get('attached') else
+              'Your OpenClaw agent reads ' + ', '.join(f'{n} {k}' for k, n in sorted(counts.items(), key=lambda c: -c[1]))
+              + ' of your own recent messages once and drafts how you write and what matters to you.')
+        print('It only reads. Nothing is sent, and USER.md only changes when you say yes. Usually a few minutes.\n')
+    deadline, tty = time.monotonic() + assistant.PROFILE_SECONDS + 1500, sys.stdout.isatty() and not args.json
+    try:
+        while True:
+            run = call(config, 'profile_status', {'run_id': started['run_id']})
+            if run['status'] not in ('starting', 'running'):
+                break
+            if time.monotonic() > deadline:
+                raise CliError('The profile draft is still running. Run assistant profile again to pick it up.')
+            if tty:
+                elapsed = int((dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(run['started_at'])).total_seconds())
+                print(f"\r  {elapsed // 60}m {elapsed % 60:02d}s · " + ('starting in OpenClaw' if run['status'] == 'starting' else 'your agent is reading'),
+                      end='', flush=True)
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print('\nStopped following. The draft keeps going in the service; run assistant profile again to see it.')
+        return
+    finally:
+        if tty:
+            print()
+    if run['status'] != 'ok' or not run.get('draft'):
+        raise CliError(f"The profile draft didn't finish ({run.get('error') or run['status']}). See openclaw logs, then run assistant profile --again.")
+    if args.json:
+        return out_json(run)
+    day = dt.datetime.now(TZ).date().isoformat()
+    path = onboarding.user_md_path(args.workspace)
+    current = path.read_text() if path.exists() else onboarding.starter_user_md(config)
+    if onboarding.user_md_is_template(path):
+        current = current.rstrip() + '\n\n' + onboarding.starter_user_md(config)
+    merged = onboarding.merge_profile(current, run['draft'], day)
+    print(onboarding.render_profile(run['draft'], day))
+    if merged is None:
+        print(f'{path} already has an "{onboarding.PROFILE_HEADING}" section you made your own, so it stays as it is. Copy what you like from above.')
+        return
+    if not (args.yes or (sys.stdin.isatty() and input(f'Add this to {path}? You can edit it afterwards [Y/n]: ').strip().lower() in ('', 'y', 'yes'))):
+        print('Not saved. Run assistant profile again any time.')
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    onboarding.write_private(path, merged)
+    print(f'Saved to {path}. Reviews and drafts read it from the next turn on.'
+          + (f' It is now {len(merged):,} characters; OpenClaw chat sessions load the first 4,000.' if len(merged) > 4000 else ''))
+
+
 def cmd_connect(config, args):
     if not args.source:
         if args.json:
@@ -429,6 +480,10 @@ def parser():
     source.add_argument('--body')
     source.add_argument('--file', help='file with the text, or - for stdin')
     add('preview', f'First run: one review of the last {assistant.PREVIEW_DAYS} days, shown here and on the dashboard; nothing is sent', cmd_preview)
+    c = add('profile', 'Draft how you write and what matters to you from your own messages, for USER.md; you see it first', cmd_profile)
+    c.add_argument('--again', action='store_true', help='make a new draft even if one was just made')
+    c.add_argument('--yes', action='store_true', help='save the draft without asking')
+    c.add_argument('--workspace', help='OpenClaw workspace with USER.md (default: OPENCLAW_WORKSPACE or ~/.openclaw/workspace)')
     c = add('connect', 'Set up a source: sign-in or key, IDs, a test read and the first sync', cmd_connect)
     c.add_argument('source', nargs='?', help='gmail, calendar, slack, crm, whatsapp, android, gateway or a connector plugin')
     c.add_argument('--account', help='account id, to redo one of several or add another')

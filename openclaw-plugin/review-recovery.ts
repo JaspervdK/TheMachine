@@ -47,6 +47,8 @@ const reviewSession = (key: string) => /^agent:main:assistant-review-signals-/.t
 export const plainToolName = (name: string) => String(name || '').replace(/^openclaw_*/, '');
 const codeModeRunner = (event: any, ctx: any) => event.toolKind === 'code_mode_exec' || ctx.toolKind === 'code_mode_exec';
 const preparationSession = (key: string) => /^agent:main:assistant-review-preparation-/.test(key || '');
+// assistant profile: one read-only turn that drafts USER.md lines from the owner's own messages.
+const profileSession = (key: string) => /^agent:main:assistant-review-profile-/.test(key || '');
 
 // Preparations are the main agent working on an accepted task, with as few restrictions as
 // possible: OpenClaw cannot show an approval prompt for these background
@@ -186,11 +188,11 @@ export function registerReviewRecovery(api: any, call: (action: string, args?: a
   const runs = new Map<string, {session: string; started: number; reviewTouched: boolean}>();
   const background = (ctx: any) => privateReviewContext(ctx) && !!ctx.runId &&
     ctx.inputProvenance?.kind !== 'external_user' &&
-    !/^agent:main:assistant-review-preparation-/.test(ctx.sessionKey || '') &&
+    !/^agent:main:assistant-review-(?:preparation|profile)-/.test(ctx.sessionKey || '') &&
     (/^agent:main:assistant-review[-:]/.test(ctx.sessionKey || '') ||
       (ctx.inputProvenance?.kind === 'internal_system' && ctx.inputProvenance?.sourceTool === 'notifications-event'));
   const eligible = (ctx: any) => privateReviewContext(ctx) && !!ctx.runId &&
-    !/^agent:main:assistant-review-preparation-/.test(ctx.sessionKey || '') &&
+    !/^agent:main:assistant-review-(?:preparation|profile)-/.test(ctx.sessionKey || '') &&
     /^agent:main:assistant-review[-:]/.test(ctx.sessionKey || '');
   const quietInstruction = 'Keep background processing silent. Save review counts, recovery, skipped/deferred signals, backlog and completion notes only through finish_analysis for the dashboard. A saved suggestion is delivered by the independent service, not by this reply. When there is no separate genuinely useful alert requiring the owner, end with exactly NO_REPLY, even after saving a new suggestion or completing a review. Do not announce starting, resuming, working, finishing or no new suggestions. Genuine actionable alerts and authorized preparation results/reminders remain enabled.';
   const instruction = 'This turn reviews the personal-assistant signals inbox. Resume an unfinished review through assistant_signals begin_analysis with the same explicit accounts, then finish_analysis after a real conclusion. Do not switch to unrelated old main-chat tasks after a provider retry. Read tools/personal-assistant/AGENTS.md. Claim once with begin_analysis limit 120 and read every page with analysis_page; finish within about fifteen minutes. The service balances accounts, oldest backlog and newer signals. For body_clipped=true read the rest with events, event_ids and body_offset. Defer only what you expect to judge better later; pass the rest as finish_analysis reviewed_ids. Publish only genuinely useful distinct suggestions; no quota or duplicate direct Telegram send. Quiet hours limit delivery, not private review. Do not claim a complete review when only a preview was assessed. ' + quietInstruction;
@@ -198,6 +200,10 @@ export function registerReviewRecovery(api: any, call: (action: string, args?: a
     if (preparationSession(ctx.sessionKey) && privateReviewContext(ctx)) {
       if (ctx.runId) sessionRuns.set(ctx.sessionKey,ctx.runId);
       const context = ((await ownerContext()) + (await preparationRules())).trim();
+      return context ? {prependContext: context} : undefined;
+    }
+    if (profileSession(ctx.sessionKey) && privateReviewContext(ctx)) {
+      const context = (await ownerContext()).trim();
       return context ? {prependContext: context} : undefined;
     }
     if (!background(ctx)) return;
@@ -218,8 +224,9 @@ export function registerReviewRecovery(api: any, call: (action: string, args?: a
   // tool's execute() from host-owned context; this hook only ever blocks, never rewrites.
   api.on('before_tool_call', async (event: any, ctx: any) => {
     // Code Mode's script runner is allowed: every tool the script calls passes this hook on its own.
-    if (reviewSession(ctx.sessionKey) && !codeModeRunner(event, ctx) && (!REVIEW_TOOLS.has(plainToolName(event.toolName)) || readsSecret(event))) {
-      return {block: true, blockReason: 'Signal reviews only read: use assistant_signals, memory lookups or read-only file tools.'};
+    if ((reviewSession(ctx.sessionKey) || profileSession(ctx.sessionKey)) && !codeModeRunner(event, ctx) &&
+        (!REVIEW_TOOLS.has(plainToolName(event.toolName)) || readsSecret(event))) {
+      return {block: true, blockReason: 'Signal reviews and profile drafts only read: use assistant_signals, memory lookups or read-only file tools.'};
     }
     const policy = preparationSession(ctx.sessionKey) ? preparationToolPolicy(event, ctx) : undefined;
     if (policy && 'block' in policy) return {block: true, blockReason: policy.block};
