@@ -209,9 +209,16 @@ def tailscale_identity(binary):
         user = status['User'][str(status['Self']['UserID'])]['LoginName']
         # A tagged machine has no owner login of its own: the dashboard owner is whoever you sign in as on your phone.
         return {'tailscale_owner': '' if user == 'tagged-devices' or '@' not in user else user,
-                'dashboard_host': status['Self']['DNSName'].rstrip('.')}
+                'dashboard_host': dashboard_address(status['Self']['DNSName'].rstrip('.'))}
     except (ValueError, KeyError, TypeError):
         return {}
+
+
+def dashboard_address(host):
+    """A tailnet name gets the dashboard's own port (:8443): its own origin, so the phone app installs
+    cleanly next to OpenClaw's web app on :443. Your own domain is kept as typed."""
+    host = host.strip().removeprefix('https://').rstrip('/')
+    return f'{host}:8443' if host.endswith('.ts.net') and ':' not in host else host
 
 
 def ask(prompt, default=''):
@@ -263,9 +270,9 @@ def answers(interactive, facts):
         values['tailscale_owner'] = ask_until('Your Tailscale login, as on your phone (only it may open the dashboard)'
                                               + ('' if values['tailscale_owner'] else '; this machine is tagged or not logged in, so type it'),
                                               values['tailscale_owner'], lambda a: bool(a.strip()), lambda a: 'needed for the dashboard')
-        values['dashboard_host'] = ask_until('Dashboard host name (your machine on the tailnet, e.g. machine.tailnet.ts.net)', values['dashboard_host'],
-                                             lambda a: bool(re.fullmatch(r'[A-Za-z0-9.-]+\.[A-Za-z]{2,}', a.strip())),
-                                             lambda a: 'a host name, like machine.tailnet.ts.net (no https:// or path)')
+        values['dashboard_host'] = ask_until('Dashboard address (your machine on the tailnet, e.g. machine.tailnet.ts.net:8443)', values['dashboard_host'],
+                                             lambda a: bool(re.fullmatch(r'[A-Za-z0-9.-]+\.[A-Za-z]{2,}(:\d{2,5})?', dashboard_address(a))),
+                                             lambda a: 'a host name, like machine.tailnet.ts.net:8443 (no path)')
         values['timezone'] = ask_until('Time zone', values['timezone'], valid_timezone,
                                        lambda a: f'unknown time zone {a!r}; use a name like Europe/Brussels or America/New_York')
         values['connectors'] = ask_until('Sources to enable (' + ','.join(CONNECTORS) + '; you connect each one next)',
@@ -278,6 +285,7 @@ def answers(interactive, facts):
             guess = values['boundary'] or onboarding.company_of(values['email']) or ('personal' if values['email'] else '')
             values['boundary'] = ask('Company name for these sources, or "personal" (keeps work and private apart)', guess)
     values['boundary'] = onboarding.boundary_label(values['boundary'] or onboarding.company_of(values['email']))
+    values['dashboard_host'] = dashboard_address(values['dashboard_host'])
     values['telegram_owner'] = onboarding.telegram_id(values['telegram_owner']) or values['telegram_owner']
     missing = [key for key in ('telegram_owner', 'tailscale_owner', 'dashboard_host') if not values[key]]
     if missing:

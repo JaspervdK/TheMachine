@@ -1,5 +1,5 @@
 # Example systemd user unit for Caddy in front of the dashboard (optional).
-# Only needed when you serve the dashboard on a custom domain; otherwise `tailscale serve` is enough.
+# Optional: only for the dashboard on your own domain. `tailscale serve` (what the installer sets up) needs no Caddy.
 # The Cloudflare env file holds CF_API_TOKEN for the DNS-01 certificate challenge.
 [Unit]
 Description=Caddy for the assistant dashboard on the tailnet (example)

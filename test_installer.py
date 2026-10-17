@@ -66,7 +66,8 @@ class InstallerTest(unittest.TestCase):
         config = json.loads(self.config.read_text())
         self.assertEqual((config['owner_name'], config['telegram_owner'], config['tailscale_owner']),
                          ('Alex Owner', '1000001', 'alex@example.com'))
-        self.assertEqual(config['dashboard_host'], 'machine.example-tailnet.ts.net')
+        self.assertEqual(config['dashboard_host'], 'machine.example-tailnet.ts.net:8443')  # its own origin
+        self.assertEqual(config['dashboard_path'], '/')
         self.assertEqual([a['id'] for a in config['accounts']], ['work-gmail', 'work-calendar', 'openclaw-gateway'])
         gmail = config['accounts'][0]
         self.assertEqual((gmail['email'], gmail['client'], gmail['boundary']), ('alex@example.com', 'work', 'work:Acme'))
@@ -185,7 +186,9 @@ class InstallerTest(unittest.TestCase):
     def test_tagged_machines_spaces_and_the_cli_path(self):
         status = {'Self': {'UserID': 7, 'DNSName': 'box.example-tailnet.ts.net.'}, 'User': {'7': {'LoginName': 'tagged-devices'}}}
         with mock.patch.object(installer, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(status), '')):
-            self.assertEqual(installer.tailscale_identity('tailscale'), {'tailscale_owner': '', 'dashboard_host': 'box.example-tailnet.ts.net'})
+            self.assertEqual(installer.tailscale_identity('tailscale'), {'tailscale_owner': '', 'dashboard_host': 'box.example-tailnet.ts.net:8443'})
+        self.assertEqual([installer.dashboard_address(h) for h in ('m.tail.ts.net', 'https://m.tail.ts.net/', 'm.tail.ts.net:443', 'my.example.com')],
+                         ['m.tail.ts.net:8443', 'm.tail.ts.net:8443', 'm.tail.ts.net:443', 'my.example.com'])
         unit = installer.unit_text({}, {'python': '/opt/my python/bin/python3'}, '/tmp/c.json')
         self.assertIn('ExecStart="/opt/my python/bin/python3" ', unit)
         self.assertIn('Environment="PATH=', unit)
@@ -303,7 +306,7 @@ class WizardTest(unittest.TestCase):
         self.assertEqual(config['accounts'][1]['boundary'], 'personal:phone')
         self.assertEqual(config['accounts'][2]['store'], str(home / '.local/share/wacli'))
         self.assertEqual(config['credentials']['gog-password'], str(home / '.local/share/personal-assistant/gog-password'))
-        self.assertEqual(config['dashboard_host'], 'box.example-tailnet.ts.net')
+        self.assertEqual(config['dashboard_host'], 'box.example-tailnet.ts.net:8443')
 
     def test_wizard_defaults_come_from_what_openclaw_already_knows(self):
         home = Path(tempfile.mkdtemp(prefix='machine-wizard-'))

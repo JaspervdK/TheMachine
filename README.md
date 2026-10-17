@@ -78,7 +78,7 @@ Python's standard library and SQLite are enough: no database server, queue, web 
 - Optional, per feature:
   - `gog` (Google Workspace CLI) for Gmail and Calendar (OAuth per account, file keyring; `assistant connect gmail` signs you in).
   - **Tailscale** for dashboard access (the dashboard only serves your Tailscale identity).
-  - **Caddy** only to serve the dashboard on a custom domain (`deploy/Caddyfile`).
+  - **Caddy** only if you want the dashboard on your own domain (`deploy/Caddyfile`). Not needed: `tailscale serve` gives it an HTTPS address on your tailnet.
   - `wacli` for WhatsApp; a Maton connection for Slack (allowed to post as you, to send Slack messages); a Salesflare API key.
   - The `gh` CLI logged in as you for GitHub; a restricted read-only key (or a Maton connection) for Stripe.
   - For LinkedIn and X: your accounts signed in to the OpenClaw browser (profile `openclaw`).
@@ -132,7 +132,7 @@ It fits setups that aren't the example:
 - **Android:** picks your paired Android node from `openclaw nodes list`.
 - **Plugins:** each connector declares what it asks in `SETUP` (see [Adding a source](docs/adding-a-source.md)).
 - **Telegram ID by hand:** message your bot; with DM pairing its reply shows your user ID. Approve yourself with `openclaw pairing approve telegram <code>`.
-- **Dashboard by hand:** `tailscale serve --bg --https=443 --set-path /assistant http://127.0.0.1:8787`, then open `https://<dashboard_host>/assistant/`. For a custom domain use `deploy/Caddyfile` and `deploy/caddy-machine.service`.
+- **Dashboard by hand:** `tailscale serve --bg --https=8443 --set-path / http://127.0.0.1:8787`, then open `https://<machine>.<tailnet>.ts.net:8443/`. Its own port makes it its own origin, so the dashboard installs as a phone app next to OpenClaw's web app on :443 (two apps on one origin claim each other's pages). A custom domain is optional: `deploy/Caddyfile` and `deploy/caddy-machine.service`.
 - **Preview and activation:** `./install.sh --preview` (or `assistant preview`) runs one regular review of the last 7 days and prints its cards, with progress while the agent works (usually a few minutes). The cards are real and stay on the dashboard, but they are never sent to Telegram, not even after activation, and nothing is prepared ahead; reviews and delivery stay off. `./install.sh --activate` turns them on. To start with one source, set `ASSISTANT_CONNECTORS=gateway ./install.sh` (Gateway failures only), or choose just `gmail` in the wizard.
 - Restart after config edits: `systemctl --user restart personal-assistant.service`.
 
@@ -151,7 +151,7 @@ It fits setups that aren't the example:
 | `telegram_owner` | — (required) | Your Telegram chat ID; the only chat that gets cards and whose taps count |
 | `telegram_account` | `default` | The OpenClaw Telegram account (bot) that sends cards, when you run several; the installer sets it |
 | `tailscale_owner` | — (required) | The Tailscale login allowed to open the dashboard |
-| `dashboard_host` | — (required) | Host name the dashboard answers on (with `:port` if not 443) |
+| `dashboard_host` | — (required) | Host name the dashboard answers on, with `:port` if not 443 (the installer uses `<machine>.ts.net:8443`) |
 | `dashboard_path` | `/` | Path the dashboard is served under on `dashboard_host` (`/assistant/` with Tailscale Serve `--set-path`) |
 | `dashboard_aliases`, `dashboard_alias_path` | `[]`, `/assistant/` | Extra host names and their path |
 | `port` | `8787` | Local API and dashboard port on 127.0.0.1 |

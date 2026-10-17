@@ -468,6 +468,14 @@ elif "show" in args: print('"ASSISTANT_CONFIG={self.path}" HOME=/elsewhere')''')
         self.assertIsNone(onboarding.dashboard_served({'port': 9999}))
         self.assertEqual(onboarding.serve_command({'dashboard_path': '/assistant/', 'port': 8787})[-3:],
                          ['--set-path', '/assistant', 'http://127.0.0.1:8787'])
+        # New installs: the dashboard on its own port, so its phone app is its own origin.
+        status = {'Web': {'box.example.ts.net:8443': {'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8787'}}}}}
+        self.stub('tailscale', f'print(json.dumps({status!r}))')
+        self.assertEqual(onboarding.dashboard_served({'port': 8787}), 'https://box.example.ts.net:8443/')
+        self.assertEqual(onboarding.dashboard_url({'port': 8787, 'dashboard_host': 'box.example.ts.net:8443', 'dashboard_path': '/'}),
+                         'https://box.example.ts.net:8443/')
+        self.assertEqual(onboarding.serve_command({'dashboard_host': 'box.example.ts.net:8443', 'dashboard_path': '/', 'port': 8787}),
+                         ['tailscale', 'serve', '--bg', '--https=8443', '--set-path', '/', 'http://127.0.0.1:8787'])
 
     def test_tailscale_serve_says_what_is_in_the_way(self):
         self.stub('tailscale', '''

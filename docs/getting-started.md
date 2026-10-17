@@ -46,7 +46,7 @@ Skipped one? `assistant connect gmail` (or `slack`, `crm`, `whatsapp`, `android`
 
 ## 3. Open the dashboard
 
-The installer offers to publish the dashboard on your tailnet (`tailscale serve`). Only your Tailscale login can open it. If Serve is not enabled on your tailnet yet, it prints the link to enable it. On your phone, open the address it prints and add it to your home screen.
+The installer offers to publish the dashboard on your tailnet (`tailscale serve`, at `https://<machine>.<tailnet>.ts.net:8443/`). No domain or certificate to set up, and only your Tailscale login can open it. If Serve is not enabled on your tailnet yet, it prints the link to enable it. On your phone, open the address it prints and add it to your home screen.
 
 ## 4. Tell the agent who you are
 

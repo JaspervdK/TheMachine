@@ -1088,7 +1088,7 @@ def dashboard_served(config):
         for path, handler in ((web or {}).get('Handlers') or {}).items():
             target = str((handler or {}).get('Proxy', '')).rstrip('/')
             if target.endswith(':' + port) and ('127.0.0.1' in target or 'localhost' in target):
-                return f'https://{host.rsplit(":", 1)[0]}{path.rstrip("/")}/'
+                return f'https://{host.removesuffix(":443")}{path.rstrip("/")}/'
     return None
 
 
@@ -1108,7 +1108,7 @@ def dashboard_url(config):
     proxy) when it answers, else the tailnet address from tailscale serve, else None."""
     served = dashboard_served(config)
     host = str(config.get('dashboard_host') or '')
-    if host and (not served or urllib.parse.urlparse(served).hostname != host):
+    if host and (not served or urllib.parse.urlparse(served).netloc != host):
         url = f'https://{host}/{config.get("dashboard_path", "/").strip("/")}'.rstrip('/') + '/'
         if reachable(url):
             return url
@@ -1116,8 +1116,12 @@ def dashboard_url(config):
 
 
 def serve_command(config):
-    path = config.get('dashboard_path', '/assistant/').rstrip('/') or '/'
-    return ['tailscale', 'serve', '--bg', '--https=443', '--set-path', path, f'http://127.0.0.1:{config.get("port", 8787)}']
+    """tailscale serve for the dashboard: on its own port (machine.ts.net:8443), so it is its own origin and
+    the installed dashboard app never collides with OpenClaw's web app or anything else on :443."""
+    https = str(config.get('dashboard_host') or '').rpartition(':')[2]
+    path = config.get('dashboard_path', '/').rstrip('/') or '/'
+    return ['tailscale', 'serve', '--bg', f'--https={https if https.isdigit() else 443}', '--set-path', path,
+            f'http://127.0.0.1:{config.get("port", 8787)}']
 
 
 def serve_dashboard(config, ui):
