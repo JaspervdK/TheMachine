@@ -57,6 +57,31 @@ class Preparation(unittest.TestCase):
         calls.clear();self.app.preparation_step(lambda r:calls.append(r) or {'status':'admitted'})
         self.assertIn('the owner tapped Do it',next(c['message'] for c in calls if c.get('message')))
 
+    def test_prepared_ahead_task_stops_at_the_last_step_and_confirm_runs_only_that_step(self):
+        sid=self.ahead()['id']
+        calls=[];self.app.preparation_step(lambda r:calls.append(r) or {'status':'admitted'})
+        message=next(c['message'] for c in calls if c.get('message'))
+        self.assertIn('so the owner only confirms the last step',message);self.assertIn('kind:finish',message)
+        job=self.q('SELECT job_id FROM preparations WHERE suggestion_id=?',sid)['job_id']
+        submit={'kind':'finish','label':'Submit expense claim','url':'https://expenses.example.com/claims/new',
+                'instructions':'On https://expenses.example.com/claims/new enter 42.50 EUR, 16 Oct 2026, category Travel, attach receipt.pdf, then press Submit.',
+                'preview':'Expense claim from acme: 42.50 EUR, Travel, 16 Oct 2026, receipt.pdf attached.'}
+        with self.assertRaises(ValueError):  # only the owner confirms it
+            self.app.action('prepare',{'suggestion_id':sid,'job_id':job,'body':'Filled in, ready to submit.','next_actions':[submit],'send_now':True,'outcome':'needs_you','needs':'confirm the submit'})
+        self.app.action('prepare',{'suggestion_id':sid,'job_id':job,'body':'Filled in, ready to submit.','next_actions':[submit],'outcome':'needs_you','needs':'confirm the submit'})
+        action=a.next_actions.actions(self.q('SELECT next_action FROM suggestions WHERE id=?',sid)['next_action'])[0]
+        self.assertEqual(a.next_actions.preview(action),submit['preview']+'\n\n'+submit['url'])
+        with self.store.connect() as db:db.execute("UPDATE preparation_runs SET status='ok',finished_at=?",(a.now(),))  # the first run ended
+        self.app.action('confirm_action',{'suggestion_id':sid,'revision':action['revision'],'approval_id':'owner-tap'},owner_dashboard=True)
+        self.assertEqual(self.q('SELECT status,early FROM suggestions WHERE id=?',sid),{'status':'accepted','early':0})
+        self.assertEqual(self.q('SELECT count(*) n FROM action_jobs WHERE suggestion_id=? AND status=?',sid,'local_preparation')['n'],1)
+        self.assertEqual(self.q("SELECT choice FROM decisions WHERE id='owner-tap'")['choice'],'send')
+        calls.clear();self.app.preparation_step(lambda r:calls.append(r) or {'status':'admitted'})
+        message=next(c['message'] for c in calls if c.get('message'))
+        self.assertIn('The owner confirmed the last step of suggestion '+sid+': Submit expense claim',message)
+        self.assertIn(submit['instructions'],message);self.assertIn(submit['preview'],message)
+        self.assertIn('do not go ahead: record a blocker',message);self.assertNotIn('NOT tapped',message)
+
     def test_stuck_prepared_ahead_card_arrives_as_a_normal_suggestion_and_daily_cap(self):
         sid=self.ahead()['id']
         with self.store.connect() as db:db.execute("UPDATE preparations SET status='blocked' WHERE suggestion_id=?",(sid,))

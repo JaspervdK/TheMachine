@@ -12,7 +12,7 @@ const button = (id: string, text: string, choice: string) => ({ text,
   callback_data: buildCallback(`assistant:${id}:${choice}`) });
 const taskActions=(item:any)=>{
  const choices=item.next_actions||(item.next_action?.kind==='menu'?item.next_action.actions:item.next_action?[item.next_action]:[]);
- const emailReady=choices.some((a:any)=>['email','email_demo','linkedin','slack','x','merge'].includes(a.kind));
+ const emailReady=choices.some((a:any)=>['email','email_demo','linkedin','slack','x','merge','finish'].includes(a.kind));
  return choices.filter((a:any)=>a.kind!=='prepare'||(!emailReady&&!/^Draft (shorter|longer|another|alternative|follow-up)\b/i.test(a.label||'')));
 };
 const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action']);
@@ -32,7 +32,7 @@ function cardButtons(item: any) {
   const buttons:any[]=[];
   if(item.status==='prepared')for(const action of taskActions(item)){
     if(action.kind==='open')buttons.push({text:action.label,url:action.url});
-    else if(['email','email_demo','linkedin','slack','x','merge','prepare'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation'].includes((action.state||item.action_status)?.status))
+    else if(['email','email_demo','linkedin','slack','x','merge','prepare','finish'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation'].includes((action.state||item.action_status)?.status))
       buttons.push(button(item.id,action.label||(action.kind==='prepare'?'Prepare next step':'Send'),(action.kind==='prepare'?'next_':'send_')+action.revision));
   }
   return packRows([...buttons,...choices.map(([text,choice])=>button(item.id,text,choice))]);
@@ -60,6 +60,10 @@ function sendReview(item:any,draft:any,dashboardBase=''){
      ...(draft.plugin?['','The OpenClaw plugin changes too: it takes effect after openclaw plugins reload personal-assistant-bridge.']:[]),
      '','Merge now runs the tests again, then updates the running code and restarts The Machine.'].join('\n'),
    buttons:[[button(item.id,'Merge now','confirm_'+draft.revision),...(dashboardBase?[{text:'See the diff',url:`${dashboardBase}#send=${item.id}&revision=${draft.revision}`}]:[]),button(item.id,'Cancel','back')]]};
+ // The last step of a prepared task: what goes out, and Confirm runs only that step.
+ if(draft.kind==='finish')return {text:[`${draft.label}?`,'',draft.preview,...(draft.url?['',draft.url]:[]),
+     '','Confirm does only this last step, checks that it went through and reports back.'].join('\n'),
+   buttons:[[button(item.id,'Confirm','confirm_'+draft.revision),...(draft.url?[{text:'Open page',url:draft.url}]:[]),button(item.id,'Cancel','back')]]};
  if(draft.kind==='linkedin')return {text:['Send this LinkedIn message?',`To: ${draft.to_name}${draft.profile?` (linkedin.com/in/${draft.profile})`:''}`,'',draft.body].join('\n'),
    buttons:[[button(item.id,'Send now','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')]]};
  // X: a reply shows the account and the post it answers; a DM the conversation.
@@ -177,13 +181,13 @@ export default definePluginEntry({
         }
         if(choice.startsWith('send_')||choice.startsWith('confirm_')||choice.startsWith('next_')){
           const [,revision,pick]=choice.split('_'),draft=taskActions(item).find((a:any)=>a.revision===revision);
-          if(item.status!=='prepared'||!draft||!['email','email_demo','linkedin','slack','x','merge','prepare'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation'].includes((draft.state||item.action_status)?.status)){
+          if(item.status!=='prepared'||!draft||!['email','email_demo','linkedin','slack','x','merge','prepare','finish'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation'].includes((draft.state||item.action_status)?.status)){
             await ctx.respond.editButtons({buttons:cardButtons(item)});return {handled:true};
           }
-          if((choice.startsWith('next_')&&draft.kind!=='prepare')||(choice.startsWith('confirm_')&&!['email','linkedin','slack','x','merge'].includes(draft.kind))||(choice.startsWith('send_')&&!['email','email_demo','linkedin','slack','x','merge'].includes(draft.kind)))return {handled:true};
+          if((choice.startsWith('next_')&&draft.kind!=='prepare')||(choice.startsWith('confirm_')&&!['email','linkedin','slack','x','merge','finish'].includes(draft.kind))||(choice.startsWith('send_')&&!['email','email_demo','linkedin','slack','x','merge','finish'].includes(draft.kind)))return {handled:true};
           if(choice.startsWith('send_')){
             if(sendReview(item,draft,`https://${config.dashboard_host}${config.dashboard_path||'/'}`).text.length>3200){
-              await ctx.respond.editButtons({buttons:[[{text:draft.kind==='merge'?'Review and merge':'Review and send',url:`https://${config.dashboard_host}${config.dashboard_path||'/'}#send=${id}&revision=${revision}`},button(id,'Cancel','back')]]});
+              await ctx.respond.editButtons({buttons:[[{text:draft.kind==='merge'?'Review and merge':draft.kind==='finish'?'Review':'Review and send',url:`https://${config.dashboard_host}${config.dashboard_path||'/'}#send=${id}&revision=${revision}`},button(id,'Cancel','back')]]});
             }else await ctx.respond.editMessage(sendReview(item,draft,`https://${config.dashboard_host}${config.dashboard_path||'/'}`));
             return {handled:true};
           }
@@ -191,7 +195,7 @@ export default definePluginEntry({
           if(options.length&&!recipient){await ctx.respond.editMessage(sendReview(item,draft,`https://${config.dashboard_host}${config.dashboard_path||'/'}`));return {handled:true};}
           try{await call('confirm_action',{suggestion_id:id,revision,approval_id:`telegram:${ctx.callbackId}`,...(recipient?{recipients:[recipient]}:{})});}
           catch(error:any){if(error.status!==400)throw error;await call('refresh_card',{suggestion_id:id});return {handled:true};}
-          await ctx.respond.editButtons({buttons:cardButtons({...item,...(draft.kind==='prepare'?{status:'accepted'}:{}),next_actions:taskActions(item).map((a:any)=>a.revision===revision?{...a,state:{status:'queued'}}:a)})});
+          await ctx.respond.editButtons({buttons:cardButtons({...item,...(['prepare','finish'].includes(draft.kind)?{status:'accepted'}:{}),next_actions:taskActions(item).map((a:any)=>a.revision===revision?{...a,state:{status:'queued'}}:a)})});
           return {handled:true};
         }
         const closed=['completed','rejected'].includes(item.status);

@@ -24,7 +24,7 @@ Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Req
 - **Reviews** waiting signals in isolated turns of your existing OpenClaw main agent. The agent saves a suggestion only when something is worth your time: an unanswered request, a deadline, a problem it can fix, or an email of yours that slipped.
 - **Delivers** suggestions as Telegram cards through your existing OpenClaw bot, with a phone-friendly dashboard (installable as an app, with optional push notifications) on your tailnet.
 - **Remembers who and what** in a living graph of people and projects: how close you are to each person (it grows with every exchange and fades with time), their usual rhythm and who has gone quiet, and which projects are heating up or cooling. Do it runs, reviews and the dashboard's Graph tab all use it.
-- **Acts** when you tap **Do it**: the agent drafts the email, LinkedIn or Slack message, or X reply (with a Send button), makes the fix, does the research, or hands the task to a colleague and waits for their reply, and reports back on the same card. It also [fixes bugs in The Machine itself](#the-machine-fixes-itself), which you merge with one tap. **Change** lets you reply with instructions; **Snooze**, **Dismiss** and **Mark done** work as you'd expect, and your choices steer later reviews.
+- **Acts** when you tap **Do it**: the agent drafts the email, LinkedIn or Slack message, or X reply (with a Send button), makes the fix, does the research, or hands the task to a colleague and waits for their reply, and reports back on the same card. Cards it's sure about arrive [already done up to the last click](#prepared-ahead): you only confirm the Send, Submit, Pay or Book. It also [fixes bugs in The Machine itself](#the-machine-fixes-itself), which you merge with one tap. **Change** lets you reply with instructions; **Snooze**, **Dismiss** and **Mark done** work as you'd expect, and your choices steer later reviews.
 
 The service itself contains no model. All interpretation happens in your OpenClaw agent, with your model provider: see [Bring your own model](docs/models.md) for choosing one, including local models.
 
@@ -180,6 +180,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | `http_timeout` | `15` | Dashboard request timeout |
 | `slack_thread_retention_days` | `30` | How long known Slack threads are rechecked |
 | `preparation_concurrency` | `3` | Do it runs at once |
+| `prepare_ahead`, `prepare_ahead_per_day` | `true`, `10` | [Prepared ahead](#prepared-ahead): cards you'd very likely say yes to arrive done up to their last step |
 | `prompt_receipts` | `<data>/prompt-receipts` | Telegram Change-prompt receipts |
 | `attachment_dir`, `attachment_sources` | `<data>/attachments`; workspace `data/assistant-attachments`, `memory/assistant` | Where email attachments are stored, and the only folders they may come from |
 | `excluded_email_subjects` | calendar "Accepted:" replies | Regexes; matching email subjects are never stored |
@@ -260,6 +261,8 @@ Your decisions and written reasons are summarised into every review prompt, and 
 ## Do it
 
 **Do it** queues a preparation: an isolated turn `agent:main:assistant-review-preparation-<job>` of your main agent with `USER.md`, `PREPARATION.md`, the card, your latest note and the full evidence. Up to `preparation_concurrency` run at once and share the OpenClaw browser through a lease. The agent does the work and saves a short result with `prepare` (longer output goes in `memory/assistant/` in the workspace), or records a plain-language blocker. Emails come back as a draft with a **Send** button; Send shows a full preview and only your **Send now** sends that exact revision, through the account's Gmail. A run interrupted by a crash or outage resumes with its history instead of redoing finished steps.
+
+<a id="prepared-ahead"></a>**Prepared ahead.** When the review is confident you'd say yes, the work starts before you tap anything, and the card arrives done up to the one step that commits something. A reply arrives as a draft with **Send**; a form arrives filled in with **Submit…**, an invoice set up with **Pay…**, a booking picked with **Book…**. That button shows what goes out (amounts, dates, names, text), and **Confirm** runs only that last step, checks that it went through and reports back. If the page shows something else by then, it stops and tells you instead. Nothing is sent, submitted, paid or changed before your confirm.
 
 ## The Machine fixes itself
 

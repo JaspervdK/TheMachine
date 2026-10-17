@@ -87,6 +87,13 @@ def attachment_bytes(record, config):
 SEND_KINDS = ('email', 'email_demo', 'linkedin', 'slack', 'x')
 # Owner-approved changes to The Machine's own code: Merge reviews the fix, Merge now applies it.
 APPROVE_KINDS = SEND_KINDS + ('merge',)
+# The last step of a task taken up to it (a filled-in form, a cart, a payment): the owner reviews
+# what will be submitted, and their confirm runs only that step.
+FINISH_KINDS = ('finish',)
+FINISH_VERBS = ('Submit', 'Pay', 'Book', 'Confirm', 'Order', 'Buy', 'Publish', 'Post', 'Sign', 'Accept', 'Decline',
+                'Approve', 'Create', 'Delete', 'Cancel', 'Register', 'Renew', 'File', 'Upload', 'Schedule', 'Reserve',
+                'Apply', 'Transfer', 'Deploy', 'Send', 'Request', 'Unsubscribe', 'Close', 'Archive', 'Invite',
+                'Share', 'Update', 'Save', 'Claim', 'Return', 'Refund', 'Reply')
 TEXT_KINDS = ('linkedin', 'slack', 'x')  # a message without a subject
 LINKEDIN_INBOX = Path(__file__).resolve().parent / 'integrations/linkedin_inbox.py'
 X_INBOX = Path(__file__).resolve().parent / 'integrations/x_inbox.py'
@@ -119,7 +126,7 @@ def selected(value,revision):
 
 def visible_actions(value):
     choices=actions(value)
-    email_ready=any(a['kind'] in APPROVE_KINDS for a in choices)
+    email_ready=any(a['kind'] in APPROVE_KINDS+FINISH_KINDS for a in choices)
     return [a for a in choices if a['kind']!='prepare' or (not email_ready and
             not re.match(r'(?i)^Draft (?:shorter|longer|another|alternative|follow-up)\b',a.get('label','')))]
 
@@ -137,6 +144,8 @@ def preview(value):
         return x_preview(value)
     if value['kind'] == 'merge':
         return merge_preview(value)
+    if value['kind'] == 'finish':
+        return value['preview'] + ('\n\n' + value['url'] if value.get('url') else '')
     if value['kind'] == 'slack':
         return 'Slack message to ' + value['to_name'] + (' (' + value['to_email'] + ')' if value.get('to_email') else '') + '\n\n' + value['body'] + delegate_note(value)
     return email_preview(value) if value['kind'] in ('email','email_demo') else value['instructions']
@@ -212,6 +221,20 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
             raise ValueError('Follow-up labels describe drafting, checking, research or applying the task’s change')
         if not isinstance(value.get('instructions'),str) or not value['instructions'].strip() or len(value['instructions'])>2000:
             raise ValueError('Provide the concrete next preparation, at most 2000 characters')
+        result=dict(value)
+    elif value.get('kind') == 'finish':
+        # Everything up to the final click is done; the owner confirms that click. Its run
+        # repeats the step from these instructions, since a tab or session may have expired.
+        if set(value)-{'kind','label','instructions','preview','url'} or not value.get('label'):
+            raise ValueError('A final step needs a label, the exact instructions and a preview of what goes out')
+        if value['label'].split()[0] not in FINISH_VERBS:
+            raise ValueError('A final step label starts with what it does: ' + ', '.join(FINISH_VERBS[:8]) + '…')
+        for field in ('instructions', 'preview'):
+            if not isinstance(value.get(field),str) or not value[field].strip() or len(value[field])>2000 or '\x00' in value[field]:
+                raise ValueError('Give the exact final step and what it submits, each at most 2000 characters')
+        if 'url' in value and (not isinstance(value['url'],str) or len(value['url'])>2000 or urlsplit(value['url']).scheme!='https'
+                               or urlsplit(value['url']).username or not urlsplit(value['url']).hostname):
+            raise ValueError('The final step’s page is an HTTPS link')
         result=dict(value)
     elif value.get('kind') == 'email_demo':
         if set(value)-{'kind','label','subject','body'} or value.get('label','Send')!='Send':
@@ -400,7 +423,7 @@ def check(value, result='', own_addresses=()):
     run fixes them itself instead of the owner tapping Change. Returns plain problems; empty is fine."""
     problems = []
     for action in actions(value):
-        text = (action.get('subject') or '') + '\n' + (action.get('body') or '')
+        text = (action.get('subject') or '') + '\n' + (action.get('body') or action.get('preview') or '')
         if PLACEHOLDER.search(text):
             problems.append(f"“{action.get('label') or action['kind']}” still has a placeholder ({PLACEHOLDER.search(text)[0]}): fill it in from the evidence")
         if re.search(r'\[[^\]]+\]\((?!https?://)[^)]*\)', text):

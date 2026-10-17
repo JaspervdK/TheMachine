@@ -328,6 +328,18 @@ class NextActions(unittest.TestCase):
                         {'kind':'prepare','label':'Change','instructions':'Anything'},self.draft(label='Draft reply')]:
             with self.assertRaises(ValueError):n.validate(invalid,config,['work'])
 
+    def test_a_last_step_says_what_it_does_and_what_goes_out(self):
+        config=self.app().config
+        step={'kind':'finish','label':'Pay invoice 2026-114','instructions':'In the bank app pay 1,210.00 EUR to BE68 5390 0754 7034, reference +++090/9337/55493+++.',
+              'preview':'1,210.00 EUR to Globex BV (BE68 5390 0754 7034), reference +++090/9337/55493+++, from the acme business account.'}
+        result=n.validate(step,config,['work'])
+        self.assertEqual((n.label(result),n.preview(result)),('Pay invoice 2026-114',step['preview']))
+        for invalid in [{**step,'label':'Handle invoice'},{**step,'label':None},{**step,'preview':''},{**step,'instructions':'x'*2001},
+                        {**step,'url':'http://bank.example.com'},{**step,'url':'https://user@bank.example.com'},{**step,'amount':12}]:
+            with self.assertRaises(ValueError):n.validate(invalid,config,['work'])
+        menu=n.validate([step,{'kind':'prepare','label':'Check the amount','instructions':'Compare with the order'}],config,['work'])
+        self.assertEqual([a['kind'] for a in n.visible_actions(menu)],['finish'])  # the confirm is the next step
+
     def test_menu_old_revision_cannot_approve_new_result(self):
         choices=self.menu()
         self.app().action('prepare',{'suggestion_id':self.sid,'body':'Updated proposal','next_actions':[self.draft(label='Send follow-up',body='Changed full draft')]})

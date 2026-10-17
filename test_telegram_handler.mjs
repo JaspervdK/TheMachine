@@ -88,6 +88,15 @@ await handler(ctx('back'));assert.equal(edits.pop().buttons.flat()[0].text,'Repl
  await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');edits.pop();}
 item.status='prepared';item.next_action={kind:'x',label:'Send',revision:'abcdef123456',account_id:'x-acme',handle:'acme',conversation_id:'42-7',to_name:'Ada',body:'Hi Ada'};
 {await handler(ctx('send_abcdef123456'));assert.equal(edits.pop().text,'Send this X message?\nAs @acme to Ada\n\nHi Ada');}
+// The last step of a prepared task: the review shows what goes out; Confirm runs only that step.
+item.status='prepared';item.next_action={kind:'finish',label:'Submit claim',revision:'abcdef123456',instructions:'Press Submit on the filled-in claim.',preview:'42.50 EUR, Travel, 16 Oct',url:'https://expenses.example.com/claims/7'};
+await handler(ctx('back'));assert.equal(edits.pop().buttons.flat()[0].text,'Submit claim');
+{const before=choices.length;await handler(ctx('next_abcdef123456'));assert.equal(choices.length,before);
+ await handler(ctx('send_abcdef123456'));const r=edits.pop();
+ assert.equal(r.text,'Submit claim?\n\n42.50 EUR, Travel, 16 Oct\n\nhttps://expenses.example.com/claims/7\n\nConfirm does only this last step, checks that it went through and reports back.');
+ assert.deepEqual(r.buttons.flat().map(b=>b.text),['Confirm','Open page','Cancel']);assert.equal(choices.length,before);
+ await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');
+ assert.ok(!edits.pop().buttons.flat().some(b=>b.text==='Submit claim'));}
 item.status='pending';await handler(ctx('back'));assert.deepEqual(edits.pop().buttons.map(row=>row.map(b=>b.text)),[['Do it','Mark done','Snooze'],['Change','Not needed']]);
 delete item.next_action;
 item.status='pending';await handler(ctx('reject'));assert.equal(choices.length,0);assert.deepEqual(edits.pop().buttons.flat().map(b=>b.text),['Not relevant','Wrong facts','Other reason…','No reason','Cancel']);
