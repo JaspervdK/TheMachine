@@ -1,0 +1,200 @@
+"""The Machine fixes itself: its own errors become signals (code locations only), and an owner-approved
+Merge applies a fix made and tested in a clone, never in the running code."""
+import json
+import logging
+import subprocess
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+import next_actions as n
+import test_ux as ux
+from test_gateway import FakeJournal
+a = ux.a
+
+
+def git(path, *args):
+    return subprocess.run(['git', '-C', str(path), '-c', 'user.name=Test', '-c', 'user.email=test@example.com', *args],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+class Faults(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = a.Store(Path(self.tmp.name) / 'a.sqlite')
+        self.log = a.FaultLog(self.store, 'abc123')
+
+    def rows(self):
+        with self.store.connect() as db:
+            return [dict(r) for r in db.execute('SELECT * FROM faults')]
+
+    def fail_in_code(self, error):
+        try:
+            raise error
+        except Exception:
+            self.log.emit(logging.LogRecord('personal-assistant', logging.ERROR, __file__, 1, 'graph error=%s', ('KeyError',), None))
+
+    def test_code_errors_are_kept_as_locations_without_messages(self):
+        for _ in range(3):
+            self.fail_in_code(KeyError('alex@example.com private subject'))
+        [row] = self.rows()
+        self.assertEqual((row['kind'], row['location'], row['count'], row['version']), ('KeyError', 'graph', 3, 'abc123'))
+        frames = json.loads(row['frames'])
+        self.assertEqual(frames[-1]['function'], 'fail_in_code')
+        self.assertEqual(frames[-1]['file'], 'test_self_fix.py')
+        self.assertNotIn('alex@example.com', json.dumps(row))
+
+    def test_trouble_outside_the_code_is_not_a_bug(self):
+        for error in (a.SourceError('gmail'), TimeoutError(), ConnectionResetError(), a.sqlite3.OperationalError('database is locked')):
+            self.fail_in_code(error)
+        self.log.emit(logging.LogRecord('personal-assistant', logging.ERROR, __file__, 1, 'no exception here', (), None))
+        self.assertEqual(self.rows(), [])
+
+    def test_a_thread_that_dies_is_recorded(self):
+        previous = threading.excepthook
+        self.addCleanup(setattr, threading, 'excepthook', previous)
+        threading.excepthook = lambda args: None  # keep the test output quiet
+        self.addCleanup(a.LOG.removeHandler, a.watch_faults(self.store, Path(__file__).resolve().parent))
+        thread = threading.Thread(target=lambda: 1 / 0, name='graph')
+        thread.start()
+        thread.join()
+        self.assertEqual([(r['kind'], r['location']) for r in self.rows()], [('ZeroDivisionError', 'thread graph')])
+
+    def test_the_gateway_source_reports_faults_once_per_step(self):
+        gateway, other = {'id': 'openclaw-gateway', 'service': 'gateway'}, {'id': 'second-gateway', 'service': 'gateway'}
+        config = {'accounts': [gateway, other], 'app_dir': '/srv/machine', 'fix_dir': '/tmp/fixes'}
+        self.fail_in_code(KeyError('x'))
+        a.sync_gateway(self.store, config, other, FakeJournal())
+        self.assertEqual(self.store.events([other['id']]), [])  # only the first Gateway source carries them
+        a.sync_gateway(self.store, config, gateway, FakeJournal())
+        [event] = self.store.events([gateway['id']])
+        self.assertEqual(event['kind'], 'machine.fault')
+        self.assertIn('Graph failed with KeyError, 1 time', event['body'])
+        self.assertIn('test_self_fix.py:', event['body'])
+        self.assertEqual(json.loads(event['metadata'])['app_dir'] if isinstance(event['metadata'], str) else event['metadata']['app_dir'], '/srv/machine')
+        self.fail_in_code(KeyError('x'))
+        a.sync_gateway(self.store, config, gateway, FakeJournal())
+        self.assertEqual(self.store.events([gateway['id']])[0]['title'], 'The Machine: KeyError in fail_in_code')  # 2 is not a step
+        self.fail_in_code(KeyError('x'))
+        a.sync_gateway(self.store, config, gateway, FakeJournal())
+        self.assertEqual(self.store.events([gateway['id']])[0]['title'], 'The Machine: KeyError in fail_in_code (3×)')
+
+
+class Merge(unittest.TestCase):
+    setUp_ux = ux.UX.setUp
+    row = ux.UX.row
+    decide = ux.UX.decide
+
+    def setUp(self):
+        self.setUp_ux()
+        self.root = Path(tempfile.mkdtemp(prefix='machine-merge-'))
+        self.addCleanup(subprocess.run, ['rm', '-rf', str(self.root)])
+        self.upstream, self.app_dir, self.fixes = self.root / 'upstream.git', self.root / 'app', self.root / 'fixes'
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.upstream)], check=True)
+        subprocess.run(['git', 'clone', '-q', str(self.upstream), str(self.app_dir)], check=True, capture_output=True)
+        (self.app_dir / 'graph.py').write_text('def rebuild(rows):\n    return rows["missing"]\n')
+        git(self.app_dir, 'add', '.')
+        git(self.app_dir, 'commit', '-qm', 'Start')
+        git(self.app_dir, 'push', '-q', '-u', 'origin', 'HEAD:main')
+        self.restarts = []
+        self.config = {'accounts': [], 'app_dir': str(self.app_dir), 'fix_dir': str(self.fixes), 'self_test': ['true']}
+
+    def fix(self, name='job1'):
+        clone = self.fixes / name
+        subprocess.run(['git', 'clone', '-q', str(self.app_dir), str(clone)], check=True, capture_output=True)
+        (clone / 'graph.py').write_text('def rebuild(rows):\n    return rows.get("missing")\n')
+        git(clone, 'commit', '-qam', 'Graph: a missing key is not a crash')
+        return clone
+
+    def action(self, clone, **extra):
+        return n.validate({'kind': 'merge', 'clone': str(clone), 'summary': 'The graph rebuild no longer stops on a missing key.', **extra}, self.config, [])
+
+    def transport(self):
+        return n.MergeTransport(self.config, lambda: self.restarts.append(1) or True)
+
+    def test_a_committed_fix_in_a_clone_becomes_a_reviewable_merge(self):
+        clone = self.fix()
+        action = self.action(clone)
+        self.assertEqual((action['kind'], action['label'], action['commits'], action['files']), ('merge', 'Merge fix', 1, ['graph.py']))
+        self.assertEqual(action['base'], git(self.app_dir, 'rev-parse', 'HEAD'))
+        self.assertEqual(action['head'], git(clone, 'rev-parse', 'HEAD'))
+        self.assertIn('+    return rows.get("missing")', action['diff'])
+        self.assertIn('Merge now runs the tests again', n.preview(action))
+        self.assertFalse(action['plugin'])
+
+    def test_only_a_clean_committed_clone_under_the_fix_folder(self):
+        with self.assertRaisesRegex(ValueError, 'under'):
+            self.action(self.app_dir)  # never the running code
+        clone = self.fix()
+        (clone / 'graph.py').write_text('changed after the commit\n')
+        with self.assertRaisesRegex(ValueError, 'uncommitted'):
+            self.action(clone)
+        git(clone, 'checkout', '-q', 'graph.py')
+        (self.app_dir / 'other.py').write_text('x = 1\n')
+        git(self.app_dir, 'add', '.')
+        git(self.app_dir, 'commit', '-qm', 'Moved on')
+        with self.assertRaisesRegex(ValueError, 'not on top'):
+            self.action(clone)
+        with self.assertRaisesRegex(ValueError, 'nothing to merge'):
+            fresh = self.fixes / 'job2'
+            subprocess.run(['git', 'clone', '-q', str(self.app_dir), str(fresh)], check=True, capture_output=True)
+            self.action(fresh)
+
+    def test_merge_now_tests_fast_forwards_pushes_and_restarts(self):
+        action = self.action(self.fix())
+        transport = self.transport()
+        transport.preflight(action)
+        result = transport.send(action, {'id': 'job'})
+        self.assertEqual(result, {'message_id': 'merge:' + action['head'][:12], 'pushed': True, 'restarted': True})
+        self.assertEqual(git(self.app_dir, 'rev-parse', 'HEAD'), action['head'])
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), action['head'])
+        self.assertIn('rows.get', (self.app_dir / 'graph.py').read_text())
+        self.assertEqual(transport.reconcile(action, {}), {'message_id': 'merge:' + action['head'][:12]})
+
+    def test_nothing_is_merged_when_tests_fail_or_anything_moved(self):
+        action = self.action(self.fix())
+        self.config['self_test'] = ['false']
+        with self.assertRaisesRegex(ValueError, 'tests fail'):
+            self.transport().preflight(action)
+        self.config['self_test'] = ['true']
+        (self.fixes / 'job1' / 'graph.py').write_text('edited after review\n')
+        with self.assertRaisesRegex(ValueError, 'changed after you reviewed'):
+            self.transport().preflight(action)
+        git(self.fixes / 'job1', 'checkout', '-q', 'graph.py')
+        (self.app_dir / 'graph.py').write_text('local edit\n')
+        with self.assertRaisesRegex(ValueError, 'uncommitted changes'):
+            self.transport().preflight(action)
+        git(self.app_dir, 'checkout', '-q', 'graph.py')
+        (self.app_dir / 'other.py').write_text('x = 1\n')
+        git(self.app_dir, 'add', '.')
+        git(self.app_dir, 'commit', '-qm', 'Moved on')
+        with self.assertRaisesRegex(ValueError, 'changed since this fix was made'):
+            self.transport().preflight(action)
+        self.assertEqual(self.restarts, [])
+
+    def test_the_owner_merges_from_the_card_and_the_agent_cannot(self):
+        self.decide('accept')
+        app = object.__new__(a.App)
+        app.store, app.config = self.store, self.config
+        merge = {'kind': 'merge', 'clone': str(self.fix()), 'summary': 'The graph rebuild no longer stops on a missing key.'}
+        with self.assertRaisesRegex(ValueError, 'send_now'):
+            app.action('prepare', {'suggestion_id': self.sid, 'body': 'Fixed and tested in a copy.', 'next_action': merge, 'send_now': True})
+        app.action('prepare', {'suggestion_id': self.sid, 'body': 'Fixed and tested in a copy.', 'next_action': merge})
+        row = self.row()
+        self.assertEqual([b['label'] for b in a.controls(row)['blocks'][0]['buttons']][:1], ['Merge fix'])
+        self.assertEqual(git(self.app_dir, 'log', '--format=%s', '-1'), 'Start')  # saving the result changed nothing
+        app.action('confirm_action', {'suggestion_id': self.sid, 'revision': row['next_action']['revision'], 'approval_id': 'owner-tap'}, owner_dashboard=True)
+        self.assertEqual(app.action_step(next_actions_transport(self)), 'sent')
+        self.assertIn('Merged. The Machine restarts with the fix.', a.card(self.row()))
+        self.assertEqual(git(self.app_dir, 'log', '--format=%s', '-1'), 'Graph: a missing key is not a crash')
+        self.assertEqual(app.action_step(next_actions_transport(self)), None)  # merged once
+        self.assertEqual(self.restarts, [1])
+
+
+def next_actions_transport(test):
+    return n.ActionTransport(None, None, merge=test.transport())
+
+
+if __name__ == '__main__':
+    unittest.main()

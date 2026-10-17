@@ -148,7 +148,7 @@ export function preparationToolPolicy(event: any, ctx: any): undefined | {block:
   if (WRITE_TOOLS.has(name)) {
     const paths = [...pathParams(params), ...patchPaths(params)];
     if (paths.some(secretPath)) return {block: 'Preparations do not touch credentials.'};
-    if (paths.some(protectedPath)) return {block: 'Preparations do not edit the assistant or Gateway itself. Describe the fix in the result instead.'};
+    if (paths.some(protectedPath)) return {block: 'Preparations do not edit the running assistant or Gateway. For The Machine, fix a git clone under its fix folder and offer a merge (PREPARATION.md); otherwise describe the fix in the result.'};
     return undefined;
   }
   if (!SHELL_TOOLS.has(name)) return undefined;
@@ -156,7 +156,7 @@ export function preparationToolPolicy(event: any, ctx: any): undefined | {block:
   if (OWNER_SERVICE.test(text) || SECRET_PATHS.some(dir => text.includes(dir)) || /\bgog\s+auth\b/.test(text))
     return {block: 'Preparations do not use credentials or owner approvals.'};
   for (const stage of commandStages(text)) {
-    if (protectedOutput(stage,cwd)) return {block: 'Preparations do not overwrite the assistant or Gateway itself. Save the proposed fix in the result.'};
+    if (protectedOutput(stage,cwd)) return {block: 'Preparations do not edit the running assistant or Gateway. For The Machine, fix a git clone under its fix folder and offer a merge (PREPARATION.md); otherwise describe the fix in the result.'};
   }
   if (CONTENT_READERS.test(text) && text.split(/[\s|;&()'"=]+/).some(word => /^[\/~.]/.test(word) && coversSecret(word, cwd)))
     return {block: 'That path includes credential folders. Search a narrower folder (e.g. ~/Documents, ~/Downloads or the workspace).'};

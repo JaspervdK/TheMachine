@@ -85,6 +85,8 @@ def attachment_bytes(record, config):
 
 # Owner-approved sends: each needs the Send review and Send now (Telegram) or the dashboard dialog.
 SEND_KINDS = ('email', 'email_demo', 'linkedin', 'slack', 'x')
+# Owner-approved changes to The Machine's own code: Merge reviews the fix, Merge now applies it.
+APPROVE_KINDS = SEND_KINDS + ('merge',)
 TEXT_KINDS = ('linkedin', 'slack', 'x')  # a message without a subject
 LINKEDIN_INBOX = Path(__file__).resolve().parent / 'integrations/linkedin_inbox.py'
 X_INBOX = Path(__file__).resolve().parent / 'integrations/x_inbox.py'
@@ -117,7 +119,7 @@ def selected(value,revision):
 
 def visible_actions(value):
     choices=actions(value)
-    email_ready=any(a['kind'] in SEND_KINDS for a in choices)
+    email_ready=any(a['kind'] in APPROVE_KINDS for a in choices)
     return [a for a in choices if a['kind']!='prepare' or (not email_ready and
             not re.match(r'(?i)^Draft (?:shorter|longer|another|alternative|follow-up)\b',a.get('label','')))]
 
@@ -125,7 +127,7 @@ def visible_actions(value):
 def label(value):
     if value['kind'] == 'x' and not value.get('label'):
         return 'Reply on X' if value.get('reply_to') else 'Send'
-    return value.get('label') or {'email':'Send','email_demo':'Send','linkedin':'Send','slack':'Send','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
+    return value.get('label') or {'email':'Send','email_demo':'Send','linkedin':'Send','slack':'Send','merge':'Merge fix','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
 
 
 def preview(value):
@@ -133,6 +135,8 @@ def preview(value):
         return linkedin_preview(value)
     if value['kind'] == 'x':
         return x_preview(value)
+    if value['kind'] == 'merge':
+        return merge_preview(value)
     if value['kind'] == 'slack':
         return 'Slack message to ' + value['to_name'] + (' (' + value['to_email'] + ')' if value.get('to_email') else '') + '\n\n' + value['body'] + delegate_note(value)
     return email_preview(value) if value['kind'] in ('email','email_demo') else value['instructions']
@@ -378,6 +382,8 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
             raise ValueError('Provide the concrete Slack message, at most 8000 characters')
         result['body'] = body.strip()
         delegation(value, result)
+    elif value.get('kind') == 'merge':
+        result = merge_action(value, config)
     else:
         raise ValueError('Only email drafts, LinkedIn, Slack and X messages, local preparation and original-page links are supported; no payments or arbitrary writes')
     result['revision'] = hashlib.sha256(canonical(result).encode()).hexdigest()[:12]
@@ -874,13 +880,156 @@ class SlackTransport:
         return {'message_id': f"slack:{channel}:{found[0]['ts']}", 'channel_id': channel, 'user_id': user_id} if len(found) == 1 else {}
 
 
-class ActionTransport:
-    """Routes an approved send to Gmail, LinkedIn, Slack or X by its kind."""
+# Fixes to The Machine itself. A Do it run never edits the running code: it clones it into its own
+# folder under fix_dir, fixes and tests it there and commits. The owner reviews the diff; Merge now
+# runs the tests again, fast-forwards the running checkout to exactly that commit and restarts.
+FIX_DIR = str(Path.home() / '.cache/the-machine/fixes')
+MAX_DIFF = 60000
 
-    def __init__(self, email, linkedin, slack=None, x=None):
-        self.email, self.linkedin, self.slack, self.x = email, linkedin, slack, x
+
+def app_dir(config):
+    return Path(config.get('app_dir') or Path(__file__).resolve().parent).expanduser().resolve()
+
+
+def fix_dir(config):
+    return Path(config.get('fix_dir') or FIX_DIR).expanduser().resolve()
+
+
+def git(path, *args, timeout=60):
+    result = subprocess.run(['git', '-C', str(path), *args], capture_output=True, text=True, timeout=timeout)
+    if result.returncode:
+        raise ValueError(f'git {args[0]} failed')
+    return result.stdout
+
+
+def merge_action(value, config):
+    if set(value) - {'kind', 'label', 'clone', 'summary'}:
+        raise ValueError('A merge needs only clone (the fixed copy) and summary (what the fix changes)')
+    if value.get('label') and not value['label'].startswith('Merge'):
+        raise ValueError('Merge button labels start with Merge, such as Merge fix')
+    summary = value.get('summary')
+    if not isinstance(summary, str) or not 10 <= len(summary.strip()) <= 500 or '\x00' in summary:
+        raise ValueError('summary says in plain words what the fix changes, at most 500 characters')
+    clone = Path(str(value.get('clone') or '')).expanduser().resolve()
+    if not clone.is_relative_to(fix_dir(config)) or clone == fix_dir(config) or not (clone / '.git').exists():
+        raise ValueError(f'Fix a clone of The Machine under {fix_dir(config)}/<job id>, made with git clone, not the running code')
+    app = app_dir(config)
+    try:
+        base, head = git(app, 'rev-parse', 'HEAD').strip(), git(clone, 'rev-parse', 'HEAD').strip()
+        if git(clone, 'status', '--porcelain'):
+            raise ValueError('Commit the fix in the clone first: it has uncommitted changes')
+        if subprocess.run(['git', '-C', str(clone), 'merge-base', '--is-ancestor', base, head], capture_output=True, timeout=30).returncode:
+            raise ValueError('The fix is not on top of the running code: git pull in the clone, test again and commit')
+        commits = int(git(clone, 'rev-list', '--count', f'{base}..{head}').strip())
+        files = git(clone, 'diff', '--name-only', base, head).split()
+        stat = git(clone, 'diff', '--stat', base, head).rstrip()
+        diff = git(clone, 'diff', base, head)
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError('git is not available to check the fix') from None
+    if not 1 <= commits <= 20 or not files:
+        raise ValueError('Commit the fix in the clone: there is nothing to merge yet')
+    result = {'kind': 'merge', 'label': value.get('label') or 'Merge fix', 'clone': str(clone), 'summary': ' '.join(summary.split()),
+              'base': base, 'head': head, 'commits': commits, 'files': files[:200], 'stat': stat[-4000:],
+              'diff': diff if len(diff) <= MAX_DIFF else diff[:MAX_DIFF] + '\n… diff shortened; the full change is in the clone.',
+              'plugin': any(f.startswith('openclaw-plugin/') for f in files)}
+    return result
+
+
+def merge_preview(action):
+    return ('Merge into The Machine: ' + action['summary'] + '\n\n' + action['stat']
+            + ('\n\nThe OpenClaw plugin changes too: it takes effect after openclaw plugins reload personal-assistant-bridge.' if action.get('plugin') else '')
+            + '\n\nMerge now runs the tests again, then updates the running code and restarts The Machine.')
+
+
+def test_command(config, clone):
+    if config.get('self_test'):
+        return list(config['self_test'])
+    if (clone / 'scripts/test.py').exists():
+        return ['python3', 'scripts/test.py']
+    return ['sh', '-c', 'python3 -m unittest discover -p "test_*.py" && for f in test_*.mjs; do [ -e "$f" ] || continue; node "$f" || exit 1; done']
+
+
+class MergeTransport:
+    """Applies one owner-approved fix to The Machine's own code. Preflight checks that nothing moved
+    since the owner reviewed it and that the tests pass; the merge is a fast-forward to exactly the
+    reviewed commit, then the code is pushed (when it has an upstream) and the service restarts."""
+
+    def __init__(self, config, restart=None):
+        self.config, self.restart = config, restart
+
+    def preflight(self, action):
+        if action['kind'] != 'merge':
+            raise ValueError('Only an owner-approved fix can use the merge transport')
+        app, clone = app_dir(self.config), Path(action['clone'])
+        try:
+            if git(app, 'rev-parse', 'HEAD').strip() != action['base']:
+                raise ValueError('The Machine’s code changed since this fix was made. Nothing was merged; tap Change and ask to redo it on the current code.')
+            if git(app, 'status', '--porcelain', '--untracked-files=no'):
+                raise ValueError('The Machine’s code has uncommitted changes here. Nothing was merged.')
+            if not clone.is_dir() or git(clone, 'rev-parse', 'HEAD').strip() != action['head'] or git(clone, 'status', '--porcelain'):
+                raise ValueError('The fix changed after you reviewed it. Nothing was merged; tap Change to get it again.')
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValueError('I could not check the fix. Nothing was merged.') from None
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('ASSISTANT_', 'OPENCLAW_', 'GOG_'))}
+        try:
+            tests = subprocess.run(test_command(self.config, clone), cwd=clone, env=env, capture_output=True, text=True,
+                                   timeout=int(self.config.get('self_test_seconds', 1200)))
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValueError('The tests did not finish on this fix. Nothing was merged.') from None
+        if tests.returncode:
+            raise ValueError('The tests fail on this fix. Nothing was merged; tap Change to have it fixed.')
+
+    def send(self, action, job):
+        app = app_dir(self.config)
+        try:
+            git(app, 'fetch', '--quiet', '--no-tags', action['clone'], 'HEAD', timeout=120)
+            if git(app, 'rev-parse', 'FETCH_HEAD').strip() != action['head']:
+                return {'rejected': 'changed'}
+            git(app, 'merge', '--ff-only', '--quiet', action['head'], timeout=120)
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            return {'rejected': 'merge'} if self.merged(action) is False else {}
+        if not self.merged(action):
+            return {}
+        pushed = None
+        try:
+            git(app, 'rev-parse', '--abbrev-ref', '@{u}')
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            pass
+        else:
+            if self.config.get('self_fix_push', True):
+                try:
+                    git(app, 'push', '--quiet', timeout=120)
+                    pushed = True
+                except (ValueError, OSError, subprocess.TimeoutExpired):
+                    pushed = False
+        restarted = bool(self.restart and self.restart())
+        return {'message_id': 'merge:' + action['head'][:12], 'pushed': pushed, 'restarted': restarted}
+
+    def merged(self, action):
+        """True when the running code contains the fix, False when it is still at the reviewed base, None if unclear."""
+        app = app_dir(self.config)
+        try:
+            if not subprocess.run(['git', '-C', str(app), 'merge-base', '--is-ancestor', action['head'], 'HEAD'], capture_output=True, timeout=30).returncode:
+                return True
+            return False if git(app, 'rev-parse', 'HEAD').strip() == action['base'] else None
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            return None
+
+    def reconcile(self, action, job):
+        return {'message_id': 'merge:' + action['head'][:12]} if self.merged(action) else {}
+
+
+class ActionTransport:
+    """Routes an approved send to Gmail, LinkedIn, Slack or X, or a fix to The Machine itself, by its kind."""
+
+    def __init__(self, email, linkedin, slack=None, x=None, merge=None):
+        self.email, self.linkedin, self.slack, self.x, self.merge = email, linkedin, slack, x, merge
 
     def pick(self, action):
+        if action['kind'] == 'merge':
+            if not self.merge:
+                raise ValueError('Merging fixes isn’t set up. Nothing was merged.')
+            return self.merge
         if action['kind'] == 'slack':
             if not self.slack:
                 raise ValueError('Slack sending isn’t set up. Nothing was sent.')

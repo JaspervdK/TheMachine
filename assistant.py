@@ -22,12 +22,14 @@ from pathlib import Path
 from decimal import Decimal
 import re
 import secrets
+import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import types
 import urllib.error
 import urllib.parse
@@ -1607,6 +1609,10 @@ class Store:
             db.execute('CREATE TABLE IF NOT EXISTS rule_changes(id INTEGER PRIMARY KEY,at TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,ref TEXT)')
             # Emails offered to a review as possibly slipped, so each is offered once.
             db.execute('CREATE TABLE IF NOT EXISTS slipped(event_id INTEGER PRIMARY KEY,kind TEXT NOT NULL,run_id TEXT,offered_at TEXT NOT NULL)')
+            # The service's own errors per code location and day: where, never what (no messages or values).
+            db.execute('CREATE TABLE IF NOT EXISTS faults(fingerprint TEXT NOT NULL,day TEXT NOT NULL,kind TEXT NOT NULL,frames TEXT NOT NULL,'
+                       'location TEXT NOT NULL,version TEXT,first_at TEXT NOT NULL,last_at TEXT NOT NULL,count INTEGER NOT NULL,'
+                       'reported INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(fingerprint,day))')
             preparation_columns = {r['name'] for r in db.execute('PRAGMA table_info(preparations)')}
             for column in ['details', 'started_at']:
                 if column not in preparation_columns:
@@ -1928,6 +1934,25 @@ class Store:
                    (uuid.uuid4().hex,account,stamp,status,signals,error,retry_at))
         cutoff = (dt.datetime.fromisoformat(stamp) - dt.timedelta(days=30)).isoformat()
         db.execute('DELETE FROM sync_activity WHERE at<?', (cutoff,))
+
+    def record_fault(self, fingerprint, kind, frames, location, version):
+        stamp = now()
+        with self.connect() as db:
+            db.execute('INSERT INTO faults(fingerprint,day,kind,frames,location,version,first_at,last_at,count) VALUES(?,?,?,?,?,?,?,?,1) '
+                       'ON CONFLICT(fingerprint,day) DO UPDATE SET count=count+1,last_at=excluded.last_at,frames=excluded.frames,version=excluded.version',
+                       (fingerprint, stamp[:10], kind, json.dumps(frames), location, version, stamp, stamp))
+            db.execute('DELETE FROM faults WHERE day<?', ((dt.datetime.fromisoformat(stamp) - dt.timedelta(days=30)).date().isoformat(),))
+
+    def unreported_faults(self):
+        """Faults worth a (new) signal: the first one of a day, then again at 3, 10, 30, 100… occurrences."""
+        with self.connect() as db:
+            rows = [dict(r) for r in db.execute('SELECT * FROM faults WHERE count>reported ORDER BY last_at')]
+        return [r for r in rows if not r['reported'] or any(r['reported'] < step <= r['count'] for step in FAULT_STEPS)]
+
+    def faults_reported(self, rows):
+        with self.connect() as db:
+            for row in rows:
+                db.execute('UPDATE faults SET reported=? WHERE fingerprint=? AND day=?', (row['count'], row['fingerprint'], row['day']))
 
     def failed(self, account, error):
         with self.connect() as db:
@@ -3168,7 +3193,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
-            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','prepare'):
+            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','merge','prepare'):
                 raise ValueError('This result changed or is no longer ready. Use its current buttons.')
             if action.get('to_options'):
                 # The owner picked who gets it, only from the addresses the service found in the thread.
@@ -3787,6 +3812,111 @@ def gateway_event(account, source_id, bucket):
             'deleted': False}
 
 
+# The Machine's own errors. A handler on the service log keeps, for each error raised in this
+# code, its exception type and code location (file, line, function) per day: never the message,
+# arguments or values, which can hold private content. The Gateway source turns them into
+# machine.fault signals, so a review can offer to fix The Machine itself.
+APP_ROOT = Path(__file__).resolve().parent
+FAULT_STEPS = (3, 10, 30, 100, 300, 1000)
+# Trouble outside this code (a source, the network, the disk, a busy database) is not a bug to fix here.
+EXTERNAL_ERRORS = (SourceError, OSError, subprocess.TimeoutExpired, sqlite3.OperationalError, KeyboardInterrupt, SystemExit)
+
+
+def fault_frames(tb, root=APP_ROOT):
+    frames = []
+    for frame in traceback.extract_tb(tb):
+        path = Path(frame.filename).resolve()
+        if path.is_relative_to(root) and 'site-packages' not in path.parts:
+            frames.append({'file': str(path.relative_to(root)), 'line': frame.lineno, 'function': frame.name})
+    return frames[-8:]
+
+
+def code_version(root=APP_ROOT):
+    try:
+        result = subprocess.run(['git', '-C', str(root), 'rev-parse', '--short=12', 'HEAD'], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() or None
+
+
+class FaultLog(logging.Handler):
+    def __init__(self, store, version=None, root=APP_ROOT):
+        super().__init__(logging.ERROR)
+        self.store, self.version, self.root = store, version, root
+
+    def emit(self, record):
+        # Called inside the except block that logged the error, so sys.exc_info() is that error.
+        error = (record.exc_info or sys.exc_info())[1]
+        # Where it happened in words, from the log call's own text without its values: "graph error=%s" -> "graph".
+        self.record(error, re.sub(r'\s*\S*%[sdr]\S*', '', str(record.msg)).strip())
+
+    def record(self, error, location):
+        try:
+            if error is None or isinstance(error, EXTERNAL_ERRORS):
+                return
+            frames = fault_frames(error.__traceback__, self.root)
+            if not frames:
+                return
+            kind = type(error).__name__
+            fingerprint = hashlib.sha256(json.dumps([kind] + [[f['file'], f['function']] for f in frames[-3:]]).encode()).hexdigest()[:16]
+            self.store.record_fault(fingerprint, kind, frames, location[:120], self.version)
+        except Exception:
+            pass  # recording an error must never cause one
+
+
+def watch_faults(store, root=APP_ROOT):
+    """Record the service's own errors: logged ones and threads that die of one."""
+    log = FaultLog(store, code_version(root), root)
+    LOG.addHandler(log)
+    previous = threading.excepthook
+
+    def hook(args):
+        log.record(args.exc_value, 'thread ' + (args.thread.name if args.thread else ''))
+        previous(args)
+    threading.excepthook = hook
+    return log
+
+
+def fault_event(account, row, config):
+    frames = json.loads(row['frames'])
+    top = frames[-1]
+    count = row['count']
+    lines = [f"{(row['location'] or 'The service').capitalize()} failed with {row['kind']}, "
+             f"{count} time{'s' if count > 1 else ''} on {row['day']} (last {dt.datetime.fromisoformat(row['last_at']).astimezone(local_tz()).strftime('%H:%M')}).",
+             '', 'Where (innermost last):'] + [f"  {f['file']}:{f['line']} in {f['function']}" for f in frames]
+    if row.get('version'):
+        lines += ['', 'Code version: ' + row['version']]
+    return {'account_id': account['id'], 'source_id': f"fault:{row['fingerprint']}:{row['day']}", 'kind': 'machine.fault',
+            'occurred_at': row['last_at'], 'title': f"The Machine: {row['kind']} in {top['function']}" + (f' ({count}×)' if count > 1 else ''),
+            'body': '\n'.join(lines),
+            'metadata': {'fault_kind': row['kind'], 'fingerprint': row['fingerprint'], 'location': row['location'], 'frames': frames,
+                         'count': count, 'day': row['day'], 'version': row.get('version'),
+                         'app_dir': str(next_actions.app_dir(config)), 'fix_dir': str(next_actions.fix_dir(config)), 'transport': 'internal',
+                         'coverage': 'Errors raised in The Machine’s own code: type and code location only, never messages or values.'},
+            'deleted': False}
+
+
+def restart_self(delay=5):
+    """Restart this service a few seconds from now, from outside its own process, so the merge result
+    is saved first. Only when it runs under systemd; returns whether a restart was scheduled."""
+    if not os.environ.get('INVOCATION_ID') or not shutil.which('systemctl'):
+        return False
+    try:
+        unit = next((part for part in Path('/proc/self/cgroup').read_text().strip().split('/')[::-1] if part.endswith('.service')), None)
+    except OSError:
+        unit = None
+    unit = unit or 'personal-assistant.service'
+    try:
+        if shutil.which('systemd-run') and not subprocess.run(['systemd-run', '--user', '--quiet', '--collect', f'--on-active={delay}',
+                                                                'systemctl', '--user', 'restart', unit], capture_output=True, timeout=20).returncode:
+            return True
+        subprocess.Popen(['sh', '-c', f'sleep {int(delay)}; exec systemctl --user restart "$0"', unit], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def sync_gateway(store, config, account, source=None):
     source = source or GatewayJournal(account)
     state = store.checkpoint(account['id']) or {}
@@ -3816,6 +3946,11 @@ def sync_gateway(store, config, account, source=None):
         if source_id not in changed:
             changed.append(source_id)
     events = [gateway_event(account, source_id, buckets[source_id]) for source_id in changed]
+    # The Machine's own errors come in through the first Gateway source.
+    faults = []
+    if next((a['id'] for a in config.get('accounts', []) if a.get('service') == 'gateway'), None) == account['id']:
+        faults = store.unreported_faults()
+        events += [fault_event(account, row, config) for row in faults]
     # Only the last two windows can still grow; older ones are final.
     cutoff = (dt.datetime.fromisoformat(now()) - 2 * GATEWAY_BUCKET).isoformat()
     state.update(mode='incremental', cursor=entries[-1][0] if entries else state.get('cursor'),
@@ -3823,6 +3958,7 @@ def sync_gateway(store, config, account, source=None):
                  open_buckets={k: v for k, v in buckets.items() if v['start'] >= cutoff},
                  coverage='OpenClaw Gateway journal from the saved cursor; selected failure kinds only.')
     store.commit_page(account['id'], state, events)
+    store.faults_reported(faults)
     return {'mode': 'incremental', 'events': len(events)}
 
 
@@ -4104,6 +4240,19 @@ REVIEW_FAILURES = {'runtime_error','runtime_timeout','runtime_aborted','runtime_
 REVIEW_FAILURE_PHASES = {'runtime','model','bridge','connection','queue','provider','tool','gateway_draining'}
 
 
+def merge_state(row, state):
+    """Is this action state a fix to The Machine (a merge) rather than a message?"""
+    if str(state.get('message_id') or '').startswith('merge:'):
+        return True
+    items = row.get('next_actions')
+    if items is None:
+        try:
+            items = next_actions.actions(row.get('next_action'))
+        except (ValueError, TypeError):
+            items = []
+    return any(a.get('kind') == 'merge' and (a.get('state') or row.get('action_status')) == state for a in items)
+
+
 def card(row):
     title = row['title'].replace('*', '').replace('_', '')
     status = {'accepted': 'On it.', 'rejected': 'Not needed.',
@@ -4123,8 +4272,10 @@ def card(row):
     elif row.get('preparation_status') == 'blocked': status='I’m stuck: '+(row.get('preparation_reason') or 'Preparation did not finish. I’ll keep this in your list.')
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed')),None)
     if action_state and row['status']=='prepared':
-        status={'queued':'Sending your approved draft…','sending':'Sending your approved draft…',
-                'sent':('LinkedIn message sent.' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Reply posted on X.' if str(action_state.get('message_id') or '').startswith('x:') else 'X message sent.' if str(action_state.get('message_id') or '').startswith('xdm:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':action_state.get('error'),'failed':action_state.get('error')}.get(action_state['status'],status)
+        merging=merge_state(row,action_state)
+        status={'queued':'Testing and merging the fix…' if merging else 'Sending your approved draft…','sending':'Testing and merging the fix…' if merging else 'Sending your approved draft…',
+                'sent':('Merged. The Machine restarts with the fix.'+(' '+action_state['error'] if action_state.get('error') else '')) if merging else
+                ('LinkedIn message sent.' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Reply posted on X.' if str(action_state.get('message_id') or '').startswith('x:') else 'X message sent.' if str(action_state.get('message_id') or '').startswith('xdm:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':action_state.get('error'),'failed':action_state.get('error')}.get(action_state['status'],status)
     try:
         handed = json.loads(row['awaiting']) if row.get('awaiting') else {}
     except (ValueError, TypeError):
@@ -4171,7 +4322,7 @@ def controls(row):
     if row['status']=='prepared':
         for action in actions:
             state=action.get('state') or row.get('action_status',{})
-            if action['kind'] in ('email','email_demo','linkedin','slack','x','prepare') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation'):
+            if action['kind'] in ('email','email_demo','linkedin','slack','x','merge','prepare') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation'):
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
                 buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
             elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
@@ -5361,7 +5512,7 @@ class App:
                 LOG.error('delivery error=%s', type(error).__name__)
 
     def action_step(self,transport=None):
-        transport=transport or next_actions.ActionTransport(next_actions.EmailTransport(self.config,credential,gog_read),next_actions.LinkedInTransport(self.config),next_actions.SlackTransport(self.config,credential),next_actions.XTransport(self.config))
+        transport=transport or next_actions.ActionTransport(next_actions.EmailTransport(self.config,credential,gog_read),next_actions.LinkedInTransport(self.config),next_actions.SlackTransport(self.config,credential),next_actions.XTransport(self.config),next_actions.MergeTransport(self.config,restart_self))
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             for candidate in db.execute("SELECT j.id,j.revision,s.status,s.next_action FROM action_jobs j JOIN suggestions s ON s.id=j.suggestion_id WHERE j.status IN ('queued','blocked')").fetchall():
@@ -5383,7 +5534,7 @@ class App:
                 else:
                     # Keep checking Sent mail, every five minutes for a day, then hourly.
                     wait=dt.timedelta(minutes=5 if dt.datetime.fromisoformat(job['created_at'])>dt.datetime.fromisoformat(now())-dt.timedelta(days=1) else 60)
-                    db.execute("UPDATE action_jobs SET status='uncertain',error=?,retry_at=? WHERE id=? AND status IN ('sending','uncertain')",('I couldn’t confirm whether this X '+('reply' if action.get('reply_to') else 'message')+' was sent. I’m checking X; I won’t send it again.' if action['kind']=='x' else 'I couldn’t confirm whether this '+('LinkedIn' if action['kind']=='linkedin' else 'Slack')+' message was sent. I’m checking the conversation; I won’t send it again.' if action['kind'] in ('linkedin','slack') else 'I couldn’t confirm whether this email was sent. I’m checking Sent mail; I won’t send it again.',(dt.datetime.fromisoformat(now())+wait).isoformat(),job['id']))
+                    db.execute("UPDATE action_jobs SET status='uncertain',error=?,retry_at=? WHERE id=? AND status IN ('sending','uncertain')",('I couldn’t confirm whether the fix was merged. I’m checking the code; I won’t merge it again.' if action['kind']=='merge' else 'I couldn’t confirm whether this X '+('reply' if action.get('reply_to') else 'message')+' was sent. I’m checking X; I won’t send it again.' if action['kind']=='x' else 'I couldn’t confirm whether this '+('LinkedIn' if action['kind']=='linkedin' else 'Slack')+' message was sent. I’m checking the conversation; I won’t send it again.' if action['kind'] in ('linkedin','slack') else 'I couldn’t confirm whether this email was sent. I’m checking Sent mail; I won’t send it again.',(dt.datetime.fromisoformat(now())+wait).isoformat(),job['id']))
             return
         try:transport.preflight(action)
         except next_actions.LinkedInBusy:
@@ -5392,7 +5543,7 @@ class App:
                 db.execute("UPDATE action_jobs SET retry_at=?,updated_at=? WHERE id=? AND status='queued'",((dt.datetime.fromisoformat(now())+dt.timedelta(minutes=2)).isoformat(),now(),job['id']))
             return 'waiting'
         except Exception as error:
-            reason=str(error) if isinstance(error,ValueError) else ({'linkedin':'LinkedIn','slack':'Slack','x':'X'}.get(action['kind'],'Gmail')+' could not be checked. Nothing was sent.')
+            reason=str(error) if isinstance(error,ValueError) else 'The fix could not be checked. Nothing was merged.' if action['kind']=='merge' else ({'linkedin':'LinkedIn','slack':'Slack','x':'X'}.get(action['kind'],'Gmail')+' could not be checked. Nothing was sent.')
             with self.store.connect() as db:
                 db.execute("UPDATE action_jobs SET status='blocked',error=?,updated_at=? WHERE id=? AND status='queued'",(reason,now(),job['id']))
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
@@ -5417,6 +5568,11 @@ class App:
             what,where={'linkedin':('this LinkedIn message','LinkedIn'),'slack':('this Slack message','Slack'),'x':('this X '+('reply' if action.get('reply_to') else 'message'),'X')}.get(action['kind'],('this email','Gmail'))
             error={'sent':None,'failed':f"{where} refused {what} (error {result.get('rejected')}). Nothing was sent; you can change it or tap Send again.",
                    'uncertain':f'I couldn’t confirm whether {what} was sent. I won’t resend it.'}[status]
+            if action['kind']=='merge':
+                error={'sent':' '.join(note for note in ('Pushing it failed; push it yourself.' if result.get('pushed') is False else '',
+                                                           '' if result.get('restarted') else 'Restart The Machine to use it.') if note) or None,
+                       'failed':'The fix no longer applies to the running code. Nothing was merged; tap Change to redo it.',
+                       'uncertain':'I couldn’t confirm whether the fix was merged. I won’t merge it again.'}[status]
             db.execute('UPDATE action_jobs SET status=?,message_id=?,error=?,updated_at=?,retry_at=? WHERE id=?',
                 (status,result.get('message_id'),error,now(),None if status=='failed' else (dt.datetime.fromisoformat(now())+dt.timedelta(minutes=5)).isoformat(),job['id']))
             if status=='sent':queue_thread_snooze(db,action,job);queue_delegate_wait(db,action,job,result)
@@ -6105,6 +6261,7 @@ class App:
                     self.output(400, {'error': str(error) if isinstance(error, ValueError) else 'Invalid request'})
 
         server = http.server.ThreadingHTTPServer(('127.0.0.1', self.config.get('port', 8787)), Handler)
+        watch_faults(self.store)
         signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
         signal.signal(signal.SIGINT, lambda *_: self.stop.set())
         for account in self.config['accounts']:
