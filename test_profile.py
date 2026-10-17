@@ -83,6 +83,18 @@ class Profile(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'empty'):
             self.app.action('save_profile', {'_profile_session': session, 'profile': {}})
 
+    def test_one_voice_per_channel_most_used_first(self):
+        run_id = self.app.action('profile_start', {})['run_id']
+        self.app.action('save_profile', {'_profile_session': a.PROFILE_SESSION_PREFIX + run_id, 'profile': {
+            'voices': {'whatsapp': 'lowercase bursts, haha', 'Slack': 'terse, no greeting', 'mail': 'Hey [name], short; Regards, Alex', 'Pigeon': 'coo'}}})
+        voices = self.app.action('profile_status', {'run_id': run_id})['draft']['voices']
+        self.assertEqual(list(voices), ['Email', 'Slack', 'WhatsApp', 'Pigeon'])  # channel names as in the evidence; email (8) first
+        self.assertEqual(voices['Email'], 'Hey [name], short; Regards, Alex')
+        run_id = self.app.action('profile_start', {'again': True})['run_id']
+        self.app.action('save_profile', {'_profile_session': a.PROFILE_SESSION_PREFIX + run_id, 'profile': {
+            'voices': [{'channel': 'Email', 'voice': 'warm'}, {'channel': 'LinkedIn', 'voice': 'friendly, no signature'}]}})
+        self.assertEqual(self.app.action('profile_status', {'run_id': run_id})['draft']['voices'], {'Email': 'warm', 'LinkedIn': 'friendly, no signature'})
+
     def test_too_few_own_messages_says_so(self):
         with self.store.connect() as db: db.execute('UPDATE events SET deleted=1')
         with self.assertRaisesRegex(ValueError, 'Only 0 of your own messages'):

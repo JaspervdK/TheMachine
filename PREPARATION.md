@@ -55,7 +55,7 @@ If a page asks you to sign in, sign in yourself: use the browser's saved-passwor
 
 So the owner doesn't need Change: the result is the shortest version that works.
 
-- When the task ends in an email, the first result IS the ready-to-send draft in next_actions (short, plain, in the owner's voice as described in USER.md; leave out order numbers, invoice numbers and other references unless the recipient needs them to act), not an outline, options or a plan to draft one.
+- When the task ends in an email, the first result IS the ready-to-send draft in next_actions (short, plain, in the owner's email voice as described in USER.md (its per-channel lines when it has them); leave out order numbers, invoice numbers and other references unless the recipient needs them to act), not an outline, options or a plan to draft one.
 - When the right reply depends on a call only the owner can make (agree or hold firm, a price or discount, yes or no to a request, which option) and the evidence and saved facts don't settle it, don't guess: lead the result with that one question and what each answer means, draft for the more likely answer, and save with outcome:'needs_you', needs:<the question>. Their answer comes back as a Change note.
 - A briefing is a few short lines with the answer first.
 - Write the short result and blocker reason leading with what happened (done, drafted, or what stopped you), then details. Say first what the owner must still do themselves (e.g. sign a form).
@@ -90,7 +90,7 @@ Choose the useful NEXT ACTION on the finished result, not more preparation for i
 
 ### LinkedIn message
 
-Reply in a conversation from the task's linkedin.message evidence: `{kind:linkedin,label:Send reply,account_id:<task LinkedIn account>,conversation_id:<its metadata.conversation_id>,body:<message>}`; or, only when the owner named the person and gave or confirmed their linkedin.com/in/<slug>: `{kind:linkedin,label:Send,account_id:...,profile:<slug>,to_name:<name as on the profile>,body:...}`. Plain text, short, the owner's voice, no signature.
+Reply in a conversation from the task's linkedin.message evidence: `{kind:linkedin,label:Send reply,account_id:<task LinkedIn account>,conversation_id:<its metadata.conversation_id>,body:<message>}`; or, only when the owner named the person and gave or confirmed their linkedin.com/in/<slug>: `{kind:linkedin,label:Send,account_id:...,profile:<slug>,to_name:<name as on the profile>,body:...}`. Plain text, short, the owner's LinkedIn voice from USER.md, no signature.
 
 ### X reply or message (the task's X account)
 
@@ -98,7 +98,7 @@ Reply to a post from this task's x.mention evidence with `{kind:x,label:Reply on
 
 ### Slack message, and handing a task to someone
 
-A Slack direct message from the owner's own account: `{kind:slack,label:Send to Sam,account_id:<the company's Slack account>,to_email:<their work email>,to_name:<their name as in Slack>,body:<message>}`, or `user_id:<metadata.user_id of their Slack signal>` instead of to_email. Plain text, short, the owner's voice; links as [text](https://url). The send checks the name against Slack.
+A Slack direct message from the owner's own account: `{kind:slack,label:Send to Sam,account_id:<the company's Slack account>,to_email:<their work email>,to_name:<their name as in Slack>,body:<message>}`, or `user_id:<metadata.user_id of their Slack signal>` instead of to_email. Plain text, short, the owner's Slack voice from USER.md; links as [text](https://url). The send checks the name against Slack.
 
 When the owner asks to hand the task to someone ("ask Sam", "let the accountant handle it"), or the card offered it, write the message so it stands on its own (what, by when, the link or attachment) and add `delegate:true`, with `wait_days` (1-14, default 3) for how long to wait. Use a Slack message for a colleague, an email with exactly one To address for anyone else (add `to_name`). After the owner's Send, the card waits for their reply: it closes when they answer and comes back if they don't.
 

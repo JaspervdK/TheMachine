@@ -567,6 +567,16 @@ else: sys.stderr.write("Access denied: serve config denied"); sys.exit(1)''')
         self.assertIn('- Tone: Short and friendly', tiny)  # never less than one line
         self.assertTrue(tiny.startswith((own * 2).rstrip()))
         self.assertEqual(onboarding.fit_profile('## Observed from my messages\n- mine\n', draft, '2026-10-17'), (None, []))
+        # Per-channel voices: their own block, the tone blank goes, and the least used channel is cut first.
+        voices = {'tone': 'Warm', 'voices': {'Email': 'Hey [name]; Regards, Alex', 'Slack': 'terse, lowercase', 'WhatsApp': 'emoji, Dutch'}}
+        starter = onboarding.starter_user_md({'owner_name': 'Alex', 'accounts': []})
+        merged = onboarding.merge_profile(starter, {'voices': voices['voices']}, '2026-10-17')
+        self.assertIn('### Per channel\n- Email: Hey [name]; Regards, Alex\n- Slack: terse, lowercase\n- WhatsApp: emoji, Dutch', merged)
+        self.assertNotIn('(for example: short and friendly', merged)
+        fitted, cut = onboarding.fit_profile(own + '- one more of mine\n' * 4, voices, '2026-10-17')
+        self.assertLessEqual(len(fitted), 4000)
+        self.assertEqual(cut[0], 'WhatsApp voice: emoji, Dutch')
+        self.assertIn('- Email: Hey [name]; Regards, Alex', fitted)
 
 
 if __name__ == '__main__':

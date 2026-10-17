@@ -1195,7 +1195,8 @@ def starter_user_md(config):
 PROFILE_HEADING = '## Observed from my messages'
 PROFILE_MARK = '<!-- assistant profile '
 # Empty starter lines a profile draft covers; they go when the draft is saved, so nothing says the same twice.
-STARTER_BLANKS = {'role': r'- Role: *', 'languages': r'- Languages: *', 'tone': r'- Tone: *(?:\(for example[^\n]*\))? *'}
+STARTER_BLANKS = {'role': r'- Role: *', 'languages': r'- Languages: *', 'tone': r'- Tone: *(?:\(for example[^\n]*\))? *',
+                  'voices': r'- Tone: *(?:\(for example[^\n]*\))? *'}
 STARTER_SECTIONS = {'matters': '## What matters to me\n\n- (customers, projects, people you never want to keep waiting)\n',
                     'leave_alone': '## Leave alone\n\n- (newsletters, tools or people the assistant should ignore)\n'}
 
@@ -1211,6 +1212,8 @@ def render_profile(profile, day):
         lines.append('- Languages: ' + '; '.join(x.rstrip(' .;') for x in profile['languages']))
     if profile.get('examples'):
         lines.append('- Sounds like: ' + ' · '.join(f'"{e.strip(chr(34))}"' for e in profile['examples']))
+    if profile.get('voices'):
+        lines += ['', '### Per channel', *(f'- {channel}: {voice}' for channel, voice in profile['voices'].items())]
     for key, title in (('matters', 'What matters'), ('leave_alone', 'Leave alone')):
         if profile.get(key):
             lines += ['', f'### {title}', *(f'- {item}' for item in profile[key])]
@@ -1239,7 +1242,7 @@ def merge_profile(text, profile, day):
 
 USER_MD_BUDGET = 4000  # OpenClaw chat sessions load this much of USER.md
 # What goes first when a draft doesn't fit: the last examples, then the last people and projects, … the tone last.
-PROFILE_DROP = ('examples', 'matters', 'leave_alone', 'habits', 'role', 'languages', 'greeting', 'sign_off', 'tone')
+PROFILE_DROP = ('examples', 'matters', 'leave_alone', 'habits', 'role', 'languages', 'greeting', 'sign_off', 'voices', 'tone')
 
 
 def without_profile(text):
@@ -1256,12 +1259,17 @@ def profile_room(text, limit=USER_MD_BUDGET):
 def fit_profile(text, profile, day, limit=USER_MD_BUDGET):
     """(merged USER.md, what was left out) with the draft trimmed to fit within limit, least useful
     lines first. Keeps at least one line; (None, []) when the owner made the section their own."""
-    profile, left_out = {k: (list(v) if isinstance(v, list) else v) for k, v in profile.items()}, []
+    profile, left_out = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v) for k, v in profile.items()}, []
     merged = merge_profile(text, profile, day)
-    lines = lambda: sum(len(v) if isinstance(v, list) else 1 for k, v in profile.items() if k in PROFILE_DROP and v)
+    lines = lambda: sum(len(v) if isinstance(v, (list, dict)) else 1 for k, v in profile.items() if k in PROFILE_DROP and v)
     for key in PROFILE_DROP:
         while merged and len(merged) > limit and profile.get(key) and lines() > 1:
-            if isinstance(profile[key], list):
+            if isinstance(profile[key], dict):  # voices: the least used channel goes first (they come most used first)
+                channel, voice = profile[key].popitem()
+                left_out.append(f'{channel} voice: {voice}')
+                if not profile[key]:
+                    profile.pop(key)
+            elif isinstance(profile[key], list):
                 left_out.append(f'{key.replace("_", " ")}: {profile[key].pop()}')
                 if not profile[key]:
                     profile.pop(key)
