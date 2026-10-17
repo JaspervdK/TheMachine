@@ -40,6 +40,26 @@ class Exclusions(unittest.TestCase):
         self.assertFalse(a.excluded_by_rules(titled,{'title':'Growth meeting','metadata':rec}))
         self.assertFalse(a.excluded_by_rules(titled,{'title':'Lunch','metadata':{'start':same}}))  # a one-off lunch stays
 
+    def test_defaults_every_owner_gets(self):
+        config={'accounts':[{'id':'g','service':'gmail'},{'id':'w','service':'whatsapp'},{'id':'c','service':'calendar'},
+                            {'id':'p','service':'android'}]}
+        phone,calendar=config['accounts'][3],config['accounts'][2]
+        rules=a.default_exclusions(config,phone)
+        drop=lambda package,title='New message':a.excluded_by_rules(rules,{'title':title,'body':'','metadata':{'package_name':package}})
+        self.assertTrue(drop('com.google.android.gm'));self.assertTrue(drop('com.whatsapp'));self.assertTrue(drop('com.whatsapp.w4b'))
+        self.assertFalse(drop('com.Slack'))  # no Slack source: its phone notifications are the only copy
+        self.assertFalse(drop('com.example.bank'))
+        for notice in ('Chrome is displaying over other apps','Charging this device via USB','USB debugging connected',
+                       'Wireless debugging connected','Serial console enabled'):
+            self.assertTrue(drop('android',notice),notice)
+        self.assertFalse(drop('android','Storage space running out'))
+        same={'dateTime':'2026-10-14T12:00:00+02:00'}
+        lunch={'title':'Lunch','metadata':{'recurring_event_id':'r','start':same,'original_start':same}}
+        self.assertTrue(a.excluded_by_rules(a.default_exclusions(config,calendar),lunch))
+        self.assertFalse(a.excluded_by_rules(a.default_exclusions(config,calendar),{**lunch,'title':'Lunch with Ann'}))
+        self.assertEqual(a.default_exclusions(config,{**phone,'default_exclude':False}),[])
+        self.assertEqual(a.default_exclusions(config,config['accounts'][0]),[])
+
     def test_excluded_signals_are_never_stored_and_old_copies_are_removed(self):
         tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
         store=a.Store(Path(tmp.name)/'e.sqlite')

@@ -47,6 +47,20 @@ class Reliability(unittest.TestCase):
         app.collector({'id': 'work', 'service': 'gmail'})  # must return normally, not raise
         self.assertEqual(app.stop.calls, 2)
 
+    def test_a_restart_does_not_cost_slow_sources_an_extra_read(self):
+        app = object.__new__(a.App)
+        app.config, app.store = {}, self.store
+        linkedin = {'id': 'li', 'service': 'linkedin', 'poll_seconds': 3600}
+        self.assertEqual(app.resume_wait(linkedin), 0)  # never read: go now
+        self.store.commit_page('li', {'mode': 'incremental'}, [])
+        self.assertGreater(app.resume_wait(linkedin), 3500)  # just read: wait out the hour
+        self.assertEqual(app.resume_wait({'id': 'li', 'service': 'gmail', 'poll_seconds': 60}), 0)  # fast sources go now
+        with self.store.connect() as db:
+            db.execute("UPDATE checkpoints SET last_success=?", ((a.dt.datetime.now(a.dt.timezone.utc) - a.dt.timedelta(hours=2)).isoformat(),))
+        self.assertEqual(app.resume_wait(linkedin), 0)  # overdue: go now
+        self.store.commit_page('li', {'mode': 'incremental', 'page_token': 'next'}, [])
+        self.assertEqual(app.resume_wait(linkedin), 0)  # catching up: go now
+
     # Rolling replay windows
 
     def test_expired_gmail_history_replays_retained_window_not_since_install(self):

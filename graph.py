@@ -199,7 +199,7 @@ def touches(kind, m, owner, wrote_to):
         contacts = [c for c in m.get('contacts') or () if isinstance(c, dict) and '@' in str(c.get('email') or '')][:5]
         met = kind == 'salesflare.meeting' and str(m.get('host') or '').lower() in owner.emails
         return [('email:' + str(c['email']).lower(), c.get('name'), (WEIGHTS['met'] / math.sqrt(len(contacts))) if met else 0.05,
-                 'met' if met else 'seen') for c in contacts if not owner.mine(str(c['email']).lower())]
+                 'met' if met else 'seen') for c in contacts if not owner.mine(str(c['email']).lower()) and not bulk(str(c['email']).lower())]
     return []
 
 

@@ -65,7 +65,9 @@ class Graph(unittest.TestCase):
                  mail(2, 'Robot <noreply@service.com>', 'sam@acme.com'),
                  mail(2, 'Acme info <info@acme.com>', 'sam@acme.com'),  # a shared role address at the owner's own domain
                  mail(3, 'Ann <ann@client.com>', 'Sam <sam@acme.com>, Sam Owner <sam@home.org>'),
-                 chat(1, '32470000001', 'Sam Owner'))  # the owner's own name on another channel
+                 chat(1, '32470000001', 'Sam Owner'),  # the owner's own name on another channel
+                 {'account_id': 'work', 'source_id': 'crm1', 'kind': 'salesflare.email', 'occurred_at': at(2), 'title': 'Your workspace',
+                  'body': 'Hi', 'deleted': False, 'metadata': {'contacts': [{'email': 'no-reply@email.slackhq.com', 'name': 'Slack'}]}})
         self.build()
         with self.store.connect() as db:
             people = {r['id'] for r in db.execute("SELECT id FROM graph_nodes WHERE kind='person'")}

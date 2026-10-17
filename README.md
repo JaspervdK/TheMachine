@@ -182,6 +182,11 @@ Every account has `id`, `service`, `transport` and `boundary`, plus optional `sc
 
 **Noise rules (`exclude`).** A list of rules; an item matching all conditions of any rule is never stored, and stored copies are removed. Conditions: `channels` (Slack channel names), `bots_only`, `packages` (Android package names), `chats` (WhatsApp chat IDs), `senders` (email address substrings), `routine_recurring` (unchanged instances of recurring calendar events), `titles` (exact titles) and `text` (regexes over title and body).
 
+**Built-in noise rules**, on top of yours (`"default_exclude": false` on an account turns them off):
+
+- **Android:** the phone's own status notices ("… is displaying over other apps", "Charging this device via USB", USB/wireless debugging, serial console; storage and security warnings still come through), and notifications from apps whose content already arrives through a source you connected (Gmail, Calendar, WhatsApp, Slack, Salesflare, LinkedIn, X, GitHub, Stripe). Without a Slack source, Slack's phone notifications stay: they are then the only copy.
+- **Calendar:** unchanged instances of recurring placeholders: Lunch, Block(ed), Busy, Focus (time), Deep work, Home, Office, Commute, Gym, Stand up / Standup / Daily standup, Happy birthday!. A moved or one-off "Lunch with Ann" still counts.
+
 ## Sources
 
 Collectors read existing source content. The optional Salesflare `join_pipelines` setting also adds your own user to matching CRM accounts; it is empty by default. Each collector runs in its own thread with its own checkpoint, so a slow or failing source never blocks the others. Absence from a later read is never treated as deletion.

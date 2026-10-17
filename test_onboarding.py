@@ -44,6 +44,9 @@ class FakeUI(onboarding.UI):
         return '\n'.join(self.out)
 
 
+PLUGINS = hasattr(onboarding.assistant(), 'load_connector')  # connector plugins (OSS); else built-in SETUPS
+
+
 class OnboardingTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='machine-onboarding-'))
@@ -242,6 +245,7 @@ else:
         config['accounts'][0]['credential_variable'] = 'SALESFLARE_GONE_KEY'
         self.assertEqual(onboarding.missing(config, config['accounts'][0]), 'SALESFLARE_GONE_KEY is not in salesflare.env')
 
+    @unittest.skipUnless(PLUGINS, 'Stripe with its own key needs the connector plugin')
     def test_stripe_can_reuse_the_maton_key_slack_already_uses(self):
         slack = dict(EXAMPLE['work-slack'], email='alex@acme.test', credential_variable='MATON_WORK_KEY', connection_id='conn-slack', team_id='T1', user_id='U1')
         self.config(slack)
@@ -327,6 +331,7 @@ elif args[:2] == ["api", "call"]:
                                  'gh is signed in as octo': 'assistant connect github',
                                  'an Android phone is paired with OpenClaw': 'assistant connect android'})
 
+    @unittest.skipUnless(PLUGINS, 'the RSS connector is a plugin')
     def test_a_plugin_source_asks_its_own_setup_fields(self):
         self.config()
         onboarding.connect(self.path, 'rss', FakeUI(answers=['https://example.com/feed.xml']), restart=False)
@@ -337,9 +342,11 @@ elif args[:2] == ["api", "call"]:
         self.assertIn('rss', raised.exception.fix)
 
     def test_every_plugin_setup_is_complete(self):
-        for service in onboarding.assistant().connector_services():
-            setup = getattr(onboarding.assistant().load_connector(service), 'SETUP', None)
-            self.assertIsNotNone(setup, service)
+        extra = [s for s in onboarding.sources() if s not in onboarding.SERVICES]
+        self.assertIn('github', extra)
+        for service in extra:
+            setup = onboarding.setup_of(service)
+            self.assertTrue(setup, service)
             self.assertEqual(setup['account']['service'], service)
             for key, prompt, *_ in setup.get('ask', []):
                 self.assertTrue(key and prompt)

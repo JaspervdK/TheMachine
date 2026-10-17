@@ -352,7 +352,7 @@ def discover(config):
     for email, _ in gog_accounts(tool(config, 'gog')):
         if email.lower() not in read:
             found.append((f'gog is signed in as {email}, but no source reads it', 'assistant connect gmail'))
-    if not siblings(config, 'github') and shutil.which('gh') and plugin('github'):
+    if not siblings(config, 'github') and shutil.which('gh') and setup_of('github'):
         login = run(['gh', 'api', 'user', '--jq', '.login'], timeout=20)
         if login.returncode == 0 and login.stdout.strip():
             found.append((f'gh is signed in as {login.stdout.strip()}', 'assistant connect github'))
@@ -389,15 +389,23 @@ def data_dir(config):
 
 
 def plugin(service):
-    return assistant().load_connector(service) if service not in LABELS else None
+    loader = getattr(assistant(), 'load_connector', None)
+    return loader(service) if loader and service not in LABELS else None
+
+
+def setup_of(service):
+    """What `connect` asks for a non-built-in source: its connector's SETUP, or assistant.SETUPS
+    for installs that build those sources in."""
+    if service in LABELS:
+        return {}
+    return getattr(plugin(service), 'SETUP', None) or (getattr(assistant(), 'SETUPS', None) or {}).get(service) or {}
 
 
 def label(service):
     if service in LABELS:
         return LABELS[service]
-    module = plugin(service)
-    kinds = list((getattr(module, 'KINDS', None) or {}).values())
-    return (getattr(module, 'SETUP', None) or {}).get('label') or (kinds[0] if kinds else service.title())
+    kinds = list((getattr(plugin(service), 'KINDS', None) or {}).values())
+    return setup_of(service).get('label') or (kinds[0] if kinds else service.title())
 
 
 def connect_name(account, config=None):
@@ -423,8 +431,7 @@ def missing(config, account):
         variable = account.get('credential_variable') if name == account.get('credential') else None
         if variable and variable not in env_names(path):
             return f'{variable} is not in {Path(path).name}'
-    module = plugin(account.get('service', 'gmail')) if account.get('service', 'gmail') not in LABELS else None
-    for key, *_ in (getattr(module, 'SETUP', None) or {}).get('ask', []):
+    for key, *_ in setup_of(account.get('service', 'gmail')).get('ask', []):
         if not account.get(key):
             return f'{key} is not set'
     return ''
@@ -462,7 +469,7 @@ def new_account(config, service, account_id=None, ui=None):
     ui = ui or UI(False)
     same = siblings(config, service)
     if same:
-        first_ask = next(iter((getattr(plugin(service), 'SETUP', None) or {}).get('ask', [])), ('',))[0] if service not in LABELS else ''
+        first_ask = next(iter(setup_of(service).get('ask', [])), ('',))[0]
         account = {k: v for k, v in same[-1].items() if k not in IDENTITY and k != first_ask}
         template_id = None
     elif service in LABELS:
@@ -471,7 +478,7 @@ def new_account(config, service, account_id=None, ui=None):
         account = next(a for a in example['accounts'] if a['id'] == CONNECTORS[name])
         template_id = account['id']
     else:
-        account = dict((getattr(plugin(service), 'SETUP', None) or {}).get('account') or {'id': service, 'service': service, 'boundary': 'work'})
+        account = dict(setup_of(service).get('account') or {'id': service, 'service': service, 'boundary': 'work'})
         template_id = account['id']
     account = expand(json.loads(json.dumps(account)), home())
     account.pop('exclude', None)  # example noise rules are not yours
@@ -762,8 +769,7 @@ def step_gateway(config, account, ui):
 
 
 def step_plugin(config, account, ui):
-    module = plugin(account.get('service', 'gmail'))
-    setup = getattr(module, 'SETUP', None) or {}
+    setup = setup_of(account.get('service', 'gmail'))
     if setup.get('note') and not setup.get('maton'):
         ui.say(setup['note'])
     for key, prompt, *rest in setup.get('ask', []):
@@ -774,10 +780,10 @@ def step_plugin(config, account, ui):
         if not account[key]:
             raise SetupError(f'No {key} given', f'rerun: assistant connect {account.get("service", "gmail")}')
     own_key = account.get('transport') != 'maton' and Path(config.get('credentials', {}).get(account.get('credential', ''), '/nonexistent')).expanduser().exists()
-    if setup.get('maton') and (account.get('transport') == 'maton' or saved_keys(config, 'MATON_')) and ui.choose(
+    if setup.get('maton') and (not setup.get('secret') or (account.get('transport') == 'maton' or saved_keys(config, 'MATON_')) and ui.choose(
             f'How should it read {setup.get("label", account["service"])}', sorted(
                 [('maton', 'through Maton, which you already use'), ('api', 'with its own key')],
-                key=lambda o: o[0] != ('api' if own_key else 'maton'))) == 'maton':
+                key=lambda o: o[0] != ('api' if own_key else 'maton'))) == 'maton'):
         account['transport'] = 'maton'
         account['connection_id'] = ui.ask(setup['maton'], account.get('connection_id', ''))
         if not account['connection_id']:
@@ -802,7 +808,8 @@ STEPS = {'gmail': step_google, 'calendar': step_google, 'slack': step_slack, 'sa
 
 
 def sources():
-    return sorted({*SERVICES} - {'salesflare'}) + assistant().connector_services()
+    extra = getattr(assistant(), 'connector_services', None)
+    return sorted({*SERVICES} - {'salesflare'}) + (extra() if extra else sorted(getattr(assistant(), 'SETUPS', None) or {}))
 
 
 def connect(config_path, name, ui, account_id=None, restart=True):
@@ -810,7 +817,7 @@ def connect(config_path, name, ui, account_id=None, restart=True):
     the service and show the first sync. Returns the account. Raises SetupError with a fix."""
     config = load(config_path)
     service = SERVICES.get(name, name)
-    if service not in LABELS and not plugin(service):
+    if service not in LABELS and not setup_of(service):
         raise SetupError(f'Unknown source {name}', 'choose one of: ' + ', '.join(sources()))
     same = siblings(config, service)
     if account_id:

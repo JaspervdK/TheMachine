@@ -1179,6 +1179,32 @@ def excluded_by_rules(rules, event):
     return False
 
 
+# Noise every owner has, on top of their own `exclude` rules. An account's `"default_exclude": false` turns these off.
+# Android's own status notices (not storage or security warnings, which still come through).
+ANDROID_STATUS_NOTICES = {'packages': ['android'], 'text': [r'is displaying over other apps', r'charging this device via usb',
+                                                           r'usb debugging connected', r'wireless debugging connected', r'serial console enabled']}
+# Phone notifications from apps whose content already arrives through their own source.
+SOURCE_APPS = {'gmail': ['com.google.android.gm'], 'calendar': ['com.google.android.calendar'],
+               'whatsapp': ['com.whatsapp', 'com.whatsapp.w4b'], 'slack': ['com.Slack'], 'salesflare': ['org.salesflare.app'],
+               'linkedin': ['com.linkedin.android'], 'x': ['com.twitter.android'], 'github': ['com.github.android'],
+               'stripe': ['com.stripe.android.dashboard']}
+# Recurring placeholders that weren't moved or cancelled: the calendar says nothing new.
+ROUTINE_CALENDAR = {'routine_recurring': True, 'titles': ['Lunch', 'Block', 'Blocked', 'Busy', 'Focus', 'Focus time', 'Deep work', 'Home',
+                                                          'Office', 'Commute', 'Gym', 'Stand up', 'Standup', 'Daily standup', 'Happy birthday!']}
+
+
+def default_exclusions(config, account):
+    if account.get('default_exclude') is False:
+        return []
+    if account.get('service') == 'android':
+        services = {a.get('service', 'gmail') for a in config.get('accounts', []) if a is not account}
+        packages = sorted({p for service in services for p in SOURCE_APPS.get(service, ())})
+        return [ANDROID_STATUS_NOTICES] + ([{'packages': packages}] if packages else [])
+    if account.get('service') == 'calendar':
+        return [ROUTINE_CALENDAR]
+    return []
+
+
 # Calendar invite acceptances are noise in every email source. Subject-only, case-insensitive; config `excluded_email_subjects` overrides.
 DEFAULT_EXCLUDED_EMAIL_SUBJECTS = [
     r"^\s*(accepted|geaccepteerd|aanvaard|accepté|acceptée|angenommen|akzeptiert|aceptado|aceptada|aceito|aceita"
@@ -4563,7 +4589,7 @@ class App:
         set_timezone(config.get('timezone'))
         self.config = config
         self.store = Store(config['database'])
-        self.store.exclusions = {a['id']: a['exclude'] for a in config['accounts'] if a.get('exclude')}
+        self.store.exclusions = {a['id']: rules for a in config['accounts'] if (rules := (a.get('exclude') or []) + default_exclusions(config, a))}
         self.store.owner_user_ids = {a['user_id'] for a in config['accounts'] if a.get('service') == 'slack' and a.get('user_id')}
         self.store.accounts = config['accounts']
         self.token = credential(config, 'api-token')
@@ -4910,8 +4936,31 @@ class App:
             return result
         raise ValueError('Unknown operation')
 
+    def resume_wait(self, account):
+        """Seconds until a slow source (polled every 10 minutes or less often: LinkedIn, X, CRM) is due
+        again after a restart. A restart alone must not cost an extra read; catch-up and new accounts go now."""
+        delay = account.get('poll_seconds', self.config.get('poll_seconds', 300))
+        if delay < 600:
+            return 0
+        state = self.store.checkpoint(account['id'])
+        with self.store.connect() as db:
+            row = db.execute('SELECT last_success FROM checkpoints WHERE account_id=?', (account['id'],)).fetchone()
+        if not row or not row['last_success'] or not state or state.get('mode') != 'incremental' or state.get('page_token'):
+            return 0
+        since = (dt.datetime.fromisoformat(now()) - dt.datetime.fromisoformat(row['last_success'])).total_seconds()
+        return max(0, min(delay, delay - since))
+
     def collector(self, account):
         source = Slack(self.config, account, self.stop) if account.get('service') == 'slack' else None
+        try:
+            wait = self.resume_wait(account)
+        except Exception as error:  # never keep a source from starting
+            LOG.warning('resume_wait account=%s error=%s', account['id'], type(error).__name__)
+            wait = 0
+        if wait:
+            LOG.info('sync account=%s resumes in %ds (last read before the restart)', account['id'], wait)
+            if self.stop.wait(wait):
+                return
         while not self.stop.is_set():
             try:
                 with self.store.connect() as db:
