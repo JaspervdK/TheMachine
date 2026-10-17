@@ -155,6 +155,27 @@ def cmd_tasks(config, args):
         print()
 
 
+def cmd_promises(config, args):
+    promises = call(config, 'status', {'full': True}).get('promises', [])
+    promises = [p for p in promises if args.all or p['state'] in ('open', 'card')]
+    if args.json:
+        return out_json(promises)
+    if not promises:
+        print('No open promises.' if not args.all else 'No promises in the last two weeks.')
+        return
+    for direction, heading in (('mine', 'You promised'), ('theirs', 'Promised to you')):
+        rows = [p for p in promises if p['direction'] == direction]
+        if not rows:
+            continue
+        print(f'{heading} ({len(rows)})')
+        for p in rows:
+            due = f" · due {dt.date.fromisoformat(p['due']):%a %d %b}" if p['due'] else ''
+            state = {'card': ' · card out', 'kept': ' · kept', 'dropped': ' · dropped', 'answered': ' · they wrote again'}.get(p['state'], '')
+            print(f"  #{p['id']}  {p['who']}: {p['what']}{due}{state}")
+            print(f"    said {local(p['made_at'])}" + (f" · {p['note']}" if p.get('note') and p['state'] != 'open' else ''))
+        print()
+
+
 def cmd_show(config, args):
     status = call(config, 'status', {'full': True})
     task = find_task(status, args.id)
@@ -459,7 +480,7 @@ def cmd_raw(config, args):
 def parser():
     p = argparse.ArgumentParser(prog='assistant', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
                                 epilog='Examples:\n  assistant tasks\n  assistant show 7b61\n  assistant search "Acme"\n'
-                                       '  assistant prepare 7b61 --file brief.md\n  assistant preview\n  assistant connect gmail\n  assistant doctor')
+                                       '  assistant promises\n  assistant prepare 7b61 --file brief.md\n  assistant preview\n  assistant connect gmail\n  assistant doctor')
     p.add_argument('--config', default=str(assistant.DEFAULT_CONFIG), help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest='command', required=True, metavar='command')
 
@@ -474,6 +495,8 @@ def parser():
     c.add_argument('--done', action='store_true', help='done and dismissed tasks')
     c.add_argument('--outstanding', action='store_true', help=argparse.SUPPRESS)
     c.add_argument('--all', action='store_true', help='every task')
+    c = add('promises', 'Promises you made and promises made to you, from your messages', cmd_promises)
+    c.add_argument('--all', action='store_true', help='also those closed in the last two weeks')
     c = add('show', 'Show one task with its decisions and evidence', cmd_show)
     c.add_argument('id', help='task id or a unique prefix')
     c.add_argument('--no-evidence', action='store_true')

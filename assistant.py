@@ -202,7 +202,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact'}
+OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -399,6 +399,9 @@ PROFILE_SKIP = re.compile(r'^(?:Sent (?:an? )?(?:image|photo|video|sticker|audio
 PROFILE_TEMPLATE_COPIES = 2  # near-identical sends (outreach templates) kept per template
 PROFILE_WEIGHTS = {'gmail.message': 2}  # drafts are mostly email, so email gets two turns per round
 OWN_KINDS = {'gmail.message': 'email', 'slack.message': 'Slack', 'whatsapp.message': 'WhatsApp', 'linkedin.message': 'LinkedIn', 'x.dm': 'X DM'}
+# When an open promise is checked without a date: the owner's own after 3 days, someone else's after a week.
+PROMISE_CHECK_DAYS = {'mine': 3, 'theirs': 7}
+PROMISE_CARDS_PER_DAY = 5
 
 
 def credential(config, name):
@@ -1625,6 +1628,12 @@ class Store:
             # Git receipts survive a service restart before optional push/restart work.
             db.execute('CREATE TABLE IF NOT EXISTS merge_effects(action_id TEXT NOT NULL,operation TEXT NOT NULL,receipt TEXT NOT NULL,status TEXT NOT NULL,'
                        'updated_at TEXT NOT NULL,PRIMARY KEY(action_id,operation))')
+            # Promises the owner made and promises made to them, from reviewed messages. Each is
+            # checked when due: still open, it becomes a card (status carded, suggestion_id).
+            db.execute('CREATE TABLE IF NOT EXISTS promises(id INTEGER PRIMARY KEY,direction TEXT NOT NULL,who TEXT NOT NULL,what TEXT NOT NULL,due TEXT,'
+                       'check_at TEXT NOT NULL,event_id INTEGER NOT NULL,account_id TEXT NOT NULL,watch TEXT,status TEXT NOT NULL,note TEXT,suggestion_id TEXT,'
+                       'created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(event_id,direction,who))')
+            db.execute("CREATE INDEX IF NOT EXISTS promises_open ON promises(status,check_at)")
             preparation_columns = {r['name'] for r in db.execute('PRAGMA table_info(preparations)')}
             if 'action_id' not in preparation_columns:
                 db.execute('ALTER TABLE preparations ADD COLUMN action_id TEXT')
@@ -2420,6 +2429,100 @@ class Store:
                        ('answered:' + row['id'], row['id'], 'complete', f"{watch['name']} replied: {answer['title'][:150]} (signal {answer['id']})", 'assistant', stamp))
             db.execute("UPDATE deliveries SET reminder=0,needs_edit=1,updated_at=? WHERE suggestion_id=?", (stamp, row['id']))
             db.execute("UPDATE deliveries SET status='cancelled' WHERE suggestion_id=? AND status='queued'", (row['id'],))
+
+    def promise(self, args, digest_at='08:30'):
+        """Record a promise from a reviewed message, or update an open one (id with status or due)."""
+        if args.get('id') is not None:
+            return self.update_promise(args, digest_at)
+        direction = args.get('direction')
+        if direction not in ('mine', 'theirs'):
+            raise ValueError("direction is 'mine' (the owner promised) or 'theirs' (someone promised the owner)")
+        who, what = ' '.join(str(args.get('who') or '').split()), ' '.join(str(args.get('what') or '').split())
+        if not 2 <= len(who) <= 80 or not 3 <= len(what) <= 140:
+            raise ValueError('who is the other person (2-80 characters); what is the promised action starting with a verb, as it follows "they’d": "send the signed contract" (3-140 characters)')
+        due = args.get('due')
+        if due is not None:
+            try:
+                due = dt.date.fromisoformat(str(due)[:10]).isoformat()
+            except ValueError:
+                raise ValueError('due must be the promised date as YYYY-MM-DD, or left out when none was said') from None
+        with self.connect() as db:
+            event = db.execute('SELECT id,account_id,kind,occurred_at,metadata FROM events WHERE id=? AND deleted=0', (args.get('event_id'),)).fetchone()
+            if not event or event['kind'] not in OWN_KINDS:
+                raise ValueError('event_id is the email, Slack, WhatsApp, LinkedIn or X message with the promise')
+            own = own_message(dict(event), self.owner_user_ids)
+            if own != (direction == 'mine'):
+                raise ValueError("The owner's promises are in messages they sent; someone else's are in their message to the owner")
+            watch = awaiting_key(dict(event), self.owner_user_ids) if direction == 'theirs' else None
+            check_at = promise_check_at(direction, due, event['occurred_at'], digest_at)
+            stamp = now()
+            cursor = db.execute('INSERT INTO promises(direction,who,what,due,check_at,event_id,account_id,watch,status,created_at,updated_at) '
+                                "VALUES(?,?,?,?,?,?,?,?,'open',?,?) ON CONFLICT(event_id,direction,who) DO NOTHING",
+                                (direction, who, what, due, check_at, event['id'], event['account_id'], encoded(watch) if watch else None, stamp, stamp))
+            if not cursor.rowcount:
+                row = db.execute('SELECT id,status FROM promises WHERE event_id=? AND direction=? AND who=?', (event['id'], direction, who)).fetchone()
+                return {'id': row['id'], 'status': row['status'], 'duplicate': True}
+        return {'id': cursor.lastrowid, 'status': 'open', 'check_at': check_at,
+                'note': 'Recorded, no card. It is checked when due; if still open then, a card comes.'}
+
+    def update_promise(self, args, digest_at='08:30', source='assistant'):
+        with self.connect() as db:
+            row = db.execute('SELECT p.*,e.occurred_at made_at FROM promises p JOIN events e ON e.id=p.event_id WHERE p.id=?', (args.get('id'),)).fetchone()
+            if not row:
+                raise ValueError('Unknown promise id')
+            if row['status'] != 'open':
+                raise ValueError('This promise is no longer open' + (': its card is out, use looks_handled on that card' if row['status'] == 'carded' else ''))
+            status, reason = args.get('status'), ' '.join(str(args.get('reason') or '').split())[:200]
+            if status in ('kept', 'dropped'):
+                if source == 'assistant' and len(reason) < 3:
+                    raise ValueError('Say in a few words what shows it kept or no longer needed (reason), with the event_ids')
+                db.execute('UPDATE promises SET status=?,note=?,updated_at=? WHERE id=?',
+                           (status, reason or ('Done' if status == 'kept' else 'Not needed') + ' (you)', now(), row['id']))
+                return {'id': row['id'], 'status': status}
+            if args.get('due') and source == 'assistant':
+                try:
+                    due = dt.date.fromisoformat(str(args['due'])[:10]).isoformat()
+                except ValueError:
+                    raise ValueError('due must be YYYY-MM-DD') from None
+                check_at = promise_check_at(row['direction'], due, row['made_at'], digest_at)
+                db.execute('UPDATE promises SET due=?,check_at=?,note=?,updated_at=? WHERE id=?', (due, check_at, reason or None, now(), row['id']))
+                return {'id': row['id'], 'status': 'open', 'due': due, 'check_at': check_at}
+        raise ValueError("Update a promise with status 'kept' or 'dropped' and a reason, or with a new due date")
+
+    def settle_promises(self, db):
+        """Someone else's promise closes itself when they write again in that conversation: their new
+        message is reviewed as usual. A promise whose message was deleted is dropped."""
+        db.execute("UPDATE promises SET status='dropped',note='The message was deleted',updated_at=? WHERE status='open' "
+                   "AND event_id IN (SELECT id FROM events WHERE deleted=1)", (now(),))
+        for row in db.execute("SELECT id,watch FROM promises WHERE status='open' AND watch IS NOT NULL").fetchall():
+            watch = json.loads(row['watch'])
+            answer = next((e for e in db.execute('SELECT id,account_id,kind,occurred_at,title,metadata FROM events WHERE account_id=? AND kind=? AND occurred_at>? AND deleted=0 ORDER BY occurred_at',
+                                                 (watch['account_id'], watch['kind'], watch['since'])) if awaiting_match(watch, dict(e), self.owner_user_ids)), None)
+            if answer:
+                db.execute("UPDATE promises SET status='answered',note=?,updated_at=? WHERE id=?",
+                           (f"They wrote again: {answer['title'][:150]}", now(), row['id']))
+
+    def promises(self, days=14):
+        """Open promises and those closed in the last days, soonest first."""
+        since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+        with self.connect() as db:
+            rows = [dict(r) for r in db.execute(
+                'SELECT p.id,p.direction,p.who,p.what,p.due,p.check_at,p.status,p.note,p.suggestion_id,p.account_id,p.event_id,p.created_at,p.updated_at,'
+                'e.occurred_at made_at,s.status card_status FROM promises p JOIN events e ON e.id=p.event_id LEFT JOIN suggestions s ON s.id=p.suggestion_id '
+                "WHERE p.status IN ('open','carded') OR p.updated_at>=? ORDER BY coalesce(p.due,substr(p.check_at,1,10)),p.id", (since,))]
+        for row in rows:
+            row['state'] = promise_state(row)
+        return [r for r in rows if r['state'] in ('open', 'card') or r['updated_at'] >= since]
+
+    def promises_text(self, limit=30):
+        """Open promises for the review prompt, so a later message can close them."""
+        lines = []
+        for p in [p for p in self.promises() if p['state'] == 'open'][:limit]:
+            made = dt.datetime.fromisoformat(p['made_at']).astimezone(local_tz())
+            due = 'due ' + dt.date.fromisoformat(p['due']).strftime('%a %d %b') if p['due'] else 'no date'
+            who = f"you → {p['who']}" if p['direction'] == 'mine' else f"{p['who']} → you"
+            lines.append(f"- #{p['id']} {who}: {p['what']} ({due}; said {made:%a %d %b}, event {p['event_id']})")
+        return '\n'.join(lines)
 
     def slipped(self, run_id, limit=5):
         """Emails that may have slipped: the owner's own emails that ask something and got no answer in
@@ -3418,9 +3521,11 @@ class Store:
         return candidate
 
     def snapshot(self, accounts):
+        promises = self.promises()
         with self.connect() as db:
             result = {table: [dict(r) for r in db.execute('SELECT * FROM ' + table + ' ORDER BY ' + column + ' DESC LIMIT 100')]
                       for table, column in [('suggestions', 'created_at'), ('decisions', 'created_at'), ('analyses', 'started_at')]}
+            result['promises'] = promises
             for decision in result['decisions']:
                 annotation=db.execute('SELECT status,reason,superseded_by FROM decision_annotations WHERE decision_id=?',(decision['id'],)).fetchone()
                 if annotation:
@@ -4136,6 +4241,38 @@ def awaiting_key(event, owner_slack_ids=()):
     if event['kind'] in ('whatsapp.message', 'linkedin.message', 'x.dm') and not m.get('from_me') and (m.get('chat_id') or m.get('conversation_id')):
         return {**key, 'conversation': m.get('chat_id') or m['conversation_id'], 'sender': m.get('sender_id') or m.get('from') or ''}
     return None
+
+
+def own_message(event, owner_slack_ids=()):
+    """Whether a collected message is the owner's own: sent email, their Slack user, a from_me chat."""
+    m = event['metadata'] if isinstance(event['metadata'], dict) else json.loads(event['metadata'])
+    if event['kind'] == 'gmail.message':
+        return 'SENT' in m.get('labels', [])
+    if event['kind'] == 'slack.message':
+        return m.get('user_id') in owner_slack_ids
+    return bool(m.get('from_me'))
+
+
+def promise_check_at(direction, due, made_at, digest_at='08:30', current=None):
+    """When an open promise is checked: the owner's own on the morning it's due (never sooner than
+    three hours from now), someone else's the morning after; undated ones after PROMISE_CHECK_DAYS."""
+    current = current or dt.datetime.fromisoformat(now())
+    hour, minute = (int(x) for x in digest_at.split(':'))
+    if due:
+        day = dt.date.fromisoformat(due) + dt.timedelta(days=1 if direction == 'theirs' else 0)
+    else:
+        day = dt.datetime.fromisoformat(made_at).astimezone(local_tz()).date() + dt.timedelta(days=PROMISE_CHECK_DAYS[direction])
+    target = dt.datetime.combine(day, dt.time(hour, minute), local_tz())
+    if direction == 'mine':
+        target = max(target, current + dt.timedelta(hours=3))
+    return target.astimezone(dt.timezone.utc).isoformat()
+
+
+def promise_state(row):
+    """open, card (its card is out), kept, dropped or answered; a card closes the promise with it."""
+    if row['status'] == 'carded':
+        return {'completed': 'kept', 'rejected': 'dropped'}.get(row.get('card_status'), 'card')
+    return row['status']
 
 
 def awaiting_match(watch, event, owner_slack_ids=()):
@@ -5000,6 +5137,15 @@ def weekly_recap(store, config, current=None, usage=None):
     if preps:
         cards.append(f"• Do it: {preps.get('done', 0)} ready, {preps.get('cancelled', 0)} stopped by you, {preps.get('blocked', 0) or 'none'} stuck")
     lines += ['', '**Cards**', *cards]
+    promised = store.promises(7)
+    if promised:
+        today = current.astimezone(tz).date().isoformat()
+        count = lambda direction, *states: sum(1 for p in promised if p['direction'] == direction and p['state'] in states)
+        late = sum(1 for p in promised if p['state'] in ('open', 'card') and p['due'] and p['due'] < today)
+        lines += ['', '**Promises**', f"• Yours: {count('mine', 'kept')} kept, {count('mine', 'open', 'card')} open",
+                  f"• To you: {count('theirs', 'kept', 'answered')} came through, {count('theirs', 'open', 'card')} still waiting"]
+        if late:
+            lines.append(f"• {late} past {'its' if late == 1 else 'their'} date")
     alive = recap_graph_lines(store)
     if alive:
         lines += ['', '**People and projects**', *alive]
@@ -5050,7 +5196,7 @@ Goal: draft the lines of the owner's USER.md that their own messages show, so re
 Do not send messages, change files or do anything else. End with exactly NO_REPLY.'''
 
 
-def review_prompt(run_id, accounts, preferences='', facts='', slipped=''):
+def review_prompt(run_id, accounts, preferences='', facts='', slipped='', promises=''):
     return f'''This is a signal review started by the personal-assistant service (review run {run_id}). It is not a chat with the owner and not a preparation task.
 The assistant instructions (tools/personal-assistant/AGENTS.md) and the owner's profile (USER.md) are included in this turn's context; follow the "Reviewing signals" section. Don't re-read those files.
 With the assistant_signals tool: call status, then ONE begin_analysis with account_ids {json.dumps(accounts)} and limit 120. The reply is paged: read every page with analysis_page before finishing, including next_row_offset continuations on the same page. Where body_clipped matters, read the rest with events (the account, event_ids and body_offset). Events replies contain events and remaining_event_ids; read the remaining IDs with the same accounts. Follow body_next_offset to the end of long bodies.
@@ -5058,10 +5204,14 @@ Save only genuinely useful, distinct suggestions with suggest; the service deliv
 Name the ongoing work: finish_analysis projects ({{"Project name": [event_ids from this batch]}}) for signals that clearly belong to a deal, hire, launch, renovation or other piece of work, and project on a suggest that belongs to one. Reuse begin_analysis's projects names when they fit. graph tells who someone is to the owner (closeness, rhythm, gone quiet, their projects).
 Before suggesting, check it isn't already handled: search related signals (same thread, sender or chat) for a later reply from the owner or from a colleague (e.g. a teammate on the owner's own email domain answering the thread), or a confirmation (signed, paid, booked, resolved). If so, don't suggest it. When a signal in this batch shows that an OPEN suggestion (pending, prepared, accepted or snoozed in status) is now done, call looks_handled with suggestion_id, a short plain reason and the event_ids that show it; the owner still closes it themselves. For anything tied to a date, check the calendars for that date (days off, travel, existing plans).
 When a note the owner wrote on a suggestion (decisions with source telegram or dashboard) states something that stays true beyond that card, save it once with remember_fact (text, decision_id); skip one-off wording requests.
+Promises: when a message in this batch commits the owner to doing something for someone, or someone to doing something for the owner, record it with promise (direction, event_id, who, what, due when a date was said). It is not a card; the service checks it when due. When a signal shows an open promise below kept, cancelled or moved, update it with promise and its id.
 Messages are disabled in this turn. Do not work on anything else. End with exactly NO_REPLY.''' + (f'''
 
 Facts the owner told you earlier (true unless newer evidence says otherwise):
 {facts}''' if facts else '') + (f'''
+
+Open promises (the owner's and those made to them):
+{promises}''' if promises else '') + (f'''
 
 Possibly slipped. Each is shown once. Read it with events (its account and event_ids) and search the thread, the person and other sources for a later answer, a call or a Slack message. Suggest a follow-up only when it still matters and nothing shows it handled: for the owner's own email, offer a short nudge (prepare_ahead when they'd clearly want it); for a question to them, offer the reply. Use its event as evidence. Skip the rest without comment.
 {slipped}''' if slipped else '') + (f'''
@@ -5359,6 +5509,12 @@ class App:
                     ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh,auth=excluded.auth''',
                            (endpoint, keys['p256dh'].rstrip('='), keys['auth'].rstrip('='), now()))
             return {'subscribed': True}
+        if name == 'promise':
+            return self.store.promise(args, self.config.get('digest_at', '08:30'))
+        if name == 'promise_close':
+            if not owner_dashboard or args.get('status') not in ('kept', 'dropped'):
+                raise ValueError('Only the owner closes a promise, on the dashboard')
+            return self.store.update_promise({'id': args.get('id'), 'status': args['status']}, source='dashboard')
         if name == 'forget_fact':
             if not owner_dashboard:
                 raise ValueError('Only the owner can remove a fact, on the dashboard')
@@ -5748,8 +5904,47 @@ class App:
         if row:
             job=dict(row);self.merge_effect(job,json.loads(job['payload']),json.loads(job['receipt']),job['operation'],next_actions.MergeTransport(self.config,restart_self))
 
+    def promise_step(self, limit=3):
+        """Once a minute: close promises answered meanwhile, then turn the due ones that are still
+        open into cards, prepared ahead when allowed. At most PROMISE_CARDS_PER_DAY a day."""
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.store.settle_promises(db)
+            since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=1)).isoformat()
+            room = PROMISE_CARDS_PER_DAY - db.execute("SELECT count(*) FROM promises WHERE status='carded' AND updated_at>=?", (since,)).fetchone()[0]
+            due = [dict(r) for r in db.execute("SELECT p.*,e.occurred_at made_at FROM promises p JOIN events e ON e.id=p.event_id "
+                                               "WHERE p.status='open' AND p.check_at<=? ORDER BY p.check_at LIMIT ?", (now(), max(0, min(limit, room))))]
+        for promise in due:
+            self.promise_card(promise)
+
+    def promise_card(self, p):
+        made = dt.datetime.fromisoformat(p['made_at']).astimezone(local_tz())
+        said = f"{made:%A} {made.day} {made:%b}"
+        by = f" by **{dt.date.fromisoformat(p['due']):%A %-d %b}**" if p['due'] else ''
+        if p['direction'] == 'mine':
+            title = p['what'][:1].upper() + p['what'][1:]
+            title = title if p['who'].lower() in title.lower() or len(title) + len(p['who']) > 84 else f"{title} for {p['who']}"
+            body = f"You told {p['who']} on {said} you’d {p['what']}{by}. Nothing shows it done yet."
+        else:
+            title = f"Waiting on {p['who']}: {p['what']}"
+            body = f"{p['who']} said on {said} they’d {p['what']}{by}. Nothing has come in yet, so a short nudge may help."
+        ahead = self.config.get('prepare_ahead', True) is not False and self.store.ahead_room(int(self.config.get('prepare_ahead_per_day', 10)))
+        saved = self.store.suggest('promise:%d' % p['id'], title[:90], body[:700], [p['event_id']], 'now', self.config.get('digest_at', '08:30'),
+                                   work=self.is_work([p['account_id']]), due=p['due'], ahead=ahead)
+        with self.store.connect() as db:
+            db.execute("UPDATE promises SET status='carded',suggestion_id=?,updated_at=? WHERE id=? AND status='open'", (saved['id'], now(), p['id']))
+            if p['watch'] and not saved.get('duplicate'):
+                # Their reply closes the card too while it is still on its way.
+                db.execute('UPDATE suggestions SET awaiting=? WHERE id=?', (p['watch'], saved['id']))
+        return saved
+
     def action_worker(self):
+        promised = 0
         while not self.stop.wait(3):
+            if time.monotonic() - promised >= 60:
+                promised = time.monotonic()
+                try:self.promise_step()
+                except Exception as error:LOG.error('promise check error=%s',type(error).__name__)
             try:self.action_step()
             except Exception as error:LOG.error('approved action error=%s',type(error).__name__)
             try:self.undo_step()
@@ -6039,7 +6234,7 @@ class App:
         if request['action'] == 'start':
             self.store.note_rule_files(RULE_FILES)
             request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text(),
-                                               self.store.slipped(run['run_id']))
+                                               self.store.slipped(run['run_id']), self.store.promises_text())
         receipt = runner(request)
         result = receipt.get('status', 'unavailable')
         with self.store.connect() as db:
@@ -6453,7 +6648,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','push_subscribe','push_unsubscribe')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','push_subscribe','push_unsubscribe')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

@@ -37,8 +37,8 @@
 [data-theme="light"] dialog{box-shadow:0 24px 60px -12px #3d375259}
 [data-theme="light"] dialog::backdrop{background:#3d375240}
 [data-theme="light"] #suggestion-stats .stats{background:#fffffff2}
-[data-theme="light"] #later-list,[data-theme="light"] #finished-list{background:#ffffffbf}
-[data-theme="light"] #later-list>summary .count,[data-theme="light"] #finished-list>summary .count{background:#3d37520f}
+[data-theme="light"] #later-list,[data-theme="light"] #promises-list,[data-theme="light"] #finished-list{background:#ffffffbf}
+[data-theme="light"] #later-list>summary .count,[data-theme="light"] #promises-list>summary .count,[data-theme="light"] #finished-list>summary .count{background:#3d37520f}
 [data-theme="light"] .actions button.ghost,[data-theme="light"] .actions button.quiet{background:#3d375212}
 [data-theme="light"] .toast{background:#3d3752;color:#fff}
 [data-theme="light"] .toast.error{background:#a3401a}
@@ -337,14 +337,18 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 @keyframes pop{to{scale:1.9;opacity:0}}
 .game-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.game-foot p{margin:0;color:var(--muted)}.game-foot button{flex:none;white-space:nowrap}
 @media(prefers-reduced-motion:reduce){#game-field .zz{animation:zz var(--d,3s) linear forwards!important}#game-field .zz.got{animation:none!important;opacity:0}}.all-clear strong{font-size:1.05rem;margin-bottom:2px}
-#later-list,#finished-list{margin:10px 0 0;padding:0;border:1px solid var(--border);border-radius:14px;background:#23272ebf}
-#later-list+#finished-list{margin-top:8px}
-#later-list>summary,#finished-list>summary{display:flex;align-items:center;gap:10px;width:100%;padding:14px 16px;font-size:.92rem;font-weight:600;color:var(--text)}
-#later-list>summary .count,#finished-list>summary .count{margin-left:auto;min-width:24px;padding:2px 8px;border-radius:999px;background:#ffffff0f;font:600 .74rem/1.4 var(--mono);color:var(--muted);text-align:center}
-#later-list[open]>summary,#finished-list[open]>summary{margin:0;border-bottom:1px solid var(--border)}
-#later-list>:not(summary),#finished-list>:not(summary){margin-left:12px;margin-right:12px}
+#later-list,#promises-list,#finished-list{margin:10px 0 0;padding:0;border:1px solid var(--border);border-radius:14px;background:#23272ebf}
+#later-list+:is(#promises-list,#finished-list),#promises-list+#finished-list{margin-top:8px}
+#later-list>summary,#promises-list>summary,#finished-list>summary{display:flex;align-items:center;gap:10px;width:100%;padding:14px 16px;font-size:.92rem;font-weight:600;color:var(--text)}
+#later-list>summary .count,#promises-list>summary .count,#finished-list>summary .count{margin-left:auto;min-width:24px;padding:2px 8px;border-radius:999px;background:#ffffff0f;font:600 .74rem/1.4 var(--mono);color:var(--muted);text-align:center}
+#later-list[open]>summary,#promises-list[open]>summary,#finished-list[open]>summary{margin:0;border-bottom:1px solid var(--border)}
+#later-list>:not(summary),#promises-list>:not(summary),#finished-list>:not(summary){margin-left:12px;margin-right:12px}
 #later-list>.day-head:first-of-type{margin-top:12px}#later-list>article:last-child,#finished-list>:last-child{margin-bottom:12px}
 #finished-list>article:first-of-type{margin-top:12px}
+#promises-list .promise{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;padding:10px 0;border-top:1px solid var(--border)}
+#promises-list .day-head+.promise{border-top:0}#promises-list>.promise:last-child{margin-bottom:6px}
+#promises-list .promise .grow{flex:1 1 100%;min-width:0;overflow-wrap:anywhere}#promises-list .promise button:first-of-type{margin-left:auto}#promises-list .promise small{display:block;margin-top:2px;color:var(--muted);font-size:.82rem}
+#promises-list .promise button{padding:6px 10px;font-size:.85rem}
 .card-badges{flex:1 1 0}.card .meta{margin-bottom:10px}
 .card h3{font-size:1.12rem;font-weight:700;line-height:1.3}
 .card .body{font-size:1.02rem;line-height:1.55;color:var(--text)}
@@ -672,6 +676,7 @@ $('#suggestions').addEventListener('click',e=>{const h=e.target.closest('.sectio
 // Long history lists show the latest few; Show more adds ten at a time and survives the refresh.
 const listShown={};const clipList=(id,rows,empty,n=3)=>{const k=listShown[id]||n;return rows.length?rows.slice(0,k).join('')+(rows.length>k?`<button type="button" class="quiet more-rows" data-more="${id}" data-shown="${k}">Show ${Math.min(10,rows.length-k)} more</button>`:''):empty};
 document.addEventListener('click',e=>{const b=e.target.closest('[data-more]');if(!b)return;listShown[b.dataset.more]=(Number(b.dataset.shown)||listShown[b.dataset.more]||3)+10;render()});
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-promise]');if(!b)return;b.disabled=true;try{await request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'promise_close',args:{id:Number(b.dataset.promise),status:b.dataset.close}})});toast(b.dataset.close==='kept'?'Marked done.':'Dropped.');refresh()}catch(err){b.disabled=false;toast(err.message,true)}});
 $('#facts').addEventListener('click',async e=>{const b=e.target.closest('[data-forget]');if(!b)return;b.disabled=true;try{await request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'forget_fact',args:{id:Number(b.dataset.forget)}})});toast('Removed.');refresh()}catch(err){b.disabled=false;toast(err.message,true)}});
 // Ctrl+Enter (Cmd+Enter on a Mac) in the change box saves it, like clicking Save changes.
 $('#suggestions').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)&&e.target.matches('textarea[id^="feedback-"]')){e.preventDefault();e.target.closest('.change-editor')?.querySelector('button[data-choice="other"]')?.click();return}const h=e.target.closest('.section-head[data-fold]');if(h&&(e.key==='Enter'||e.key===' ')){e.preventDefault();toggleSection(h.dataset.fold)}});
@@ -680,8 +685,13 @@ let scopeFilter=['work','personal'].includes(localStorage.getItem('scope-filter'
 let linkedCardId=null;
 $('#suggestion-stats').addEventListener('click',e=>{const t=e.target.closest('[data-fold-tile]');if(t)toggleSection(t.dataset.foldTile)});
 $('#suggestion-summary').addEventListener('click',e=>{const b=e.target.closest('[data-scope]');if(!b)return;linkedCardId=null;scopeFilter=b.dataset.scope;localStorage.setItem('scope-filter',scopeFilter);render()});
+// Promises from your messages, both ways. A still-open one becomes a card when it's due.
+function promisesList(open){const items=(state.promises||[]).filter(p=>['open','card'].includes(p.state));if(!items.length)return '';
+const row=p=>`<div class="promise"><span class="grow">${p.direction==='mine'?'To':'From'} <b>${esc(p.who)}</b>: ${esc(p.what)}<small>${esc(p.direction==='mine'?'You said it':'Said')} ${esc(new Date(p.made_at).toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'}))}${p.state==='card'?' · on a card now':p.due?'':' · no date, checked '+esc(new Date(p.check_at).toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'}))}</small></span>${dueChip(p)}${p.state==='open'?`<button type="button" class="quiet" data-promise="${p.id}" data-close="kept" aria-label="Done: ${esc(p.what)}">Done</button><button type="button" class="quiet" data-promise="${p.id}" data-close="dropped" aria-label="Not needed: ${esc(p.what)}">Drop</button>`:''}</div>`;
+const group=(direction,title)=>{const rows=items.filter(p=>p.direction===direction);return rows.length?`<h3 class="day-head">${title}</h3>`+rows.map(row).join(''):''};
+return `<details id="promises-list" ${open?'open':''}><summary><span>Promises</span><span class="count">${items.length}</span></summary>${group('mine','You promised')}${group('theirs','Promised to you')}</details>`}
 function render(){
-const finishedOpen=$('#finished-list')?.open||false,laterOpen=$('#later-list')?.open||false;
+const finishedOpen=$('#finished-list')?.open||false,laterOpen=$('#later-list')?.open||false,promisesOpen=$('#promises-list')?.open||false;
 const drafts=Object.fromEntries([...document.querySelectorAll('#suggestions textarea')].filter(t=>t.value).map(t=>[t.id,t.value]));
 const shown=state.suggestions.filter(s=>scopeFilter==='all'||s.scope===scopeFilter);
 const dueKey=s=>s.due||'9999',outstanding=shown.filter(s=>!closed(s)&&s.status!=='snoozed').sort((a,b)=>dueKey(a)<dueKey(b)?-1:dueKey(a)>dueKey(b)?1:0),later=shown.filter(s=>s.status==='snoozed'),finished=shown.filter(closed);
@@ -697,7 +707,7 @@ $('#suggestion-stats').innerHTML=`<div class="stats">${[[ready,'Ready','mint','r
 $('#badge-inbox').textContent=outstanding.length||'';
 $('#suggestions').innerHTML=(outstanding.length?'':`<div class="empty all-clear"><button class="poke" type="button" aria-label="Poke the robot" title="Poke me"><img class="sleepy" src="brand/${pokeAwake?'wave':'sleepy'}.webp" alt="The Machine resting"></button><div><strong>All clear.</strong><span class="poke-line">${esc(pokeLine||'I’ll add something when it’s useful.')}</span></div>${pokes>=PLAY_AFTER?PLAY_BUTTON:''}</div>`)+[[ready,'Ready for you','ready'],[needs,'Needs your decision','needs'],[preparing,'Preparing','preparing']].filter(([items])=>items.length).map(([items,title,key])=>`<div class="section-head" id="section-${key}" data-fold="${key}" role="button" tabindex="0" aria-expanded="${!folded.has(key)}"><h2>${title}</h2><span class="count">${items.length}</span></div>${folded.has(key)?'':items.map(s=>suggestionCard(s,title)).join('')}`).join('')
 // Snoozed cards are out of the way by choice: folded by default, open state kept across refreshes.
-+(later.length?`<details id="later-list" ${laterOpen?'open':''}><summary><span>Coming back later</span><span class="count">${later.length}</span></summary>${laterCards(later)}</details>`:'')+`<details id="finished-list" ${finishedOpen?'open':''}><summary><span>Done / dismissed this week</span><span class="count">${recent.length}</span></summary>${recent.map(suggestionCard).join('')||'<p class="muted">Nothing finished or dismissed this week.</p>'}${older?`<p class="muted">${older} older ${older===1?'item is':'items are'} under Feedback.</p>`:''}</details>`;
++(later.length?`<details id="later-list" ${laterOpen?'open':''}><summary><span>Coming back later</span><span class="count">${later.length}</span></summary>${laterCards(later)}</details>`:'')+promisesList(promisesOpen)+`<details id="finished-list" ${finishedOpen?'open':''}><summary><span>Done / dismissed this week</span><span class="count">${recent.length}</span></summary>${recent.map(suggestionCard).join('')||'<p class="muted">Nothing finished or dismissed this week.</p>'}${older?`<p class="muted">${older} older ${older===1?'item is':'items are'} under Feedback.</p>`:''}</details>`;
 for(const[id,v]of Object.entries(drafts)){const t=document.getElementById(id);if(t){t.value=v;t.classList.add('filled')}}
 const choiceTone={accept:'mint',complete:'mint',reject:'muted',snooze:'lavender',other:'amber',reopen:'lavender',undo:'lavender',retry:'lavender'};
 {const q=state.quality;const pct=v=>v==null?'–':`${v}%`;const was=(v,prev)=>prev==null||v==null?'':`<small>${v>prev?'up':v<prev?'down':'same'} from ${prev}%</small>`;
