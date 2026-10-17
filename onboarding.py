@@ -47,6 +47,12 @@ IDENTITY = {'id', 'email', 'owner_emails', 'display_name', 'connection_id', 'tea
 # The source is set up but can't serve right now (shared browser in use, rate limit): saved anyway, and the
 # collector's own retry reads it, instead of failing setup over a moment's contention.
 BUSY = ('x_browser_busy', 'linkedin_browser_busy', 'x_rate_limited')
+# Phone apps whose notifications repeat a source. Setup offers to skip them on the Android account, never by
+# default: the phone app may also show inboxes or workspaces that nothing here reads.
+PHONE_APPS = {'gmail': ['com.google.android.gm'], 'calendar': ['com.google.android.calendar'],
+              'whatsapp': ['com.whatsapp', 'com.whatsapp.w4b'], 'slack': ['com.Slack'], 'salesflare': ['org.salesflare.app'],
+              'linkedin': ['com.linkedin.android'], 'x': ['com.twitter.android'], 'github': ['com.github.android'],
+              'stripe': ['com.stripe.android.dashboard']}
 # Redacted sync error labels -> what to do about them (first matching prefix wins).
 HINTS = (
     ('account_identity_mismatch', 'the sign-in belongs to a different account than config.json says'),
@@ -970,6 +976,26 @@ def sources():
     return sorted({*SERVICES} - {'salesflare'}) + (extra() if extra else sorted(getattr(assistant(), 'SETUPS', None) or {}))
 
 
+def offer_phone_skip(config, account, ui):
+    """Ask once per phone app that repeats a connected source whether the Android account should skip its notifications.
+    Default no; a yes adds an explicit `packages` rule to that Android account."""
+    if not ui.interactive:
+        return
+    others = [a for a in config.get('accounts', []) if a.get('id') != account.get('id')]
+    phones = [account] if account.get('service') == 'android' else [a for a in others if a.get('service') == 'android']
+    services = sorted({a.get('service', 'gmail') for a in others}) if account.get('service') == 'android' else [account.get('service', 'gmail')]
+    for phone in phones:
+        for service in services:
+            packages = PHONE_APPS.get(service)
+            skipped = {p for rule in phone.get('exclude') or [] if set(rule) == {'packages'} for p in rule['packages']}
+            if not packages or set(packages) <= skipped:
+                continue
+            where = '' if phone is account else f' ({phone["id"]})'
+            if ui.yes(f'  Skip {label(service)} notifications from the phone{where}? The {label(service)} source already reads them;'
+                      ' say no if the phone app also shows accounts not connected here', default=False):
+                phone.setdefault('exclude', []).append({'packages': packages})
+
+
 def connect(config_path, name, ui, account_id=None, restart=True):
     """Set up one source: ask, write config and credentials, find IDs, read it once; then restart
     the service and show the first sync. Returns the account. Raises SetupError with a fix."""
@@ -998,6 +1024,7 @@ def connect(config_path, name, ui, account_id=None, restart=True):
         ui.say(f'  ! not read yet: {hint(error) or error}. Saved; the first sync reads it.')
     elif error:
         raise SetupError(f'{account["id"]} does not work yet: {error}', hint(error) or f'rerun: assistant connect {name}')
+    offer_phone_skip(config, account, ui)
     config['accounts'] = [account if a['id'] == account['id'] else a for a in config.get('accounts', [])] + ([] if existing else [account])
     save(config_path, config)
     ui.say(f'  ✓ {label(service)} connected')

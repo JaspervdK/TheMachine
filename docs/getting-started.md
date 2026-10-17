@@ -36,7 +36,7 @@ Right after the service starts, the installer walks through each source:
 | Slack | Asks for your Maton API key (hidden) and connection ID, then finds your team, user and email itself. |
 | Salesflare | Asks for an API key (hidden), then finds your user and team. |
 | WhatsApp | Finds the wacli store, offers to link it (QR code) and records which account it is. |
-| Android | Picks your paired Android phone from OpenClaw. |
+| Android | Picks your paired Android phone from OpenClaw. For each source you connect that also has a phone app (Gmail, Slack, WhatsApp, …) it asks whether to skip that app's notifications; the default keeps them, since the phone may show other inboxes too. |
 | Gateway log | Finds the Gateway's systemd unit. |
 | Plugins | `github`, `stripe`, `x`, `linkedin`, `rss`: not part of the installer; `assistant connect github` (and so on) asks for the few fields each needs. |
 

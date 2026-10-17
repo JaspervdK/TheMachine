@@ -131,7 +131,7 @@ It fits setups that aren't the example:
 - **Slack:** your Maton API key (or one you saved before) and Slack connection ID; `team_id`, `user_id`, `email` and `slack_host` come from Slack itself.
 - **Salesflare (`crm`):** an API key (or one you saved before); `user_id`, `team_id` and `email` come from `/me`.
 - **WhatsApp:** the wacli store; offers `wacli auth` (QR code) when it isn't linked, then records `identity_sha256` from `wacli auth status`.
-- **Android:** picks your paired Android node from `openclaw nodes list`.
+- **Android:** picks your paired Android node from `openclaw nodes list`, then asks per connected source with a phone app whether to skip that app's notifications (default no).
 - **Plugins:** each connector declares what it asks in `SETUP` (see [Adding a source](docs/adding-a-source.md)).
 - **Telegram ID by hand:** message your bot; with DM pairing its reply shows your user ID. Approve yourself with `openclaw pairing approve telegram <code>`.
 - **Dashboard by hand:** `tailscale serve --bg --https=8443 --set-path / http://127.0.0.1:8787`, then open `https://<machine>.<tailnet>.ts.net:8443/`. Its own port makes it its own origin, so the dashboard installs as a phone app next to OpenClaw's web app on :443 (two apps on one origin claim each other's pages). A custom domain is optional: `deploy/Caddyfile` and `deploy/caddy-machine.service`.
@@ -193,7 +193,7 @@ Every account has `id`, `service`, `transport` and `boundary`, plus optional `sc
 
 **Built-in noise rules**, on top of yours (`"default_exclude": false` on an account turns them off):
 
-- **Android:** the phone's own status notices ("… is displaying over other apps", "Charging this device via USB", USB/wireless debugging, serial console; storage and security warnings still come through). App notifications stay even if one account from that service is connected: the phone may also use personal mailboxes or other workspaces not collected here. Use an explicit account `exclude` rule with `packages` only when you want that entire phone app excluded.
+- **Android:** the phone's own status notices ("… is displaying over other apps", "Charging this device via USB", USB/wireless debugging, serial console; storage and security warnings still come through). App notifications stay even if one account from that service is connected: the phone may also use personal mailboxes or other workspaces not collected here. When you connect a source that also has a phone app (Gmail, Slack, WhatsApp, …), setup asks once whether to skip that app's notifications; yes adds an `exclude` rule with its `packages` to the Android account, which you can also write yourself.
 - **Calendar:** unchanged instances of recurring placeholders: Lunch, Block(ed), Busy, Focus (time), Deep work, Home, Office, Commute, Gym, Stand up / Standup / Daily standup, Happy birthday!. A moved or one-off "Lunch with Ann" still counts.
 
 ## Sources

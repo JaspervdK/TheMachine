@@ -220,6 +220,23 @@ if args[:2] == ["pairing", "list"]:
         self.assertEqual(self.saved()['accounts'][0]['node_id'], 'phone-1')
         self.assertIn('Pixel', ui.text())
 
+    def test_phone_apps_that_repeat_a_source_are_skipped_only_when_asked(self):
+        phone = {'id': 'phone', 'service': 'android'}
+        config = {'accounts': [{'id': 'mail', 'service': 'gmail'}, {'id': 'chat', 'service': 'whatsapp'}, {'id': 'log', 'service': 'gateway'}]}
+        ui = FakeUI(yes=[True, False])
+        onboarding.offer_phone_skip(config, phone, ui)
+        self.assertEqual(phone['exclude'], [{'packages': ['com.google.android.gm']}])  # WhatsApp kept: the owner said no
+        self.assertEqual(sum('Skip' in line for line in ui.out), 2)  # nothing to ask for the Gateway log
+        config['accounts'].append(phone)
+        slack = {'id': 'team', 'service': 'slack'}
+        onboarding.offer_phone_skip(config, slack, FakeUI(yes=[True]))
+        self.assertEqual(phone['exclude'][-1], {'packages': ['com.Slack']})
+        ui = FakeUI(yes=[True])
+        onboarding.offer_phone_skip(config, slack, ui)  # already skipped: not asked again
+        self.assertEqual((ui.out, len(phone['exclude'])), ([], 2))
+        onboarding.offer_phone_skip(config, {'id': 'more', 'service': 'whatsapp'}, onboarding.UI(False))
+        self.assertEqual(len(phone['exclude']), 2)  # unattended setup never drops phone notifications
+
     def test_gmail_signs_in_read_only_and_calendar_reuses_the_sign_in(self):
         flag = self.tmp / 'authorized'
         gog = self.stub('gog', f'''
