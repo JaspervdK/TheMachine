@@ -70,8 +70,8 @@ class Promises(unittest.TestCase):
     def test_direction_must_match_who_wrote_the_message(self):
         with self.assertRaisesRegex(ValueError, 'messages they sent'):
             self.record(direction='mine')
-        with self.assertRaisesRegex(ValueError, 'messages they sent'):
-            self.record(event_id=self.mine)
+        # Someone else's promise can sit in the owner's own ask that they took on.
+        self.assertEqual(self.record(event_id=self.mine, what='make an issue for it')['status'], 'open')
         with self.assertRaisesRegex(ValueError, 'direction'):
             self.record(direction='ours')
         with self.assertRaisesRegex(ValueError, 'YYYY-MM-DD'):
@@ -99,6 +99,21 @@ class Promises(unittest.TestCase):
         self.assertIn('Signed contract', row['note'])
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM suggestions').fetchone()[0], 0)
+
+    def test_a_chat_promise_stays_open_when_they_write_again(self):
+        chat = lambda source_id, at, mine=False: {'account_id': 'work', 'source_id': source_id, 'kind': 'whatsapp.message', 'occurred_at': at,
+                                                  'title': 'Pat', 'body': 'sure' if mine else 'Can you check both paints?', 'deleted': False,
+                                                  'metadata': {'chat_id': 'pat@s.whatsapp.net', 'from_me': mine, 'sender_id': None if mine else 'pat@s.whatsapp.net'}}
+        self.store.commit_page('work', {}, [chat('ask', '2026-10-19T08:40:00+00:00'), chat('yes', '2026-10-19T08:41:00+00:00', mine=True)])
+        with self.store.connect() as db:
+            ask, yes = [r[0] for r in db.execute("SELECT id FROM events WHERE source_id IN ('ask','yes') ORDER BY source_id")]
+        # A bare "sure" to a request is the owner's promise; the request says what.
+        mine = self.app().action('promise', {'direction': 'mine', 'event_id': yes, 'who': 'Pat', 'what': 'check both paints'})['id']
+        theirs = self.app().action('promise', {'direction': 'theirs', 'event_id': ask, 'who': 'Pat', 'what': 'send the paint colours'})['id']
+        self.assertIsNone(self.row(theirs)['watch'])
+        self.store.commit_page('work', {}, [chat('later', '2026-10-20T10:00:00+00:00')])
+        self.app().promise_step()
+        self.assertEqual((self.row(mine)['status'], self.row(theirs)['status']), ('open', 'open'))
 
     def test_an_open_promise_becomes_a_prepared_card_when_due(self):
         theirs = self.record(due='2026-10-23')['id']

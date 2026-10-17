@@ -2451,9 +2451,11 @@ class Store:
             if not event or event['kind'] not in OWN_KINDS:
                 raise ValueError('event_id is the email, Slack, WhatsApp, LinkedIn or X message with the promise')
             own = own_message(dict(event), self.owner_user_ids)
-            if own != (direction == 'mine'):
-                raise ValueError("The owner's promises are in messages they sent; someone else's are in their message to the owner")
-            watch = awaiting_key(dict(event), self.owner_user_ids) if direction == 'theirs' else None
+            if direction == 'mine' and not own:
+                raise ValueError("The owner's promises are in messages they sent (a reply, a yes or a reaction to a request); event_id is that message")
+            # Only an email closes someone else's promise by itself: chats run on, so a later chat message from
+            # them is no sign it was kept; the review closes those, or the check when it's due.
+            watch = awaiting_key(dict(event), self.owner_user_ids) if direction == 'theirs' and event['kind'] == 'gmail.message' else None
             check_at = promise_check_at(direction, due, event['occurred_at'], digest_at)
             stamp = now()
             cursor = db.execute('INSERT INTO promises(direction,who,what,due,check_at,event_id,account_id,watch,status,created_at,updated_at) '
@@ -2490,8 +2492,8 @@ class Store:
         raise ValueError("Update a promise with status 'kept' or 'dropped' and a reason, or with a new due date")
 
     def settle_promises(self, db):
-        """Someone else's promise closes itself when they write again in that conversation: their new
-        message is reviewed as usual. A promise whose message was deleted is dropped."""
+        """Someone else's promise made by email closes itself when they write again in that thread or from
+        that address: their new message is reviewed as usual. A promise whose message was deleted is dropped."""
         db.execute("UPDATE promises SET status='dropped',note='The message was deleted',updated_at=? WHERE status='open' "
                    "AND event_id IN (SELECT id FROM events WHERE deleted=1)", (now(),))
         for row in db.execute("SELECT id,watch FROM promises WHERE status='open' AND watch IS NOT NULL").fetchall():
@@ -5204,7 +5206,7 @@ Save only genuinely useful, distinct suggestions with suggest; the service deliv
 Name the ongoing work: finish_analysis projects ({{"Project name": [event_ids from this batch]}}) for signals that clearly belong to a deal, hire, launch, renovation or other piece of work, and project on a suggest that belongs to one. Reuse begin_analysis's projects names when they fit. graph tells who someone is to the owner (closeness, rhythm, gone quiet, their projects).
 Before suggesting, check it isn't already handled: search related signals (same thread, sender or chat) for a later reply from the owner or from a colleague (e.g. a teammate on the owner's own email domain answering the thread), or a confirmation (signed, paid, booked, resolved). If so, don't suggest it. When a signal in this batch shows that an OPEN suggestion (pending, prepared, accepted or snoozed in status) is now done, call looks_handled with suggestion_id, a short plain reason and the event_ids that show it; the owner still closes it themselves. For anything tied to a date, check the calendars for that date (days off, travel, existing plans).
 When a note the owner wrote on a suggestion (decisions with source telegram or dashboard) states something that stays true beyond that card, save it once with remember_fact (text, decision_id); skip one-off wording requests.
-Promises: when a message in this batch commits the owner to doing something for someone, or someone to doing something for the owner, record it with promise (direction, event_id, who, what, due when a date was said). It is not a card; the service checks it when due. When a signal shows an open promise below kept, cancelled or moved, update it with promise and its id.
+Promises: when a message in this batch commits the owner to doing something for someone, or someone to doing something for the owner, record it with promise (direction, event_id, who, what, due when a date was said). Most are silent: a "sure", "ok" or 👍 to a request (what comes from the request in earlier_in_conversation), "I'll check", a yes to an invitation, or something the owner asked of someone that they took on. It is not a card; the service checks it when due. When a signal shows an open promise below kept, cancelled or moved, update it with promise and its id.
 Messages are disabled in this turn. Do not work on anything else. End with exactly NO_REPLY.''' + (f'''
 
 Facts the owner told you earlier (true unless newer evidence says otherwise):

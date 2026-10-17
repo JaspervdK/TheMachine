@@ -243,10 +243,10 @@ The service starts reviews itself (`review_worker.enabled`). When at least `min_
 
 ### Promises
 
-Reviews record every promise they find in a message, with `promise`, instead of making a card: one you made in something you sent (`mine`), or one someone made to you (`theirs`), with who, what and a date when one was said. Each goes into the `promises` table, once per message, person and direction. Nothing shows up on Telegram yet.
+Reviews record every promise they find in a message, with `promise`, instead of making a card: one you made in something you sent (`mine`), or one someone made to you (`theirs`, in their message or in your ask they took on), with who, what and a date when one was said. Most are silent: a "sure" or 👍 to a request, "I'll check", a yes to a plan, a repeated request; the review reads the request in `earlier_in_conversation`. Each goes into the `promises` table, once per message, person and direction. Nothing shows up on Telegram yet.
 
 - **When it's checked:** yours on the morning it's due (at `digest_at`, never sooner than three hours after it was recorded), theirs the morning after their date. Without a date: yours after 3 days, theirs after a week.
-- **Closing by itself:** someone else's promise closes when they write again in that conversation (same email thread or sender, Slack DM or channel member, chat). Their new message is reviewed as usual, so a delay can become a new promise. Every review prompt lists the open promises, and the review closes one (`kept` or `dropped`, with the reason) or moves its date when a later message shows it.
+- **Closing by itself:** someone else's promise made by email closes when they write again (same thread or sender). Chats run on, so a later chat message is no sign it was kept: those stay open for the review or the check. Their new message is reviewed as usual, so a delay can become a new promise. Every review prompt lists the open promises, and the review closes one (`kept` or `dropped`, with the reason) or moves its date when a later message shows it.
 - **The card:** a promise still open when it's checked becomes a card (`promise:<id>`), prepared ahead under the usual limits: for yours the thing you promised, for theirs a short nudge. If they answer while the card is on its way, it closes. At most 5 such cards a day.
 - **Where you see them:** the dashboard's Suggestions tab has a **Promises** list (You promised, Promised to you) with Done and Drop for open ones, `assistant promises` lists them, and the weekly recap counts kept and open ones.
 
