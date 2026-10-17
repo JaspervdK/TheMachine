@@ -100,6 +100,18 @@ class OnboardingTest(unittest.TestCase):
         with mock.patch.object(onboarding.assistant(), 'load_connector', return_value=SimpleNamespace(check=check)):
             self.assertIsNone(onboarding.check({}, {'service':'test'}))
 
+    def test_a_busy_browser_does_not_fail_setup(self):
+        self.config()
+        ui = FakeUI(answers=['personal', 'alex_example'])
+        with mock.patch.object(onboarding, 'check', return_value='x_browser_busy'), \
+             mock.patch.object(onboarding, 'step_plugin', side_effect=lambda config, account, ui: account.update(handle='alex_example')):
+            onboarding.connect(self.path, 'x', ui, restart=False)
+        self.assertEqual([a['service'] for a in json.loads(self.path.read_text())['accounts']], ['x'])
+        self.assertTrue(any('Saved; the first sync reads it' in line for line in ui.out))
+        with mock.patch.object(onboarding, 'check', return_value='x_signed_out'), \
+             mock.patch.object(onboarding, 'step_plugin', side_effect=lambda config, account, ui: None), self.assertRaises(onboarding.SetupError):
+            onboarding.connect(self.path, 'x', FakeUI(answers=['personal']), 'other-x', restart=False)
+
     def test_plugin_setup_without_a_read_check_is_not_reported_verified(self):
         from types import SimpleNamespace
         with mock.patch.object(onboarding.assistant(), 'load_connector', return_value=SimpleNamespace()):

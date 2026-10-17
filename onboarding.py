@@ -44,6 +44,9 @@ PLACEHOLDERS = {'email': 'alex@example.com', 'connection_id': '00000000-0000-000
 IDENTITY = {'id', 'email', 'owner_emails', 'display_name', 'connection_id', 'team_id', 'user_id', 'slack_host', 'node_id',
             'identity_sha256', 'store', 'calendar_id', 'handle', 'login', 'url', 'workspace_id', 'stripe_account',
             'exclude', 'excluded_terms', 'scope'}
+# The source is set up but can't serve right now (shared browser in use, rate limit): saved anyway, and the
+# collector's own retry reads it, instead of failing setup over a moment's contention.
+BUSY = ('x_browser_busy', 'linkedin_browser_busy', 'x_rate_limited')
 # Redacted sync error labels -> what to do about them (first matching prefix wins).
 HINTS = (
     ('account_identity_mismatch', 'the sign-in belongs to a different account than config.json says'),
@@ -991,7 +994,9 @@ def connect(config_path, name, ui, account_id=None, restart=True):
         ui.say(f'  saving it as {account["id"]} in {account.get("boundary")}')
     STEPS.get(service, step_plugin)(config, account, ui)
     error = check(config, account)
-    if error:
+    if error and error.startswith(BUSY):
+        ui.say(f'  ! not read yet: {hint(error) or error}. Saved; the first sync reads it.')
+    elif error:
         raise SetupError(f'{account["id"]} does not work yet: {error}', hint(error) or f'rerun: assistant connect {name}')
     config['accounts'] = [account if a['id'] == account['id'] else a for a in config.get('accounts', [])] + ([] if existing else [account])
     save(config_path, config)

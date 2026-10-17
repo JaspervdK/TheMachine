@@ -45,7 +45,7 @@ The service calls `sync` every `poll_seconds` (default 300) in the account's own
 
 ### Setup: `assistant connect <service>`
 
-Setup verifies a real read before saving the account configuration. A plugin can define `check(config, account, helpers)`, returning `None` on success or raising `helpers.SourceError` with a content-free error label. The check must not write source data or advance checkpoints. Existing `Source.verify()` or `Source.profile()` methods are also supported. Without a supported read check, setup reports that verification is unavailable rather than calling the account connected.
+Setup verifies a real read before saving the account configuration. A plugin can define `check(config, account, helpers)`, returning `None` on success or raising `helpers.SourceError` with a content-free error label. The check must not write source data or advance checkpoints. Existing `Source.verify()` or `Source.profile()` methods are also supported. Without a supported read check, setup reports that verification is unavailable rather than calling the account connected. A source that answers it is busy or rate limited (`x_browser_busy`, `linkedin_browser_busy`, `x_rate_limited`) is saved anyway with a note; the first sync reads it.
 
 Declare `SETUP` so the owner can add an account without editing JSON:
 

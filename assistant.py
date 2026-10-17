@@ -227,6 +227,13 @@ def clamp(value, chars=300, items=10):
     return value
 
 
+def similar(a, b, cutoff=0.5):
+    """Two openings mostly made of the same words in the same order (an outreach template). Words, not
+    characters: ordinary sentences share most letters, so character matching is slow and says little."""
+    a, b = a.split(), b.split()
+    return len(set(a) & set(b)) > cutoff * max(len(a), len(b)) and difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() > cutoff
+
+
 def sentences(value, chars):
     """One line of at most chars, ending at a whole sentence (or word) instead of mid-word."""
     text = ' '.join(str(value or '').split())
@@ -2462,7 +2469,7 @@ class Store:
                         if len(text.split()) < 2 or PROFILE_SKIP.match(text):
                             continue
                         gist = ' '.join(re.sub(r'^\W*(?:hey|hi|hello|dear|hoi|dag)\b[^,\n!]{0,40}[,\n!]', '', text[:400], flags=re.I).split()).lower()[:120]
-                        if sum(gist == other or (len(gist) > 60 and len(other) > 60 and difflib.SequenceMatcher(None, gist, other).ratio() > 0.5)
+                        if sum(gist == other or (len(gist) > 60 and len(other) > 60 and similar(gist, other))
                                for other in copies) >= PROFILE_TEMPLATE_COPIES:
                             continue
                         copies.append(gist)
