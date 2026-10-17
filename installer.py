@@ -7,9 +7,14 @@
     ./install.sh --uninstall         remove the service, plugin and CLI link; keep data
     ./install.sh --uninstall --purge also delete the data directory (config, database, secrets)
 
+In a terminal, a healthy install goes on to connect each source (onboarding.py: sign-ins,
+keys and IDs, a test read and the first sync), offers the dashboard on your tailnet and a
+starter USER.md, then a preview review and, after it, turning reviews and Telegram on.
+
 Re-running is safe: an existing config.json is kept, missing keys are added, and secrets
-are only created when absent. Nothing here reads or changes OpenClaw's own configuration
-beyond `openclaw plugins install/enable/uninstall`.
+are only created when absent. OpenClaw's own configuration is only read (your approved
+Telegram ID, paired phones); the installer changes nothing there beyond `openclaw plugins
+install/enable/uninstall`, and approving your own Telegram pairing request if you say yes.
 """
 import argparse
 import json
@@ -22,6 +27,9 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+
+import onboarding
+from onboarding import CONNECTORS, expand, write_private
 
 ROOT = Path(__file__).resolve().parent
 PLUGIN_ID = 'personal-assistant-bridge'
@@ -48,14 +56,6 @@ ENV = {
     'android_node_id': 'ASSISTANT_ANDROID_NODE_ID',
     'whatsapp_store': 'ASSISTANT_WHATSAPP_STORE',
 }
-# Connector name -> account id in config.example.json.
-CONNECTORS = {'gmail': 'work-gmail', 'calendar': 'work-calendar', 'slack': 'work-slack',
-              'crm': 'work-crm', 'android': 'personal-android', 'whatsapp': 'personal-whatsapp', 'gateway': 'openclaw-gateway'}
-NEEDS_MANUAL = {'slack': 'Slack via Maton: fill connection_id, team_id, user_id and put MATON_API_KEY=… in the maton-slack credential file',
-                'crm': 'Salesflare CRM: fill user_id/team_id and put SALESFLARE_API_KEY=… in the salesflare credential file',
-                'whatsapp': 'WhatsApp: set identity_sha256 to the sha256 of your linked JID (`wacli auth status --json`)'}
-
-
 class Paths:
     def __init__(self, home=None):
         self.home = Path(home or os.environ.get('HOME') or Path.home())
@@ -176,7 +176,7 @@ def check_prerequisites():
         ok = False
         say('  FAIL  cannot locate the OpenClaw npm package; expose its installed CLI on PATH and rerun')
 
-    for name, hint in (('gog', 'Gmail and Calendar sources: install gog and run `gog auth add <email>`'),
+    for name, hint in (('gog', 'Gmail and Calendar sources: install gog (gogcli); signing in comes later in this setup'),
                        ('tailscale', 'dashboard access: install Tailscale and join your tailnet'),
                        ('caddy', 'only needed to serve the dashboard on a custom domain (see deploy/Caddyfile)'),
                        ('wacli', 'only needed for the WhatsApp source'),
@@ -207,30 +207,34 @@ def ask(prompt, default=''):
 
 
 def answers(interactive, facts):
+    # Smart defaults from this machine: Tailscale identity, the Telegram ID OpenClaw already trusts,
+    # Google accounts gog knows, and sources that are installed or linked here.
     detected = tailscale_identity(facts.get('tailscale'))
-    defaults = {'owner_name': '', 'telegram_owner': '', 'tailscale_owner': detected.get('tailscale_owner', ''),
+    owners = onboarding.telegram_owners()
+    google = onboarding.gog_accounts(facts.get('gog'))
+    defaults = {'owner_name': onboarding.owner_name(), 'telegram_owner': owners[0] if owners else '',
+                'tailscale_owner': detected.get('tailscale_owner', ''),
                 'dashboard_host': detected.get('dashboard_host', ''), 'timezone': local_timezone(),
-                'connectors': 'gmail,calendar,gateway', 'email': '', 'gog_client': 'default', 'boundary': 'work:Main',
+                'connectors': onboarding.suggested_sources(facts), 'email': google[0][0] if google else '',
+                'gog_client': google[0][1] if google else 'default', 'boundary': 'work:Main',
                 'android_node_id': '', 'whatsapp_store': str(Path.home() / '.local/share/wacli')}
     values = {key: os.environ.get(var) or defaults[key] for key, var in ENV.items()}
     if interactive:
         say('\nA few questions (Enter keeps the default):')
         values['owner_name'] = ask('Your name (used to sign emails)', values['owner_name'])
-        values['telegram_owner'] = ask('Your Telegram user/chat ID (the private chat with your OpenClaw bot)', values['telegram_owner'])
+        if not values['telegram_owner'] and facts.get('openclaw'):
+            values['telegram_owner'] = onboarding.telegram_from_pairing(facts['openclaw'], onboarding.UI()) or ''
+        values['telegram_owner'] = ask('Your Telegram user ID (the private chat with your OpenClaw bot'
+                                       + (', found in OpenClaw)' if values['telegram_owner'] else
+                                          '; your bot\'s pairing reply shows it)'), values['telegram_owner'])
         values['tailscale_owner'] = ask('Your Tailscale login (only this identity may open the dashboard)', values['tailscale_owner'])
         values['dashboard_host'] = ask('Dashboard host name (your machine on the tailnet, e.g. machine.tailnet.ts.net)', values['dashboard_host'])
         values['timezone'] = ask('Time zone', values['timezone'])
-        values['connectors'] = ask('Sources to enable (' + ','.join(CONNECTORS) + ')', values['connectors'])
+        values['connectors'] = ask('Sources to enable (' + ','.join(CONNECTORS) + '; you connect each one next)', values['connectors'])
         chosen = set(split(values['connectors']))
         if chosen & {'gmail', 'calendar', 'slack', 'crm'}:
             values['email'] = ask('Your work email address', values['email'])
             values['boundary'] = ask('Boundary label for these work sources (work:<Company>)', values['boundary'])
-        if chosen & {'gmail', 'calendar'}:
-            values['gog_client'] = ask('gog OAuth client name for that account', values['gog_client'])
-        if 'android' in chosen:
-            values['android_node_id'] = ask('OpenClaw node ID of your Android phone (`openclaw nodes list`)', values['android_node_id'])
-        if 'whatsapp' in chosen:
-            values['whatsapp_store'] = ask('wacli store directory', values['whatsapp_store'])
     missing = [key for key in ('telegram_owner', 'tailscale_owner', 'dashboard_host') if not values[key]]
     if missing:
         raise SystemExit('Missing answers: ' + ', '.join(missing) + ' (set ' + ', '.join(ENV[k] for k in missing) + ')')
@@ -253,16 +257,6 @@ def local_timezone():
         return target.split('zoneinfo/', 1)[1] if 'zoneinfo/' in target else 'UTC'
     except OSError:
         return 'UTC'
-
-
-def expand(value, home):
-    if isinstance(value, str) and value.startswith('~/'):
-        return str(home / value[2:])
-    if isinstance(value, list):
-        return [expand(v, home) for v in value]
-    if isinstance(value, dict):
-        return {k: expand(v, home) for k, v in value.items()}
-    return value
 
 
 def new_config(values, facts, paths):
@@ -318,16 +312,6 @@ def refresh_install_paths(config, facts, paths):
     if facts.get('wacli') and config.get('wacli') in (None, 'wacli'):
         config['wacli'] = facts['wacli']
     return config
-
-
-def write_private(path, text):
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temp = path.with_name(path.name + '.tmp')
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as handle:
-        handle.write(text)
-    os.chmod(temp, 0o600)
-    os.replace(temp, path)
 
 
 def setup_config(interactive, facts, paths):
@@ -495,28 +479,79 @@ def health(config, timeout):
         time.sleep(1)
 
 
-def next_steps(config, healthy, started):
+def activate(paths):
+    config = json.loads(paths.config.read_text())
+    config['delivery_enabled'] = True
+    config.setdefault('review_worker', {})['enabled'] = True
+    write_private(paths.config, json.dumps(config, indent=2) + '\n')
+    return config
+
+
+def guided(paths, since, ui=None):
+    """After a healthy start in a terminal: connect what is not set up, show the first sync, offer the
+    dashboard and USER.md, then a preview and, after it, turning reviews on. Every step can be skipped."""
+    ui = ui or onboarding.UI()
+    config = json.loads(paths.config.read_text())
+    todo = [a for a in config.get('accounts', []) if onboarding.missing(config, a)]
+    connected = []
+    if todo:
+        say('\nConnect your sources now (a minute each; skip any and run `assistant connect <name>` later).')
+    for account in todo:
+        name = onboarding.connect_name(account, config)
+        if not ui.yes(f'Connect {onboarding.label(account.get("service", "gmail"))} ({account["id"]}) now?', True):
+            continue
+        try:
+            onboarding.connect(paths.config, account.get('service', 'gmail'), ui, account['id'], restart=False)
+            connected.append(account['id'])
+        except onboarding.SetupError as error:
+            say(f'  ✗ {error.message}' + (f'\n    fix: {error.fix}' if error.fix else '') + f'\n    later: assistant connect {name}')
+    config = json.loads(paths.config.read_text())
+    ready = [a['id'] for a in config.get('accounts', []) if not onboarding.missing(config, a)]
+    if ready:
+        if connected:
+            onboarding.restart_and_sync(config, ready, ui, config_path=paths.config)
+        else:
+            onboarding.first_sync(config, ready, since, ui, wait=45)
+    onboarding.serve_dashboard(config, ui)
+    onboarding.offer_user_md(config, ui, paths.workspace)
+    if config.get('delivery_enabled') and config.get('review_worker', {}).get('enabled'):
+        return config
+    if ready and ui.yes('Run a preview now? Your agent reviews the last 7 days and shows the cards here and on the dashboard;'
+                        ' nothing is sent and nothing is done in your accounts', True):
+        subprocess.call([sys.executable, str(ROOT / 'cli.py'), '--config', str(paths.config), 'preview'])
+        if ui.yes('Turn on daily reviews and Telegram cards now? (Do it acts with your accounts only when you tap it;'
+                  ' see README "Security model")', True):
+            config = activate(paths)
+            restarted = run(['systemctl', '--user', 'restart', UNIT_NAME]).returncode == 0
+            say('  Reviews and Telegram cards are on.' if restarted else
+                f'  Saved; restart to apply: systemctl --user restart {UNIT_NAME}')
+    return config
+
+
+def next_steps(config, healthy, started, paths=None):
+    paths = paths or Paths()
     host, path = config.get('dashboard_host', ''), config.get('dashboard_path', '/assistant/')
-    gmail = [a for a in config.get('accounts', []) if a.get('transport') == 'gog']
     lines = ['', 'Next steps:']
     if started:
         lines.append(f'  - Health: {"OK" if healthy else "not answering yet; check journalctl --user -u " + UNIT_NAME + " -n 50"}')
-    if gmail:
-        lines += [f'  - Gmail/Calendar: gog auth add {gmail[0]["email"]} --client {gmail[0]["client"]} (read-only scopes are enough to start)',
-                  f'    and put the gog file-keyring password in {config["credentials"].get("gog-password")} (chmod 600)']
     for account in config.get('accounts', []):
-        name = next((k for k, v in CONNECTORS.items() if v == account['id']), None)
-        if name in NEEDS_MANUAL:
-            lines.append('  - ' + NEEDS_MANUAL[name])
-    lines += [f'  - Dashboard on your tailnet: tailscale serve --bg --https=443 --set-path {path.rstrip("/")} http://127.0.0.1:{config.get("port", 8787)}',
-              f'    then open https://{host}{path} (custom domain instead: see deploy/Caddyfile)',
-              '  - Tell the agent about you: create USER.md in your OpenClaw workspace (name, companies, tone, preferences)',
-              '  - Keep `Do it` in mind: it lets the agent act with your accounts. Read README "Security model".',
+        if onboarding.missing(config, account):
+            lines.append(f'  - Connect {onboarding.label(account.get("service", "gmail"))}: assistant connect {onboarding.connect_name(account, config)}')
+    served = onboarding.dashboard_served(config)
+    if served:
+        lines.append(f'  - Dashboard: {served}')
+    else:
+        lines += [f'  - Dashboard on your tailnet: {" ".join(onboarding.serve_command(config))}',
+                  f'    then open https://{host}{path} (custom domain instead: see deploy/Caddyfile)']
+    if not onboarding.user_md_path(paths.workspace).exists():
+        lines.append(f'  - Tell the agent about you: create USER.md in {paths.workspace} (name, companies, tone, preferences)')
+    lines += ['  - Keep `Do it` in mind: it lets the agent act with your accounts. Read README "Security model".',
               '  - After editing config.json: systemctl --user restart ' + UNIT_NAME]
     if not config.get('delivery_enabled') or not config.get('review_worker', {}).get('enabled'):
         lines += ['  - See what it would suggest: ./install.sh --preview (one review of the last 7 days by your agent;',
                   '    the cards show here and on the dashboard; nothing is sent and nothing is done in your accounts)',
                   '  - Once sources are connected and Security model is understood: ./install.sh --activate']
+    lines.append('  - Check everything any time: assistant doctor (each problem comes with its fix)')
     say('\n'.join(lines))
 
 
@@ -597,12 +632,17 @@ def main(argv=None):
     if not plugin_ok:
         return 1
     if args.activate:
-        config['delivery_enabled'] = True
-        config.setdefault('review_worker', {})['enabled'] = True
-        write_private(paths.config, json.dumps(config, indent=2) + '\n')
+        config = activate(paths)
+    since = onboarding.now()
     started = install_unit(config, facts, paths, start=not args.no_start)
     healthy = started and health(config, args.health_timeout)
-    next_steps(config, healthy, started)
+    if interactive and healthy:
+        try:
+            config = guided(paths, since)
+        except (KeyboardInterrupt, EOFError):
+            say('\nStopped the guided setup; everything done so far is saved. Pick it up with: assistant doctor')
+            config = json.loads(paths.config.read_text())
+    next_steps(config, healthy, started, paths)
     return 0 if (args.no_start and started is None) or (started and healthy) else 1
 
 

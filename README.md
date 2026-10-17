@@ -12,7 +12,7 @@ cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 ```
 
-Read [Requirements](#requirements) first. The installer checks prerequisites, asks for your owner identity and source choices, writes the config and secrets, installs the systemd user service and the OpenClaw plugin, and ends with a health check and the remaining manual steps (connecting Gmail, exposing the dashboard on your tailnet). Fresh installs collect configured sources but leave AI reviews and Telegram delivery **off**. To see what it would do for you first, run `./install.sh --preview`: your agent reviews the last 7 days of signals once and the resulting cards appear in the terminal and on the dashboard, with nothing sent and nothing done in your accounts. Once you have connected the sources, checked `assistant sources` and read [Security model](#security-model), run `./install.sh --activate`. Run the installer again to upgrade; `./install.sh --uninstall` removes it again (see [Install](#install)).
+Read [Requirements](#requirements) first, or follow the [Getting started](docs/getting-started.md) checklist. The installer checks prerequisites and asks a few questions, with answers found on this machine filled in (your Telegram ID from OpenClaw, your Tailscale login, installed sources). It installs the service and the OpenClaw plugin, then walks you through connecting each source: sign-ins and keys, IDs found for you, a test read and the first sync with real counts. It offers the dashboard on your tailnet and a starter `USER.md`, then a **preview**: your agent reviews the last 7 days once and the cards appear in the terminal and on the dashboard, with nothing sent and nothing done in your accounts. After the preview it offers to turn on reviews and Telegram cards; read [Security model](#security-model) first. Every step can be skipped and picked up later with `assistant connect <source>`, `./install.sh --preview` and `./install.sh --activate`; `assistant doctor` checks everything and says how to fix what isn't right. Run the installer again to upgrade; `./install.sh --uninstall` removes it again (see [Install](#install)).
 
 Contents: [What it does](#what-it-does) · [Architecture](#architecture) · [Requirements](#requirements) · [Install](#install) · [Configuration](#configuration) · [Sources](#sources) · [Reviews](#reviews) · [Telegram and the dashboard](#telegram-and-the-dashboard) · [Do it](#do-it) · [Related signals](#related-signals-optional-local-embeddings) · [Security model](#security-model) · [Command line](#command-line) · [Operations](#operations) · [Adding a source](#adding-a-source) · [Known limitations](#known-limitations) · [Tests](#tests)
 
@@ -76,7 +76,7 @@ Python's standard library and SQLite are enough: no database server, queue, web 
 - **Node.js 24.16+ within the 24.x series, or 26.1+** (`>=24.16.0 <25 || >=26.1.0`, matching OpenClaw's engine range). Node 22 and 25 are unsupported. The installer resolves mise/asdf shims and the installed npm package.
 - **OpenClaw 2026.10.2 or later**, with the Gateway running and its Telegram channel set up with your bot. CI tests 2026.10.2 and the latest release every week; see [Known limitations](#known-limitations).
 - Optional, per feature:
-  - `gog` (Google Workspace CLI) for Gmail and Calendar (OAuth per account, file keyring).
+  - `gog` (Google Workspace CLI) for Gmail and Calendar (OAuth per account, file keyring; `assistant connect gmail` signs you in).
   - **Tailscale** for dashboard access (the dashboard only serves your Tailscale identity).
   - **Caddy** only to serve the dashboard on a custom domain (`deploy/Caddyfile`).
   - `wacli` for WhatsApp; a Maton connection for Slack (allowed to post as you, to send Slack messages); a Salesflare API key.
@@ -105,18 +105,22 @@ What it does, in order:
 4. **CLI:** links `~/.local/bin/assistant` to `cli.py`.
 5. **Plugin:** `openclaw plugins install --link --force --accept-capabilities openclaw-plugin/`, `openclaw plugins enable personal-assistant-bridge`, then a reload. Running the installer accepts the local bridge's OpenClaw capability consent: it registers the assistant tool, owner Telegram commands and event hooks described in the security model. The plugin reads `AGENTS.md` and `PREPARATION.md` from `app_dir` (this checkout), so edits there apply to the next turn.
 6. **Service:** writes `~/.config/systemd/user/personal-assistant.service` with this checkout's paths, then `daemon-reload`, `enable` and `restart`.
-7. **Health:** waits for `http://127.0.0.1:<port>/health` and prints the next steps. Plugin install/enable/reload failures, systemd failures and an unanswered health check return a nonzero exit code; rerun after resolving the reported step.
+7. **Health:** waits for `http://127.0.0.1:<port>/health`. Plugin install/enable/reload failures, systemd failures and an unanswered health check return a nonzero exit code; rerun after resolving the reported step.
+8. **Guided setup** (in a terminal, once healthy): connects each source that isn't set up yet (as `assistant connect`, below), restarts the service once and shows the first sync per source; offers `tailscale serve` for the dashboard and a starter `USER.md` when missing; then a preview and, after it, turning on reviews and Telegram. Every question can be answered no. It ends with what is left, if anything.
 
-`--non-interactive` reads: `ASSISTANT_OWNER_NAME`, `ASSISTANT_TELEGRAM_OWNER` (required), `ASSISTANT_TAILSCALE_OWNER` (required), `ASSISTANT_DASHBOARD_HOST` (required), `ASSISTANT_TIMEZONE`, `ASSISTANT_CONNECTORS` (comma list of `gmail,calendar,slack,crm,android,whatsapp,gateway`; default `gmail,calendar,gateway`), `ASSISTANT_EMAIL`, `ASSISTANT_GOG_CLIENT`, `ASSISTANT_BOUNDARY`, `ASSISTANT_ANDROID_NODE_ID`, `ASSISTANT_WHATSAPP_STORE`. Tailscale login and host default to what `tailscale status` reports.
+`--non-interactive` reads: `ASSISTANT_OWNER_NAME`, `ASSISTANT_TELEGRAM_OWNER` (required), `ASSISTANT_TAILSCALE_OWNER` (required), `ASSISTANT_DASHBOARD_HOST` (required), `ASSISTANT_TIMEZONE`, `ASSISTANT_CONNECTORS` (comma list of `gmail,calendar,slack,crm,android,whatsapp,gateway`; default: what is installed or linked here, plus `gateway`), `ASSISTANT_EMAIL`, `ASSISTANT_GOG_CLIENT`, `ASSISTANT_BOUNDARY`, `ASSISTANT_ANDROID_NODE_ID`, `ASSISTANT_WHATSAPP_STORE`. Tailscale login and host default to what `tailscale status` reports, the Telegram ID to the one OpenClaw already trusts (`commands.ownerAllowFrom`, the Telegram `allowFrom`, or approved pairing senders), the email to the first Google account gog knows. Non-interactive installs skip the guided setup; run `assistant connect` afterwards.
 
-**What you still do by hand** (the installer prints these):
+**Connecting a source:** `assistant connect <source>` (the installer runs the same steps). It asks only what it can't find, writes the account to `config.json` (keeping `config.json.bak`) and keys to their credential files (mode 600, typed without echo, never printed), reads the source once as the service would, and saves nothing if that read fails; it says what to fix instead. Then it restarts the service, only if that service reads this config, and shows the first sync.
 
-- **Find your Telegram chat ID**: message your OpenClaw bot and read the sender ID from `openclaw logs`, or ask a bot such as @userinfobot.
-- **Connect Google**: `gog auth add <email> --client <client>`, and put the gog file-keyring password in the `gog-password` credential file (mode 600). Read-only scopes are enough; sending approved emails also needs `gmail.send`, thread snoozes `gmail.modify`.
-- **Other sources**: fill the IDs in `config.json` and put their API keys in the credential files it names (see [Sources](#sources)).
-- **Dashboard**: `tailscale serve --bg --https=443 --set-path /assistant http://127.0.0.1:8787`, then open `https://<dashboard_host>/assistant/`. For a custom domain use `deploy/Caddyfile` and `deploy/caddy-machine.service`.
-- **Tell the agent about you**: create `USER.md` in your OpenClaw workspace (see below).
-- **Preview, then activate**: check `assistant sources` and resolve source errors. `./install.sh --preview` (or `assistant preview`) runs one regular review of the last 7 days and prints its cards, with progress while the agent works (usually a few minutes). The cards are real and stay on the dashboard, but they are never sent to Telegram, not even after activation, and nothing is prepared ahead; reviews and delivery stay off. Then read the security model and run `./install.sh --activate`. To start with one source, set `ASSISTANT_CONNECTORS=gateway ./install.sh` (Gateway failures only), or choose just `gmail` in the wizard. Add other accounts from `config.example.json` when ready.
+- **Gmail and Calendar:** picks your gog OAuth client, or asks for a downloaded *Desktop app* client JSON (`gog auth setup` explains how to make one). Stores the gog file-keyring password you type, or a generated one, in the `gog-password` credential. Signs in with `gog auth add --readonly` for Gmail and Calendar (browserless with `--manual` over SSH). Sending approved emails later needs `gmail.send`, and thread snoozes `gmail.modify`; connecting never asks for more than read access.
+- **Slack:** your Maton API key and Slack connection ID; `team_id`, `user_id`, `email` and `slack_host` come from Slack itself.
+- **Salesflare (`crm`):** an API key; `user_id`, `team_id` and `email` come from `/me`.
+- **WhatsApp:** the wacli store; offers `wacli auth` (QR code) when it isn't linked, then records `identity_sha256` from `wacli auth status`.
+- **Android:** picks your paired Android node from `openclaw nodes list`.
+- **Plugins:** each connector declares what it asks in `SETUP` (see [Adding a source](docs/adding-a-source.md)).
+- **Telegram ID by hand:** message your bot; with DM pairing its reply shows your user ID. Approve yourself with `openclaw pairing approve telegram <code>`.
+- **Dashboard by hand:** `tailscale serve --bg --https=443 --set-path /assistant http://127.0.0.1:8787`, then open `https://<dashboard_host>/assistant/`. For a custom domain use `deploy/Caddyfile` and `deploy/caddy-machine.service`.
+- **Preview and activation:** `./install.sh --preview` (or `assistant preview`) runs one regular review of the last 7 days and prints its cards, with progress while the agent works (usually a few minutes). The cards are real and stay on the dashboard, but they are never sent to Telegram, not even after activation, and nothing is prepared ahead; reviews and delivery stay off. `./install.sh --activate` turns them on. To start with one source, set `ASSISTANT_CONNECTORS=gateway ./install.sh` (Gateway failures only), or choose just `gmail` in the wizard.
 - Restart after config edits: `systemctl --user restart personal-assistant.service`.
 
 ### Your own instructions: USER.md and overlays
@@ -186,7 +190,7 @@ Collectors read existing source content. The optional Salesflare `join_pipelines
 | `x` (plugin) | X signed in to the OpenClaw browser | `handle`, `primary` (the account the browser is normally on), `active_hours` (`[7, 23]`), `long_posts` (X Premium: replies up to 25000 characters); config `x_inbox` for the reader path |
 | `rss` (plugin) | — | `url` |
 
-Plugin accounts aren't set up by the installer: add them to `accounts` by hand, using the keys above (each connector's header has a full example), then restart the service.
+Add a plugin account with `assistant connect github` (or `stripe`, `x`, `linkedin`, `rss`): it asks for the fields that connector needs. You can also add accounts to `config.json` by hand, using the keys above (each connector's header has a full example), and restart the service.
 
 - **Gmail:** follows Gmail history after a seven-day import; replays the retained window when history expires. Replies keep their new text whole and only 3,000 characters of quoted history. Sending approved drafts and snoozing threads use separate workers and only scopes already granted.
 - **Calendar:** seven past and thirty future days, recurring events expanded, incremental sync token with a daily full refresh. A missing event is "unavailable", not "cancelled". Context for email and preparation, not a reminder feed.
@@ -272,7 +276,7 @@ Read this before you turn on delivery.
 
 ## Command line
 
-`assistant` (linked by the installer; code in `cli.py`) talks to the running service with the local API token. Every command takes `--json`.
+`assistant` (linked by the installer; code in `cli.py`) talks to the running service with the local API token; `connect` and `doctor` work on this machine's files and also run while the service is down. Every command takes `--json`.
 
 | Command | What it does |
 |---|---|
@@ -285,6 +289,8 @@ Read this before you turn on delivery.
 | `assistant feedback` | Recent decisions and written feedback |
 | `assistant prepare <id> --file brief.md` | Save a preparation on an accepted task |
 | `assistant preview` | Before activation: one review of the last 7 days; prints the cards, sends nothing |
+| `assistant connect [<source>]` | Set up or redo a source (sign-in or key, IDs, a test read, first sync); without a source, lists what still needs connecting. `--account <id>` picks or adds one of several |
+| `assistant doctor` | Checks the service, OpenClaw bridge, Telegram approval, every source, reviews, dashboard and `USER.md`; every problem comes with its fix. Exits 1 when something is broken |
 | `assistant raw <action> '<json>'` | Any other non-owner service action |
 
 ## Operations

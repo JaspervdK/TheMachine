@@ -21,6 +21,12 @@ import urllib.parse
 import urllib.request
 
 KINDS = {'stripe.event': 'Stripe'}
+# For `assistant connect stripe`: the account it adds and what it asks (see docs/adding-a-source.md).
+SETUP = {'label': 'Stripe', 'account': {'id': 'billing', 'service': 'stripe', 'transport': 'api', 'boundary': 'work', 'credential': 'stripe',
+                     'poll_seconds': 900},
+         'note': 'Create a restricted key in Stripe with read access to Events, Customers and Account only.',
+         'ask': [('stripe_account', 'Stripe account ID (acct_…)')],
+         'secret': 'Restricted Stripe key (rk_…)'}
 TYPES = ('invoice.payment_failed', 'customer.subscription.deleted', 'customer.subscription.updated',
          'customer.subscription.created', 'charge.dispute.created')
 PATHS = ('v1/account', 'v1/events', 'v1/customers/')

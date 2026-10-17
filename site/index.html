@@ -306,22 +306,22 @@ footer a{color:var(--muted);text-decoration:none}
   <div>
     <div class="eyebrow">Get started</div>
     <h2>Try it on last week first</h2>
-    <p class="sub">The preview has your agent review the last seven days once and shows the cards it would have sent. Nothing is sent and nothing is done in your accounts.</p>
+    <p class="sub">The installer finds what it can on your machine and walks you through connecting each source, with a test read and the first sync. Then the preview has your agent review the last seven days once and shows the cards it would have sent. Nothing is sent and nothing is done in your accounts.</p>
     <p class="req">Linux with systemd · Python 3.12+ · Node.js 24 or 26 · OpenClaw 2026.10.2+ with its Telegram channel · Tailscale for the dashboard.</p>
   </div>
   <div>
-<pre><span class="c"># install next to your OpenClaw workspace</span>
+<pre><span class="c"># install, connect your sources, preview, turn on</span>
 git clone https://github.com/JeroenCorthout/TheMachine.git \
   ~/.openclaw/workspace/tools/personal-assistant
 cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 
-<span class="c"># see what it would tell you, without sending anything</span>
-./install.sh --preview
+<span class="c"># add a source later</span>
+assistant connect slack
 
-<span class="c"># happy? turn on reviews and Telegram</span>
-./install.sh --activate</pre>
-    <a class="btn ghost" href="https://github.com/JeroenCorthout/TheMachine#readme">Read the full guide</a>
+<span class="c"># something off? every problem comes with its fix</span>
+assistant doctor</pre>
+    <a class="btn ghost" href="https://github.com/JeroenCorthout/TheMachine/blob/main/docs/getting-started.md">Getting started, step by step</a>
   </div>
 </div></section>
 

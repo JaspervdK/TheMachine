@@ -43,6 +43,21 @@ The service calls `sync` every `poll_seconds` (default 300) in the account's own
 | `helpers.local_tz()` | The owner's time zone (config `timezone`), for things like active hours. |
 | `helpers.credential(config, name)` | The secret named `name` in `config['credentials']` (or systemd's `LoadCredential`), as text. Use it for API keys instead of reading files yourself. |
 
+### Setup: `assistant connect <service>`
+
+Declare `SETUP` so the owner can add an account without editing JSON:
+
+```python
+SETUP = {'label': 'RSS feed',                          # name in prompts, doctor and next steps
+         'account': {'id': 'feed', 'service': 'rss', 'transport': 'http', 'boundary': 'work', 'poll_seconds': 1800},
+         'note': 'Shown before the questions, e.g. where to find a key.',
+         'ask': [('url', 'Feed URL (RSS or Atom)')],     # (key, prompt[, default]); defaults can use '{other_key}'
+         'detect': {},                                   # key -> command whose output is the default, e.g. ['gh', 'api', 'user', '--jq', '.login']
+         'secret': None}                                 # a prompt here asks for a key without echo into the `credential` file (mode 600)
+```
+
+`assistant connect` adds the account from `account`, asks each `ask` key (empty answers stop it), stores the secret, saves `config.json`, restarts the service and shows the first sync. With `credential_variable` in `account`, the secret is written as `VARIABLE=value`. `assistant doctor` treats a missing `ask` key or credential file as not set up. A test checks every connector has a complete `SETUP`.
+
 ## 3. Events
 
 Each event is a dict with exactly these fields:
@@ -85,7 +100,7 @@ Test with saved fixtures, not live accounts. [`test_connectors.py`](../test_conn
 - that `304 Not Modified` keeps the checkpoint,
 - that errors raise `SourceError` with a safe label.
 
-Then add the account to `config.json`, restart the service (`systemctl --user restart personal-assistant.service`) and check the account's first read with `assistant sources` or on the dashboard.
+Then run `assistant connect <service>`: it adds the account, restarts the service and shows the first read. Check it later with `assistant sources`, `assistant doctor` or on the dashboard.
 
 ## Checklist
 
@@ -94,3 +109,4 @@ Then add the account to `config.json`, restart the service (`systemctl --user re
 - [ ] Events and cursor committed together; replays don't duplicate.
 - [ ] Failures raise `SourceError` with a content-free label.
 - [ ] Fixture tests for parsing, replays, expired cursors and errors.
+- [ ] `SETUP` with what `assistant connect` should ask.

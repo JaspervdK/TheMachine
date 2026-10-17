@@ -2,7 +2,8 @@
 """Command line for The Machine's personal assistant.
 
 Reads tasks, evidence, sources and review history from the running service,
-can save a preparation for an accepted task, and runs a first-run preview review. Owner decisions (accept, snooze,
+can save a preparation for an accepted task, and runs a first-run preview review. Sets up
+sources (connect) and checks the whole setup (doctor). Owner decisions (accept, snooze,
 done, dismiss, feedback) stay with Telegram and the dashboard; the service
 refuses them from here.
 """
@@ -21,6 +22,10 @@ from zoneinfo import ZoneInfo
 _spec = importlib.util.spec_from_file_location('assistant', Path(__file__).resolve().with_name('assistant.py'))
 assistant = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(assistant)
+_spec = importlib.util.spec_from_file_location('onboarding', Path(__file__).resolve().with_name('onboarding.py'))
+onboarding = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(onboarding)
+onboarding._assistant = assistant
 
 TZ = assistant.LOCAL_TZ
 GROUPS = {
@@ -336,6 +341,37 @@ def cmd_preview(config, args):
         raise CliError(f"The preview review didn't finish ({error}). See assistant reviews and openclaw logs, then run assistant preview again.")
 
 
+def cmd_connect(config, args):
+    if not args.source:
+        if args.json:
+            return out_json([{'id': a['id'], 'service': a.get('service', 'gmail'), 'missing': onboarding.missing(config, a)}
+                             for a in config.get('accounts', [])])
+        print('Sources: ' + ', '.join(onboarding.sources()) + '\n')
+        for account in config.get('accounts', []):
+            reason = onboarding.missing(config, account)
+            print(f"  {account['id']:<26} {onboarding.label(account.get('service', 'gmail')):<22} "
+                  + (f'not set up ({reason}): assistant connect {onboarding.connect_name(account, config)}' if reason else 'set up'))
+        print('\nConnect or redo one: assistant connect <source> [--account <id>]')
+        return
+    if not sys.stdin.isatty():
+        raise CliError('assistant connect asks a few questions; run it in a terminal.')
+    try:
+        onboarding.connect(args.config, args.source, onboarding.UI(), args.account)
+    except onboarding.SetupError as error:
+        raise CliError(error.message + (f'\n  fix: {error.fix}' if error.fix else '')) from None
+    except (KeyboardInterrupt, EOFError):
+        raise CliError('stopped; nothing was saved to config.json') from None
+
+
+def cmd_doctor(config, args):
+    results = onboarding.doctor(args.config)
+    if args.json:
+        out_json([{'status': {'✓': 'ok', '!': 'warn', '✗': 'fail'}[m], 'check': t, 'fix': f} for m, t, f in results])
+        sys.exit(1 if any(m == '✗' for m, *_ in results) else 0)
+    print('The Machine: doctor\n')
+    sys.exit(onboarding.print_doctor(results, onboarding.UI(False)))
+
+
 def cmd_raw(config, args):
     out_json(call(config, args.action, json.loads(args.args) if args.args else {}))
 
@@ -343,7 +379,7 @@ def cmd_raw(config, args):
 def parser():
     p = argparse.ArgumentParser(prog='assistant', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
                                 epilog='Examples:\n  assistant tasks\n  assistant show 7b61\n  assistant search "Acme"\n'
-                                       '  assistant prepare 7b61 --file brief.md\n  assistant preview')
+                                       '  assistant prepare 7b61 --file brief.md\n  assistant preview\n  assistant connect gmail\n  assistant doctor')
     p.add_argument('--config', default=str(assistant.DEFAULT_CONFIG), help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest='command', required=True, metavar='command')
 
@@ -385,6 +421,10 @@ def parser():
     source.add_argument('--body')
     source.add_argument('--file', help='file with the text, or - for stdin')
     add('preview', f'First run: one review of the last {assistant.PREVIEW_DAYS} days, shown here and on the dashboard; nothing is sent', cmd_preview)
+    c = add('connect', 'Set up a source: sign-in or key, IDs, a test read and the first sync', cmd_connect)
+    c.add_argument('source', nargs='?', help='gmail, calendar, slack, crm, whatsapp, android, gateway or a connector plugin')
+    c.add_argument('--account', help='account id, to redo one of several or add another')
+    add('doctor', 'Check the whole setup; every problem comes with its fix', cmd_doctor)
     c = add('raw', 'Call any non-owner service action with JSON args', cmd_raw)
     c.add_argument('action')
     c.add_argument('args', nargs='?', help='JSON object')
@@ -394,7 +434,7 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        args.func(load_config(args.config), args)
+        args.func({} if args.func is cmd_doctor else load_config(args.config), args)
     except CliError as error:
         sys.exit(f'assistant: {error}')
     except BrokenPipeError:

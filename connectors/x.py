@@ -26,6 +26,10 @@ import urllib.parse
 from pathlib import Path
 
 KINDS = {'x.mention': 'X', 'x.dm': 'X message'}
+# For `assistant connect x`: the account it adds and what it asks (see docs/adding-a-source.md).
+SETUP = {'label': 'X', 'account': {'id': 'me-x', 'service': 'x', 'transport': 'x-inbox', 'boundary': 'work', 'poll_seconds': 3600},
+         'note': 'Sign in to X once in the OpenClaw browser first: openclaw browser --browser-profile openclaw open https://x.com/login',
+         'ask': [('handle', 'Your X handle, without @'), ('primary', 'Handle the browser is normally signed in to', '{handle}')]}
 READER = Path(__file__).resolve().parent.parent / 'integrations/x_inbox.py'
 
 

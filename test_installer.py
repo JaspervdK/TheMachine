@@ -93,7 +93,10 @@ class InstallerTest(unittest.TestCase):
         self.assertIn('systemctl --user daemon-reload', calls)
         self.assertFalse(any('enable personal-assistant.service' in c for c in calls), calls)  # --no-start
         self.assertIn('Next steps', result.stdout)
-        self.assertIn('gog auth add alex@example.com --client work', result.stdout)
+        self.assertIn('Connect Gmail: assistant connect gmail', result.stdout)
+        self.assertIn('Connect Google Calendar: assistant connect calendar', result.stdout)
+        self.assertNotIn('Connect OpenClaw Gateway', result.stdout)
+        self.assertIn('assistant doctor', result.stdout)
 
     def test_rerun_upgrades_without_clobbering_config_or_secrets(self):
         self.assertEqual(self.install('--no-start').returncode, 0)
@@ -230,7 +233,7 @@ class WizardTest(unittest.TestCase):
         home = Path(tempfile.mkdtemp(prefix='machine-wizard-'))
         self.addCleanup(shutil.rmtree, home, True)
         replies = iter(['Alex Owner', '1000001', 'alex@example.com', 'box.example-tailnet.ts.net', 'Europe/Amsterdam',
-                        'gmail,android,whatsapp', 'alex@example.com', 'work:Acme', 'personal', '0123456789abcdef', ''])
+                        'gmail,android,whatsapp', 'alex@example.com', 'work:Acme'])
         with mock.patch.dict(os.environ, {'HOME': str(home)}, clear=False), \
              mock.patch.dict(os.environ, {k: '' for k in installer.ENV.values()}), \
              mock.patch.object(builtins, 'input', lambda prompt='': next(replies)), \
@@ -240,12 +243,64 @@ class WizardTest(unittest.TestCase):
             config = installer.new_config(values, {}, paths)
         self.assertEqual(next(replies, 'done'), 'done')
         self.assertEqual([a['id'] for a in config['accounts']], ['work-gmail', 'personal-android', 'personal-whatsapp'])
-        self.assertEqual(config['accounts'][0]['client'], 'personal')
-        self.assertEqual(config['accounts'][1]['node_id'], '0123456789abcdef')
+        self.assertEqual(config['accounts'][0]['client'], 'default')
+        self.assertTrue(installer.onboarding.missing(config, config['accounts'][1]))  # assistant connect android picks the phone
         self.assertEqual(config['accounts'][1]['boundary'], 'personal:phone')
         self.assertEqual(config['accounts'][2]['store'], str(home / '.local/share/wacli'))
         self.assertEqual(config['credentials']['gog-password'], str(home / '.local/share/personal-assistant/gog-password'))
         self.assertEqual(config['dashboard_host'], 'box.example-tailnet.ts.net')
+
+    def test_wizard_defaults_come_from_what_openclaw_already_knows(self):
+        home = Path(tempfile.mkdtemp(prefix='machine-wizard-'))
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / '.openclaw').mkdir()
+        (home / '.openclaw/openclaw.json').write_text(json.dumps({'commands': {'ownerAllowFrom': ['telegram:2000002']}}))
+        replies = iter([''] * 7)
+        with mock.patch.dict(os.environ, {'HOME': str(home)}, clear=False), \
+             mock.patch.dict(os.environ, {k: '' for k in installer.ENV.values()}), \
+             mock.patch.object(builtins, 'input', lambda prompt='': next(replies)), \
+             mock.patch.object(installer, 'tailscale_identity', return_value={'tailscale_owner': 'a@b.c', 'dashboard_host': 'h.ts.net'}), \
+             mock.patch.object(installer.onboarding, 'owner_name', return_value='Alex Owner'), \
+             mock.patch.object(installer, 'say'):
+            values = installer.answers(True, {})
+        self.assertEqual((values['telegram_owner'], values['owner_name'], values['connectors']), ('2000002', 'Alex Owner', 'gateway'))
+
+    def test_guided_setup_connects_then_offers_preview_and_activation(self):
+        home = Path(tempfile.mkdtemp(prefix='machine-guided-'))
+        self.addCleanup(shutil.rmtree, home, True)
+        with mock.patch.dict(os.environ, {'HOME': str(home), 'OPENCLAW_WORKSPACE': str(home / 'ws')}):
+            paths = installer.Paths(home)
+            values = {**{k: '' for k in installer.ENV}, 'owner_name': 'Alex', 'telegram_owner': '1000001', 'tailscale_owner': 'a@b.c',
+                      'dashboard_host': 'h.ts.net', 'timezone': 'UTC', 'connectors': 'gmail,gateway', 'email': 'alex@acme.test',
+                      'gog_client': 'default', 'boundary': 'work:Acme', 'whatsapp_store': ''}
+            installer.write_private(paths.config, json.dumps(installer.new_config(values, {}, paths)))
+            asked, connected = [], []
+
+            class UI(installer.onboarding.UI):
+                def say(self, text=''): asked.append(text)
+                def yes(self, prompt, default=True):
+                    asked.append(prompt)
+                    return not prompt.startswith('Make the dashboard')
+
+            def connect(path, name, ui, account_id=None, restart=True):
+                connected.append((name, account_id, restart))
+                config = json.loads(Path(path).read_text())
+                installer.write_private(Path(config['credentials']['gog-password']), 'x')
+            with mock.patch.object(installer.onboarding, 'connect', side_effect=connect), \
+                 mock.patch.object(installer.onboarding, 'restart_and_sync') as sync, \
+                 mock.patch.object(installer.onboarding, 'serve_dashboard') as serve, \
+                 mock.patch.object(installer.subprocess, 'call', return_value=0) as preview, \
+                 mock.patch.object(installer, 'run', return_value=subprocess.CompletedProcess([], 0)), \
+                 mock.patch.object(installer, 'say'):
+                config = installer.guided(paths, '2026-01-01T00:00:00+00:00', UI())
+        self.assertEqual(connected, [('gmail', 'work-gmail', False)])
+        self.assertEqual(sync.call_args.args[1], ['work-gmail', 'openclaw-gateway'])
+        serve.assert_called_once()
+        self.assertTrue((home / 'ws/USER.md').exists())
+        self.assertEqual(preview.call_args.args[0][-1], 'preview')
+        self.assertTrue(config['delivery_enabled'] and config['review_worker']['enabled'])
+        self.assertTrue(json.loads(paths.config.read_text())['delivery_enabled'])
+        self.assertLess(next(i for i, a in enumerate(asked) if 'preview' in str(a)), next(i for i, a in enumerate(asked) if 'Turn on' in str(a)))
 
     def test_example_config_covers_every_connector(self):
         example = json.loads((ROOT / 'config.example.json').read_text())
