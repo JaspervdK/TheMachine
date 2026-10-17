@@ -181,9 +181,10 @@ pre .c{color:var(--faint)}
 .req{color:var(--faint);font-size:15px}
 .sub.tight{margin-bottom:24px}
 ol.start{list-style:none;padding:0;margin:0 0 28px;display:grid;gap:14px;counter-reset:step}
-ol.start li{padding-left:40px;position:relative;color:var(--muted)}
+ol.start li{padding-left:34px;text-indent:-34px;color:var(--muted)}
 ol.start li b{color:var(--text)}
-ol.start li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:1px;width:26px;height:26px;border-radius:50%;border:1.5px solid var(--amber);color:var(--amber);font:600 13px/23px ui-monospace,monospace;text-align:center}
+/* Inline, so the number shares the first line's baseline at any font size. */
+ol.start li::before{counter-increment:step;content:counter(step,decimal-leading-zero);display:inline-block;width:34px;text-indent:0;color:var(--amber);font:600 .85em var(--mono);letter-spacing:.1em}
 .final{text-align:center;padding:96px 0}
 .final img{width:150px;margin-bottom:6px}
 .final .ctas{justify-content:center}
