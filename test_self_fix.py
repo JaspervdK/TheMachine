@@ -192,6 +192,111 @@ class Merge(unittest.TestCase):
         self.assertEqual(self.restarts, [1])
 
 
+class AutoMerge(unittest.TestCase):
+    """Private: a small, tested fix to The Machine's own error merges by itself, and stays undoable."""
+    setUp_ux = ux.UX.setUp
+    setUp_merge = Merge.setUp
+    fix_clone = Merge.fix
+    transport = Merge.transport
+    row = ux.UX.row
+    decide = ux.UX.decide
+
+    def setUp(self):
+        self.setUp_merge()
+        with self.store.connect() as db:
+            db.execute("UPDATE events SET kind='machine.fault',metadata=? WHERE id=1", (json.dumps({'fingerprint': 'fp-graph'}),))
+        self.app = object.__new__(a.App)
+        self.app.store, self.app.config = self.store, self.config
+        self.decide('accept')
+
+    def fix(self, proof=True, name='job1'):
+        clone = self.fix_clone(name)
+        (clone / 'test_graph.py').write_text('import unittest\nimport graph\n\n\nclass Graph(unittest.TestCase):\n'
+                                             + ('    def test_missing_key(self):\n        self.assertIsNone(graph.rebuild({}))\n' if proof
+                                                else '    def test_present_key(self):\n        self.assertEqual(graph.rebuild({"missing": 1}), 1)\n'))
+        git(clone, 'add', '.')
+        git(clone, 'commit', '-qm', 'Test the missing key')
+        return clone
+
+    def save(self, clone):
+        return self.app.action('prepare', {'suggestion_id': self.sid, 'body': 'Fixed and tested in a copy.',
+                                           'next_action': {'kind': 'merge', 'clone': str(clone), 'summary': 'The graph rebuild no longer stops on a missing key.'}})
+
+    def labels(self):
+        return [b['label'] for block in a.controls(self.row())['blocks'] for b in block['buttons']]
+
+    def merged(self):
+        saved = self.save(self.fix())
+        self.assertTrue(saved['auto_merge'].startswith('queued'))
+        self.assertIn('It merges by itself if every check passes.', a.card(self.row()))
+        self.assertNotIn('Merge fix', self.labels())
+        self.assertEqual(self.app.action_step(next_actions_transport(self)), 'sent')
+        self.assertEqual(git(self.app_dir, 'log', '--format=%s', '-1'), 'Test the missing key')
+        return git(self.app_dir, 'rev-parse', 'HEAD')
+
+    def test_a_small_tested_fix_merges_by_itself_and_the_owner_can_undo_it(self):
+        head = self.merged()
+        self.assertIn('Merged by itself and restarted. You can undo it for 24 hours', a.card(self.row()))
+        self.assertIn('Undo merge', self.labels())
+        with self.assertRaisesRegex(ValueError, 'owner'):  # the agent cannot undo or redo it
+            self.app.action('undo_merge', {'suggestion_id': self.sid, 'approval_id': 'agent'})
+        self.app.action('undo_merge', {'suggestion_id': self.sid, 'approval_id': 'owner-undo'}, owner_dashboard=True)
+        self.assertIn('Undoing the merge…', a.card(self.row()))
+        self.assertEqual(self.app.undo_step(self.transport()), 'undone')
+        self.assertIn('rows["missing"]', (self.app_dir / 'graph.py').read_text())
+        self.assertFalse((self.app_dir / 'test_graph.py').exists())
+        self.assertEqual(git(self.upstream, 'rev-parse', 'main'), git(self.app_dir, 'rev-parse', 'HEAD'))
+        self.assertTrue(git(self.app_dir, 'log', '--format=%s', '-1').startswith('Undo: The graph rebuild'))
+        self.assertEqual(self.restarts, [1, 1])
+        self.assertIn('Merge undone. The Machine restarts on the previous code.', a.card(self.row()))
+        self.assertFalse({'Merge fix', 'Undo merge'} & set(self.labels()))
+        self.assertTrue(self.app.action('undo_merge', {'suggestion_id': self.sid, 'approval_id': 'again'}, owner_dashboard=True)['duplicate'])
+        self.assertNotEqual(head, git(self.app_dir, 'rev-parse', 'HEAD'))
+
+    def test_it_undoes_itself_when_the_fixed_error_comes_back(self):
+        head = self.merged()
+        self.store.record_fault('fp-other', 'KeyError', [], 'graph', 'oldversion0')  # the old code, before the restart
+        self.assertIsNone(self.app.undo_step(self.transport()))
+        self.store.record_fault('fp-graph', 'KeyError', [], 'graph', head[:12])
+        self.assertEqual(self.app.undo_step(self.transport()), 'undone')
+        self.assertIn('The error it fixed (KeyError) came back, so I undid the merge.', a.card(self.row()))
+        self.assertIsNone(self.app.undo_step(self.transport()))  # once
+
+    def test_it_undoes_itself_when_a_new_error_shows_up_right_after(self):
+        head = self.merged()
+        self.store.record_fault('fp-new', 'TypeError', [], 'digest', head[:12])
+        self.assertEqual(self.app.undo_step(self.transport()), 'undone')
+        self.assertIn('A new error (TypeError) showed up right after the merge, so I undid it.', a.card(self.row()))
+
+    def test_anything_less_than_safe_waits_for_the_owner(self):
+        action = {'kind': 'merge', 'files': ['graph.py', 'test_graph.py'], 'lines': 2, 'commits': 2, 'plugin': False, 'diff': '+x'}
+        self.assertIsNone(n.unsafe_merge(action, {}))
+        for change, reason in [({'files': ['graph.py']}, 'no test'), ({'plugin': True}, 'more than'), ({'files': ['AGENTS.md', 'test_graph.py']}, 'more than'),
+                               ({'lines': 51}, 'bigger'), ({'files': ['a.py', 'b.py', 'c.py', 'd.py', 'test_a.py']}, 'bigger'),
+                               ({'diff': '+        db.execute("ALTER TABLE events ADD x")'}, 'database')]:
+            self.assertIn(reason, n.unsafe_merge({**action, **change}, {}))
+        self.assertIn('off', n.unsafe_merge(action, {'self_fix_auto': False}))
+        # A test that passes without the fix proves nothing: the card waits for Merge fix, which still works.
+        self.assertTrue(self.save(self.fix(proof=False))['auto_merge'].startswith('queued'))
+        self.assertEqual(self.app.action_step(next_actions_transport(self)), 'blocked')
+        self.assertIn('doesn’t prove the fix. Not merged by itself. Tap Merge fix to merge it anyway.', a.card(self.row()))
+        self.assertIn('Merge fix', self.labels())
+        self.assertEqual(git(self.app_dir, 'log', '--format=%s', '-1'), 'Start')
+        revision = self.row()['next_action']['revision']
+        self.app.action('confirm_action', {'suggestion_id': self.sid, 'revision': revision, 'approval_id': 'owner-tap'}, owner_dashboard=True)
+        self.assertEqual(self.app.action_step(next_actions_transport(self)), 'sent')
+        self.assertIn('Merged. The Machine restarts with the fix.', a.card(self.row()))
+
+    def test_only_fixes_to_its_own_errors_and_one_a_day(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE events SET kind='gmail.message' WHERE id=1")
+        self.assertIn('recorded errors', self.save(self.fix())['auto_merge'])
+        with self.store.connect() as db:
+            db.execute("UPDATE events SET kind='machine.fault' WHERE id=1")
+            db.execute("INSERT INTO action_jobs VALUES('old','other','r','{\"kind\":\"merge\"}','sent',?,?,'owner','dashboard','','merge:abc',NULL,NULL)", (a.now(), a.now()))
+        self.assertEqual(self.store.auto_merge(self.sid, self.config), 'another merge happened in the last day')
+
+
 def next_actions_transport(test):
     return n.ActionTransport(None, None, merge=test.transport())
 

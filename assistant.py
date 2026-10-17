@@ -202,7 +202,11 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'revise_draft', 'forget_fact'}
+OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact'}
+# A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
+# its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
+UNDO_MERGE = dt.timedelta(hours=24)
+AUTO_UNDO_NEW = dt.timedelta(hours=1)
 # A signal deferred this many times at the same version is set aside: still pending
 # and searchable, but no longer offered in review batches until new content arrives.
 SET_ASIDE_AFTER = 2
@@ -3232,6 +3236,62 @@ class Store:
             db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(suggestion_id,))
         return {'status':'queued'}
 
+    def auto_merge(self, suggestion_id, config):
+        """Queue a fix to The Machine's own error for merging without the owner's tap, when it is small
+        and safe (next_actions.unsafe_merge) and no other merge happened in the last day. Returns why
+        not, or None once queued; Merge now still works if the checks stop it."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
+            merges=[a for a in next_actions.visible_actions(row['next_action']) if a['kind']=='merge'] if row and row['status']=='prepared' else []
+            if len(merges)!=1:return 'no single fix to merge'
+            action=merges[0]
+            fault=next((json.loads(e['metadata']).get('fingerprint') for e in db.execute(
+                "SELECT e.metadata FROM events e JOIN json_each(?) ids ON ids.value=e.id WHERE e.kind='machine.fault'",(row['event_ids'],))),None)
+            if not fault:return 'it does not fix one of The Machine’s recorded errors'
+            reason=next_actions.unsafe_merge(action,config)
+            if reason:return reason
+            since=(dt.datetime.fromisoformat(now())-UNDO_MERGE).isoformat()
+            if db.execute("SELECT 1 FROM action_jobs WHERE json_extract(payload,'$.kind')='merge' AND (status IN ('queued','sending','uncertain','undoing') OR (status='sent' AND updated_at>=?))",(since,)).fetchone():
+                return 'another merge happened in the last day'
+            if db.execute('SELECT 1 FROM action_jobs WHERE suggestion_id=? AND revision=?',(suggestion_id,action['revision'])).fetchone():
+                return 'this fix was already handled'
+            job_id=uuid.uuid4().hex;stamp=now()
+            db.execute("INSERT INTO action_jobs(id,suggestion_id,revision,payload,status,created_at,updated_at,approval_id,source,rfc_message_id) VALUES(?,?,?,?,'queued',?,?,?,'auto','')",
+                       (job_id,suggestion_id,action['revision'],encoded({**action,'auto':True,'fault':fault}),stamp,stamp,'auto-merge:'+job_id))
+            db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(suggestion_id,))
+        return None
+
+    def undo_merge(self, suggestion_id, approval_id, source, reason=None):
+        """Queue the undo of a merged fix (the owner's Undo, or The Machine's own when the fix misbehaves)."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            since=(dt.datetime.fromisoformat(now())-UNDO_MERGE).isoformat()
+            job=db.execute("SELECT * FROM action_jobs WHERE suggestion_id=? AND json_extract(payload,'$.kind')='merge' AND status IN ('sent','undoing','undone') ORDER BY updated_at DESC LIMIT 1",(suggestion_id,)).fetchone()
+            if job and job['status'] in ('undoing','undone'):return {'status':job['status'],'duplicate':True}
+            if not job or job['updated_at']<since:raise ValueError('There is no merged fix to undo here (Undo lasts 24 hours).')
+            db.execute("UPDATE action_jobs SET status='undoing',error=?,retry_at=NULL WHERE id=?",(reason,job['id']))  # updated_at stays the merge time
+            db.execute('INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)',(approval_id,suggestion_id,'undo_merge',reason or '',source,now()))
+            db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(suggestion_id,))
+        return {'status':'undoing'}
+
+    def misbehaving_merges(self):
+        """Fixes merged by themselves that their own code version contradicts: the fault they fixed came
+        back, or a new error within the first hour."""
+        found=[]
+        with self.connect() as db:
+            since=(dt.datetime.fromisoformat(now())-UNDO_MERGE).isoformat()
+            # Once per fix: an undo that failed is not retried by itself.
+            for job in db.execute("SELECT * FROM action_jobs j WHERE status='sent' AND approval_id LIKE 'auto-merge:%' AND updated_at>=? AND NOT EXISTS("
+                                  "SELECT 1 FROM decisions d WHERE d.suggestion_id=j.suggestion_id AND d.choice='undo_merge' AND d.created_at>=j.updated_at)",(since,)).fetchall():
+                action=json.loads(job['payload']);version=action['head'][:12]
+                early=(dt.datetime.fromisoformat(job['updated_at'])+AUTO_UNDO_NEW).isoformat()
+                back=db.execute('SELECT kind FROM faults WHERE version=? AND fingerprint=?',(version,action.get('fault'))).fetchone()
+                new=db.execute('SELECT kind FROM faults WHERE version=? AND first_at<=? ORDER BY first_at LIMIT 1',(version,early)).fetchone()
+                if back:found.append((job['suggestion_id'],f"The error it fixed ({back['kind']}) came back, so I undid the merge."))
+                elif new:found.append((job['suggestion_id'],f"A new error ({new['kind']}) showed up right after the merge, so I undid it."))
+        return found
+
     def preparation_blocked(self, suggestion_id, job_id, reason, details=None, note_kind=None):
         if not reason.strip() or len(reason)>400:
             raise ValueError('Give a short, specific blocker')
@@ -3292,8 +3352,11 @@ class Store:
         extra={'result_files':files,'original_urls':originals[:5]}
         action=suggestion.get('next_action');action=json.loads(action) if isinstance(action,str) else action
         if action:
-            states={r['revision']:{k:r[k] for k in ('status','error','message_id','snooze_status','snooze_until','snooze_error') if r[k] is not None or k in ('status','error','message_id')}
-                    for r in db.execute('SELECT j.revision,j.status,j.error,j.message_id,t.status snooze_status,t.until snooze_until,t.error snooze_error FROM action_jobs j LEFT JOIN thread_snoozes t ON t.job_id=j.id WHERE j.suggestion_id=?',(suggestion['id'],))}
+            states={r['revision']:{**{k:r[k] for k in ('status','error','message_id','snooze_status','snooze_until','snooze_error') if r[k] is not None or k in ('status','error','message_id')},
+                                   **({'auto':True} if r['approval_id'].startswith('auto-merge:') else {}),
+                                   # A merged fix can be undone for a day.
+                                   **({'undo_until':(dt.datetime.fromisoformat(r['updated_at'])+UNDO_MERGE).isoformat()} if r['status']=='sent' and str(r['message_id']).startswith('merge:') else {})}
+                    for r in db.execute('SELECT j.revision,j.status,j.error,j.message_id,j.approval_id,j.updated_at,t.status snooze_status,t.until snooze_until,t.error snooze_error FROM action_jobs j LEFT JOIN thread_snoozes t ON t.job_id=j.id WHERE j.suggestion_id=?',(suggestion['id'],))}
             extra['next_actions']=[{**item,**({'state':states[item['revision']]} if item['revision'] in states else {})} for item in next_actions.visible_actions(action)]
             if action['kind']!='menu' and action['revision'] in states:extra['action_status']=states[action['revision']]
         prompt=db.execute('SELECT status,error FROM feedback_prompts WHERE request_id=?',(suggestion.get('feedback_request_id'),)).fetchone()
@@ -4271,12 +4334,15 @@ def card(row):
     if row.get('preparation_status') in ('starting','running'): status='Preparing…'
     elif row.get('preparation_status') == 'queued': status='Next up. I’ll start shortly.'
     elif row.get('preparation_status') == 'blocked': status='I’m stuck: '+(row.get('preparation_reason') or 'Preparation did not finish. I’ll keep this in your list.')
-    action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed')),None)
+    action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed','undoing','undone')),None)
     if action_state and row['status']=='prepared':
         merging=merge_state(row,action_state)
-        status={'queued':'Testing and merging the fix…' if merging else 'Sending your approved draft…','sending':'Testing and merging the fix…' if merging else 'Sending your approved draft…',
-                'sent':('Merged. The Machine restarts with the fix.'+(' '+action_state['error'] if action_state.get('error') else '')) if merging else
-                ('LinkedIn message sent.' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Reply posted on X.' if str(action_state.get('message_id') or '').startswith('x:') else 'X message sent.' if str(action_state.get('message_id') or '').startswith('xdm:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':action_state.get('error'),'failed':action_state.get('error')}.get(action_state['status'],status)
+        auto=merging and action_state.get('auto')
+        status={'queued':'Testing the fix. It merges by itself if every check passes.' if auto else 'Testing and merging the fix…' if merging else 'Sending your approved draft…','sending':'Testing and merging the fix…' if merging else 'Sending your approved draft…',
+                'sent':(('Merged by itself and restarted. You can undo it for 24 hours; it undoes itself if the error comes back.' if auto else 'Merged. The Machine restarts with the fix.')
+                        +(' '+action_state['error'] if action_state.get('error') else '')) if merging else
+                ('LinkedIn message sent.' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Reply posted on X.' if str(action_state.get('message_id') or '').startswith('x:') else 'X message sent.' if str(action_state.get('message_id') or '').startswith('xdm:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':(action_state.get('error') or '')+(' Tap Merge fix to merge it anyway.' if auto else ''),'failed':action_state.get('error'),
+                'undoing':'Undoing the merge…','undone':action_state.get('error') or 'Merge undone.'}.get(action_state['status'],status)
     try:
         handed = json.loads(row['awaiting']) if row.get('awaiting') else {}
     except (ValueError, TypeError):
@@ -4323,10 +4389,12 @@ def controls(row):
     if row['status']=='prepared':
         for action in actions:
             state=action.get('state') or row.get('action_status',{})
-            if action['kind'] in ('email','email_demo','linkedin','slack','x','merge','prepare','finish') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation'):
+            if action['kind'] in ('email','email_demo','linkedin','slack','x','merge','prepare','finish') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation','undoing','undone'):
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
                 buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
             elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
+    if row['status'] in ('prepared','completed') and any(a['kind']=='merge' and (a.get('state') or row.get('action_status') or {}).get('undo_until','')>now() for a in actions):
+        buttons.append({'label':'Undo merge','action':{'type':'callback','value':f"assistant:{row['id']}:unmerge"}})  # a merged fix stays reversible for a day
     buttons+=[{'label':label,'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}} for label,choice in choices]
     # Fewer rows: up to three buttons per row that fit a phone's width, in order, so a Send
     # shares its row with Mark done. Same rule as packRows in the plugin.
@@ -5206,6 +5274,10 @@ class App:
                 ready=[a for a in next_actions.actions(action) if a['kind'] in ('email','linkedin','slack','x') and not a.get('to_options')]
                 if not ready:raise ValueError('send_now needs an email, LinkedIn, Slack or X draft with its recipients filled in')
                 saved['send']=self.store.confirm_action(args['suggestion_id'],ready[0]['revision'],'assistant:'+uuid.uuid4().hex,'assistant')
+            if any(a['kind']=='merge' for a in next_actions.actions(action)) and not saved.get('replayed'):
+                # The service decides, never the agent: a small, tested fix to its own error merges by itself.
+                why=self.store.auto_merge(args['suggestion_id'],self.config)
+                saved['auto_merge']='queued: it merges by itself if the tests pass and the new test fails without the fix' if why is None else 'waits for the owner’s Merge: '+why
             return saved
         if name == 'revise_draft':
             if not owner_dashboard:raise ValueError('Drafts are edited in the dashboard')
@@ -5215,6 +5287,11 @@ class App:
             elif not owner_dashboard and re.fullmatch(r'telegram:[A-Za-z0-9_.:-]{1,200}',str(args.get('approval_id',''))):source='telegram'
             else:raise ValueError('Sending approval must come from the owner’s controls')
             return self.store.confirm_action(args['suggestion_id'],args['revision'],args['approval_id'],source,args.get('recipients'))
+        if name == 'undo_merge':
+            if owner_dashboard and re.fullmatch(r'[A-Za-z0-9_.:-]{1,200}',str(args.get('approval_id',''))):source='dashboard'
+            elif not owner_dashboard and re.fullmatch(r'telegram:[A-Za-z0-9_.:-]{1,200}',str(args.get('approval_id',''))):source='telegram'
+            else:raise ValueError('Undo must come from the owner’s controls')
+            return self.store.undo_merge(args['suggestion_id'],args['approval_id'],source)
         if name == 'remember_fact':
             return self.store.remember_fact(args.get('text'), args.get('decision_id'), args.get('kind') or 'fact')
         if name == 'looks_handled':
@@ -5587,8 +5664,31 @@ class App:
         while not self.stop.wait(3):
             try:self.action_step()
             except Exception as error:LOG.error('approved action error=%s',type(error).__name__)
+            try:self.undo_step()
+            except Exception as error:LOG.error('undo merge error=%s',type(error).__name__)
             try:self.thread_snooze_step()
             except Exception as error:LOG.error('thread snooze error=%s',type(error).__name__)
+
+    def undo_step(self,merge=None):
+        """Undo merged fixes: the owner's Undo, or a fix merged by itself that misbehaves."""
+        for suggestion_id,reason in self.store.misbehaving_merges():
+            self.store.undo_merge(suggestion_id,'auto-undo:'+uuid.uuid4().hex,'assistant',reason)
+        with self.store.connect() as db:
+            job=db.execute("SELECT * FROM action_jobs WHERE status='undoing' ORDER BY updated_at LIMIT 1").fetchone()
+        if not job:return
+        merge=merge or next_actions.MergeTransport(self.config,restart_self)
+        try:
+            result=merge.revert(json.loads(job['payload']))
+            note=' '.join(n for n in (job['error'] or 'Merge undone.','Pushing the undo failed; push it yourself.' if result.get('pushed') is False else '',
+                                      'The Machine restarts on the previous code.' if result.get('restarted') else 'Restart The Machine to use the previous code.') if n)
+            status='undone'
+        except ValueError as error:
+            note,status=str(error),'sent'
+        with self.store.connect() as db:
+            # A failed undo leaves the fix merged and says why; the card keeps its Undo.
+            db.execute('UPDATE action_jobs SET status=?,error=? WHERE id=?',(status,note,job['id']))
+            db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
+        return status
 
     def thread_snooze_step(self,gmail=None):
         """Archive a replied thread under a label, then return it to the inbox when due."""
@@ -6252,7 +6352,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','revise_draft','forget_fact','push_subscribe','push_unsubscribe')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','push_subscribe','push_unsubscribe')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

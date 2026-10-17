@@ -88,6 +88,11 @@ await handler(ctx('back'));assert.equal(edits.pop().buttons.flat()[0].text,'Repl
  await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');edits.pop();}
 item.status='prepared';item.next_action={kind:'x',label:'Send',revision:'abcdef123456',account_id:'x-acme',handle:'acme',conversation_id:'42-7',to_name:'Ada',body:'Hi Ada'};
 {await handler(ctx('send_abcdef123456'));assert.equal(edits.pop().text,'Send this X message?\nAs @acme to Ada\n\nHi Ada');}
+// A merged fix to The Machine: Undo merge for a day, through the owner's tap only.
+item.status='prepared';item.next_action={kind:'merge',label:'Merge fix',revision:'abcdef123456',summary:'Fix',stat:'1 file',state:{status:'sent',message_id:'merge:abc',undo_until:new Date(Date.now()+864e5).toISOString()}};
+await handler(ctx('back'));{const labels=edits.pop().buttons.flat().map(b=>b.text);assert.ok(labels.includes('Undo merge'));assert.ok(!labels.includes('Merge fix'));}
+await handler(ctx('unmerge'));{const c=choices.pop();assert.equal(c.suggestion_id,id);assert.match(c.approval_id,/^telegram:/);}
+item.next_action.state.undo_until=new Date(Date.now()-1000).toISOString();await handler(ctx('back'));assert.ok(!edits.pop().buttons.flat().some(b=>b.text==='Undo merge'));
 // The last step of a prepared task: the review shows what goes out; Confirm runs only that step.
 item.status='prepared';item.next_action={kind:'finish',label:'Submit claim',revision:'abcdef123456',instructions:'Press Submit on the filled-in claim.',preview:'42.50 EUR, Travel, 16 Oct',url:'https://expenses.example.com/claims/7'};
 await handler(ctx('back'));assert.equal(edits.pop().buttons.flat()[0].text,'Submit claim');

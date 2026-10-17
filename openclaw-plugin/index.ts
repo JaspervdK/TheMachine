@@ -15,7 +15,7 @@ const taskActions=(item:any)=>{
  const emailReady=choices.some((a:any)=>['email','email_demo','linkedin','slack','x','merge','finish'].includes(a.kind));
  return choices.filter((a:any)=>a.kind!=='prepare'||(!emailReady&&!/^Draft (shorter|longer|another|alternative|follow-up)\b/i.test(a.label||'')));
 };
-const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action']);
+const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge']);
 const TOOL_ACTIONS = ['status', 'events', 'begin_analysis', 'analysis_page', 'finish_analysis', 'suggest', 'prepare', 'preparation_blocked', 'preparation_history', 'remember_fact', 'looks_handled', 'related', 'graph', 'profile_evidence', 'save_profile'];
 // dismiss_handled stays for older cards; the service records that reason as done.
 const DISMISS_REASONS: Record<string,string> = {dismiss_irrelevant:'Not relevant', dismiss_handled:'Already handled', dismiss_wrong:'Wrong facts'};
@@ -32,9 +32,12 @@ function cardButtons(item: any) {
   const buttons:any[]=[];
   if(item.status==='prepared')for(const action of taskActions(item)){
     if(action.kind==='open')buttons.push({text:action.label,url:action.url});
-    else if(['email','email_demo','linkedin','slack','x','merge','prepare','finish'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation'].includes((action.state||item.action_status)?.status))
+    else if(['email','email_demo','linkedin','slack','x','merge','prepare','finish'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((action.state||item.action_status)?.status))
       buttons.push(button(item.id,action.label||(action.kind==='prepare'?'Prepare next step':'Send'),(action.kind==='prepare'?'next_':'send_')+action.revision));
   }
+  // A merged fix stays reversible for a day. Same rule as controls() in assistant.py.
+  if(['prepared','completed'].includes(item.status)&&taskActions(item).some((a:any)=>a.kind==='merge'&&Date.parse((a.state||item.action_status)?.undo_until||'')>Date.now()))
+    buttons.push(button(item.id,'Undo merge','unmerge'));
   return packRows([...buttons,...choices.map(([text,choice])=>button(item.id,text,choice))]);
 }
 
@@ -164,7 +167,7 @@ export default definePluginEntry({
             String(ctx.senderId) !== config.telegram_owner || String(ctx.callback.chatId) !== config.telegram_owner) {
           return { handled: true };
         }
-        const match = /^assistant:([a-f0-9]{16}):(accept|reject|snooze|other|complete|undo|retry|back|snooze_(?:2h|tomorrow|3d|1w)|dismiss_(?:irrelevant|handled|wrong|other|none)|(?:send|confirm|next)_[a-f0-9]{12}|confirm_[a-f0-9]{12}_[0-5])$/.exec(ctx.callback.data);
+        const match = /^assistant:([a-f0-9]{16}):(accept|reject|snooze|other|complete|undo|unmerge|retry|back|snooze_(?:2h|tomorrow|3d|1w)|dismiss_(?:irrelevant|handled|wrong|other|none)|(?:send|confirm|next)_[a-f0-9]{12}|confirm_[a-f0-9]{12}_[0-5])$/.exec(ctx.callback.data);
         if (!match) return { handled: true };
         const [, id, choice] = match;
         const state = await call('status', {full:true});
@@ -181,7 +184,7 @@ export default definePluginEntry({
         }
         if(choice.startsWith('send_')||choice.startsWith('confirm_')||choice.startsWith('next_')){
           const [,revision,pick]=choice.split('_'),draft=taskActions(item).find((a:any)=>a.revision===revision);
-          if(item.status!=='prepared'||!draft||!['email','email_demo','linkedin','slack','x','merge','prepare','finish'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation'].includes((draft.state||item.action_status)?.status)){
+          if(item.status!=='prepared'||!draft||!['email','email_demo','linkedin','slack','x','merge','prepare','finish'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((draft.state||item.action_status)?.status)){
             await ctx.respond.editButtons({buttons:cardButtons(item)});return {handled:true};
           }
           if((choice.startsWith('next_')&&draft.kind!=='prepare')||(choice.startsWith('confirm_')&&!['email','linkedin','slack','x','merge','finish'].includes(draft.kind))||(choice.startsWith('send_')&&!['email','email_demo','linkedin','slack','x','merge','finish'].includes(draft.kind)))return {handled:true};
@@ -196,6 +199,12 @@ export default definePluginEntry({
           try{await call('confirm_action',{suggestion_id:id,revision,approval_id:`telegram:${ctx.callbackId}`,...(recipient?{recipients:[recipient]}:{})});}
           catch(error:any){if(error.status!==400)throw error;await call('refresh_card',{suggestion_id:id});return {handled:true};}
           await ctx.respond.editButtons({buttons:cardButtons({...item,...(['prepare','finish'].includes(draft.kind)?{status:'accepted'}:{}),next_actions:taskActions(item).map((a:any)=>a.revision===revision?{...a,state:{status:'queued'}}:a)})});
+          return {handled:true};
+        }
+        if(choice==='unmerge'){
+          try{await call('undo_merge',{suggestion_id:id,approval_id:`telegram:${ctx.callbackId}`});}
+          catch(error:any){if(error.status!==400)throw error;}
+          await call('refresh_card',{suggestion_id:id});
           return {handled:true};
         }
         const closed=['completed','rejected'].includes(item.status);

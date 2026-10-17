@@ -113,6 +113,8 @@ A card about The Machine's own error (a machine.fault signal) or another bug in 
 
 If the running code moves on before the owner merges, the merge refuses; a Change then redoes the fix on the current code.
 
+A small fix to one of The Machine's recorded errors merges by itself, without the owner's tap: at most 3 changed Python files of the service and 50 lines besides the tests, a new test_*.py test that fails without the fix (the service checks this), and nothing in the plugin, these instructions, the database layout or the config. At most one a day. The owner can undo it for 24 hours, and it undoes itself when its code version records the same error again or a new one in the first hour. So keep fixes that small when you can, and always add the test. The prepare result says whether it was queued (`auto_merge`).
+
 ### The last step: Submit, Pay, Book…
 
 When a prepared-ahead task ends in a click that commits something (submitting a form, paying, booking, ordering, publishing, signing, accepting), do everything before it and offer the click as `{kind:finish,label:Submit expense claim,instructions:<the exact step>,preview:<what goes out>,url:<the page>}`:

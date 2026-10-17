@@ -947,6 +947,7 @@ def merge_action(value, config):
         files = git(clone, 'diff', '--name-only', base, head).split()
         stat = git(clone, 'diff', '--stat', base, head).rstrip()
         diff = git(clone, 'diff', base, head)
+        numstat = git(clone, 'diff', '--numstat', base, head)
     except (OSError, subprocess.TimeoutExpired):
         raise ValueError('git is not available to check the fix') from None
     if not 1 <= commits <= 20 or not files:
@@ -954,8 +955,38 @@ def merge_action(value, config):
     result = {'kind': 'merge', 'label': value.get('label') or 'Merge fix', 'clone': str(clone), 'summary': ' '.join(summary.split()),
               'base': base, 'head': head, 'commits': commits, 'files': files[:200], 'stat': stat[-4000:],
               'diff': diff if len(diff) <= MAX_DIFF else diff[:MAX_DIFF] + '\n… diff shortened; the full change is in the clone.',
-              'plugin': any(f.startswith('openclaw-plugin/') for f in files)}
+              'plugin': any(f.startswith('openclaw-plugin/') for f in files),
+              # Lines changed outside the tests, for the safe-merge limits ('-' is a binary file).
+              'lines': sum(int(a) + int(d) if a.isdigit() and d.isdigit() else 10**6
+                           for a, d, path in (line.split('\t', 2) for line in numstat.splitlines() if line.count('\t') >= 2)
+                           if not is_test(path))}
     return result
+
+
+def is_test(path):
+    return Path(path).name.startswith('test_') and path.endswith(('.py', '.mjs'))
+
+
+SCHEMA_CHANGE = re.compile(r'(?im)^\+.*\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX|VIEW|TRIGGER)\b|^\+.*\bexecutescript\(')
+
+
+def unsafe_merge(action, config):
+    """Why this fix waits for the owner's Merge, or None when The Machine may merge it by itself:
+    a small Python change to the service, with a new test, that leaves the plugin, the agent's
+    instructions, the database layout and the config alone. Undo stays available for 24 hours."""
+    if config.get('self_fix_auto', True) is False:
+        return 'merging by itself is off'
+    files = action.get('files') or []
+    code = [f for f in files if not is_test(f)]
+    if action.get('plugin') or any(not f.endswith('.py') or '/' in f and not f.startswith('integrations/') for f in code):
+        return 'it changes more than the service’s own Python code'
+    if not any(is_test(f) and f.endswith('.py') for f in files):
+        return 'it adds no test'
+    if not code or len(code) > 3 or not isinstance(action.get('lines'), int) or action['lines'] > 50 or action.get('commits', 99) > 5:
+        return 'it is bigger than a small fix (at most 3 files and 50 lines)'
+    if SCHEMA_CHANGE.search(action.get('diff') or '') or action['diff'].endswith('the full change is in the clone.'):
+        return 'it may change the database'
+    return None
 
 
 def merge_preview(action):
@@ -1001,6 +1032,54 @@ class MergeTransport:
             raise ValueError('The tests did not finish on this fix. Nothing was merged.') from None
         if tests.returncode:
             raise ValueError('The tests fail on this fix. Nothing was merged; tap Change to have it fixed.')
+        if action.get('auto'):
+            self.proves(action, env)
+
+    def proves(self, action, env):
+        """Merging by itself: the fix's new tests must fail on the code without the fix."""
+        tests = [f for f in action['files'] if is_test(f) and f.endswith('.py')]
+        with tempfile.TemporaryDirectory(prefix='machine-proof-') as tmp:
+            try:
+                subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', action['clone'], tmp], check=True, capture_output=True, timeout=120)
+                git(Path(tmp), 'checkout', '--quiet', action['base'])
+                git(Path(tmp), 'checkout', action['head'], '--', *tests)
+                run = subprocess.run(['python3', '-m', 'unittest', *[t[:-3].replace('/', '.') for t in tests]], cwd=tmp, env=env,
+                                     capture_output=True, text=True, timeout=int(self.config.get('self_test_seconds', 1200)))
+            except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                raise ValueError('I could not check that the new test catches the bug. Not merged by itself.') from None
+        if not run.returncode:
+            raise ValueError('The new test also passes without the fix, so it doesn’t prove the fix. Not merged by itself.')
+
+    def revert(self, action):
+        """Undo a merged fix: revert its commits on top of the running code, push and restart."""
+        app = app_dir(self.config)
+        name = ['-c', 'user.name=The Machine', '-c', 'user.email=the-machine@localhost']
+        try:
+            if git(app, 'status', '--porcelain', '--untracked-files=no'):
+                raise ValueError('The Machine’s code has uncommitted changes here. Nothing was undone.')
+            if self.merged(action) is not True:
+                raise ValueError('The fix is no longer in the running code. Nothing to undo.')
+            try:
+                git(app, *name, 'revert', '--no-edit', '--no-commit', f"{action['base']}..{action['head']}", timeout=120)
+            except ValueError:
+                subprocess.run(['git', '-C', str(app), 'revert', '--abort'], capture_output=True, timeout=60)
+                raise ValueError('Later changes touch the same lines, so I could not undo it by itself. Nothing was undone.') from None
+            git(app, *name, 'commit', '--quiet', '-m', 'Undo: ' + action['summary'][:200], timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValueError('git did not finish undoing it. Check The Machine’s code.') from None
+        pushed = None
+        try:
+            git(app, 'rev-parse', '--abbrev-ref', '@{u}')
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            pass
+        else:
+            if self.config.get('self_fix_push', True):
+                try:
+                    git(app, 'push', '--quiet', timeout=120)
+                    pushed = True
+                except (ValueError, OSError, subprocess.TimeoutExpired):
+                    pushed = False
+        return {'pushed': pushed, 'restarted': bool(self.restart and self.restart())}
 
     def send(self, action, job):
         app = app_dir(self.config)
