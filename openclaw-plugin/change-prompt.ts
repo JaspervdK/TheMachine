@@ -42,13 +42,13 @@ export function forceReplyPayload(method: string, payload: any, cardId: string, 
     reply_markup:{force_reply:true,input_field_placeholder:'Your reply'}};
 }
 // `text` is the service's prompt_text(), so a cached copy can be matched exactly on recovery.
-export async function sendChangePrompt(cfg: any, cardId: string, text: string, confirmed?: (id:string)=>Promise<void>, owner = '') {
+export async function sendChangePrompt(cfg: any, cardId: string, text: string, confirmed?: (id:string)=>Promise<void>, owner = '', accountId = 'default') {
   let admitted=false,transport:any;
   try {
   if (!/^\d+$/.test(cardId) || !/^-?\d+$/.test(String(owner))) throw new Error('Missing suggestion card');
   const {resolveTelegramAccount, sendMessageTelegram, getOrCreateAccountThrottler, createTelegramClientFetch,
     asTelegramClientFetch, resolveTelegramTransport, makeProxyFetch, Bot} = await telegramInternals();
-  const account=resolveTelegramAccount({cfg,accountId:'default'});
+  const account=resolveTelegramAccount({cfg,accountId});
   transport=resolveTelegramTransport(account.config.proxy ? makeProxyFetch(account.config.proxy) : undefined,{network:account.config.network});
     const clientFetch=createTelegramClientFetch({fetchImpl:asTelegramClientFetch(transport.fetch),transport});
     const bot=new Bot(account.token,{client:{...(clientFetch?{fetch:asTelegramClientFetch(clientFetch)}:{}),...(account.config.apiRoot?{apiRoot:account.config.apiRoot}:{})}});
@@ -62,7 +62,7 @@ export async function sendChangePrompt(cfg: any, cardId: string, text: string, c
       return result;
     });
     admitted=true;
-    const result=await sendMessageTelegram(String(owner),text.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])),{cfg,accountId:'default',api:bot.api,textMode:'html',replyToMessageId:Number(cardId)});
+    const result=await sendMessageTelegram(String(owner),text.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])),{cfg,accountId,api:bot.api,textMode:'html',replyToMessageId:Number(cardId)});
     if (!result?.messageId) throw new Error('Unconfirmed Change prompt');
     await confirmed?.(String(result.messageId));
     return String(result.messageId);

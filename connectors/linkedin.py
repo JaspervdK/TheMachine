@@ -5,7 +5,7 @@ tab of the signed-in OpenClaw browser parked on linkedin.com/robots.txt: no API 
 leaving the browser, and nothing marked as read. Sign in to LinkedIn once in that browser
 (`openclaw browser --browser-profile openclaw open https://www.linkedin.com/login`). One account:
 
-    {"id": "me-linkedin", "service": "linkedin", "transport": "linkedin-inbox", "boundary": "work",
+    {"id": "me-linkedin", "service": "linkedin", "transport": "linkedin-inbox", "boundary": "work:Acme",
      "poll_seconds": 3600}
 
 LinkedIn has no API for this, so reads stay rare and in waking hours. Optional: "active_hours":

@@ -3125,10 +3125,10 @@ class Store:
                 last_failure = db.execute("SELECT at,error FROM sync_activity WHERE account_id=? AND status='failed' ORDER BY at DESC,rowid DESC LIMIT 1",(account['id'],)).fetchone()
                 failures_24h = db.execute("SELECT count(*) FROM sync_activity WHERE account_id=? AND status='failed' AND at>=?",(account['id'],cutoff)).fetchone()[0]
                 result['connectors'].append({'sync_activity':activity,'last_failure':dict(last_failure) if last_failure else None,
-                                             'failures_24h':failures_24h,'id': account['id'], 'email': account['email'], 'boundary': account['boundary'],
+                                             'failures_24h':failures_24h,'id': account['id'], 'email': account.get('email', ''), 'boundary': account['boundary'],
                                              'service': account.get('service', 'gmail'),
                                              'poll_seconds':account.get('poll_seconds',300),
-                                             'display_name': account.get('display_name', account['email']),
+                                             'display_name': account.get('display_name') or account.get('email') or account['id'],
                                              **(dict(row) if row else {}), **dict(counts), **channel_health})
             result['deliveries'] = [dict(r) for r in db.execute('SELECT * FROM deliveries')]
             jobs={r['suggestion_id']:dict(r) for r in db.execute('SELECT * FROM preparations')}
@@ -4034,6 +4034,11 @@ def node_bin(config):
     return str(sibling) if sibling.exists() else 'node'
 
 
+def telegram_account(config):
+    """The OpenClaw Telegram account (bot) that talks to the owner: config `telegram_account`."""
+    return str(config.get('telegram_account') or 'default')
+
+
 def node_env(config):
     """Environment for the Node helpers: where OpenClaw is installed and who the owner is."""
     env = dict(os.environ)
@@ -4043,6 +4048,7 @@ def node_env(config):
         env['OPENCLAW_PACKAGE_DIR'] = str(Path(config['openclaw_package_dir']).expanduser())
     if config.get('telegram_owner'):
         env['ASSISTANT_TELEGRAM_OWNER'] = str(config['telegram_owner'])
+    env['ASSISTANT_TELEGRAM_ACCOUNT'] = telegram_account(config)
     if config.get('dashboard_host'):
         env['PUSH_VAPID_SUBJECT'] = 'https://' + config['dashboard_host'] + config.get('dashboard_path', '/')
     return env
@@ -4106,7 +4112,7 @@ def telegram(config, row, action, message_id=None):
         root='https://'+config['dashboard_host']+config.get('dashboard_path','/')
         message=('Ready: ' if ready else 'Needs your help: ')+'**'+title+'**'
         message+='\n\n[View '+('result' if ready else 'task')+']('+root+'#result='+row['id']+')'
-        return telegram_request(config,{'action':'send','channel':'telegram','accountId':'default',
+        return telegram_request(config,{'action':'send','channel':'telegram','accountId':telegram_account(config),
             'target':config['telegram_owner'],'replyTo':str(row['message_id']),
             'message':message,'presentation':{'blocks':[]},**({'silent':True} if row.get('_silent') else {})})
     body=dict(row)
@@ -4124,7 +4130,7 @@ def telegram(config, row, action, message_id=None):
         body['body']=strip_result_links(body['body'])
         if row['status']=='prepared':body['body']+='\n\n[Read result]('+root+'#result='+row['id']+')'
         elif row.get('original_urls'):body['body']+='\n\n[Open original]('+row['original_urls'][0]+')'
-    args = {'action':action,'channel':'telegram','accountId':'default','target':config['telegram_owner'],
+    args = {'action':action,'channel':'telegram','accountId':telegram_account(config),'target':config['telegram_owner'],
             'message':('Your update\n\n' if action=='send' and row.get('reminder') and (row['status'] in ('prepared','instructions') or row.get('preparation_status')=='blocked') else 'Reminder\n\n' if action=='send' and row.get('reminder') else '')+card(body),'presentation':controls(row)}
     if message_id:
         args['messageId'] = str(message_id)
@@ -5039,7 +5045,7 @@ class App:
         result=None
         try:
             if mode=='native':result=sender(row)
-            else:result=telegram_request(self.config,{'action':'send','channel':'telegram','accountId':'default','target':self.config['telegram_owner'],
+            else:result=telegram_request(self.config,{'action':'send','channel':'telegram','accountId':telegram_account(self.config),'target':self.config['telegram_owner'],
                 'message':prompt_text(row['title'],plain=True,kind=row.get('kind') or 'change'),'replyTo':row['card_id']})
         except DeliveryNotSent:
             result={'definitely_not_sent':True}
@@ -5519,7 +5525,7 @@ class App:
         except Exception:
             usage = None
         text = weekly_recap(self.store, self.config, current, usage)
-        sender = sender or (lambda message: telegram_request(self.config, {'action': 'send', 'channel': 'telegram', 'accountId': 'default',
+        sender = sender or (lambda message: telegram_request(self.config, {'action': 'send', 'channel': 'telegram', 'accountId': telegram_account(self.config),
                                                                            'target': self.config['telegram_owner'], 'message': message}))
         status, message_id, error = 'uncertain', None, None
         try:

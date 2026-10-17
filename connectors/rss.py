@@ -1,6 +1,6 @@
 """Example connector: an RSS or Atom feed.
 
-Config: {"id": "work-feed", "service": "rss", "transport": "http", "boundary": "work",
+Config: {"id": "work-feed", "service": "rss", "transport": "http", "boundary": "work:Acme",
          "url": "https://example.com/feed.xml", "poll_seconds": 1800}
 
 A connector is one module in connectors/ named after its service. It exposes

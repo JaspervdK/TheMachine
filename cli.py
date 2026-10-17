@@ -366,6 +366,9 @@ def cmd_connect(config, args):
         raise CliError(error.message + (f'\n  fix: {error.fix}' if error.fix else '')) from None
     except (KeyboardInterrupt, EOFError):
         raise CliError('stopped; nothing was saved to config.json') from None
+    except Exception as error:  # say what broke instead of a traceback; config.json is only written after a good read
+        raise CliError(f'connecting {args.source} failed unexpectedly: {type(error).__name__}: {str(error)[:300]}\n'
+                       '  config.json was not changed; try again, or see what else is off with: assistant doctor') from None
 
 
 def cmd_doctor(config, args):

@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -203,24 +204,91 @@ def telegram_id(value):
     return text if re.fullmatch(r'-?\d{3,20}', text) else None
 
 
+def json5(text):
+    """JSON with comments and trailing commas (openclaw.json is JSON5), without a JSON5 library."""
+    out, i, string = [], 0, None
+    while i < len(text):
+        c = text[i]
+        if string:
+            out.append(c)
+            if c == '\\':
+                out.append(text[i + 1:i + 2])
+                i += 1
+            elif c == string:
+                string = None
+        elif c in '"\'':
+            string = c
+            out.append(c)
+        elif text.startswith('//', i):
+            i = text.find('\n', i)
+            i = len(text) if i < 0 else i - 1
+        elif text.startswith('/*', i):
+            end = text.find('*/', i + 2)
+            i = len(text) if end < 0 else end + 1
+        else:
+            out.append(c)
+        i += 1
+    cleaned = re.sub(r',(\s*[}\]])', r'\1', ''.join(out))
+    cleaned = re.sub(r"'((?:[^'\\]|\\.)*)'", lambda m: json.dumps(m[1]), cleaned)
+    return json.loads(re.sub(r'([{,]\s*)([A-Za-z_$][\w$]*)\s*:', r'\1"\2":', cleaned))
+
+
+def openclaw_dir(root=None):
+    """OpenClaw's state directory: OPENCLAW_STATE_DIR, else ~/.openclaw."""
+    if root is None and os.environ.get('OPENCLAW_STATE_DIR', '').strip():
+        return Path(os.environ['OPENCLAW_STATE_DIR'].strip()).expanduser()
+    return Path(root or home()) / '.openclaw'
+
+
+def openclaw_settings(root=None):
+    """openclaw.json (OPENCLAW_CONFIG_PATH, else in the state directory), read-only; {} when unreadable."""
+    path = Path(os.environ['OPENCLAW_CONFIG_PATH'].strip()).expanduser() if root is None and os.environ.get('OPENCLAW_CONFIG_PATH', '').strip() \
+        else openclaw_dir(root) / 'openclaw.json'
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    for parse in (json.loads, json5):
+        try:
+            settings = parse(text)
+            return settings if isinstance(settings, dict) else {}
+        except ValueError:
+            continue
+    return {}
+
+
+def telegram_accounts(settings):
+    """{account name: its settings} for OpenClaw's Telegram channel; the top level is 'default'."""
+    channel = (settings.get('channels') or {}).get('telegram') or {}
+    accounts = {k: v for k, v in (channel.get('accounts') or {}).items() if isinstance(v, dict)} if isinstance(channel, dict) else {}
+    if isinstance(channel, dict) and (not accounts or channel.get('botToken') or channel.get('tokenFile')):
+        accounts = {'default': accounts.get('default', channel), **accounts}
+    return accounts
+
+
+def telegram_account(owner, root=None):
+    """The OpenClaw Telegram account (bot) the owner talks to: the one whose allowFrom has them,
+    else 'default', else the only one there is."""
+    accounts = telegram_accounts(openclaw_settings(root))
+    for name, account in accounts.items():
+        allow = account.get('allowFrom') or []
+        if str(owner) in {telegram_id(a) for a in (allow if isinstance(allow, list) else [allow])}:
+            return name
+    return 'default' if 'default' in accounts or len(accounts) != 1 else next(iter(accounts))
+
+
 def telegram_owners(config=None, root=None):
     """Telegram IDs OpenClaw already trusts, owner first: commands.ownerAllowFrom, then the
     channel's allowFrom, then approved pairing senders. Read-only; never prints the bot token."""
-    root = Path(root or home())
     found = []
-    try:
-        settings = json.loads((root / '.openclaw/openclaw.json').read_text())
-    except (OSError, ValueError):
-        settings = {}
-    if isinstance(settings, dict):
+    settings = openclaw_settings(root)
+    if settings:
         owners = (settings.get('commands') or {}).get('ownerAllowFrom') or []
         found += [o for o in (owners if isinstance(owners, list) else [owners]) if str(o).lower().startswith(('telegram:', 'tg:'))]
-        channel = (settings.get('channels') or {}).get('telegram') or {}
-        scopes = [channel] + [a for a in (channel.get('accounts') or {}).values() if isinstance(a, dict)]
-        for scope in scopes:
+        for scope in telegram_accounts(settings).values():
             allow = scope.get('allowFrom') or []
             found += allow if isinstance(allow, list) else [allow]
-    state = Path((config or {}).get('openclaw_state') or root / '.openclaw/state/openclaw.sqlite').expanduser()
+    state = Path((config or {}).get('openclaw_state') or openclaw_dir(root) / 'state/openclaw.sqlite').expanduser()
     if state.exists():
         try:
             with closing(sqlite3.connect(f'file:{state}?mode=ro', uri=True, timeout=2)) as db:
@@ -341,7 +409,7 @@ def suggested_sources(facts):
         chosen.append('whatsapp')
     if android_nodes(facts.get('openclaw')):
         chosen.append('android')
-    return ','.join(chosen + ['gateway'])
+    return ','.join(chosen + (['gateway'] if gateway_unit() else []))
 
 
 def discover(config):
@@ -446,7 +514,39 @@ def siblings(config, service):
 
 
 def slug(text):
-    return re.sub(r'[^a-z0-9]+', '-', str(text).lower()).strip('-') or 'account'
+    text = unicodedata.normalize('NFKD', str(text)).encode('ascii', 'ignore').decode()
+    return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-') or 'account'
+
+
+WEBMAIL = {'gmail', 'googlemail', 'outlook', 'hotmail', 'live', 'msn', 'yahoo', 'icloud', 'me', 'mac', 'aol', 'proton',
+           'protonmail', 'pm', 'gmx', 'web', 'mail', 'yandex', 'zoho', 'fastmail', 'hey', 'tutanota', 'skynet', 'telenet'}
+
+
+def company_of(email):
+    """A company name guessed from a work address (alex@acme.io -> Acme, sam@mail.acme.co.uk -> Acme); '' for webmail."""
+    parts = str(email or '').rpartition('@')[2].lower().split('.')[:-1]
+    if parts and parts[-1] in ('co', 'com', 'org', 'net', 'ac', 'gov') and len(parts) > 1:
+        parts = parts[:-1]
+    name = parts[-1] if parts else ''
+    return '' if not name or name in WEBMAIL or name == 'example' else name.capitalize()
+
+
+def boundary_label(text, default='work:Main'):
+    """work:<Company> or personal:<name> from what someone typed: 'Acme' is work:Acme, 'personal' or 'me'
+    is personal:me, and a full label is kept."""
+    text = str(text or '').strip()
+    kind, colon, name = text.partition(':')
+    if colon and kind.strip().lower() in ('work', 'personal', 'owner') and name.strip():
+        return f'{kind.strip().lower()}:{name.strip()}'
+    if text.lower().rstrip(':') in ('personal', 'private', 'me', 'home', 'family'):
+        return 'personal:' + ('family' if text.lower() == 'family' else 'me')
+    if text.lower().rstrip(':') in ('', 'work'):
+        return default
+    return 'work:' + (name.strip() if colon else text)
+
+
+def ask_boundary(ui, default):
+    return boundary_label(ui.ask('Company name, or "personal" (stored as work:<Company> or personal:<name>)', default), default)
 
 
 def boundaries(config, service):
@@ -487,12 +587,11 @@ def new_account(config, service, account_id=None, ui=None):
         pass  # keep the example's device boundary
     elif same or len(options) > 1:
         choice = ui.choose('Which part of your life is this account', [(b, b) for b in options] + [(None, 'something else')]) if options else None
-        account['boundary'] = choice or ui.ask('Boundary (work:<Company> or personal:<name>)',
-                                               account.get('boundary') if ':' in str(account.get('boundary')) else 'work:')
+        account['boundary'] = choice or ask_boundary(ui, account.get('boundary') if ':' in str(account.get('boundary')) else 'work:Main')
     elif options:
         account['boundary'] = options[0]
-    elif str(account.get('boundary', '')).startswith('work:'):
-        account['boundary'] = ui.ask('Boundary (work:<Company> or personal:<name>)', account['boundary'])
+    elif str(account.get('boundary', '')).startswith('work') or ':' not in str(account.get('boundary', '')):
+        account['boundary'] = ask_boundary(ui, account['boundary'] if ':' in str(account.get('boundary', '')) else 'work:Main')
     taken = {a['id'] for a in config.get('accounts', [])}
     suffix = 'crm' if service == 'salesflare' else service
     # Your ids follow <boundary name>-<source> (acme-gmail): name this one the same way.
@@ -628,7 +727,17 @@ def step_google(config, account, ui):
     account['client'] = client
     password = Path(config.setdefault('credentials', {}).setdefault('gog-password', str(data_dir(config) / 'gog-password'))).expanduser()
     if not password.exists():
-        typed = ui.secret('Password for the gog file keyring that keeps the Google token (Enter generates one)')
+        # The service needs the keyring password too: reuse the one gog already uses here, never replace it.
+        typed = os.environ.get('GOG_KEYRING_PASSWORD', '').strip()
+        if typed:
+            ui.say('  using your GOG_KEYRING_PASSWORD')
+        elif known:
+            typed = ui.secret('Password of your gog file keyring (it already holds ' + ', '.join(e for e, _ in known) + ')')
+            if not typed:
+                raise SetupError('No keyring password', 'run assistant connect again with the password your gog keyring uses '
+                                 '(or export GOG_KEYRING_PASSWORD first)')
+        else:
+            typed = ui.secret('Password for the gog file keyring that keeps the Google token (Enter generates one)')
         write_private(password, (typed or secrets.token_urlsafe(24)) + '\n')
         ui.say('  keyring password saved to ' + str(password) + (' (generated)' if not typed else ''))
     if check(config, account) is None:
@@ -697,10 +806,10 @@ def step_slack(config, account, ui):
         user = slack.get('users.info', {'user': me['user_id']}).get('user') or {}
     except assistant().SourceError as error:
         raise SetupError(f'Slack did not answer: {error}', hint(error)) from None
-    account.update(team_id=me['team_id'], user_id=me['user_id'], email=(user.get('profile') or {}).get('email') or account['email'])
+    account.update(team_id=me['team_id'], user_id=me['user_id'], email=(user.get('profile') or {}).get('email') or account.get('email', ''))
     if me.get('url'):
         account['slack_host'] = urllib.parse.urlparse(me['url']).netloc or account.get('slack_host')
-    ui.say(f'  Slack: {account["email"]} in {account.get("slack_host") or me["team_id"]}')
+    ui.say(f'  Slack: {account["email"] or me["user_id"]} in {account.get("slack_host") or me["team_id"]}')
 
 
 def step_salesflare(config, account, ui):
@@ -759,12 +868,28 @@ def step_android(config, account, ui):
     ui.say(f'  Android: {name or account["node_id"]}')
 
 
+def gateway_units():
+    """The OpenClaw Gateway's systemd user units here (any name with openclaw in it), gateway ones first."""
+    if not shutil.which('systemctl'):
+        return []
+    units = run(['systemctl', '--user', 'list-unit-files', '--type=service', '--no-legend', '--plain', '*openclaw*'], timeout=15).stdout.split()
+    return sorted((u for u in units if u.endswith('.service')), key=lambda u: 'gateway' not in u)
+
+
+def gateway_unit():
+    """The Gateway unit to read logs from, or None when the Gateway does not run under systemd here."""
+    units = gateway_units()
+    return units[0] if units and shutil.which('journalctl') else None
+
+
 def step_gateway(config, account, ui):
     """The Gateway's own systemd unit, also when it is named differently here."""
-    units = run(['systemctl', '--user', 'list-unit-files', '--type=service', '--no-legend', '--plain', '*openclaw*'], timeout=15).stdout.split()
-    units = [u for u in units if u.endswith('.service')]
+    units = gateway_units()
     if account.get('unit') not in units and units:
-        account['unit'] = next((u for u in units if 'gateway' in u), units[0])
+        account['unit'] = units[0]
+    if not units:
+        raise SetupError('No OpenClaw Gateway systemd unit found',
+                         'the Gateway source reads its journal; install it as a service (openclaw gateway install) or remove this source')
     account.setdefault('unit', 'openclaw-gateway.service')
 
 
@@ -1006,10 +1131,23 @@ def serve_dashboard(config, ui):
     command = serve_command(config)
     if not ui.yes(f'Make the dashboard reachable on your tailnet? ({" ".join(command)})', True):
         return None
-    result = run(command, timeout=60)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        output, failed = (result.stdout or '') + (result.stderr or ''), result.returncode
+    except subprocess.TimeoutExpired as error:  # it waits when Serve still has to be enabled for the tailnet
+        output, failed = ''.join(x.decode() if isinstance(x, bytes) else x or '' for x in (error.stdout, error.stderr)), 1
+    except OSError as error:
+        output, failed = str(error), 1
     served = dashboard_served(config)
-    if result.returncode or not served:
-        ui.say('  tailscale refused. Allow your user once with: sudo tailscale set --operator=$USER, then run:\n    ' + ' '.join(command))
+    if failed or not served:
+        link = re.search(r'https://login\.tailscale\.com/\S+', output)
+        if link:
+            ui.say(f'  Tailscale Serve is not enabled on your tailnet yet. Enable it at {link[0]}, then run:\n    ' + ' '.join(command))
+        elif re.search(r'access denied|operator|permission', output, re.I):
+            ui.say('  tailscale refused. Allow your user once with: sudo tailscale set --operator=$USER, then run:\n    ' + ' '.join(command))
+        else:
+            ui.say('  tailscale serve did not work' + (': ' + output.strip().splitlines()[-1][:300] if output.strip() else '')
+                   + '\n    try it yourself: ' + ' '.join(command))
         return None
     ui.say(f'  Dashboard: {served} (add it to your phone\'s home screen)')
     return served
@@ -1017,6 +1155,15 @@ def serve_dashboard(config, ui):
 
 def user_md_path(workspace=None):
     return Path(workspace or os.environ.get('OPENCLAW_WORKSPACE') or home() / '.openclaw/workspace') / 'USER.md'
+
+
+def user_md_is_template(path):
+    """OpenClaw seeds USER.md with its template; that one still says nothing about the owner."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return False
+    return '# USER.md - User Model' in text and '- Prefer ...' in text and '# About me' not in text
 
 
 def starter_user_md(config):
@@ -1043,12 +1190,16 @@ def starter_user_md(config):
 
 def offer_user_md(config, ui, workspace=None):
     path = user_md_path(workspace)
-    if path.exists():
+    template = user_md_is_template(path)
+    if path.exists() and not template:
         return False
-    if not ui.yes(f'Write a starter {path} so your agent knows who you are? (edit it afterwards)', True):
+    if not ui.yes(f'{"Add an About me section to" if template else "Write a starter"} {path} so your agent knows who you are? (edit it afterwards)', True):
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_private(path, starter_user_md(config))
+    text = starter_user_md(config)
+    if template:
+        text = path.read_text().rstrip() + '\n\n' + text
+    write_private(path, text)
     ui.say(f'  wrote {path}; fill in the empty lines when you have a minute')
     return True
 
@@ -1117,6 +1268,14 @@ def doctor(config_path, workspace=None):
     else:
         add('✗', f'telegram_owner {owner} is not an approved Telegram sender in OpenClaw (found {", ".join(owners)})',
             'set telegram_owner in config.json to your own ID, or approve it: openclaw pairing list telegram')
+    bots = telegram_accounts(openclaw_settings())
+    configured = str(config.get('telegram_account') or 'default')
+    if bots and configured not in bots:
+        add('✗', f'telegram_account {configured} is not a Telegram account in OpenClaw (there: {", ".join(bots)})',
+            f'set "telegram_account": "{telegram_account(owner)}" in config.json, then systemctl --user restart {UNIT_NAME}')
+    elif bots and owner and telegram_account(owner) != configured and len(bots) > 1:
+        add('!', f'you are approved on the Telegram account {telegram_account(owner)}, but cards go out through {configured}',
+            f'set "telegram_account": "{telegram_account(owner)}" in config.json, then systemctl --user restart {UNIT_NAME}')
     # Credentials (a source's own missing credential is reported with that source below)
     for name, path in sorted(config.get('credentials', {}).items()):
         path = Path(path).expanduser()
@@ -1139,7 +1298,10 @@ def doctor(config_path, workspace=None):
         name, title = connect_name(account, config), f'{account["id"]} ({label(account.get("service", "gmail"))})'
         reason = missing(config, account)
         point = checkpoints.get(account['id']) or {}
-        if reason:
+        if account.get('service') == 'gateway' and shutil.which('systemctl') and account.get('unit') not in gateway_units():
+            add('✗', f'{title}: no systemd unit {account.get("unit")} here, so there is no Gateway log to read',
+                f'assistant connect gateway (finds the unit), or remove {account["id"]} from config.json')
+        elif reason:
             add('✗', f'{title}: not set up ({reason})', f'assistant connect {name}')
         elif not point.get('last_success') and point.get('error'):
             add('✗', f'{title}: {point["error"]}' + (f': {hint(point["error"])}' if hint(point['error']) else ''), f'assistant connect {name}')
@@ -1171,8 +1333,10 @@ def doctor(config_path, workspace=None):
     else:
         add('!', f'dashboard not reachable at {config.get("dashboard_host") or "your dashboard_host"} nor in tailscale serve', ' '.join(serve_command(config)) + ' (or a custom domain: deploy/Caddyfile)')
     path = user_md_path(workspace)
-    add('✓' if path.exists() else '!', f'{path} ' + ('exists' if path.exists() else 'missing: the agent does not know who you are'),
-        '' if path.exists() else 'rerun ./install.sh for a starter one, or write it yourself')
+    known = path.exists() and not user_md_is_template(path)
+    add('✓' if known else '!', f'{path} ' + ('exists' if known else
+        ('is still the OpenClaw template' if path.exists() else 'missing') + ': the agent does not know who you are'),
+        '' if known else 'rerun ./install.sh for a starter one, or write it yourself')
     return results
 
 

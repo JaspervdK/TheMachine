@@ -6,7 +6,7 @@ let input = '';
 for await (const chunk of process.stdin) input += chunk;
 const request = JSON.parse(input);
 if (!['edit', 'send'].includes(request.action) || request.channel !== 'telegram' ||
-    request.accountId !== 'default' || !process.env.ASSISTANT_TELEGRAM_OWNER || request.target !== process.env.ASSISTANT_TELEGRAM_OWNER) {
+    request.accountId !== (process.env.ASSISTANT_TELEGRAM_ACCOUNT || 'default') || !process.env.ASSISTANT_TELEGRAM_OWNER || request.target !== process.env.ASSISTANT_TELEGRAM_OWNER) {
   throw new Error('Only the existing owner Telegram route is allowed');
 }
 let stage = 'preflight';

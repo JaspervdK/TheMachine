@@ -12,13 +12,13 @@ This guide covers the plugin.
 ## 1. The account in `config.json`
 
 ```json
-{"id": "work-feed", "service": "rss", "transport": "http", "boundary": "work",
+{"id": "work-feed", "service": "rss", "transport": "http", "boundary": "work:Acme",
  "url": "https://example.com/feed.xml", "poll_seconds": 1800}
 ```
 
 - `id` is the account's own ID. Its checkpoint, health and events are keyed by it.
 - `service` picks the connector: `rss` loads `connectors/rss.py`.
-- `boundary` (`work` or `personal`) keeps signals apart in reviews and on the dashboard.
+- `boundary` (`work:<Company>` or `personal:<name>`) keeps signals apart in reviews and on the dashboard; only `work:` ones count as work (weekend hold, work cards). In `SETUP`, a bare `work` makes `assistant connect` ask which company.
 - Any other keys (`url` here) are yours to read in the connector. Keep secrets out of `config.json`: name a credential (`"credential": "stripe"`) and read it with `helpers.credential`.
 
 ## 2. The module

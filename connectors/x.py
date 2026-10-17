@@ -6,7 +6,7 @@ browser, and nothing marked as seen or read. Sign in to X once in that browser (
 open https://x.com/login`); add more accounts with X's own account switcher. One config account
 per X account:
 
-    {"id": "me-x", "service": "x", "transport": "x-inbox", "boundary": "work",
+    {"id": "me-x", "service": "x", "transport": "x-inbox", "boundary": "work:Acme",
      "handle": "yourhandle", "primary": "yourhandle", "poll_seconds": 3600}
 
 `primary` is the account the browser should normally be on. To read another signed-in account

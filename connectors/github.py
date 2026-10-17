@@ -4,7 +4,7 @@ Read-only through the owner's logged-in `gh` CLI: GET requests only; notificatio
 marked as read.
 
 Config:
-    {"id": "github", "service": "github", "transport": "gh", "boundary": "work",
+    {"id": "github", "service": "github", "transport": "gh", "boundary": "work:Acme",
      "login": "your-login", "poll_seconds": 600}
 Optional: "repos": ["owner/repo", ...] to keep only those repositories; "ci_repos": [...] and
 "ci_branch" (default "main") to report failed workflow runs on that branch; config "gh" for the

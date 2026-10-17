@@ -106,6 +106,11 @@ class OnboardingTest(unittest.TestCase):
                            [('telegram', 'default', '444444', 1), ('telegram', 'default', '111111', 0), ('whatsapp', 'default', '555555', 0)])
         self.assertEqual(onboarding.telegram_owners(), ['111111', '222222', '333333', '444444'])
         self.assertEqual(onboarding.telegram_owners(root=self.tmp / 'nowhere'), [])
+        self.assertEqual((onboarding.telegram_account('333333'), onboarding.telegram_account('111111')), ('work', 'default'))
+        # openclaw.json is JSON5: comments, trailing commas and unquoted keys are fine; a named-only bot is found too.
+        (openclaw / 'openclaw.json').write_text('{\n  // mine\n  channels: {telegram: {accounts: {bot: {botToken: "1:x", allowFrom: ["555555",],},},},},\n}')
+        self.assertEqual(onboarding.telegram_owners()[:1], ['555555'])
+        self.assertEqual(onboarding.telegram_account('999'), 'bot')
 
     def test_pairing_fallback_picks_up_the_new_sender_and_approves_only_on_yes(self):
         counter = self.tmp / 'count'
@@ -219,6 +224,32 @@ else:
         self.assertEqual([a['id'] for a in config['accounts']], ['work-gmail', 'work-calendar'])
         self.assertEqual((config['accounts'][1]['email'], config['accounts'][1]['client']), ('alex@acme.test', 'work'))
         self.assertEqual(self.calls().count('auth add'), 1)
+
+    def test_an_existing_gog_keyring_keeps_its_password(self):
+        gog = self.stub('gog', '''
+if args[:3] == ["auth", "credentials", "list"]: print(json.dumps({"clients": [{"client": "default"}]}))
+elif args[:2] == ["auth", "list"]: print(json.dumps({"accounts": [{"email": "alex@acme.test", "client": "default"}]}))
+elif os.environ.get("GOG_KEYRING_PASSWORD") == "kept": print(json.dumps({"emailAddress": "alex@acme.test", "historyId": "9"}))
+else: sys.stderr.write("HTTP 401"); sys.exit(1)''')
+        self.config(dict(EXAMPLE['work-gmail'], client='default'), gog=gog)
+        ui = FakeUI(answers=[''], secrets=[''])
+        with self.assertRaises(onboarding.SetupError) as raised:
+            onboarding.connect(self.path, 'gmail', ui, restart=False)
+        self.assertIn('already holds alex@acme.test', ui.text())
+        self.assertIn('GOG_KEYRING_PASSWORD', raised.exception.fix)
+        self.assertFalse((self.data / 'gog-password').exists())
+        with mock.patch.dict(os.environ, {'GOG_KEYRING_PASSWORD': 'kept'}):
+            onboarding.connect(self.path, 'gmail', FakeUI(answers=['']), restart=False)
+        self.assertEqual((self.data / 'gog-password').read_text().strip(), 'kept')
+        self.assertNotIn('auth add', self.calls())
+
+    def test_boundaries_from_what_people_type(self):
+        cases = {'Acme': 'work:Acme', 'personal': 'personal:me', 'Me': 'personal:me', 'family': 'personal:family',
+                 'work:Beta': 'work:Beta', 'personal:Sam': 'personal:Sam', '': 'work:Main', 'work:': 'work:Main'}
+        self.assertEqual({k: onboarding.boundary_label(k) for k in cases}, cases)
+        self.assertEqual([onboarding.company_of(e) for e in ('alex@acme.io', 'sam@mail.globex.co.uk', 'me@gmail.com', 'alex@example.com')],
+                         ['Acme', 'Globex', '', ''])
+        self.assertEqual(onboarding.slug('Café Ünïon'), 'cafe-union')
 
     # ------------------------------------------------------------ setups that are not the example
 
@@ -334,9 +365,10 @@ elif args[:2] == ["api", "call"]:
     @unittest.skipUnless(PLUGINS, 'the RSS connector is a plugin')
     def test_a_plugin_source_asks_its_own_setup_fields(self):
         self.config()
-        onboarding.connect(self.path, 'rss', FakeUI(answers=['https://example.com/feed.xml']), restart=False)
+        onboarding.connect(self.path, 'rss', FakeUI(answers=['personal', 'https://example.com/feed.xml']), restart=False)
         account = self.saved()['accounts'][0]
-        self.assertEqual((account['id'], account['service'], account['url']), ('feed', 'rss', 'https://example.com/feed.xml'))
+        self.assertEqual((account['id'], account['service'], account['url'], account['boundary']),
+                         ('feed', 'rss', 'https://example.com/feed.xml', 'personal:me'))
         with self.assertRaises(onboarding.SetupError) as raised:
             onboarding.connect(self.path, 'fax', FakeUI(), restart=False)
         self.assertIn('rss', raised.exception.fix)
@@ -399,6 +431,20 @@ elif args[:2] == ["api", "call"]:
         self.assertEqual(onboarding.print_doctor(results, ui), 1)
         self.assertIn('fix: assistant connect whatsapp', ui.text())
 
+    def test_doctor_checks_the_telegram_bot_and_the_gateway_unit(self):
+        (self.home / '.openclaw').mkdir()
+        (self.home / '.openclaw/openclaw.json').write_text(json.dumps({'channels': {'telegram': {'accounts': {
+            'family': {'botToken': 'x', 'allowFrom': ['5']}, 'work': {'botToken': 'y', 'allowFrom': ['1000001']}}}}}))
+        self.config(dict(EXAMPLE['openclaw-gateway'], unit='openclaw-gateway.service'), openclaw=str(self.bin / 'missing'))
+        text = '\n'.join(f'{m} {t} | {f}' for m, t, f in onboarding.doctor(self.path))
+        self.assertIn('✗ telegram_account default is not a Telegram account in OpenClaw (there: family, work) | set "telegram_account": "work"', text)
+        self.assertIn('✗ openclaw-gateway (OpenClaw Gateway log): no systemd unit openclaw-gateway.service here', text)
+        self.stub('systemctl', 'print("openclaw-gateway.service enabled enabled" if "list-unit-files" in args else "inactive")')
+        self.config(dict(EXAMPLE['openclaw-gateway'], unit='openclaw-gateway.service'), telegram_account='family', openclaw=str(self.bin / 'missing'))
+        text = '\n'.join(f'{m} {t} | {f}' for m, t, f in onboarding.doctor(self.path))
+        self.assertIn('! you are approved on the Telegram account work, but cards go out through family', text)
+        self.assertNotIn('no systemd unit', text)
+
     def test_only_the_service_that_reads_this_config_is_restarted(self):
         self.stub('systemctl', f'''
 if "is-active" in args: print("active")
@@ -423,6 +469,20 @@ elif "show" in args: print('"ASSISTANT_CONFIG={self.path}" HOME=/elsewhere')''')
         self.assertEqual(onboarding.serve_command({'dashboard_path': '/assistant/', 'port': 8787})[-3:],
                          ['--set-path', '/assistant', 'http://127.0.0.1:8787'])
 
+    def test_tailscale_serve_says_what_is_in_the_way(self):
+        self.stub('tailscale', '''
+if args[:2] == ["serve", "status"]: print("{}")
+else: print("Serve is not enabled on your tailnet. To enable, visit: https://login.tailscale.com/f/serve?node=abc"); sys.exit(1)''')
+        ui = FakeUI()
+        self.assertIsNone(onboarding.serve_dashboard({'port': 8787, 'dashboard_path': '/assistant/'}, ui))
+        self.assertIn('Enable it at https://login.tailscale.com/f/serve?node=abc', ui.text())
+        self.stub('tailscale', '''
+if args[:2] == ["serve", "status"]: print("{}")
+else: sys.stderr.write("Access denied: serve config denied"); sys.exit(1)''')
+        ui = FakeUI()
+        onboarding.serve_dashboard({'port': 8787}, ui)
+        self.assertIn('sudo tailscale set --operator=$USER', ui.text())
+
     def test_starter_user_md_is_written_once_from_the_answers(self):
         config = {'owner_name': 'Alex Owner', 'timezone': 'Europe/Brussels',
                   'accounts': [dict(EXAMPLE['work-gmail'], email='alex@acme.test'), dict(EXAMPLE['personal-whatsapp'])]}
@@ -435,6 +495,17 @@ elif "show" in args: print('"ASSISTANT_CONFIG={self.path}" HOME=/elsewhere')''')
         self.assertFalse(onboarding.offer_user_md(config, FakeUI(), workspace))
         self.assertEqual((workspace / 'USER.md').read_text(), 'mine')
         self.assertFalse(onboarding.offer_user_md(config, onboarding.UI(False), self.home / 'other'))
+
+    def test_the_openclaw_template_user_md_still_gets_an_about_me(self):
+        workspace = self.home / 'seeded'
+        workspace.mkdir()
+        template = '# USER.md - User Model\n\n## Directives\n\n<!-- observed: YYYY-MM-DD | status: active -->\n\n- Prefer ...\n'
+        (workspace / 'USER.md').write_text(template)
+        self.assertTrue(onboarding.offer_user_md({'owner_name': 'Alex Owner', 'accounts': []}, FakeUI(), workspace))
+        text = (workspace / 'USER.md').read_text()
+        self.assertTrue(text.startswith('# USER.md - User Model'))
+        self.assertIn('Name: Alex Owner', text)
+        self.assertFalse(onboarding.offer_user_md({'accounts': []}, FakeUI(), workspace))
 
 
 if __name__ == '__main__':

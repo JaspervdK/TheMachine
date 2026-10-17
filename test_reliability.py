@@ -61,6 +61,12 @@ class Reliability(unittest.TestCase):
         self.store.commit_page('li', {'mode': 'incremental', 'page_token': 'next'}, [])
         self.assertEqual(app.resume_wait(linkedin), 0)  # catching up: go now
 
+    def test_status_lists_sources_without_an_email(self):
+        accounts = [{'id': 'openclaw-gateway', 'service': 'gateway', 'boundary': 'owner:system'},
+                    {'id': 'feed', 'service': 'rss', 'boundary': 'work:Acme', 'display_name': 'Feed'}]
+        names = {c['id']: c['display_name'] for c in self.store.snapshot(accounts)['connectors']}
+        self.assertEqual(names, {'openclaw-gateway': 'openclaw-gateway', 'feed': 'Feed'})
+
     # Rolling replay windows
 
     def test_expired_gmail_history_replays_retained_window_not_since_install(self):

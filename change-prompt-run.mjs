@@ -20,7 +20,7 @@ try{
   const file=await open(temp,'w',0o600);
   try{await file.writeFile(JSON.stringify({messageId}));await file.sync();}finally{await file.close();}
   await rename(temp,dest);
- },String(request.target));
+ },String(request.target),process.env.ASSISTANT_TELEGRAM_ACCOUNT||'default');
  process.stdout.write(JSON.stringify({messageId:id}));
 }catch(error){
  process.stdout.write(JSON.stringify({error:'prompt_unconfirmed',

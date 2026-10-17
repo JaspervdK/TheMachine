@@ -6,7 +6,8 @@ From nothing to your first cards in about 15 minutes. Each step says how to chec
 
 - [ ] **OpenClaw** 2026.10.2 or later, with the Gateway running and its Telegram channel talking to your bot. Check: your bot answers you in Telegram.
 - [ ] **Node.js** 24.16+ (24.x) or 26.1+, and **Python 3.12+**.
-- [ ] **Tailscale** on this machine and your phone, for the dashboard.
+- [ ] **Tailscale** on this machine and your phone, logged in (`sudo tailscale up`), for the dashboard.
+- [ ] Your own user account, not root, with a systemd user session (a normal login; over SSH that works too).
 - [ ] Per source you want: `gog` for Gmail and Calendar, `wacli` for WhatsApp, the OpenClaw Android app paired as a node for phone notifications, a [Maton](https://maton.ai) Slack connection, a Salesflare API key, `gh` for GitHub. You can add any of them later.
 
 ## 1. Install
@@ -20,7 +21,8 @@ cd ~/.openclaw/workspace/tools/personal-assistant
 The wizard fills in what it can find, so most questions only need Enter:
 
 - **Telegram ID:** taken from OpenClaw (your owner entry or approved senders). If OpenClaw doesn't know you yet, the installer asks you to message your bot, reads your ID from the pairing request and offers to approve it.
-- **Tailscale login and dashboard host:** from `tailscale status`.
+- **Tailscale login and dashboard host:** from `tailscale status` (on a tagged machine, type the login you use on your phone).
+- **Company:** from your email address; answer "personal" if these are private accounts.
 - **Sources:** suggested from what is installed and linked here (gog, a linked WhatsApp, a paired Android phone).
 - **Email:** from the Google accounts gog already knows.
 
@@ -35,7 +37,8 @@ Right after the service starts, the installer walks through each source:
 | Salesflare | Asks for an API key (hidden), then finds your user and team. |
 | WhatsApp | Finds the wacli store, offers to link it (QR code) and records which account it is. |
 | Android | Picks your paired Android phone from OpenClaw. |
-| Plugins | `github`, `stripe`, `x`, `linkedin`, `rss`: asks for the few fields each needs. |
+| Gateway log | Finds the Gateway's systemd unit. |
+| Plugins | `github`, `stripe`, `x`, `linkedin`, `rss`: not part of the installer; `assistant connect github` (and so on) asks for the few fields each needs. |
 
 Every source is read once before it is saved, so a wrong key or account shows up immediately, with what to do about it. Afterwards you see the first sync per source: how many signals came in and from how far back.
 
@@ -43,11 +46,11 @@ Skipped one? `assistant connect gmail` (or `slack`, `crm`, `whatsapp`, `android`
 
 ## 3. Open the dashboard
 
-The installer offers to publish the dashboard on your tailnet (`tailscale serve`). Only your Tailscale login can open it. On your phone, open the address it prints and add it to your home screen.
+The installer offers to publish the dashboard on your tailnet (`tailscale serve`). Only your Tailscale login can open it. If Serve is not enabled on your tailnet yet, it prints the link to enable it. On your phone, open the address it prints and add it to your home screen.
 
 ## 4. Tell the agent who you are
 
-The installer offers a starter `USER.md` in your OpenClaw workspace with your name, companies and email. Fill in the empty lines (tone, languages, who matters, what to leave alone): reviews and drafts read it every time.
+The installer offers a starter `USER.md` in your OpenClaw workspace with your name, companies and email (added under OpenClaw's template if that is all it has). Fill in the empty lines (tone, languages, who matters, what to leave alone): reviews and drafts read it every time.
 
 ## 5. Preview, then turn it on
 

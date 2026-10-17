@@ -27,6 +27,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import onboarding
 from onboarding import CONNECTORS, expand, write_private
@@ -49,7 +50,7 @@ ENV = {
     'tailscale_owner': 'ASSISTANT_TAILSCALE_OWNER',
     'dashboard_host': 'ASSISTANT_DASHBOARD_HOST',
     'timezone': 'ASSISTANT_TIMEZONE',
-    'connectors': 'ASSISTANT_CONNECTORS',       # comma list: gmail,calendar,gateway,android,whatsapp,slack,crm
+    'connectors': 'ASSISTANT_CONNECTORS',       # comma list: gmail,calendar,gateway,android,whatsapp,slack,crm (or none)
     'email': 'ASSISTANT_EMAIL',                 # Google account for gmail/calendar
     'gog_client': 'ASSISTANT_GOG_CLIENT',
     'boundary': 'ASSISTANT_BOUNDARY',           # e.g. work:Acme
@@ -149,6 +150,9 @@ def check_prerequisites():
         ok = False
         say(f'  FAIL  python {py[0]}.{py[1]}: need {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+; install a newer python3 and rerun with it')
     facts['python'] = sys.executable
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        ok = False
+        say('  FAIL  running as root: run ./install.sh as the user who runs OpenClaw (the service is a systemd user unit)')
 
     node = resolve_tool(shutil.which('node'))
     node_version = version_tuple(run([node, '--version']).stdout) if node else None
@@ -184,6 +188,13 @@ def check_prerequisites():
         found = shutil.which(name)
         facts[name] = found
         say(f'  {"ok   " if found else "skip "} {name}{"" if found else ": " + hint}')
+    fresh = not Paths().config.exists()
+    if fresh and not facts['tailscale'] and not (os.environ.get(ENV['tailscale_owner']) and os.environ.get(ENV['dashboard_host'])):
+        ok = False
+        say('  FAIL  tailscale: the dashboard only opens for your Tailscale login. Install Tailscale on this machine and your phone\n'
+            '        (https://tailscale.com/download), run `sudo tailscale up`, then rerun ./install.sh')
+    elif fresh and facts['tailscale'] and not tailscale_identity(facts['tailscale']).get('dashboard_host'):
+        say('  note  tailscale is installed but not logged in; run `sudo tailscale up` first, or type your login and host below')
     return ok, facts
 
 
@@ -196,7 +207,9 @@ def tailscale_identity(binary):
     try:
         status = json.loads(result.stdout)
         user = status['User'][str(status['Self']['UserID'])]['LoginName']
-        return {'tailscale_owner': user, 'dashboard_host': status['Self']['DNSName'].rstrip('.')}
+        # A tagged machine has no owner login of its own: the dashboard owner is whoever you sign in as on your phone.
+        return {'tailscale_owner': '' if user == 'tagged-devices' or '@' not in user else user,
+                'dashboard_host': status['Self']['DNSName'].rstrip('.')}
     except (ValueError, KeyError, TypeError):
         return {}
 
@@ -204,6 +217,23 @@ def tailscale_identity(binary):
 def ask(prompt, default=''):
     answer = input(f'{prompt}{f" [{default}]" if default else ""}: ').strip()
     return answer or default
+
+
+def ask_until(prompt, default, valid, problem):
+    """Ask again until the answer passes `valid`; Enter keeps a valid default."""
+    while True:
+        answer = ask(prompt, default)
+        if valid(answer):
+            return answer
+        say(f'  {problem(answer)}')
+
+
+def valid_timezone(name):
+    try:
+        ZoneInfo(name)
+        return True
+    except (ValueError, KeyError, OSError):
+        return False
 
 
 def answers(interactive, facts):
@@ -216,33 +246,48 @@ def answers(interactive, facts):
                 'tailscale_owner': detected.get('tailscale_owner', ''),
                 'dashboard_host': detected.get('dashboard_host', ''), 'timezone': local_timezone(),
                 'connectors': onboarding.suggested_sources(facts), 'email': google[0][0] if google else '',
-                'gog_client': google[0][1] if google else 'default', 'boundary': 'work:Main',
+                'gog_client': google[0][1] if google else 'default', 'boundary': '',
                 'android_node_id': '', 'whatsapp_store': str(Path.home() / '.local/share/wacli')}
     values = {key: os.environ.get(var) or defaults[key] for key, var in ENV.items()}
+    unknown = lambda text: sorted(set(split(text)) - set(CONNECTORS) - {'none'})
     if interactive:
         say('\nA few questions (Enter keeps the default):')
         values['owner_name'] = ask('Your name (used to sign emails)', values['owner_name'])
         if not values['telegram_owner'] and facts.get('openclaw'):
             values['telegram_owner'] = onboarding.telegram_from_pairing(facts['openclaw'], onboarding.UI()) or ''
-        values['telegram_owner'] = ask('Your Telegram user ID (the private chat with your OpenClaw bot'
-                                       + (', found in OpenClaw)' if values['telegram_owner'] else
-                                          '; your bot\'s pairing reply shows it)'), values['telegram_owner'])
-        values['tailscale_owner'] = ask('Your Tailscale login (only this identity may open the dashboard)', values['tailscale_owner'])
-        values['dashboard_host'] = ask('Dashboard host name (your machine on the tailnet, e.g. machine.tailnet.ts.net)', values['dashboard_host'])
-        values['timezone'] = ask('Time zone', values['timezone'])
-        values['connectors'] = ask('Sources to enable (' + ','.join(CONNECTORS) + '; you connect each one next)', values['connectors'])
+        values['telegram_owner'] = ask_until('Your Telegram user ID (the private chat with your OpenClaw bot'
+                                             + (', found in OpenClaw)' if values['telegram_owner'] else
+                                                '; your bot\'s pairing reply shows it)'), values['telegram_owner'],
+                                             onboarding.telegram_id, lambda a: f'{a!r} is not a Telegram user ID: that is a number like 123456789')
+        values['telegram_owner'] = onboarding.telegram_id(values['telegram_owner'])
+        values['tailscale_owner'] = ask_until('Your Tailscale login, as on your phone (only it may open the dashboard)'
+                                              + ('' if values['tailscale_owner'] else '; this machine is tagged or not logged in, so type it'),
+                                              values['tailscale_owner'], lambda a: bool(a.strip()), lambda a: 'needed for the dashboard')
+        values['dashboard_host'] = ask_until('Dashboard host name (your machine on the tailnet, e.g. machine.tailnet.ts.net)', values['dashboard_host'],
+                                             lambda a: bool(re.fullmatch(r'[A-Za-z0-9.-]+\.[A-Za-z]{2,}', a.strip())),
+                                             lambda a: 'a host name, like machine.tailnet.ts.net (no https:// or path)')
+        values['timezone'] = ask_until('Time zone', values['timezone'], valid_timezone,
+                                       lambda a: f'unknown time zone {a!r}; use a name like Europe/Brussels or America/New_York')
+        values['connectors'] = ask_until('Sources to enable (' + ','.join(CONNECTORS) + '; you connect each one next)',
+                                         values['connectors'], lambda a: not unknown(a),
+                                         lambda a: 'unknown: ' + ', '.join(unknown(a)) + '; other sources (github, x, ...) come later with assistant connect')
         chosen = set(split(values['connectors']))
         if chosen & {'gmail', 'calendar', 'slack', 'crm'}:
-            values['email'] = ask('Your work email address', values['email'])
-            values['boundary'] = ask('Boundary label for these work sources (work:<Company>)', values['boundary'])
+            values['email'] = ask_until('Your email address for these sources', values['email'], lambda a: '@' in a,
+                                        lambda a: 'an email address, like you@company.com')
+            guess = values['boundary'] or onboarding.company_of(values['email']) or ('personal' if values['email'] else '')
+            values['boundary'] = ask('Company name for these sources, or "personal" (keeps work and private apart)', guess)
+    values['boundary'] = onboarding.boundary_label(values['boundary'] or onboarding.company_of(values['email']))
+    values['telegram_owner'] = onboarding.telegram_id(values['telegram_owner']) or values['telegram_owner']
     missing = [key for key in ('telegram_owner', 'tailscale_owner', 'dashboard_host') if not values[key]]
     if missing:
         raise SystemExit('Missing answers: ' + ', '.join(missing) + ' (set ' + ', '.join(ENV[k] for k in missing) + ')')
     if not re.fullmatch(r'-?\d{3,20}', values['telegram_owner']):
         raise SystemExit('The Telegram owner must be a numeric chat ID, got ' + repr(values['telegram_owner']))
-    unknown = set(split(values['connectors'])) - set(CONNECTORS)
-    if unknown:
-        raise SystemExit('Unknown sources: ' + ', '.join(sorted(unknown)))
+    if unknown(values['connectors']):
+        raise SystemExit('Unknown sources: ' + ', '.join(unknown(values['connectors'])))
+    if not valid_timezone(values['timezone']):
+        raise SystemExit('Unknown time zone ' + repr(values['timezone']) + ' (set ASSISTANT_TIMEZONE, e.g. Europe/Brussels)')
     return values
 
 
@@ -267,6 +312,9 @@ def new_config(values, facts, paths):
     config.update(owner_name=values['owner_name'], timezone=values['timezone'], telegram_owner=values['telegram_owner'],
                   tailscale_owner=values['tailscale_owner'], dashboard_host=values['dashboard_host'], heartbeat_job_id='',
                   booking_links={})
+    bot = onboarding.telegram_account(values['telegram_owner'])
+    if bot != 'default':
+        config['telegram_account'] = bot  # the OpenClaw Telegram account (bot) you talk to
     config['delivery_enabled'] = False
     config['review_worker']['enabled'] = False
     data = str(paths.data)
@@ -277,6 +325,11 @@ def new_config(values, facts, paths):
     config['attachment_sources'] = [str(paths.workspace / 'data/assistant-attachments'), str(paths.workspace / 'memory/assistant')]
     accounts = []
     for name in split(values['connectors']):
+        if name == 'none':
+            continue
+        if name == 'gateway' and not onboarding.gateway_unit():
+            say('  skipped the Gateway log source: the OpenClaw Gateway does not run as a systemd user unit here')
+            continue
         account = expand(dict(templates[CONNECTORS[name]]), paths.home)
         if 'email' in account:
             account['email'] = values['email'] or account['email']
@@ -287,11 +340,15 @@ def new_config(values, facts, paths):
             config['credentials']['gog-password'] = data + '/gog-password'
         if account.get('boundary', '').startswith('work:'):
             account['boundary'] = values['boundary']
+            if values['boundary'].startswith('personal:'):
+                account['id'] = account['id'].replace('work-', 'personal-', 1)
         account.pop('exclude', None)  # example noise rules are not yours
         if name == 'android':
             account['node_id'] = values['android_node_id'] or account['node_id']
         if name == 'whatsapp':
             account['store'] = values['whatsapp_store']
+        if name == 'gateway':
+            account['unit'] = onboarding.gateway_unit()
         if account.get('credential'):
             config['credentials'][account['credential']] = f"{data}/{account['credential']}.env"
         accounts.append(account)
@@ -319,9 +376,15 @@ def setup_config(interactive, facts, paths):
         config = json.loads(paths.config.read_text())
         example = expand(json.loads((ROOT / 'config.example.json').read_text()), paths.home)
         example.pop('accounts')
-        added = [key for key in example if key not in config and key not in ('booking_links', 'heartbeat_job_id')]
+        # The example's identity (owner, Telegram, Tailscale, host) is not yours; its time zone is this machine's.
+        added = [key for key in example if key not in config and key not in
+                 ('booking_links', 'heartbeat_job_id', 'owner_name', 'telegram_owner', 'tailscale_owner', 'dashboard_host')]
         for key in added:
-            config[key] = example[key]
+            config[key] = local_timezone() if key == 'timezone' else example[key]
+        bot = onboarding.telegram_account(config.get('telegram_owner', ''))
+        if 'telegram_account' not in config and bot != 'default':
+            config['telegram_account'] = bot
+            added.append(f'telegram_account {bot}')
         say(f'Keeping existing {paths.config}' + (f' (added defaults: {", ".join(added)})' if added else ''))
     else:
         config = new_config(answers(interactive, facts), facts, paths)
@@ -330,7 +393,7 @@ def setup_config(interactive, facts, paths):
     # Built-in sources plus connector plugins (connectors/<service>.py, see docs/adding-a-source.md).
     supported = {'gmail', 'calendar', 'slack', 'salesflare', 'android', 'whatsapp', 'gateway'} | {
         p.stem for p in (ROOT / 'connectors').glob('*.py') if re.fullmatch(r'[a-z][a-z0-9_]{0,30}', p.stem)}
-    unsupported = [a['id'] for a in config.get('accounts', []) if a.get('service') not in supported]
+    unsupported = [a['id'] for a in config.get('accounts', []) if a.get('service', 'gmail') not in supported]
     if unsupported:
         raise SystemExit('Unsupported sources in existing config: ' + ', '.join(unsupported)
                          + '. Remove those accounts and unused credentials from config.json; database history is kept.')
@@ -368,6 +431,12 @@ def setup_secrets(config, facts, paths):
 
 # ---------------------------------------------------------------- systemd, CLI, plugin
 
+def quote_unit(path):
+    """A path for a systemd command line: quoted when it has spaces."""
+    text = str(path)
+    return f'"{text}"' if re.search(r'\s', text) else text
+
+
 def unit_text(config, facts, config_path=None):
     bins = [str(Path(p).parent) for p in (facts.get('node'), facts.get('openclaw'), facts.get('gog'), facts.get('wacli')) if p]
     path = ':'.join(dict.fromkeys(bins + ['%h/.local/bin', '/usr/local/bin', '/usr/bin', '/bin']))
@@ -382,7 +451,7 @@ StartLimitBurst=10
 [Service]
 Type=simple
 WorkingDirectory={ROOT}
-ExecStart={facts.get('python') or sys.executable} {ROOT / 'assistant.py'} serve
+ExecStart={quote_unit(facts.get('python') or sys.executable)} {quote_unit(ROOT / 'assistant.py')} serve
 Restart=always
 RestartSec=10
 TimeoutStopSec=20
@@ -390,7 +459,7 @@ KillMode=control-group
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-Environment=PATH={path}
+Environment="PATH={path}"
 Environment=PYTHONUNBUFFERED=1
 Environment="ASSISTANT_CONFIG={str(config_path or Paths().config)}"
 Environment="OPENCLAW_WORKSPACE={Paths().workspace}"
@@ -412,7 +481,12 @@ def install_unit(config, facts, paths, start):
         return None if not start else False
     reload = run(['systemctl', '--user', 'daemon-reload'])
     if reload.returncode != 0:
-        say('  daemon-reload failed: ' + (reload.stderr or reload.stdout).strip()[:300])
+        error = (reload.stderr or reload.stdout).strip()
+        say('  daemon-reload failed: ' + error[:300])
+        if re.search(r'bus|XDG_RUNTIME_DIR', error, re.I):
+            say('  There is no systemd user session here (sudo su, a container, or SSH without one). Log in as this user\n'
+                '  directly (or: sudo loginctl enable-linger $USER, then log in again) and rerun, or install with\n'
+                '  --no-start and run `python3 assistant.py serve` yourself.')
         return False
     if not start:
         say('  not started (--no-start)')
@@ -423,6 +497,9 @@ def install_unit(config, facts, paths, start):
         say('  could not start it: ' + (result.stderr or result.stdout).strip()[:300])
         return False
     say('  enabled and (re)started')
+    linger = run(['loginctl', 'show-user', os.environ.get('USER') or str(os.getuid()), '-p', 'Linger', '--value'], timeout=10)
+    if linger.returncode == 0 and linger.stdout.strip() == 'no':
+        say('  note: it stops when you log out. To keep it (and the Gateway) running: sudo loginctl enable-linger $USER')
     return True
 
 
@@ -430,6 +507,7 @@ def install_cli(paths):
     target = ROOT / 'cli.py'
     paths.cli.parent.mkdir(parents=True, exist_ok=True)
     if paths.cli.is_symlink() and paths.cli.resolve() == target:
+        warn_path(paths)
         return
     if paths.cli.exists() and not paths.cli.is_symlink():
         raise SystemExit(f'CLI install failed: {paths.cli} is an existing file; move it aside and rerun')
@@ -438,6 +516,14 @@ def install_cli(paths):
     paths.cli.symlink_to(target)
     os.chmod(target, 0o755)
     say(f'CLI: {paths.cli} -> cli.py')
+    warn_path(paths)
+
+
+def warn_path(paths):
+    folders = [Path(p).expanduser() for p in os.environ.get('PATH', '').split(os.pathsep) if p]
+    if paths.cli.parent not in folders:
+        say(f'  note: {paths.cli.parent} is not on your PATH, so `assistant` is not found yet. Use {paths.cli},\n'
+            f'  or add it: echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.profile (then open a new terminal)')
 
 
 def install_plugin(facts, reload=True):
@@ -505,6 +591,10 @@ def guided(paths, since, ui=None):
             connected.append(account['id'])
         except onboarding.SetupError as error:
             say(f'  ✗ {error.message}' + (f'\n    fix: {error.fix}' if error.fix else '') + f'\n    later: assistant connect {name}')
+        except (KeyboardInterrupt, EOFError):
+            raise
+        except Exception as error:  # one source's surprise should not end the whole setup
+            say(f'  ✗ {account["id"]} failed unexpectedly: {type(error).__name__}: {str(error)[:200]}\n    later: assistant connect {name}')
     config = json.loads(paths.config.read_text())
     ready = [a['id'] for a in config.get('accounts', []) if not onboarding.missing(config, a)]
     if ready:
@@ -518,9 +608,11 @@ def guided(paths, since, ui=None):
         return config
     if ready and ui.yes('Run a preview now? Your agent reviews the last 7 days and shows the cards here and on the dashboard;'
                         ' nothing is sent and nothing is done in your accounts', True):
-        subprocess.call([sys.executable, str(ROOT / 'cli.py'), '--config', str(paths.config), 'preview'])
+        previewed = subprocess.call([sys.executable, str(ROOT / 'cli.py'), '--config', str(paths.config), 'preview']) == 0
+        if not previewed:
+            say('  The preview did not finish; turn reviews on once it works (./install.sh --preview, then --activate).')
         if ui.yes('Turn on daily reviews and Telegram cards now? (Do it acts with your accounts only when you tap it;'
-                  ' see README "Security model")', True):
+                  ' see README "Security model")', previewed):
             config = activate(paths)
             restarted = run(['systemctl', '--user', 'restart', UNIT_NAME]).returncode == 0
             say('  Reviews and Telegram cards are on.' if restarted else
@@ -543,7 +635,8 @@ def next_steps(config, healthy, started, paths=None):
     else:
         lines += [f'  - Dashboard on your tailnet: {" ".join(onboarding.serve_command(config))}',
                   f'    then open https://{host}{path} (custom domain instead: see deploy/Caddyfile)']
-    if not onboarding.user_md_path(paths.workspace).exists():
+    user_md = onboarding.user_md_path(paths.workspace)
+    if not user_md.exists() or onboarding.user_md_is_template(user_md):
         lines.append(f'  - Tell the agent about you: create USER.md in {paths.workspace} (name, companies, tone, preferences)')
     lines += ['  - Keep `Do it` in mind: it lets the agent act with your accounts. Read README "Security model".',
               '  - After editing config.json: systemctl --user restart ' + UNIT_NAME]
@@ -625,7 +718,11 @@ def main(argv=None):
     if not ok:
         say('\nFix the FAIL items above and rerun ./install.sh')
         return 1
-    config = setup_config(interactive, facts, paths)
+    try:
+        config = setup_config(interactive, facts, paths)
+    except (KeyboardInterrupt, EOFError):
+        say('\nStopped; nothing was written.')
+        return 1
     setup_secrets(config, facts, paths)
     install_cli(paths)
     plugin_ok = args.skip_plugin or install_plugin(facts, reload=not args.no_start)

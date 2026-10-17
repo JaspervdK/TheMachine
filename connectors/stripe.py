@@ -3,10 +3,10 @@
 Read-only: GET on the account, events and customer endpoints only. Never writes, refunds or retries.
 
 Config, with a restricted read-only key (Events, Customers, Account: Read) in a credential file:
-    {"id": "billing", "service": "stripe", "transport": "api", "boundary": "work",
+    {"id": "billing", "service": "stripe", "transport": "api", "boundary": "work:Acme",
      "credential": "stripe", "stripe_account": "acct_...", "poll_seconds": 900}
 or through a Maton Stripe connection:
-    {"id": "billing", "service": "stripe", "transport": "maton", "boundary": "work",
+    {"id": "billing", "service": "stripe", "transport": "maton", "boundary": "work:Acme",
      "credential": "maton", "credential_variable": "MATON_API_KEY", "connection_id": "...",
      "stripe_account": "acct_...", "poll_seconds": 900}
 Optional: "large_subscription_monthly" (default 500, in the price currency): new subscriptions

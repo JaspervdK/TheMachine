@@ -247,7 +247,7 @@ export function registerReviewRecovery(api: any, call: (action: string, args?: a
   api.on('reply_payload_sending', async (event: any, ctx: any) => {
     const owner = runs.get(event.runId);
     if (!owner?.reviewTouched || owner.session !== event.sessionKey ||
-        ctx.channelId !== 'telegram' || ctx.accountId !== 'default' ||
+        ctx.channelId !== 'telegram' || ctx.accountId !== String(assistantConfig().telegram_account || 'default') ||
         !sameChat(ctx.conversationId || '') ||
         event.kind !== 'final' || event.payload?.mediaUrl || event.payload?.mediaUrls?.length ||
         !processingOnlyReviewSummary(event.payload?.text)) return;

@@ -150,7 +150,7 @@ export default definePluginEntry({
       channel: 'telegram', namespace: 'assistant',
       async handler(ctx: any) {
         const config = await settings();
-        if (!ctx.auth.isAuthorizedSender || ctx.isGroup || ctx.accountId !== 'default' ||
+        if (!ctx.auth.isAuthorizedSender || ctx.isGroup || ctx.accountId !== (config.telegram_account || 'default') ||
             String(ctx.senderId) !== config.telegram_owner || String(ctx.callback.chatId) !== config.telegram_owner) {
           return { handled: true };
         }
@@ -270,7 +270,7 @@ export default definePluginEntry({
       const config = await settings();
       const sender = String(context.senderId || event.senderId || '').replace(/^telegram:/, '');
       const conversation = String(context.conversationId || '').replace(/^telegram:/, '');
-      if ((context.channelId || event.channel) !== 'telegram' || context.accountId !== 'default' ||
+      if ((context.channelId || event.channel) !== 'telegram' || context.accountId !== (config.telegram_account || 'default') ||
           sender !== config.telegram_owner || conversation !== config.telegram_owner || event.isGroup ||
           (context.sessionKey || event.sessionKey) !== 'agent:main:main') return;
       const messageId = context.messageId || event.messageId;
@@ -286,7 +286,7 @@ export default definePluginEntry({
       async handler(ctx: any) {
         const config = await settings();
         if (!ctx.isAuthorizedSender || String(ctx.senderId) !== config.telegram_owner ||
-            ctx.accountId !== 'default' || String(ctx.from).replace(/^telegram:/, '') !== config.telegram_owner) {
+            ctx.accountId !== (config.telegram_account || 'default') || String(ctx.from).replace(/^telegram:/, '') !== config.telegram_owner) {
           return { text: 'Feedback is available only in the owner’s private Telegram conversation.' };
         }
         const match = /^([a-f0-9]{16})\s+([\s\S]+)$/.exec(ctx.args || '');

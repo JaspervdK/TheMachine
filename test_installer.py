@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent
 STUB = '''#!/bin/sh
 echo "{name} $*" >> "{log}"
 if [ "$*" = "$ASSISTANT_TEST_FAIL" ]; then echo "Synthetic failure" >&2; exit 1; fi
-case "$*" in --version) echo "OpenClaw 2026.10.2 (test)";; esac
+case "$*" in --version) echo "OpenClaw 2026.10.2 (test)";; *list-unit-files*) echo "openclaw-gateway.service enabled enabled";; esac
 exit 0
 '''
 ANSWERS = {'ASSISTANT_OWNER_NAME': 'Alex Owner', 'ASSISTANT_TELEGRAM_OWNER': '1000001',
@@ -32,7 +32,7 @@ class InstallerTest(unittest.TestCase):
         self.home, self.bin, self.log = self.tmp / 'home', self.tmp / 'bin', self.tmp / 'calls.log'
         self.home.mkdir()
         self.bin.mkdir()
-        for name in ('openclaw', 'systemctl'):
+        for name in ('openclaw', 'systemctl', 'journalctl'):
             path = self.bin / name
             path.write_text(STUB.format(log=self.log, name=name))
             path.chmod(0o755)
@@ -137,6 +137,61 @@ class InstallerTest(unittest.TestCase):
         self.assertIn('numeric chat ID', result.stdout + result.stderr)
         result = self.install('--no-start', ASSISTANT_CONNECTORS='gmail,fax')
         self.assertIn('Unknown sources: fax', result.stdout + result.stderr)
+
+    def test_upgrades_never_take_the_examples_identity(self):
+        self.assertEqual(self.install('--no-start').returncode, 0)
+        config = json.loads(self.config.read_text())
+        for key in ('dashboard_host', 'timezone'):
+            del config[key]
+        self.config.write_text(json.dumps(config))
+        result = self.install('--no-start')
+        again = json.loads(self.config.read_text())
+        self.assertNotIn('dashboard_host', again)
+        self.assertEqual(again['timezone'], installer.local_timezone())
+        self.assertIn('dashboard_host is empty', subprocess.run(
+            [sys.executable, str(ROOT / 'cli.py'), '--config', str(self.config), 'doctor'], env=self.env(), capture_output=True, text=True).stdout)
+
+    def test_bad_answers_and_a_missing_tailscale_fail_before_writing(self):
+        result = self.install('--no-start', ASSISTANT_TIMEZONE='Mars/Olympus')
+        self.assertIn('Unknown time zone', result.stdout + result.stderr)
+        result = self.install('--no-start', ASSISTANT_TAILSCALE_OWNER='')
+        self.assertIn('FAIL  tailscale', result.stdout)
+        self.assertIn('https://tailscale.com/download', result.stdout)
+        self.assertFalse(self.config.exists())
+
+    def test_a_personal_setup_a_named_bot_and_no_gateway_unit(self):
+        home = Path(tempfile.mkdtemp(prefix='machine-wizard-'))
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / '.openclaw').mkdir()
+        (home / '.openclaw/openclaw.json').write_text(json.dumps({'channels': {'telegram': {'accounts': {
+            'family': {'botToken': 'x', 'allowFrom': ['5']}, 'mine': {'botToken': 'y', 'allowFrom': ['tg:1000001']}}}}}))
+        replies = iter(['Alex Owner', 'alex', '1000001', 'alex@example.com', 'https://box', 'box.example-tailnet.ts.net',
+                        'Mars/Olympus', 'Europe/Brussels', 'gmail,fax', 'gmail,gateway', 'nope', 'alex@gmail.com', ''])
+        with mock.patch.dict(os.environ, {'HOME': str(home)}, clear=False), \
+             mock.patch.dict(os.environ, {k: '' for k in installer.ENV.values()}), \
+             mock.patch.object(builtins, 'input', lambda prompt='': next(replies)), \
+             mock.patch.object(installer.onboarding, 'gateway_unit', return_value=None), \
+             mock.patch.object(installer, 'say') as said:
+            values = installer.answers(True, {})
+            config = installer.new_config(values, {}, installer.Paths(home))
+        self.assertEqual(next(replies, 'done'), 'done')
+        said = ' '.join(str(c.args[0]) for c in said.call_args_list)
+        for problem in ('not a Telegram user ID', 'a host name', 'unknown time zone', 'unknown: fax', 'an email address', 'skipped the Gateway'):
+            self.assertIn(problem, said)
+        self.assertEqual((values['telegram_owner'], values['timezone'], values['boundary']), ('1000001', 'Europe/Brussels', 'personal:me'))
+        self.assertEqual([(a['id'], a['boundary']) for a in config['accounts']], [('personal-gmail', 'personal:me')])
+        self.assertEqual(config['telegram_account'], 'mine')
+
+    def test_tagged_machines_spaces_and_the_cli_path(self):
+        status = {'Self': {'UserID': 7, 'DNSName': 'box.example-tailnet.ts.net.'}, 'User': {'7': {'LoginName': 'tagged-devices'}}}
+        with mock.patch.object(installer, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(status), '')):
+            self.assertEqual(installer.tailscale_identity('tailscale'), {'tailscale_owner': '', 'dashboard_host': 'box.example-tailnet.ts.net'})
+        unit = installer.unit_text({}, {'python': '/opt/my python/bin/python3'}, '/tmp/c.json')
+        self.assertIn('ExecStart="/opt/my python/bin/python3" ', unit)
+        self.assertIn('Environment="PATH=', unit)
+        result = self.install('--no-start')
+        self.assertIn('is not on your PATH', result.stdout)
+        self.assertIn(str(self.home / '.local/bin/assistant'), result.stdout)
 
     def test_missing_openclaw_is_reported_with_a_fix(self):
         (self.bin / 'openclaw').unlink()
@@ -261,6 +316,7 @@ class WizardTest(unittest.TestCase):
              mock.patch.object(builtins, 'input', lambda prompt='': next(replies)), \
              mock.patch.object(installer, 'tailscale_identity', return_value={'tailscale_owner': 'a@b.c', 'dashboard_host': 'h.ts.net'}), \
              mock.patch.object(installer.onboarding, 'owner_name', return_value='Alex Owner'), \
+             mock.patch.object(installer.onboarding, 'gateway_unit', return_value='openclaw-gateway.service'), \
              mock.patch.object(installer, 'say'):
             values = installer.answers(True, {})
         self.assertEqual((values['telegram_owner'], values['owner_name'], values['connectors']), ('2000002', 'Alex Owner', 'gateway'))
@@ -268,7 +324,8 @@ class WizardTest(unittest.TestCase):
     def test_guided_setup_connects_then_offers_preview_and_activation(self):
         home = Path(tempfile.mkdtemp(prefix='machine-guided-'))
         self.addCleanup(shutil.rmtree, home, True)
-        with mock.patch.dict(os.environ, {'HOME': str(home), 'OPENCLAW_WORKSPACE': str(home / 'ws')}):
+        with mock.patch.dict(os.environ, {'HOME': str(home), 'OPENCLAW_WORKSPACE': str(home / 'ws')}), \
+             mock.patch.object(installer.onboarding, 'gateway_unit', return_value='openclaw-gateway.service'):
             paths = installer.Paths(home)
             values = {**{k: '' for k in installer.ENV}, 'owner_name': 'Alex', 'telegram_owner': '1000001', 'tailscale_owner': 'a@b.c',
                       'dashboard_host': 'h.ts.net', 'timezone': 'UTC', 'connectors': 'gmail,gateway', 'email': 'alex@acme.test',
