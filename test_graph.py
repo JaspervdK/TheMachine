@@ -58,6 +58,17 @@ class Graph(unittest.TestCase):
         with self.store.connect() as db:
             return [db.execute('SELECT id FROM events WHERE source_id=?', (s,)).fetchone()[0] for s in source_ids]
 
+    def test_names_are_only_names(self):
+        cases = {'Kim Lee (Initech)': 'Kim Lee', 'Ann Bell | Acme': 'Ann Bell', '(second) Kim Lee': 'Kim Lee',
+                 'Ann Bell - Bell': 'Ann Bell', 'Lee at Example': 'Lee', 'Doe, Jane': 'Jane Doe',
+                 'Doe EXT, Sam': 'Sam Doe', 'Jane Doe, PhD': 'Jane Doe', 'Pat 🚀 Lee': 'Pat Lee', 'Sam (@sam)': 'Sam',
+                 'Anna von Berg via LinkedIn': 'Anna von Berg', 'Kim Lee-Bell': 'Kim Lee-Bell',
+                 "Mary O'Neil": "Mary O'Neil", 'Dr. Ann Bell': 'Dr. Ann Bell', '(Initech)': '(Initech)'}
+        self.assertEqual({k: graph.person_name(k) for k in cases}, cases)
+        self.add(mail(3, 'Kim Lee (Initech) <kim@initech.example>', 'sam@acme.com'), mail(2, 'Sam <sam@acme.com>', 'kim@initech.example', ('SENT',)))
+        self.build()
+        self.assertEqual(self.node('email:kim@initech.example')['name'], 'Kim Lee')
+
     def test_owner_bulk_and_aliases_never_become_people(self):
         self.add(mail(1, 'Sam <sam@acme.com>', 'Ann <ann@client.com>', ('SENT',)),
                  mail(1, 'Sam Owner <sam@home.org>', 'ann@client.com', ('SENT',)),  # an alias the owner sends from

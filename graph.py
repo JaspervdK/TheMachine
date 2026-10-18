@@ -136,10 +136,33 @@ def bulk(address):
     return bool(BULK.search(address))
 
 
+SUFFIX = re.compile(r'\s+(?:[|/\-–—•·:@]|via|from|at|for)\s+.*$')
+DEGREE = re.compile(r'^(?:[A-Z]{2,6}|Ph\.?D\.?|MSc|BSc|Jr\.?|Sr\.?)$')
+
+
+def person_name(name):
+    """Only the name, without what people or their tools add to it: "Kim Lee (Initech)", "Ann Bell | Acme",
+    "Sam at Globex", "(second) Pat Lee", "Doe EXT, Sam" and "Smith, PhD". "Doe, Jane" is
+    turned around. Left as it was when nothing that looks like a name is left."""
+    raw = ' '.join(str(name or '').replace('"', ' ').split())
+    text = re.sub(r'[\(\[\{<][^)\]}>]*[\)\]}>]', ' ', raw)  # (Initech), [Acme], (@handle), <note>
+    text = SUFFIX.sub('', ' '.join(text.split()))  # "| Acme", "- Acme", "at Acme", "via LinkedIn"
+    text = ''.join(c for c in text if not unicodedata.category(c).startswith('S'))  # emoji and symbols
+    text = re.sub(r'\b(?:EXT|Ext|ext|EXTERNAL|External)\b\.?', ' ', text)
+    if text.count(',') == 1:
+        before, after = (p.strip() for p in text.split(','))
+        if DEGREE.match(after) or not after:
+            text = before
+        elif before and 1 <= len(after.split()) <= 3 and len(before.split()) <= 3 and not re.search(r'\d', after):
+            text = f'{after} {before}'  # "Last, First"
+    text = ' '.join(text.strip(' ,;:-–—|/').split())
+    return text if re.search(r'[^\W\d_]{2}', text) else raw
+
+
 def plain_name(name):
     """Comparable full name: accents, case, punctuation and extra spaces removed; None unless it
     looks like a person's full name (two or more words, no address)."""
-    name = re.sub(r'\s*\(@[^)]*\)\s*$', '', str(name or '')).strip()
+    name = person_name(name)
     if not name or '@' in name or name.casefold() in GENERIC_NAMES:
         return None
     folded = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode().casefold()
@@ -458,7 +481,7 @@ def build(db, config, now):
             owner_events.add(event_id)
         for identifier, name, _, _ in found:
             if name and str(name).strip() and '@' not in str(name) and str(name).strip().casefold() not in GENERIC_NAMES:
-                names[identifier][re.sub(r'\s*\(@[^)]*\)\s*$', '', str(name)).strip()] += 1
+                names[identifier][person_name(name)] += 1
             if identifier.startswith('x:') and m.get('screen_name') and not m.get('from_me'):
                 x_names[identifier] = m['screen_name']
     merges = db.execute('SELECT a,b,same FROM graph_merges ORDER BY created_at').fetchall()
@@ -471,7 +494,7 @@ def build(db, config, now):
             union.join(r['a'], r['b'])
     for r in db.execute('SELECT identifier,name,email FROM identity_names'):
         if r['name']:
-            names[r['identifier']][r['name']] += 3
+            names[r['identifier']][person_name(r['name'])] += 3
         if r['email'] and r['identifier'] in known:
             union.join('email:' + r['email'].lower(), r['identifier'])
     by_name = collections.defaultdict(set)
