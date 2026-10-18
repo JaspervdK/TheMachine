@@ -253,6 +253,23 @@ def has_telegram(settings):
     return isinstance(channel, dict) and bool(channel) and channel.get('enabled') is not False
 
 
+ALLOW_SCRIPTS = re.compile(r'--allow-scripts=([\w@./,-]+)')
+
+
+def allow_install_scripts(npm, command, output, ui):
+    """npm 11+ skips package install scripts unless they're allowed, and says which ones it skipped. OpenClaw
+    needs them (its own setup and native parts such as koffi), so run exactly those, for the package just installed."""
+    skipped = ALLOW_SCRIPTS.search(output)
+    if not skipped:
+        return subprocess.CompletedProcess(command, 0, '', '')
+    prefix = command[command.index('--prefix'):command.index('--prefix') + 2] if '--prefix' in command else []
+    ui.say(f'  Running the install steps npm held back: {skipped.group(1).replace(",", ", ")}')
+    result = run([npm, 'rebuild', '-g', *prefix, f'--allow-scripts={skipped.group(1)}'], timeout=1800)
+    if result.returncode != 0:
+        ui.say(((result.stderr or '') + (result.stdout or '')).strip()[-1500:])
+    return result
+
+
 def offer_openclaw(ui):
     """In a terminal, before the prerequisite check: without OpenClaw, offer to install it; when it was never
     set up, or has no Telegram bot, walk through OpenClaw's own setup with what The Machine needs from it.
@@ -272,7 +289,12 @@ def offer_openclaw(ui):
                ' It is not installed here.')
         if not ui.yes(f'Install OpenClaw {want} now? (runs: npm {" ".join(command[1:])})', True):
             return
-        result = run(command, timeout=1800, capture_output=False)
+        ui.say('  Installing (a few minutes)...')
+        result = run(command, timeout=1800)
+        if result.returncode == 0:
+            result = allow_install_scripts(npm, command, (result.stdout or '') + (result.stderr or ''), ui)
+        else:
+            ui.say(((result.stderr or '') + (result.stdout or '')).strip()[-1500:])
         openclaw = installed_openclaw(npm, command) if result.returncode == 0 else None
         if not openclaw:
             ui.say(f'  ✗ OpenClaw did not install. Run it yourself and rerun ./install.sh:\n    npm {" ".join(command[1:])}')

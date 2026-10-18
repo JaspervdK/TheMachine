@@ -227,6 +227,8 @@ class InstallerTest(unittest.TestCase):
             if args[1:3] == ['install', '-g']:
                 binary = Path(args[args.index('--prefix') + 1]) / 'bin/openclaw'
                 binary.parent.mkdir(parents=True); binary.write_text('#!/bin/sh\n'); binary.chmod(0o755)
+                return subprocess.CompletedProcess(args, 0, '', 'npm warn install-scripts Run `npm install -g --allow-scripts=esbuild,koffi,openclaw`'
+                                                   ' to allow these scripts once\n')
             if args[1:] == ['onboard', '--install-daemon']:  # OpenClaw's own wizard: model, Gateway, Telegram bot
                 settings.parent.mkdir(exist_ok=True)
                 settings.write_text(json.dumps({'channels': {'telegram': {'botToken': 'x'}}}))
@@ -242,6 +244,8 @@ class InstallerTest(unittest.TestCase):
             self.assertIn(str(self.home / '.local/bin'), os.environ['PATH'])  # the rest of this run finds it
         local = self.home / '.local'
         self.assertIn([str(self.bin / 'npm'), 'install', '-g', 'openclaw@2026.10.2', '--prefix', str(local)], ran)
+        # npm 11 held back the install scripts: exactly those run for this install.
+        self.assertIn([str(self.bin / 'npm'), 'rebuild', '-g', '--prefix', str(local), '--allow-scripts=esbuild,koffi,openclaw'], ran)
         self.assertIn([str(local / 'bin/openclaw'), 'onboard', '--install-daemon'], ran)
         self.assertIn([str(local / 'bin/openclaw'), 'health'], ran)
         self.assertFalse(any('channels' in a for a in ran))  # the wizard already added the bot
