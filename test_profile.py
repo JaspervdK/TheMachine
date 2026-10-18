@@ -83,6 +83,18 @@ class Profile(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'empty'):
             self.app.action('save_profile', {'_profile_session': session, 'profile': {}})
 
+    def test_onboarding_also_names_what_the_closest_people_are(self):
+        self.assertIn('set it with graph node_id and role', a.profile_prompt('r', {'email': 6}))
+        run_id = self.app.action('profile_start', {})['run_id']
+        with self.store.connect() as db:
+            for node, name, strength in (('email:sam@globex.test', 'Sam', 3), ('email:kim@globex.test', 'Kim', 2), ('email:lee@globex.test', 'Lee', 1)):
+                db.execute("INSERT INTO graph_nodes(id,kind,name,strength,signals,info) VALUES(?,'person',?,?,1,'{}')", (node, name, strength))
+            db.execute("INSERT INTO person_roles VALUES('email:lee@globex.test','old friend','owner',?)", (a.now(),))  # the owner's own
+            a.graph.set_role(db, 'email:kim@globex.test', 'designer at Globex', 'agent', a.now())
+            a.graph.set_role(db, 'email:sam@globex.test', 'CFO at Globex', 'agent', a.now())
+        self.assertEqual(self.app.action('profile_status', {'run_id': run_id})['roles'],
+                         [{'name': 'Sam', 'role': 'CFO at Globex'}, {'name': 'Kim', 'role': 'designer at Globex'}])
+
     def test_one_voice_per_channel_most_used_first(self):
         run_id = self.app.action('profile_start', {})['run_id']
         self.app.action('save_profile', {'_profile_session': a.PROFILE_SESSION_PREFIX + run_id, 'profile': {
@@ -183,7 +195,8 @@ class ProfileCommand(unittest.TestCase):
         if existing is not None:
             (self.workspace / 'USER.md').write_text(existing)
         statuses = [{'status': 'running', 'started_at': a.now()},
-                    {'status': 'ok', 'started_at': a.now(), 'draft': {'tone': 'Short and friendly', 'based_on': '6 sent emails'}}]
+                    {'status': 'ok', 'started_at': a.now(), 'draft': {'tone': 'Short and friendly', 'based_on': '6 sent emails'},
+                     'roles': [{'name': 'Sam', 'role': 'CFO at Globex'}]}]
         def fake(config, action, args=None):
             return {'run_id': 'r' * 32, 'started_at': a.now(), 'counts': {'email': 6}} if action == 'profile_start' else statuses.pop(0)
         out = io.StringIO()
@@ -196,6 +209,7 @@ class ProfileCommand(unittest.TestCase):
     def test_shows_the_draft_and_saves_only_after_yes(self):
         out = self.run_cli(answer='n')
         self.assertIn('- Tone: Short and friendly', out)
+        self.assertIn('  - Sam: CFO at Globex', out)
         self.assertIn('Not saved', out)
         self.assertFalse((self.workspace / 'USER.md').exists())
         self.run_cli()

@@ -52,7 +52,7 @@ The installer offers to publish the dashboard on your tailnet (`tailscale serve`
 
 The installer offers a starter `USER.md` in your OpenClaw workspace with your name, companies and email (added under OpenClaw's template if that is all it has). Reviews and drafts read it every time.
 
-Then it offers to fill in the rest from what you actually write: your agent reads your own recent messages once (read-only, nothing is sent) and drafts your role, languages, how you write on each channel (email, Slack, WhatsApp, …), what matters to you and what to leave alone. You see the draft first; it's saved only if you say yes, and it never overwrites what you wrote. Redo it later with `assistant profile`, or edit `USER.md` yourself. Check: `USER.md` has an "Observed from my messages" section.
+Then it offers to fill in the rest from what you actually write: your agent reads your own recent messages once (nothing is sent) and drafts your role, languages, how you write on each channel (email, Slack, WhatsApp, …), what matters to you and what to leave alone. It also notes what your closest people are to you ("accountant", "customer at Globex") where their messages show it, which you can change in the Graph tab. You see the draft first; it's saved only if you say yes, and it never overwrites what you wrote. Redo it later with `assistant profile`, or edit `USER.md` yourself. Check: `USER.md` has an "Observed from my messages" section.
 
 ## 5. Preview, then turn it on
 

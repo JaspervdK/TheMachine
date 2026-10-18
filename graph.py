@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS graph_state(id INTEGER PRIMARY KEY CHECK(id=1),built_
 CREATE TABLE IF NOT EXISTS person_roles(identifier TEXT PRIMARY KEY,role TEXT NOT NULL,source TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_unnamed(key INTEGER PRIMARY KEY,event_ids TEXT NOT NULL,people TEXT NOT NULL,titles TEXT NOT NULL,size INTEGER NOT NULL,last_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_offers(key INTEGER PRIMARY KEY,size INTEGER NOT NULL,run_id TEXT,offered_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS graph_role_asks(identifier TEXT PRIMARY KEY,run_id TEXT,asked_at TEXT NOT NULL);
 '''
 HALF_LIFE = {'person': 60, 'pair': 45, 'project_person': 45, 'project': 21}
 DAY_CAP = 1.0           # one day of contact, however many messages
@@ -400,6 +401,7 @@ def build(db, config, now):
     seen_message_ids = set()
     per_event, names, x_names = {}, collections.defaultdict(collections.Counter), {}
     crm_names, paying_names = {}, {}
+    appears = collections.defaultdict(set)  # identifier -> where they show up: a hint for a review, never a role
     owner_events = set()
     for event_id, account_id, kind, at, m in signals:
         if kind == 'gmail.message' and m.get('message-id'):
@@ -409,10 +411,16 @@ def build(db, config, now):
         crm = m.get('crm_account') if isinstance(m.get('crm_account'), dict) else None
         if crm and crm.get('domain') and crm.get('name'):
             crm_names[str(crm['domain']).lower()] = str(crm['name'])
-        if kind == 'stripe.event' and m.get('customer_name'):
+        if kind in ('salesflare.email', 'salesflare.meeting'):
+            for c in m.get('contacts') or ():
+                if isinstance(c, dict) and '@' in str(c.get('email') or ''):
+                    appears['email:' + str(c['email']).lower()].add('a Salesflare contact' + (' at ' + str(crm['name']) if crm and crm.get('name') else ''))
+        elif kind in ('stripe.event', 'intercom.conversation'):
             for _, addr in addresses(m.get('from'))[:1]:
+                appears['email:' + addr].add(('billed through Stripe' + (' as ' + str(m['customer_name']) if m.get('customer_name') else ''))
+                                             if kind == 'stripe.event' else 'wrote to support (Intercom)')
                 domain = addr.rsplit('@', 1)[1]
-                if domain not in FREEMAIL:
+                if kind == 'stripe.event' and m.get('customer_name') and domain not in FREEMAIL:
                     paying_names.setdefault(domain, str(m['customer_name']))
         found = touches(kind, m, owner, wrote_to)
         if not found:
@@ -574,7 +582,8 @@ def build(db, config, now):
 
     # Write.
     nodes, links, members = [], [], collections.defaultdict(list)
-    said = {r['identifier']: r['role'] for r in db.execute('SELECT identifier,role FROM person_roles')}
+    said = {r['identifier']: (r['role'], 'owner' if r['source'] == 'owner' else 'review') for r in db.execute('SELECT identifier,role,source FROM person_roles')}
+    surnames = {n.split()[-1] for n in owner.names if len(n.split()) >= 2}
     for node, value in strength.items():
         if value < FLOOR:
             continue
@@ -594,11 +603,15 @@ def build(db, config, now):
         if domains:
             members[domains[0]].append((node, value))
         colleague = any(i.startswith('email:') and i.rsplit('@', 1)[1] in owner.domains for i in group)
-        role = next((said[i] for i in group if said.get(i)), None)  # only what the owner or a review said
+        role, role_by = next((said[i] for i in group if i in said), (None, None))  # only what the owner or a review said
+        full = plain_name(name)
+        hints = sorted(set().union(*(appears.get(i, ()) for i in group))) + (["an address at the owner's own domain"] if colleague else []) \
+            + (["in the owner's Slack"] if any(i.startswith('slack:') for i in group) else []) \
+            + (["shares the owner's surname"] if full and surnames & set(full.split()[1:]) else [])
         info = {'ids': sorted({shown_id(i, x_names) for i in group}), 'org': ('org:' + domains[0]) if domains else None,
                 'wrote': len(roles[node]['owner']), 'heard': len(roles[node]['them']), 'met': len(roles[node]['met']),
                 'accounts': sorted(accounts[node]), 'next_meeting': next_meeting[node].isoformat() if node in next_meeting else None,
-                'colleague': colleague, 'role': role}
+                'colleague': colleague, 'role': role, 'role_by': role_by, 'hints': hints}
         nodes.append((node, 'person', name[:200], round(value, 4), last_day[node].isoformat() if node in last_day else None,
                       len(node_events[node]), usual, int(quiet), None, json.dumps(info)))
     kept = {n[0] for n in nodes}
@@ -678,7 +691,8 @@ def node_view(row, links=None):
     if row['kind'] == 'person':
         view.update(closeness=closeness(row['strength']), ids=info.get('ids', []), org=info.get('org'), quiet=bool(row['quiet']),
                     usual_gap_days=row['gap_days'], wrote_days=info.get('wrote'), heard_days=info.get('heard'), met_days=info.get('met'),
-                    next_meeting=info.get('next_meeting'), colleague=info.get('colleague'), role=info.get('role'))
+                    next_meeting=info.get('next_meeting'), colleague=info.get('colleague'), role=info.get('role'),
+                    role_by=info.get('role_by'), hints=info.get('hints', []))
     elif row['kind'] == 'project':
         view.update(trend=row['trend'], state=project_state(row), closed=bool(info.get('closed_at')), probable_signals=info.get('probable', 0))
     if links is not None:

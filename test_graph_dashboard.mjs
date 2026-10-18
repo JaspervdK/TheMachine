@@ -8,7 +8,7 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const soon=new Date(Date.now()+2*864e5).toISOString().slice(0,10);
 let person={id:'email:ann@client.example',kind:'person',name:'Ann Example',strength:2.4,closeness:'regular',last_at:soon,signals:5,ids:['ann@client.example'],
- usual_gap_days:6,quiet:false,role:'customer',links:[{id:'project:1',kind:'project',name:'Acme renewal',link:'project',strength:0.5}],
+ usual_gap_days:6,quiet:false,role:'customer',role_by:'review',links:[{id:'project:1',kind:'project',name:'Acme renewal',link:'project',strength:0.5}],
  open:{you_promised:[{id:7,who:'Ann',what:'send the renewal quote with the new seat count',due:soon}],they_promised:[{id:8,who:'Ann',what:'sign the order form',due:null}],
        cards:[{id:'0123456789abcdef',title:'Answer Ann about pricing',status:'pending',due:null}],facts:['Ann prefers calls before 10']},
  recent:[{id:41,account_id:'work',kind:'gmail.message',occurred_at:new Date().toISOString(),title:'Seat count for next year',probable:true},
@@ -19,7 +19,7 @@ const server=createServer(async(req,res)=>{
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],connectors:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[]}));return}
  if(url.pathname==='/api/graph'){res.end(JSON.stringify(url.searchParams.get('node')?person:{projects:[],people:[person],quiet:[],new:[],orgs:[]}));return}
- if(url.pathname==='/api/action'){let body='';for await(const b of req)body+=b;const call=JSON.parse(body);calls.push(call);if(call.action==='graph_role')person={...person,role:call.args.role};res.end('{}');return}
+ if(url.pathname==='/api/action'){let body='';for await(const b of req)body+=b;const call=JSON.parse(body);calls.push(call);if(call.action==='graph_role')person={...person,role:call.args.role,role_by:'owner'};res.end('{}');return}
  if(url.pathname.startsWith('/brand/')||url.pathname.startsWith('/assets/')){res.statusCode=404;res.end();return}
  res.end('{}');
 });
@@ -37,7 +37,7 @@ try{
  await page.locator('#people-view article[data-node="email:ann@client.example"] button.node').click();
  await page.locator('.graph-open').waitFor();
  const text=await page.locator('#people-view').textContent();
- assert.ok(text.includes('To you: customer'));
+ assert.ok(text.includes('To you: customer · a review read it in your messages'));
  assert.ok(text.includes('You promised: send the renewal quote')&&text.includes('They promised: sign the order form'));
  assert.ok(text.includes('Card: Answer Ann about pricing')&&text.includes('Fact: Ann prefers calls before 10'));
  assert.equal(await page.locator('.graph-open a[href="#card=0123456789abcdef"]').count(),1);

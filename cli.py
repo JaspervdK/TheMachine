@@ -377,8 +377,8 @@ def cmd_profile(config, args):
         counts = started.get('counts') or {}
         print('Following the profile draft that is already running.' if started.get('attached') else
               'Your OpenClaw agent reads ' + ', '.join(f'{n} {k}' for k, n in sorted(counts.items(), key=lambda c: -c[1]))
-              + ' of your own recent messages once and drafts how you write and what matters to you.')
-        print('It only reads. Nothing is sent, and USER.md only changes when you say yes. Usually a few minutes.\n')
+              + ' of your own recent messages once and drafts how you write, what matters to you and what your closest people are to you.')
+        print('Nothing is sent. Roles go into the graph, where you can change them; USER.md only changes when you say yes. Usually a few minutes.\n')
     deadline, tty = time.monotonic() + assistant.PROFILE_SECONDS + 1500, sys.stdout.isatty() and not args.json
     try:
         while True:
@@ -402,6 +402,9 @@ def cmd_profile(config, args):
         raise CliError(f"The profile draft didn't finish ({run.get('error') or run['status']}). See openclaw logs, then run assistant profile --again.")
     if args.json:
         return out_json(run)
+    if run.get('roles'):
+        print('What your closest people are to you, read from your messages (change them in the dashboard\'s Graph tab):')
+        print('\n'.join(f"  - {r['name']}: {r['role']}" for r in run['roles']) + '\n')
     day = dt.datetime.now(TZ).date().isoformat()
     while True:
         # The owner can edit USER.md while inference or the save prompt is running.
@@ -524,7 +527,7 @@ def parser():
     source.add_argument('--body')
     source.add_argument('--file', help='file with the text, or - for stdin')
     add('preview', f'First run: one review of the last {assistant.PREVIEW_DAYS} days, shown here and on the dashboard; nothing is sent', cmd_preview)
-    c = add('profile', 'Draft how you write and what matters to you from your own messages, for USER.md; you see it first', cmd_profile)
+    c = add('profile', 'Draft how you write and what matters to you from your own messages, for USER.md (you see it first), and note what your closest people are to you', cmd_profile)
     c.add_argument('--again', action='store_true', help='make a new draft even if one was just made')
     c.add_argument('--yes', action='store_true', help='save the draft without asking')
     c.add_argument('--all', action='store_true', help='keep every line, even past the 4,000 characters OpenClaw chats load')
