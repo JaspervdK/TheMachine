@@ -61,7 +61,7 @@ class Graph(unittest.TestCase):
     def test_names_are_only_names(self):
         cases = {'Kim Lee (Initech)': 'Kim Lee', 'Ann Bell | Acme': 'Ann Bell', '(second) Kim Lee': 'Kim Lee',
                  'Ann Bell - Bell': 'Ann Bell', 'Lee at Example': 'Lee', 'Doe, Jane': 'Jane Doe',
-                 'Doe EXT, Sam': 'Sam Doe', 'Jane Doe, PhD': 'Jane Doe', 'Pat 🚀 Lee': 'Pat Lee', 'Sam (@sam)': 'Sam',
+                 'Doe EXT, Sam': 'Sam Doe', 'Jane Doe, PhD': 'Jane Doe', 'Dr. Ann Lee, DBA, MPA': 'Dr. Ann Lee', 'Pat 🚀 Lee': 'Pat Lee', 'Sam (@sam)': 'Sam',
                  'Anna von Berg via LinkedIn': 'Anna von Berg', 'Kim Lee-Bell': 'Kim Lee-Bell',
                  "Mary O'Neil": "Mary O'Neil", 'Dr. Ann Bell': 'Dr. Ann Bell', '(Initech)': '(Initech)'}
         self.assertEqual({k: graph.person_name(k) for k in cases}, cases)

@@ -149,11 +149,13 @@ def person_name(name):
     text = SUFFIX.sub('', ' '.join(text.split()))  # "| Acme", "- Acme", "at Acme", "via LinkedIn"
     text = ''.join(c for c in text if not unicodedata.category(c).startswith('S'))  # emoji and symbols
     text = re.sub(r'\b(?:EXT|Ext|ext|EXTERNAL|External)\b\.?', ' ', text)
-    if text.count(',') == 1:
-        before, after = (p.strip() for p in text.split(','))
-        if DEGREE.match(after) or not after:
-            text = before
-        elif before and 1 <= len(after.split()) <= 3 and len(before.split()) <= 3 and not re.search(r'\d', after):
+    parts = [p.strip() for p in text.split(',')]
+    while len(parts) > 1 and (DEGREE.match(parts[-1]) or not parts[-1]):
+        parts.pop()  # ", PhD", ", DBA, MPA"
+    text = ', '.join(parts)
+    if len(parts) == 2:
+        before, after = parts
+        if before and 1 <= len(after.split()) <= 3 and len(before.split()) <= 3 and not re.search(r'\d', after):
             text = f'{after} {before}'  # "Last, First"
     text = ' '.join(text.strip(' ,;:-–—|/').split())
     return text if re.search(r'[^\W\d_]{2}', text) else raw
