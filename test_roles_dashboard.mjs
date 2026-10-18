@@ -15,7 +15,8 @@ let whos=[{id:'email:pat@client.example',kind:'person',name:'Pat Doe',role:'CFO 
 let pat={id:'email:pat@client.example',kind:'person',name:'Pat Doe',strength:2,closeness:'regular',last_at:made,signals:4,ids:['pat@client.example'],links:[],
  role:'CFO at Client Ltd',role_by:'review',role_quote:'As the CFO at Client Ltd I look after the renewal',role_event_id:41,
  relations:[{a:'email:ann@client.example',a_name:'Ann Assist',relation:'assistant of',b:'email:pat@client.example',b_name:'Pat Doe',by:'review'}],open:{},recent:[],around:[]};
-const org={id:'org:client.example',kind:'org',name:'Client Ltd',strength:3,last_at:made,signals:3,role:'customer',role_by:'review',links:[],open:{},recent:[],around:[]};
+const org={id:'org:client.example',kind:'org',name:'Client Ltd',strength:3,last_at:made,signals:3,role:'customer',role_by:'review',links:[],open:{},recent:[],around:[],
+ about:'Logistics, 51-200 people, Ghent',profile:{industry:'Logistics',about:'Client Ltd moves boxes.',linkedin_url:'https://www.linkedin.com/company/client',website:'javascript:alert(1)'}};
 const calls=[],errors=[],opened=[];
 const server=createServer(async(req,res)=>{
  const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
@@ -47,7 +48,7 @@ try{
  await list.locator('.whos').first().waitFor();
  let text=await list.textContent();
  assert.ok(text.includes('Who’s who')&&text.includes('“As the CFO at Client Ltd I look after the renewal”'));
- assert.ok(text.includes('Customer · 3 people'));  // the organisation's role in its list
+ assert.ok(text.includes('Customer · Logistics · 3 people'));  // the organisation's role and industry in its list  // the organisation's role in its list
  const widths=[];
  for(const width of [320,390,768]){
   await page.setViewportSize({width,height:844});
@@ -82,6 +83,11 @@ try{
  await page.evaluate(()=>people('org:client.example'));
  await page.locator('.graph-detail h3',{hasText:'Client Ltd'}).waitFor();
  assert.ok((await page.locator('.role-row').first().textContent()).includes('To you: customer'));
+ // What the enrichment service says about it, with only real links.
+ const detail=await page.locator('.graph-detail').textContent();
+ assert.ok(detail.includes('Logistics, 51-200 people, Ghent')&&detail.includes('Client Ltd moves boxes.'));
+ assert.equal(await page.locator('.graph-detail a[href^="https://www.linkedin.com"]').count(),1);
+ assert.equal(await page.locator('.graph-detail a[href^="javascript"]').count(),0);
  assert.deepEqual(errors,[]);
  console.log(JSON.stringify({widths,actions:calls.length,page_errors:errors}));
 }finally{if(browser)await browser.close();await new Promise(r=>server.close(r))}

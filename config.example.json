@@ -63,6 +63,12 @@
     "model": "embeddinggemma-300m",
     "dims": 256
   },
+  "enrichment": {
+    "enabled": false,
+    "provider": "apollo",
+    "key_file": "~/.local/share/personal-assistant/enrichment.key",
+    "per_day": 50
+  },
   "accounts": [
     {
       "id": "work-gmail",

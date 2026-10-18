@@ -38,6 +38,7 @@ import uuid
 from zoneinfo import ZoneInfo
 import embeddings
 import graph
+import enrichment
 import next_actions
 import preparation_state
 
@@ -2821,11 +2822,13 @@ class Store:
                                'days_in_touch': {'owner_wrote': view['wrote_days'], 'they_wrote': view['heard_days'], 'met': view['met_days']},
                                'usual_gap_days': view['usual_gap_days'], 'hints': view['hints'],
                                'organisation': {'node_id': view['org'], 'name': org['name'], 'role': json.loads(org['info']).get('role'),
+                                                'profile': enrichment.summary(json.loads(org['info']).get('profile')),
                                                 'others': [{'name': n['name'], 'role': n['role']} for n in graph.detail(db, view['org'], 0)['people_roles']
                                                            if n['id'] != r['id']][:5]} if org else None,
                                'projects': [n['name'] for n in graph.neighbours(db, r['id']) if n['kind'] == 'project'][:3],
                                'messages': graph.person_evidence(db, r['id'], owner)})
             orgs = [{'node_id': r['id'], 'name': r['name'], 'domain': json.loads(r['info']).get('domain'),
+                     'about': (json.loads(r['info']).get('profile') or {}).get('about'), 'profile': enrichment.summary(json.loads(r['info']).get('profile')),
                      'people': [{'name': n['name'], 'role': n['role']} for n in graph.detail(db, r['id'], 0)['people_roles']][:6]}
                     for r in db.execute("SELECT * FROM graph_nodes WHERE kind='org' AND strength>=1 AND json_extract(info,'$.role') IS NULL "
                                         'ORDER BY strength DESC LIMIT 6')]
@@ -5581,6 +5584,16 @@ class App:
             return self.store.finish_analysis(args['analysis_id'], args.get('summary', ''), args.get('_review_session'), args.get('_review_run'), args.get('reviewed_ids'), args.get('projects'))
         if name == 'graph':
             return self.graph_action(args)
+        if name == 'enrich':  # the CLI: status, or one domain now
+            if args.get('domain'):
+                try:
+                    found = enrichment.lookup(self.store.connect, self.config, args['domain'], now())
+                except enrichment.EnrichmentError as error:
+                    raise ValueError(str(error)) from None
+                self.graph_dirty.set()
+                return found
+            with self.store.connect() as db:
+                return enrichment.status(db, self.config)
         if name == 'preview_review':
             return self.start_preview()
         if name == 'roles_start':
@@ -6611,6 +6624,22 @@ class App:
                 LOG.error('graph error=%s', type(error).__name__)
                 wait = 1800
 
+    def enrichment_worker(self):
+        """Organisation data from the configured enrichment service: a few domains every ten minutes, each
+        looked up again after three months. A service error waits an hour (a day for that domain)."""
+        wait = 120
+        while not self.stop.wait(wait):
+            try:
+                if enrichment.step(self.store.connect, self.config, now()):
+                    self.graph_dirty.set()  # show the new profiles
+                wait = 600
+            except enrichment.EnrichmentError as error:
+                LOG.error('enrichment error=%s', error)
+                wait = 3600
+            except Exception as error:
+                LOG.error('enrichment error=%s', type(error).__name__)
+                wait = 3600
+
     def graph_build(self):
         with self.store.connect() as db:
             db.isolation_level = None  # graph.build runs its own transaction
@@ -6907,6 +6936,8 @@ class App:
         threading.Thread(target=self.graph_worker, daemon=True).start()
         if embeddings.settings(self.config):
             threading.Thread(target=self.embedding_worker, daemon=True).start()
+        if enrichment.settings(self.config):
+            threading.Thread(target=self.enrichment_worker, daemon=True).start()
         server.timeout = 1
         LOG.info('service started; loopback only; accounts=%d', len(self.config['accounts']))
         while not self.stop.is_set():

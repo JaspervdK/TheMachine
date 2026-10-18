@@ -34,6 +34,8 @@ import struct
 import unicodedata
 from zoneinfo import ZoneInfo
 
+import enrichment
+
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE COLLATE NOCASE,created_at TEXT NOT NULL,closed_at TEXT);
 CREATE TABLE IF NOT EXISTS event_projects(event_id INTEGER NOT NULL,project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -54,6 +56,7 @@ CREATE TABLE IF NOT EXISTS graph_names(node_id TEXT PRIMARY KEY,name TEXT NOT NU
 CREATE TABLE IF NOT EXISTS graph_role_asks(identifier TEXT PRIMARY KEY,run_id TEXT,asked_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS role_corrections(id INTEGER PRIMARY KEY,identifier TEXT NOT NULL,name TEXT NOT NULL,old_role TEXT NOT NULL,
   new_role TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS org_profiles(domain TEXT PRIMARY KEY,status TEXT NOT NULL,profile TEXT,fetched_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_relations(a TEXT NOT NULL,b TEXT NOT NULL,relation TEXT NOT NULL,source TEXT NOT NULL,event_id INTEGER,
   created_at TEXT NOT NULL,PRIMARY KEY(a,b));
 '''
@@ -610,6 +613,7 @@ def build(db, config, now):
     named = {r['node_id']: r['name'] for r in db.execute('SELECT node_id,name FROM graph_names')}
     said = {r['identifier']: (r['role'], 'owner' if r['source'] == 'owner' else 'review') for r in db.execute('SELECT identifier,role,source FROM person_roles')}
     related = db.execute('SELECT a,b,relation,source FROM graph_relations').fetchall()
+    profiles = {r['domain']: json.loads(r['profile']) for r in db.execute("SELECT domain,profile FROM org_profiles WHERE status='found'")}
     surnames = {n.split()[-1] for n in owner.names if len(n.split()) >= 2}
     for node, value in strength.items():
         if value < FLOOR:
@@ -648,9 +652,11 @@ def build(db, config, now):
     for domain, people in members.items():
         total = sum(v for _, v in people)
         role, role_by = said.get('org:' + domain, (None, None))
-        nodes.append(('org:' + domain, 'org', named.get('org:' + domain) or crm_names.get(domain) or paying_names.get(domain) or domain[:200], round(total, 4),
+        profile = profiles.get(domain)
+        nodes.append(('org:' + domain, 'org', (named.get('org:' + domain) or crm_names.get(domain) or paying_names.get(domain)
+                                               or (profile or {}).get('name') or domain)[:200], round(total, 4),
                       max((last_day[p].isoformat() for p, _ in people if p in last_day), default=None), len(people), None, 0, None,
-                      json.dumps({'domain': domain, 'role': role, 'role_by': role_by, 'paying': domain in paying_names})))
+                      json.dumps({'domain': domain, 'role': role, 'role_by': role_by, 'paying': domain in paying_names, 'profile': profile})))
         for node, value in people:
             links.append((node, 'org:' + domain, 'member', round(value, 4), None))
     two_weeks = current - dt.timedelta(days=14)
@@ -743,7 +749,8 @@ def node_view(row, links=None):
                     role_by=info.get('role_by'), hints=info.get('hints', []),
                     seen_only=bool(info.get('seen_only')), relations=info.get('relations', []))
     elif row['kind'] == 'org':
-        view.update(role=info.get('role'), role_by=info.get('role_by'), domain=info.get('domain'))
+        view.update(role=info.get('role'), role_by=info.get('role_by'), domain=info.get('domain'), profile=info.get('profile'),
+                    about=enrichment.summary(info.get('profile')))
     elif row['kind'] == 'project':
         view.update(trend=row['trend'], state=project_state(row), closed=bool(info.get('closed_at')), probable_signals=info.get('probable', 0))
     if links is not None:
@@ -857,8 +864,9 @@ def context_lines(db, event_ids, limit_chars=1500, skip_card=None):
             projects = [n for n in neighbours(db, row['id'], 12) if n['kind'] == 'project'][:3]
             people = [n for n in neighbours(db, row['id'], 12) if n['kind'] == 'person'][:3]
             org = db.execute('SELECT name,info FROM graph_nodes WHERE id=?', (view['org'],)).fetchone() if view['org'] else None
-            org_role = json.loads(org['info']).get('role') if org else None
-            bits = ([view['role']] if view['role'] else ['no role yet']) + ([f"at {org['name']}" + (f" ({org_role})" if org_role else '')] if org else []) \
+            org_info = json.loads(org['info']) if org else {}
+            org_bits = [b for b in (org_info.get('role'), enrichment.summary(org_info.get('profile'))) if b]
+            bits = ([view['role']] if view['role'] else ['no role yet']) + ([f"at {org['name']}" + (f" ({'; '.join(org_bits)})" if org_bits else '')] if org else []) \
                 + [relation_text(r) for r in view['relations'][:2]] \
                 + [f"{view['closeness']} contact", f"last {'seen' if view['seen_only'] else 'contact'} {short_date(view['last_at'])}"]
             if view['usual_gap_days']:

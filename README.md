@@ -190,6 +190,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | `review_worker` | `enabled: false` | `enabled`, `min_signals` (40), `max_wait_minutes` (60), `gap_seconds` (600), `timeout_seconds` (1500), `outage_grace_seconds` (600), `retry_seconds` (60), `max_retry_seconds` (1800) |
 | `weekly_recap` | `enabled: false` | `enabled`, `weekday` (1–7, default 5), `at` (`16:00`) |
 | `embeddings` | `enabled: false` | Optional [related signals](#related-signals-optional-local-embeddings): `url`, `model`, `dims` (256), `floor` (0.6), `query_floor` (0.4) |
+| `enrichment` | off | Optional [organisation data](#organisation-data-optional-enrichment): `provider` or `url`, `headers`, `key_file`/`key_env`, `fields`, `per_day` (50) |
 | `accounts` | `[]` | Sources, below |
 
 Every account has `id`, `service`, `transport` and `boundary`, plus optional `scope` (`work`/`personal`, overrides the label the boundary implies), `poll_seconds` and `exclude` (noise rules, below). `config.example.json` has one complete example per built-in source; each plugin in `connectors/` (GitHub, Stripe, X, LinkedIn, RSS) shows its own at the top of its file.
@@ -287,7 +288,7 @@ The service keeps track of its own bugs and can fix them. Small fixes that prove
 
 ## People and projects
 
-A living map of who you deal with and what's going on, across every account. `graph.py` rebuilds it from scratch every ten minutes (and soon after a label or merge) as a pure function of the signals, your card decisions, project labels and merges, so a rule change also applies to the past. It needs no setup and nothing leaves the machine; a rebuild over 5,000 signals with probable links and unnamed work takes under half a second.
+A living map of who you deal with and what's going on, across every account. `graph.py` rebuilds it from scratch every ten minutes (and soon after a label or merge) as a pure function of the signals, your card decisions, project labels and merges, so a rule change also applies to the past. It needs no setup and nothing leaves the machine (unless you turn on [organisation data](#organisation-data-optional-enrichment)); a rebuild over 5,000 signals with probable links and unnamed work takes under half a second.
 
 - **People** come from identifiers only: email addresses (Gmail, Calendar, Intercom, Salesflare contacts), WhatsApp numbers, Slack users, LinkedIn and X conversations, GitHub logins. Your own addresses (configured, plus any address your sent mail comes from), shared role addresses at your domains (info@, support@), your own name on other channels, newsletters (Gmail Promotions/Updates/Social/Forums, no-reply and mailing senders, unless you ever wrote to them), bots and mass mailings (over 20 recipients) are left out.
 - **Who is who:** Slack users are looked up once a month (`users.info`, a few per Slack page); their email joins them to their mail. The same full name on two different channels is one person, unless one channel has two identifiers with that name. The agent's `graph` `merge` or `different` (two person ids) overrides either way.
@@ -328,6 +329,22 @@ Off unless you set it up. Full-text search finds the same words; this finds the 
 
 **Off again:** remove `embeddings` (or set `enabled: false`) and restart; the `event_vectors` table can stay or be dropped.
 
+## Organisation data (optional, enrichment)
+
+Off unless you set it up. With a key for an enrichment service, The Machine looks up the organisations in the graph by domain and keeps a small profile of each: industry, size, location, founded, a short description, LinkedIn and website. It describes the company, never what it is to you; that stays a role.
+
+**Setup.** Put the key in a file only you can read (`chmod 600`), then add to `config.json` and restart:
+
+- A preset: `"enrichment": {"provider": "apollo", "key_file": "~/.local/share/personal-assistant/enrichment.key"}`. Presets: `apollo`, `peopledatalabs`, `hunter`.
+- Any other service that answers a GET with JSON about a domain: `"enrichment": {"url": "https://api.example.com/companies?domain={domain}", "headers": {"Authorization": "Bearer {key}"}, "key_file": "…"}`. `{key}` can go in the url or the headers; `key_env` reads it from an environment variable instead. The key never goes in the config itself.
+- Common response shapes are understood: flat, or wrapped in `organization`, `company`, `data` or `result`, with the usual field names. If yours differs, `fields` adds paths of your own: `{"industry": ["category.sector"], "about": ["profile.text"]}`.
+
+Check it with `assistant enrich globex.com` (looks one up now) and `assistant enrich` (service and counts).
+
+**What is sent.** Only organisation domains from the graph, never free-mail domains, your own domains, names, addresses or messages. Strongest first, five per pass every ten minutes and at most 50 a day (`per_day`), each looked up again after 90 days. After an error (rejected key, rate limit, unreachable) it waits an hour, and that domain a day; errors never contain the url or the key. Lookups count against your plan with that service.
+
+**Where it shows.** The Graph tab (industry in the organisation list; a summary, the description and links on its page), `graph` results (`about`, `profile`), preparation context ("at Globex (customer; Manufacturing, 51-200 people, Springfield, founded 1989)") and the roles run. Profiles are kept in `org_profiles`. **Off again:** remove `enrichment` (or set `"enabled": false`) and restart.
+
 ## Security model
 
 Read this before you turn on delivery.
@@ -337,7 +354,7 @@ Read this before you turn on delivery.
 - **Reviews are read-only.** Review turns can only use `assistant_signals`, memory lookups and read-only file tools.
 - **Do it gives the agent broad authority.** OpenClaw can't show approval prompts in background runs, so a Do it run can run commands, use the logged-in browser, edit files and act in your accounts, including payments, deletions and signing, as far as the card and your note ask. The plugin blocks only reading credentials and editing the assistant's own code, the OpenClaw config/extensions and systemd units. Fixes to The Machine are made in a clone and reach the running code only through a tested Merge now or the small proven-fix exception below. These are guardrails against mistakes, not a sandbox. Source messages are treated as untrusted evidence, but the agent reads them; prompt injection remains a risk you accept by using Do it. Use a model and accounts you trust with that.
 - **Its own code changes only through a tested merge.** Do it never edits the running code. A fix merges after your Merge now, or by itself only when it is small, fixes a recorded error, comes with a test that fails on the old code, and leaves the plugin, the agent's instructions, the database layout and the config alone. Every merge can be undone for 24 hours, and one that merged by itself undoes itself if its error returns.
-- **Privacy.** Collected content stays in your SQLite database, but reviews and preparations send it to your agent's model provider. The optional related signals embed text only through the local server you configure. Logs contain account IDs, counts and redacted errors only. Source credentials never reach the model.
+- **Privacy.** Collected content stays in your SQLite database, but reviews and preparations send it to your agent's model provider. The optional related signals embed text only through the local server you configure; the optional organisation data sends only organisation domains to the enrichment service you configure. Logs contain account IDs, counts and redacted errors only. Source credentials never reach the model.
 
 ## Command line
 
@@ -359,6 +376,7 @@ Read this before you turn on delivery.
 | `assistant profile` | Your agent drafts how you write and what matters to you from your own messages, and notes what your closest people are to you in the graph; the draft is saved to `USER.md` only after your yes, within the 4,000 characters OpenClaw loads (`--again` for a fresh draft, `--all` to keep every line) |
 | `assistant connect [<source>]` | Set up or redo a source (sign-in or key, IDs, a test read, first sync); without a source, lists what still needs connecting. `--account <id>` picks or adds one of several |
 | `assistant doctor` | Checks the service, OpenClaw bridge, Telegram approval, every source, reviews, dashboard and `USER.md`; every problem comes with its fix. Exits 1 when something is broken |
+| `assistant enrich [domain]` | Organisation data from your enrichment service: status, or look up one domain now |
 | `assistant raw <action> '<json>'` | Any other non-owner service action |
 
 ## Operations

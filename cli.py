@@ -483,6 +483,32 @@ def cmd_roles(config, args):
         return out_json(run)
 
 
+def cmd_enrich(config, args):
+    if args.domain:
+        found = call(config, 'enrich', {'domain': args.domain})
+        if args.json:
+            return out_json(found)
+        profile = found['profile']
+        if not profile:
+            print(f"The enrichment service doesn't know {found['domain']}.")
+            return
+        print(f"{profile.get('name') or found['domain']} ({found['domain']})")
+        for label, key in (('Industry', 'industry'), ('Size', 'size'), ('Employees', 'employees'), ('Location', 'location'), ('Founded', 'founded'),
+                           ('Type', 'type'), ('LinkedIn', 'linkedin_url'), ('Website', 'website'), ('About', 'about')):
+            if profile.get(key):
+                print(f'  {label + ":":<11}{profile[key]}')
+        return
+    state = call(config, 'enrich', {})
+    if args.json:
+        return out_json(state)
+    if not state['service']:
+        print('Enrichment is off. Add "enrichment" to the config to look up the organisations you deal with (see README, Enrichment).')
+        return
+    print(f"Organisation data from {state['service']}: {state['found']} found, {state['unknown']} unknown"
+          + (f", {state['errors']} errors (last {state['last_error_at'][:16].replace('T', ' ')})" if state['errors'] else '')
+          + f". Each is looked up again after {state['refresh_days']} days.")
+
+
 def cmd_connect(config, args):
     if not args.source:
         if args.json:
@@ -573,6 +599,8 @@ def parser():
     source.add_argument('--body')
     source.add_argument('--file', help='file with the text, or - for stdin')
     add('preview', f'First run: one review of the last {assistant.PREVIEW_DAYS} days, shown here and on the dashboard; nothing is sent', cmd_preview)
+    c = add('enrich', 'Organisation data from your enrichment service: status, or look up one domain now', cmd_enrich)
+    c.add_argument('domain', nargs='?', help='a domain to look up now, like globex.com')
     c = add('roles', 'Note what your closest people and organisations are to you, from your messages with them (also part of profile)', cmd_roles)
     c.add_argument('--again', action='store_true', help='run again even if it just ran')
     c = add('profile', 'Draft how you write and what matters to you from your own messages, for USER.md (you see it first), then note what your closest people are to you', cmd_profile)
