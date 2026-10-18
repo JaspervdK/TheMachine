@@ -337,6 +337,11 @@ class Graph(unittest.TestCase):
         self.assertEqual(hints('email:ann@home.example'), ["shares the owner's surname"])
         self.assertEqual(hints('slack:U0TEAM1'), ["in the owner's Slack"])
         self.assertEqual(hints('email:kai@acme.com'), ["an address at the owner's own domain"])  # a teammate answering support
+        # Last contact is contact with the owner: Pat's later Stripe event and Kai's support answer don't count.
+        tz = graph.owner_tz({})
+        self.assertEqual(self.node('email:pat@client.com')['last_at'], dt.datetime.fromisoformat(at(3)).astimezone(tz).date().isoformat())
+        self.assertFalse(self.node('email:pat@client.com')['seen_only'])
+        self.assertTrue(self.node('email:kai@acme.com')['seen_only'])
         # A review is asked about the strongest people without a role, each once a month, and reads their messages.
         with self.store.connect() as db:
             db.execute("UPDATE graph_nodes SET strength=1 WHERE kind='person'")

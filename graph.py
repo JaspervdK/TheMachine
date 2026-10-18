@@ -26,10 +26,12 @@ import email.utils
 import json
 import math
 import operator
+import os
 import re
 import sqlite3
 import struct
 import unicodedata
+from zoneinfo import ZoneInfo
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE COLLATE NOCASE,created_at TEXT NOT NULL,closed_at TEXT);
@@ -377,11 +379,19 @@ def unnamed_work(per_event, event_people, owner_events, labelled, vectors, curre
     return sorted(out, key=lambda g: g[2], reverse=True)
 
 
+def owner_tz(config):
+    try:
+        return ZoneInfo(config.get('timezone') or os.environ.get('ASSISTANT_TIMEZONE') or 'Europe/Amsterdam')
+    except (ValueError, KeyError):
+        return dt.timezone.utc
+
+
 def build(db, config, now):
     """Recompute graph_nodes, graph_links and graph_events. Returns a short summary."""
     started = dt.datetime.now(dt.timezone.utc)
     current = parse_time(now)
     owner = Owner(config)
+    tz = owner_tz(config)
     horizon = (current - dt.timedelta(days=HORIZON_DAYS)).isoformat()
     rows = db.execute("SELECT id,account_id,kind,occurred_at,metadata FROM events WHERE deleted=0 AND occurred_at>=? ORDER BY occurred_at", (horizon,)).fetchall()
     signals = []
@@ -481,7 +491,7 @@ def build(db, config, now):
                 if role == 'met' and (node not in next_meeting or at < next_meeting[node]):
                     next_meeting[node] = at
                 continue
-            day = at.date()
+            day = at.astimezone(tz).date()  # the owner's day: a message at 00:17 on Sunday is Sunday
             day_weight[(node, day)] += weight
             roles[node][role].add(day)
             accounts[node].add(account_id)
@@ -599,7 +609,9 @@ def build(db, config, now):
         talk = sorted(roles[node]['owner'] | roles[node]['them'] | roles[node]['met'])
         gaps = [(b - a).days for a, b in zip(talk, talk[1:])][-8:]
         usual = sorted(gaps)[len(gaps) // 2] if len(gaps) >= 3 else None
-        since = (current.date() - last_day[node]).days if node in last_day else None
+        if talk:  # contact is with the owner: someone answering a customer or posting in a channel isn't
+            last_day[node] = talk[-1]
+        since = (current.astimezone(tz).date() - last_day[node]).days if node in last_day else None
         quiet = bool(usual and len(roles[node]['owner']) >= 2 and since is not None and max(14, 3 * usual) < since < 365)
         domains = sorted({i.split('@', 1)[1] for i in group if i.startswith('email:')} - FREEMAIL - owner.domains)
         if domains:
@@ -613,7 +625,7 @@ def build(db, config, now):
         info = {'ids': sorted({shown_id(i, x_names) for i in group}), 'org': ('org:' + domains[0]) if domains else None,
                 'wrote': len(roles[node]['owner']), 'heard': len(roles[node]['them']), 'met': len(roles[node]['met']),
                 'accounts': sorted(accounts[node]), 'next_meeting': next_meeting[node].isoformat() if node in next_meeting else None,
-                'colleague': colleague, 'role': role, 'role_by': role_by, 'hints': hints}
+                'colleague': colleague, 'role': role, 'role_by': role_by, 'hints': hints, 'seen_only': not talk}
         nodes.append((node, 'person', name[:200], round(value, 4), last_day[node].isoformat() if node in last_day else None,
                       len(node_events[node]), usual, int(quiet), None, json.dumps(info)))
     kept = {n[0] for n in nodes}
@@ -694,7 +706,8 @@ def node_view(row, links=None):
         view.update(closeness=closeness(row['strength']), ids=info.get('ids', []), org=info.get('org'), quiet=bool(row['quiet']),
                     usual_gap_days=row['gap_days'], wrote_days=info.get('wrote'), heard_days=info.get('heard'), met_days=info.get('met'),
                     next_meeting=info.get('next_meeting'), colleague=info.get('colleague'), role=info.get('role'),
-                    role_by=info.get('role_by'), hints=info.get('hints', []))
+                    role_by=info.get('role_by'), hints=info.get('hints', []),
+                    seen_only=bool(info.get('seen_only')))
     elif row['kind'] == 'project':
         view.update(trend=row['trend'], state=project_state(row), closed=bool(info.get('closed_at')), probable_signals=info.get('probable', 0))
     if links is not None:
@@ -777,7 +790,7 @@ def context_lines(db, event_ids, limit_chars=1500, skip_card=None):
         if row['kind'] == 'person':
             projects = [n for n in neighbours(db, row['id'], 12) if n['kind'] == 'project'][:3]
             people = [n for n in neighbours(db, row['id'], 12) if n['kind'] == 'person'][:3]
-            bits = ([view['role']] if view['role'] else []) + [f"{view['closeness']} contact", f"last contact {short_date(view['last_at'])}"]
+            bits = ([view['role']] if view['role'] else []) + [f"{view['closeness']} contact", f"last {'seen' if view['seen_only'] else 'contact'} {short_date(view['last_at'])}"]
             if view['usual_gap_days']:
                 gap = int(view['usual_gap_days'])
                 bits.append(('usually daily' if gap <= 1 else f'usually every {gap} days') + (' (gone quiet)' if view['quiet'] else ''))

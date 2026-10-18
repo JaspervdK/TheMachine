@@ -33,7 +33,7 @@ try{
  await page.goto('http://127.0.0.1:'+server.address().port);
  await page.locator('nav [data-tab="people"]').click();
  await page.locator('#people-view article[data-node="email:ann@client.example"]').waitFor();
- assert.match(await page.locator('#people-view').textContent(),/Customer · regular/);
+ assert.match(await page.locator('#people-view').textContent(),/Customer · last contact/);
  await page.locator('#people-view article[data-node="email:ann@client.example"] button.node').click();
  await page.locator('.graph-open').waitFor();
  const text=await page.locator('#people-view').textContent();
