@@ -678,6 +678,13 @@ def install_plugin(facts, reload=True):
     if result.returncode != 0:
         say('  plugin enable failed: ' + (result.stderr or result.stdout).strip()[:300])
         return False
+    # OpenClaw only runs a non-bundled plugin's conversation hooks with this set; without them a review
+    # is never tied to its run and every preview ends "without saving its review".
+    result = run([openclaw, 'config', 'set', f'plugins.entries.{PLUGIN_ID}.hooks.allowConversationAccess', 'true', '--strict-json'], timeout=120)
+    if result.returncode != 0:
+        say('  could not allow the plugin\'s conversation hooks: ' + (result.stderr or result.stdout).strip()[:300]
+            + f'\n  run it yourself: openclaw config set plugins.entries.{PLUGIN_ID}.hooks.allowConversationAccess true --strict-json')
+        return False
     if reload:
         result = run([openclaw, 'plugins', 'reload', PLUGIN_ID, '--wait'], timeout=300)
         if result.returncode != 0:

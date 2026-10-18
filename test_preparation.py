@@ -57,6 +57,14 @@ class Preparation(unittest.TestCase):
         calls.clear();self.app.preparation_step(lambda r:calls.append(r) or {'status':'admitted'})
         self.assertIn('the owner tapped Do it',next(c['message'] for c in calls if c.get('message')))
 
+    def test_a_start_the_gateway_declares_over_is_retried_once_under_a_new_run_id(self):
+        sid=self.ahead()['id']
+        first=self.q('SELECT job_id FROM preparations WHERE suggestion_id=?',sid)['job_id']
+        self.app.preparation_step(lambda r:{'status':'lost'})
+        row=self.q('SELECT job_id,status,error,auto_retries FROM preparations WHERE suggestion_id=?',sid)
+        self.assertEqual((row['status'],row['error'],row['auto_retries']),('queued','ai_run_failed',1))
+        self.assertNotEqual(row['job_id'],first)
+
     def test_prepared_ahead_task_stops_at_the_last_step_and_confirm_runs_only_that_step(self):
         sid=self.ahead()['id']
         calls=[];self.app.preparation_step(lambda r:calls.append(r) or {'status':'admitted'})
@@ -166,7 +174,7 @@ class Preparation(unittest.TestCase):
         self.store.decide(self.sid,'other','Use a shorter version','feedback','telegram')
         current=self.job()['job_id'];self.assertNotEqual(current,old)
         with self.assertRaises(ValueError):self.store.prepare(self.sid,'Stale draft',old)
-        self.app.preparation_step(lambda req:{'status':'lost'})
+        self.app.preparation_step(lambda req:{'status':'lost' if req['action']=='stop' else 'pending'})  # the old run is gone
         self.app.preparation_step(lambda req:{'status':'admitted'})
         with self.assertRaises(ValueError):self.store.prepare(self.sid,'Unowned heartbeat draft')
         self.store.prepare(self.sid,'Actual useful short draft',current)

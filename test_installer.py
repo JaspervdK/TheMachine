@@ -91,6 +91,8 @@ class InstallerTest(unittest.TestCase):
         calls = self.calls()
         self.assertIn(f'openclaw plugins install --link --force --accept-capabilities {ROOT}/openclaw-plugin', calls)
         self.assertIn('openclaw plugins enable personal-assistant-bridge', calls)
+        # Without this OpenClaw skips the bridge's conversation hooks and reviews never bind to their run.
+        self.assertIn('openclaw config set plugins.entries.personal-assistant-bridge.hooks.allowConversationAccess true --strict-json', calls)
         self.assertIn('systemctl --user daemon-reload', calls)
         self.assertFalse(any('enable personal-assistant.service' in c for c in calls), calls)  # --no-start
         self.assertIn('Next steps', result.stdout)
@@ -280,6 +282,7 @@ class InstallerTest(unittest.TestCase):
     def test_failed_install_steps_exit_nonzero(self):
         for command in ('plugins install --link --force --accept-capabilities ' + str(ROOT / 'openclaw-plugin'),
                         'plugins enable personal-assistant-bridge',
+                        'config set plugins.entries.personal-assistant-bridge.hooks.allowConversationAccess true --strict-json',
                         'plugins reload personal-assistant-bridge --wait',
                         '--user daemon-reload', '--user enable personal-assistant.service',
                         '--user restart personal-assistant.service'):

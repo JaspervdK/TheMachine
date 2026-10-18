@@ -64,7 +64,10 @@ try {
         result?.status==='timeout' && result?.endedAt ? 'timed_out':'pending';
     process.stdout.write(JSON.stringify({run_id:request.job_id,status,...failure(result,status)}));
   }
-} catch {
-  // An admission timeout is ambiguous: retain the SAME idempotency key.
-  process.stdout.write(JSON.stringify({run_id:request.job_id,status:'unavailable'}));
+} catch (error) {
+  // An admission timeout is ambiguous: retain the SAME idempotency key. But when the Gateway answers
+  // that this run id's turn is over and a new turn is needed, it keeps giving that (cached) answer
+  // for the key: the run is lost, so the service ends it and the next one starts fresh.
+  const over=request.action==='start' && error?.name==='GatewayClientRequestError' && /submit a new turn/i.test(error?.message || '');
+  process.stdout.write(JSON.stringify(over?{run_id:request.job_id,status:'lost',error:'runtime_lost',error_phase:'runtime'}:{run_id:request.job_id,status:'unavailable'}));
 }

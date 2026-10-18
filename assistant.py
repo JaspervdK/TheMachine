@@ -6299,7 +6299,7 @@ class App:
             if status=='admitted':
                 db.execute("UPDATE preparations SET status='running',updated_at=?,error=NULL,retry_at=NULL WHERE job_id=?",(now(),job['job_id']))
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
-            elif status in ('ok','error','aborted','timed_out'):
+            elif status in ('ok','error','aborted','timed_out','lost'):  # lost: the Gateway refused this run id for good
                 error={'ok':'run_ended_without_preparation','timed_out':'ai_run_timed_out'}.get(status,'ai_run_failed')
                 if not current['auto_retries']:
                     # Continue the retained session once. Its durable tool history must be read

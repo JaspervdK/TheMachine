@@ -67,6 +67,14 @@ class Preview(unittest.TestCase):
         self.assertIsNone(self.app.review_step(Runner()))
         self.assertEqual(len(self.runs()), 1)
 
+    def test_a_start_the_gateway_declares_over_ends_the_run_so_a_new_one_can_start(self):
+        # After a Codex cold-start timeout the Gateway answers every retry of that run id with
+        # "submit a new turn"; the runner reports it lost instead of retrying for 35 minutes.
+        self.app.start_preview()
+        self.assertEqual(self.app.review_step(Runner('lost')), 'lost')
+        self.assertEqual((self.runs()[0]['status'], self.runs()[0]['error']), ('lost', 'runtime_lost'))
+        self.assertNotEqual(self.app.start_preview()['run_id'], self.runs()[0]['run_id'])
+
     def test_preview_claims_only_the_last_week(self):
         run_id = self.app.start_preview()['run_id']
         self.app.review_step(Runner('admitted'))

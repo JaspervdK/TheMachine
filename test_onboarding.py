@@ -501,6 +501,19 @@ elif args[:2] == ["api", "call"]:
         self.assertIn('! you are approved on the Telegram account work, but cards go out through family', text)
         self.assertNotIn('no systemd unit', text)
 
+    def test_doctor_notices_when_openclaw_skips_the_review_hooks(self):
+        self.stub('openclaw', 'print(json.dumps({"plugins": [{"id": "personal-assistant-bridge", "enabled": True, "status": "loaded"}]}))')
+        (self.home / '.openclaw').mkdir()
+        settings = self.home / '.openclaw/openclaw.json'
+        settings.write_text(json.dumps({'plugins': {'entries': {'personal-assistant-bridge': {'enabled': True}}}}))
+        self.config(openclaw=str(self.bin / 'openclaw'))
+        text = '\n'.join(f'{m} {t} | {f}' for m, t, f in onboarding.doctor(self.path))
+        self.assertIn("✗ OpenClaw skips the bridge plugin's review hooks, so reviews never finish | "
+                      'openclaw config set plugins.entries.personal-assistant-bridge.hooks.allowConversationAccess true --strict-json', text)
+        settings.write_text(json.dumps({'plugins': {'entries': {'personal-assistant-bridge': {'enabled': True, 'hooks': {'allowConversationAccess': True}}}}}))
+        text = '\n'.join(f'{m} {t} | {f}' for m, t, f in onboarding.doctor(self.path))
+        self.assertIn('✓ OpenClaw bridge plugin loaded', text)
+
     def test_only_the_service_that_reads_this_config_is_restarted(self):
         self.stub('systemctl', f'''
 if "is-active" in args: print("active")

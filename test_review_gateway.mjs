@@ -43,6 +43,13 @@ assert.equal(r.result.status,'pending');assert.equal(r.result.error,undefined);
 r=await run({kind:'review',job_id:id,action:'start',message:'Review'},[{runId:id}]);
 assert.equal(r.result.status,'admitted');assert.equal(r.calls[0].args.idempotencyKey,id);
 assert.equal(r.calls[0].args.deliver,false);assert.equal(r.calls[0].args.disableMessageTool,true);
+// A refused start keeps its key (it may have been admitted) unless the Gateway says the run id's turn is over.
+const refusal=Object.assign(new Error('Pending input ownership ended; submit a new turn to continue'),{name:'GatewayClientRequestError',gatewayCode:'UNAVAILABLE'});
+r=await run({kind:'review',job_id:id,action:'start',message:'Review'},[refusal]);
+assert.deepEqual(r.result,{run_id:id,status:'lost',error:'runtime_lost',error_phase:'runtime'});
+for(const other of [Object.assign(new Error('codex app-server request timed out'),{name:'GatewayClientRequestError'}),new Error('submit a new turn')]){
+  r=await run({kind:'review',job_id:id,action:'start',message:'Review'},[other]);assert.equal(r.result.status,'unavailable');
+}
 // Try again on a stuck preparation stops only its exact isolated session and run.
 r=await run({kind:'preparation',job_id:id,action:'stop'},[{ok:true,status:'no-active-run',abortedRunId:null}]);
 assert.equal(r.result.status,'lost');assert.equal(r.calls[0].args.key,'agent:main:assistant-review-preparation-'+id);assert.equal(r.calls[0].args.runId,id);

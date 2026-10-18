@@ -249,6 +249,12 @@ def openclaw_dir(root=None):
     return Path(root or home()) / '.openclaw'
 
 
+def hooks_allowed(settings):
+    """OpenClaw runs a non-bundled plugin's conversation hooks (review binding, recovery) only with this set."""
+    entry = ((settings.get('plugins') or {}).get('entries') or {}).get('personal-assistant-bridge') or {}
+    return bool((entry.get('hooks') or {}).get('allowConversationAccess'))
+
+
 def openclaw_settings(root=None):
     """openclaw.json (OPENCLAW_CONFIG_PATH, else in the state directory), read-only; {} when unreadable."""
     path = Path(os.environ['OPENCLAW_CONFIG_PATH'].strip()).expanduser() if root is None and os.environ.get('OPENCLAW_CONFIG_PATH', '').strip() \
@@ -1418,6 +1424,10 @@ def doctor(config_path, workspace=None):
         elif not bridge.get('enabled') or bridge.get('status') not in (None, 'loaded'):
             add('✗', f'OpenClaw bridge plugin {"disabled" if not bridge.get("enabled") else bridge.get("status")}',
                 'openclaw plugins enable personal-assistant-bridge && openclaw plugins reload personal-assistant-bridge --wait')
+        elif not hooks_allowed(openclaw_settings()):
+            add('✗', 'OpenClaw skips the bridge plugin\'s review hooks, so reviews never finish',
+                'openclaw config set plugins.entries.personal-assistant-bridge.hooks.allowConversationAccess true --strict-json'
+                ' && openclaw plugins reload personal-assistant-bridge --wait')
         else:
             add('✓', 'OpenClaw bridge plugin loaded')
     # Telegram
