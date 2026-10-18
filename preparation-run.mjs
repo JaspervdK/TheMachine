@@ -65,9 +65,24 @@ try {
     process.stdout.write(JSON.stringify({run_id:request.job_id,status,...failure(result,status)}));
   }
 } catch (error) {
-  // An admission timeout is ambiguous: retain the SAME idempotency key. But when the Gateway answers
-  // that this run id's turn is over and a new turn is needed, it keeps giving that (cached) answer
-  // for the key: the run is lost, so the service ends it and the next one starts fresh.
-  const over=request.action==='start' && error?.name==='GatewayClientRequestError' && /submit a new turn/i.test(error?.message || '');
-  process.stdout.write(JSON.stringify(over?{run_id:request.job_id,status:'lost',error:'runtime_lost',error_phase:'runtime'}:{run_id:request.job_id,status:'unavailable'}));
+  // An admission timeout is ambiguous. A "submit a new turn" reply means this
+  // key can't be admitted again, but it isn't proof the old execution ended.
+  // Reconcile that exact run before allowing a fresh key or external work.
+  let ended=false;
+  if (request.action==='start' && error?.name==='GatewayClientRequestError' && /submit a new turn/i.test(error?.message || '')) {
+    try {
+      const prior=await callGatewayFromCli('agent.wait',{timeout:'15000'},{runId:request.job_id,timeoutMs:0},scope);
+      ended=!!prior?.endedAt && ['ok','error','aborted','timeout'].includes(prior?.status);
+      if (!ended) {
+        const stopped=await callGatewayFromCli('sessions.abort',{timeout:'15000'},
+          {key:session+sessionId,agentId:'main',runId:request.job_id,clearQueued:true},scope);
+        ended=stopped?.ok===true && !stopped?.warning && stopped?.status==='no-active-run' && !stopped?.abortedRunId;
+        if (!ended && stopped?.ok===true && !stopped?.warning && stopped?.status==='aborted' && stopped?.abortedRunId===request.job_id) {
+          const outcome=await callGatewayFromCli('agent.wait',{timeout:'15000'},{runId:request.job_id,timeoutMs:0},scope);
+          ended=!!outcome?.endedAt && ['ok','error','aborted','timeout'].includes(outcome?.status);
+        }
+      }
+    } catch {}  // keep the same key/custody when the status check is unavailable
+  }
+  process.stdout.write(JSON.stringify(ended?{run_id:request.job_id,status:'lost',error:'runtime_lost',error_phase:'runtime'}:{run_id:request.job_id,status:'unavailable'}));
 }

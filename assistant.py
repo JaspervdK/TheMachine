@@ -1637,7 +1637,15 @@ class Store:
             # checked when due: still open, it becomes a card (status carded, suggestion_id).
             db.execute('CREATE TABLE IF NOT EXISTS promises(id INTEGER PRIMARY KEY,direction TEXT NOT NULL,who TEXT NOT NULL,what TEXT NOT NULL,due TEXT,'
                        'check_at TEXT NOT NULL,event_id INTEGER NOT NULL,account_id TEXT NOT NULL,watch TEXT,status TEXT NOT NULL,note TEXT,suggestion_id TEXT,'
-                       'created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(event_id,direction,who))')
+                       'created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(event_id,direction,who,what))')
+            promise_sql = db.execute("SELECT sql FROM sqlite_master WHERE name='promises'").fetchone()[0]
+            if re.search(r'UNIQUE\s*\(event_id,\s*direction,\s*who\)', promise_sql, re.I):
+                if not db.in_transaction:
+                    db.execute('BEGIN IMMEDIATE')
+                db.execute(re.sub(r'UNIQUE\s*\(event_id,\s*direction,\s*who\)', 'UNIQUE(event_id,direction,who,what)', re.sub(r'^CREATE TABLE\s+"?promises"?', 'CREATE TABLE promises_next', promise_sql, count=1), flags=re.I))
+                db.execute('INSERT INTO promises_next SELECT * FROM promises')
+                db.execute('DROP TABLE promises')
+                db.execute('ALTER TABLE promises_next RENAME TO promises')
             db.execute("CREATE INDEX IF NOT EXISTS promises_open ON promises(status,check_at)")
             preparation_columns = {r['name'] for r in db.execute('PRAGMA table_info(preparations)')}
             if 'action_id' not in preparation_columns:
@@ -2263,8 +2271,8 @@ class Store:
         to one review (again only once it has doubled)."""
         lines = []
         with self.connect() as db:
-            rows = db.execute('SELECT u.* FROM graph_unnamed u LEFT JOIN graph_offers o ON o.key=u.key WHERE o.key IS NULL OR u.size>=2*o.size '
-                              'ORDER BY u.last_at DESC LIMIT ?', (limit,)).fetchall()
+            rows = db.execute("SELECT u.* FROM graph_unnamed u LEFT JOIN graph_offers o ON o.key=u.key WHERE o.key IS NULL OR NOT (o.run_id IS NULL OR (o.run_id<>? AND (NOT EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id) OR EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id AND r.status='ok') OR EXISTS(SELECT 1 FROM analyses a WHERE a.owner_run=o.run_id AND a.status='complete')))) OR u.size>=2*o.size "
+                              'ORDER BY u.last_at DESC LIMIT ?', (run_id, limit,)).fetchall()
             for r in rows:
                 people, titles, ids = json.loads(r['people']), json.loads(r['titles']), json.loads(r['event_ids'])
                 lines.append(f"- {r['size']} signals" + (f" with {', '.join(people)}" if people else '') + ': ' + ' / '.join(f'"{t}"' for t in titles)
@@ -2281,17 +2289,17 @@ class Store:
                                 f"they on {info.get('heard', 0)}, met on {info.get('met', 0)}" + (f"; hints: {', '.join(info['hints'])}" if info.get('hints') else '') + ')')
         parts = []
         with self.connect() as db:
-            asked = "AND n.id NOT IN (SELECT identifier FROM graph_role_asks WHERE asked_at>?)"
+            asked = "AND n.id NOT IN (SELECT identifier FROM graph_role_asks o WHERE asked_at>? AND (o.run_id IS NULL OR (o.run_id<>? AND (NOT EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id) OR EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id AND r.status='ok') OR EXISTS(SELECT 1 FROM analyses a WHERE a.owner_run=o.run_id AND a.status='complete')))))"
             marks = ','.join('?' for _ in graph.OPEN_CARD)
             on_cards = db.execute(f"SELECT DISTINCT n.* FROM suggestions s JOIN json_each(s.event_ids) j JOIN graph_events g ON g.event_id=j.value AND g.direct=1 "
                                   f"JOIN graph_nodes n ON n.id=g.node_id WHERE s.status IN ({marks}) AND n.kind='person' AND n.strength>=0.1 "
-                                  f"AND json_extract(n.info,'$.role') IS NULL {asked} ORDER BY n.strength DESC LIMIT ?", (*graph.OPEN_CARD, since, limit)).fetchall()
-            strongest = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='person' AND strength>=0.5 AND json_extract(info,'$.role') IS NULL {asked} "
-                                   'ORDER BY strength DESC LIMIT ?', (since, limit)).fetchall()
+                                  f"AND json_extract(n.info,'$.role') IS NULL AND coalesce(json_extract(n.info,'$.role_by'),'')!='owner' {asked} ORDER BY n.strength DESC LIMIT ?", (*graph.OPEN_CARD, since, run_id, limit)).fetchall()
+            strongest = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='person' AND strength>=0.5 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' {asked} "
+                                   'ORDER BY strength DESC LIMIT ?', (since, run_id, limit)).fetchall()
             people = list({r['id']: r for r in on_cards + strongest}.values())[:limit]
-            orgs = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='org' AND strength>=1 AND json_extract(info,'$.role') IS NULL {asked} "
-                              'ORDER BY strength DESC LIMIT 2', (since,)).fetchall()
-            stale = [r for r in graph.stale_roles(db, now()) if not db.execute('SELECT 1 FROM graph_role_asks WHERE identifier=? AND asked_at>?', (r['id'], since)).fetchone()]
+            orgs = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='org' AND strength>=1 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' {asked} "
+                              'ORDER BY strength DESC LIMIT 2', (since, run_id)).fetchall()
+            stale = [r for r in graph.stale_roles(db, now()) if not db.execute("SELECT 1 FROM graph_role_asks o WHERE identifier=? AND asked_at>? AND (o.run_id IS NULL OR (o.run_id<>? AND (NOT EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id) OR EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id AND r.status='ok') OR EXISTS(SELECT 1 FROM analyses a WHERE a.owner_run=o.run_id AND a.status='complete'))))", (r['id'], since, run_id)).fetchone()]
             if people:
                 parts.append('\n'.join(line(r, json.loads(r['info'] or '{}')) + (' on an open card' if r in on_cards else '') for r in people))
             if orgs:
@@ -2393,7 +2401,11 @@ class Store:
                        (now(), summary[:4000], encoded(items), analysis_id))
         return {'status': 'complete'}
 
-    def suggest(self, dedupe_key, title, body, event_ids, when='now', digest_at='08:30', work=False, urgent=False, due=None, ahead=False, awaiting=None, project=None):
+    def suggest(self, dedupe_key, title, body, event_ids, when='now', digest_at='08:30', work=False, urgent=False, due=None, ahead=False, awaiting=None, project=None, _db=None):
+        if _db is None:
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                return self.suggest(dedupe_key, title, body, event_ids, when, digest_at, work, urgent, due, ahead, awaiting, project, _db=db)
         if not dedupe_key or not title or not body or not event_ids:
             raise ValueError('Evidence, title, body and stable dedupe_key are required')
         if due is not None:
@@ -2403,7 +2415,7 @@ class Store:
                 raise ValueError('due must be the deadline date as YYYY-MM-DD') from None
         if len(title) > 90 or len(body) > 700:
             raise ValueError('Keep it simple: title under 90 characters; body under 700 characters, about three short sentences. Keep event IDs and internal details out of the message.')
-        with self.connect() as db:
+        with contextlib.nullcontext(_db) as db:
             existing = db.execute('SELECT id,status FROM suggestions WHERE dedupe_key=?', (dedupe_key,)).fetchone()
             if existing:
                 return {**dict(existing), 'duplicate': True}
@@ -2533,16 +2545,17 @@ class Store:
             check_at = promise_check_at(direction, due, event['occurred_at'], digest_at)
             stamp = now()
             cursor = db.execute('INSERT INTO promises(direction,who,what,due,check_at,event_id,account_id,watch,status,created_at,updated_at) '
-                                "VALUES(?,?,?,?,?,?,?,?,'open',?,?) ON CONFLICT(event_id,direction,who) DO NOTHING",
-                                (direction, who, what, due, check_at, event['id'], event['account_id'], encoded(watch) if watch else None, stamp, stamp))
+                                "VALUES(?,?,?,?,?,?,?,?,'open',?,?) ON CONFLICT(event_id,direction,who,what) DO NOTHING",
+                                (direction, who, what, due, check_at, event['id'], event['account_id'], encoded({**watch, 'promise': True}) if watch else None, stamp, stamp))
             if not cursor.rowcount:
-                row = db.execute('SELECT id,status FROM promises WHERE event_id=? AND direction=? AND who=?', (event['id'], direction, who)).fetchone()
+                row = db.execute('SELECT id,status FROM promises WHERE event_id=? AND direction=? AND who=? AND what=?', (event['id'], direction, who, what)).fetchone()
                 return {'id': row['id'], 'status': row['status'], 'duplicate': True}
         return {'id': cursor.lastrowid, 'status': 'open', 'check_at': check_at,
                 'note': 'Recorded, no card. It is checked when due; if still open then, a card comes.'}
 
     def update_promise(self, args, digest_at='08:30', source='assistant'):
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT p.*,e.occurred_at made_at FROM promises p JOIN events e ON e.id=p.event_id WHERE p.id=?', (args.get('id'),)).fetchone()
             if not row:
                 raise ValueError('Unknown promise id')
@@ -2566,12 +2579,12 @@ class Store:
         raise ValueError("Update a promise with status 'kept' or 'dropped' and a reason, or with a new due date")
 
     def settle_promises(self, db):
-        """Someone else's promise made by email closes itself when they write again in that thread or from
-        that address: their new message is reviewed as usual. A promise whose message was deleted is dropped."""
+        """Someone else's email promise closes when that sender replies in the same thread (address only
+        when the original has no thread): their new message is reviewed as usual. A promise whose message was deleted is dropped."""
         db.execute("UPDATE promises SET status='dropped',note='The message was deleted',updated_at=? WHERE status='open' "
                    "AND event_id IN (SELECT id FROM events WHERE deleted=1)", (now(),))
         for row in db.execute("SELECT id,watch FROM promises WHERE status='open' AND watch IS NOT NULL").fetchall():
-            watch = json.loads(row['watch'])
+            watch = {**json.loads(row['watch']), 'promise': True}
             answer = next((e for e in db.execute('SELECT id,account_id,kind,occurred_at,title,metadata FROM events WHERE account_id=? AND kind=? AND occurred_at>? AND deleted=0 ORDER BY occurred_at',
                                                  (watch['account_id'], watch['kind'], watch['since'])) if awaiting_match(watch, dict(e), self.owner_user_ids)), None)
             if answer:
@@ -2802,7 +2815,7 @@ class Store:
             with self.connect() as db:
                 return [{'node_id': r['id'], 'name': r['name']} for r in db.execute(
                     "SELECT DISTINCT n.id,n.name,n.strength FROM graph_events g JOIN graph_nodes n ON n.id=g.node_id WHERE g.direct=1 AND n.kind='person' "
-                    "AND json_extract(n.info,'$.role') IS NULL AND g.event_id IN (" + ','.join('?' for _ in ids) + ') ORDER BY n.strength DESC LIMIT 4', ids)]
+                    "AND json_extract(n.info,'$.role') IS NULL AND coalesce(json_extract(n.info,'$.role_by'),'')!='owner' AND g.event_id IN (" + ','.join('?' for _ in ids) + ') ORDER BY n.strength DESC LIMIT 4', ids)]
         except sqlite3.Error:
             return []
 
@@ -2813,7 +2826,7 @@ class Store:
         owner.slack |= set(self.owner_user_ids)
         people = []
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM graph_nodes WHERE kind='person' AND strength>=0.5 AND json_extract(info,'$.role') IS NULL "
+            rows = db.execute("SELECT * FROM graph_nodes WHERE kind='person' AND strength>=0.5 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' "
                               'ORDER BY strength DESC LIMIT ?', (limit,)).fetchall()
             for r in rows:
                 view = graph.node_view(r)
@@ -2830,7 +2843,7 @@ class Store:
             orgs = [{'node_id': r['id'], 'name': r['name'], 'domain': json.loads(r['info']).get('domain'),
                      'about': (json.loads(r['info']).get('profile') or {}).get('about'), 'profile': enrichment.summary(json.loads(r['info']).get('profile')),
                      'people': [{'name': n['name'], 'role': n['role']} for n in graph.detail(db, r['id'], 0)['people_roles']][:6]}
-                    for r in db.execute("SELECT * FROM graph_nodes WHERE kind='org' AND strength>=1 AND json_extract(info,'$.role') IS NULL "
+                    for r in db.execute("SELECT * FROM graph_nodes WHERE kind='org' AND strength>=1 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' "
                                         'ORDER BY strength DESC LIMIT 6')]
         return people, orgs
 
@@ -2848,7 +2861,8 @@ class Store:
         run_id, started = uuid.uuid4().hex, now()
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            run = db.execute("SELECT run_id,started_at FROM profile_runs WHERE kind='roles' AND status IN ('starting','running')").fetchone()
+            run = db.execute("SELECT run_id,started_at FROM profile_runs WHERE kind='roles' AND (status IN ('starting','running') OR "
+                             "(status='ok' AND finished_at>? AND NOT ?)) ORDER BY started_at DESC LIMIT 1", (recent, int(bool(again)))).fetchone()
             if run:
                 return {'run_id': run['run_id'], 'started_at': run['started_at'], 'attached': True}
             db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind) VALUES(?,'starting',?,?,?,'roles')",
@@ -4437,6 +4451,9 @@ def promise_state(row):
 
 def awaiting_match(watch, event, owner_slack_ids=()):
     m = event['metadata'] if isinstance(event['metadata'], dict) else json.loads(event['metadata'])
+    if watch['kind'] == 'gmail.message' and watch.get('promise'):
+        return ('SENT' not in m.get('labels', []) and _address(m.get('from')) == watch.get('from') and
+                (not watch.get('thread_id') or m.get('thread_id') == watch['thread_id']))
     if watch['kind'] == 'gmail.message' and watch.get('delegated'):
         return ('SENT' not in m.get('labels', []) and _address(m.get('from')) == watch['from'] and
                 ((watch.get('thread_id') and m.get('thread_id') == watch['thread_id']) or (watch.get('reply_to') and watch['reply_to'] in (m.get('in-reply-to') or ''))))
@@ -6137,7 +6154,16 @@ class App:
         for promise in due:
             self.promise_card(promise)
 
-    def promise_card(self, p):
+    def promise_card(self, p, _db=None):
+        if _db is None:
+            with self.store.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                self.store.settle_promises(db)
+                current = db.execute("SELECT p.*,e.occurred_at made_at FROM promises p JOIN events e ON e.id=p.event_id "
+                                     "WHERE p.id=? AND p.status='open' AND p.check_at<=? AND e.deleted=0", (p['id'], now())).fetchone()
+                if not current:
+                    return None  # closed or rescheduled since the worker selected it
+                return self.promise_card(dict(current), _db=db)
         made = dt.datetime.fromisoformat(p['made_at']).astimezone(local_tz())
         said = f"{made:%A} {made.day} {made:%b}"
         by = f" by **{dt.date.fromisoformat(p['due']):%A %-d %b}**" if p['due'] else ''
@@ -6150,12 +6176,12 @@ class App:
             body = f"{p['who']} said on {said} they’d {p['what']}{by}. Nothing has come in yet, so a short nudge may help."
         ahead = self.config.get('prepare_ahead', True) is not False and self.store.ahead_room(int(self.config.get('prepare_ahead_per_day', 10)))
         saved = self.store.suggest('promise:%d' % p['id'], title[:90], body[:700], [p['event_id']], 'now', self.config.get('digest_at', '08:30'),
-                                   work=self.is_work([p['account_id']]), due=p['due'], ahead=ahead)
-        with self.store.connect() as db:
+                                   work=self.is_work([p['account_id']]), due=p['due'], ahead=ahead, _db=_db)
+        with contextlib.nullcontext(_db) as db:
             db.execute("UPDATE promises SET status='carded',suggestion_id=?,updated_at=? WHERE id=? AND status='open'", (saved['id'], now(), p['id']))
             if p['watch'] and not saved.get('duplicate'):
                 # Their reply closes the card too while it is still on its way.
-                db.execute('UPDATE suggestions SET awaiting=? WHERE id=?', (p['watch'], saved['id']))
+                db.execute('UPDATE suggestions SET awaiting=? WHERE id=?', (encoded({**json.loads(p['watch']), 'promise': True}), saved['id']))
         return saved
 
     def action_worker(self):

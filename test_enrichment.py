@@ -29,9 +29,13 @@ class Service(http.server.BaseHTTPRequestHandler):
         pass
 
 
-class Enrichment(tg.Graph):
+class Enrichment(unittest.TestCase):
+    add = tg.Graph.add
+    build = tg.Graph.build
+    node = tg.Graph.node
+    ids = tg.Graph.ids
     def setUp(self):
-        super().setUp()
+        tg.Graph.setUp(self)
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Service)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close); self.addCleanup(self.server.shutdown)

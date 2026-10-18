@@ -245,10 +245,10 @@ The service starts reviews itself (`review_worker.enabled`). When at least `min_
 
 ### Promises
 
-Reviews record every promise they find in a message, with `promise`, instead of making a card: one you made in something you sent (`mine`), or one someone made to you (`theirs`, in their message or in your ask they took on), with who, what and a date when one was said. Most are never spelled out and look different per person, language and relationship, so the review judges what a message means in its conversation (reading the request in `earlier_in_conversation`), with examples as a guide rather than words to look for. Each goes into the `promises` table, once per message, person and direction. Nothing shows up on Telegram yet.
+Reviews record every promise they find in a message, with `promise`, instead of making a card: one you made in something you sent (`mine`), or one someone made to you (`theirs`, in their message or in your ask they took on), with who, what and a date when one was said. Most are never spelled out and look different per person, language and relationship, so the review judges what a message means in its conversation (reading the request in `earlier_in_conversation`), with examples as a guide rather than words to look for. Each goes into the `promises` table, once per message, person, direction and distinct promised action. Nothing shows up on Telegram yet.
 
 - **When it's checked:** yours on the morning it's due (at `digest_at`, never sooner than three hours after it was recorded), theirs the morning after their date. Without a date: yours after 3 days, theirs after a week.
-- **Closing by itself:** someone else's promise made by email closes when they write again (same thread or sender). Chats run on, so a later chat message is no sign it was kept: those stay open for the review or the check. Their new message is reviewed as usual, so a delay can become a new promise. Every review prompt lists the open promises, and the review closes one (`kept` or `dropped`, with the reason) or moves its date when a later message shows it.
+- **Closing by itself:** someone else's promise made by email closes when that sender replies in the original thread (sender-only fallback if no thread was recorded). Chats run on, so a later chat message is no sign it was kept: those stay open for the review or the check. Their new message is reviewed as usual, so a delay can become a new promise. Every review prompt lists the open promises, and the review closes one (`kept` or `dropped`, with the reason) or moves its date when a later message shows it.
 - **The card:** a promise still open when it's checked becomes a card (`promise:<id>`), prepared ahead under the usual limits: for yours the thing you promised, for theirs a short nudge. If they answer while the card is on its way, it closes. At most 5 such cards a day.
 - **Where you see them:** the dashboard's Suggestions tab has a **Promises** list (You promised, Promised to you) with Done and Drop for open ones, `assistant promises` lists them, and the weekly recap counts kept and open ones.
 
@@ -446,3 +446,22 @@ MIT, see [LICENSE](LICENSE).
 - **Rollback timing:** error timing is tracked per code version, separately from daily signal aggregation. A new error triggers automatic Undo only within the true first hour after that merge; the fixed error retains its 24-hour rule. Legacy aggregates contribute only their known last occurrence.
 
 These changes add no approval tier or execution restriction to owner-requested work. SQLite migrations are additive (`preparations.action_id`, `merge_effects`, `fault_versions`); keep the live database and owner decisions on source rollback. See `test_action_recovery.py`, `test_owner_boundary.py`, `test_finish_merge_dashboard.mjs` and `test_telegram_handler.mjs`.
+
+
+## Review repairs · October 18, 2026
+
+Reviewed the new promises, Graph projects/roles, enrichment, setup and recovery work in both repositories. Repairs keep the existing broad Do it / written-instruction authority; no extra approval tier or per-tool confirmation was added.
+
+- **Promises:** closing/rescheduling and reminder creation share one transaction. A failed save rolls back the card, preparation and promise link together. Distinct commitments to the same person in one message can both be kept; repeat submissions still deduplicate. Email replies must come from the promised sender in the original thread (sender-only fallback when no thread was recorded). A reply means “answered”, not proof the promised work was completed; normal review still checks its meaning.
+- **Graph:** only current-version vectors from the configured embedding model/dimensions participate. Turning embeddings off stops semantic grouping. Rebuilds publish one coherent snapshot, so an older rebuild cannot overwrite a newer owner edit. On merged identities the latest owner role wins, its original evidence stays reachable, and explicitly cleared roles/relationships stay cleared.
+- **Review context:** an unadmitted/failed review cannot consume the monthly role prompt or unnamed-project offer. Admission retries get the context again; successful review/committed-analysis evidence consumes the offer. Historical offers without a retained run remain consumed.
+- **Dashboard:** role and rename forms stay bound to the person actually shown, even when another page is loading. Late responses cannot open a different person's edit form.
+- **Enrichment:** transient errors keep the last known company profile while retaining the error and retry timestamp. No new provider or paid lookup was enabled.
+- **Recovery:** a Gateway “submit a new turn” response prevents reuse of that admission key but does not prove prior execution ended. Check/stop that exact run first; only terminal proof permits one existing recovery attempt. Network uncertainty retains custody and the same key.
+- **CLI:** `assistant roles --json` emits only JSON, including when no role work remains.
+
+Regression coverage: `test_review_integrity.py`, real Chromium delays in `test_roles_dashboard.mjs`, exact Gateway envelopes in `test_review_gateway.mjs`, and the full Python/Node suites. Tests use temporary databases/browser contexts, not live owner decisions or external task actions.
+
+**Activation/rollback:** restart only `personal-assistant.service` after committing tested source. Keep the live database, configuration and owner feedback on source rollback. The promise uniqueness migration preserves IDs/notes/card links but is not compatible with old three-column-conflict code: rollback by reverting the other changes while retaining the four-column promise schema and matching INSERT/lookup. Never restore a stale database over new owner input. A private SQLite backup and source archives precede this activation.
+
+The installer enables the bridge’s required conversation hooks through OpenClaw’s own config command; `assistant doctor` checks the grant instead of calling a loaded-but-inert bridge healthy.

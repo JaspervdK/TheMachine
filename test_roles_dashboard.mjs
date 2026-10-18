@@ -17,12 +17,13 @@ let pat={id:'email:pat@client.example',kind:'person',name:'Pat Doe',strength:2,c
  relations:[{a:'email:ann@client.example',a_name:'Ann Assist',relation:'assistant of',b:'email:pat@client.example',b_name:'Pat Doe',by:'review'}],open:{},recent:[],around:[]};
 const org={id:'org:client.example',kind:'org',name:'Client Ltd',strength:3,last_at:made,signals:3,role:'customer',role_by:'review',links:[],open:{},recent:[],around:[],
  about:'Logistics, 51-200 people, Ghent',profile:{industry:'Logistics',about:'Client Ltd moves boxes.',linkedin_url:'https://www.linkedin.com/company/client',website:'javascript:alert(1)'}};
+let holdOrg=null;
 const calls=[],errors=[],opened=[];
 const server=createServer(async(req,res)=>{
  const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions,promises:[],connectors:[],suggestion_counts:{pending:2},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[]}));return}
- if(url.pathname==='/api/graph'){const node=url.searchParams.get('node');res.end(JSON.stringify(node==='org:client.example'?org:node?pat:{projects:[],people:[],quiet:[],new:[],orgs:[{...org}],whos_who:whos}));return}
+ if(url.pathname==='/api/graph'){const node=url.searchParams.get('node');if(node===org.id&&holdOrg)await holdOrg;res.end(JSON.stringify(node==='org:client.example'?org:node?pat:{projects:[],people:[],quiet:[],new:[],orgs:[{...org}],whos_who:whos}));return}
  if(url.pathname==='/api/event'||url.pathname==='/api/events'){opened.push(url.search);res.end(JSON.stringify([]));return}
  if(url.pathname==='/api/action'){let body='';for await(const b of req)body+=b;const call=JSON.parse(body);calls.push(call);
   if(call.action==='graph_role'){whos=whos.filter(w=>w.id!==call.args.node_id);if(call.args.node_id===pat.id)pat={...pat,role:call.args.role,role_by:'owner'}}
@@ -88,6 +89,28 @@ try{
  assert.ok(detail.includes('Logistics, 51-200 people, Ghent')&&detail.includes('Client Ltd moves boxes.'));
  assert.equal(await page.locator('.graph-detail a[href^="https://www.linkedin.com"]').count(),1);
  assert.equal(await page.locator('.graph-detail a[href^="javascript"]').count(),0);
+ // The shown form is Pat's even when a slow navigation has selected another node.
+ await page.evaluate(()=>people('email:pat@client.example'));
+ await page.locator('.graph-detail h3',{hasText:'Pat Doe'}).waitFor();
+ await page.locator('[data-role-edit]').click();
+ await page.locator('.role-form input').fill('trusted colleague');
+ let release;holdOrg=new Promise(r=>release=r);
+ await page.evaluate(()=>{void people('org:client.example')});
+ await page.locator('.role-form button').click();
+ for(let i=0;i<100&&!calls.some(c=>c.args.role==='trusted colleague');i++)await page.waitForTimeout(20);
+ assert.deepEqual(calls.find(c=>c.args.role==='trusted colleague'),{action:'graph_role',args:{node_id:pat.id,role:'trusted colleague'}});
+ holdOrg=null;release();
+ await page.waitForTimeout(100);
+ await page.evaluate(()=>people('email:pat@client.example'));
+ await page.locator('.graph-detail h3',{hasText:'Pat Doe'}).waitFor();
+ await page.locator('[data-name-edit]').click();
+ await page.locator('.name-form input').fill('Pat Owner Name');
+ holdOrg=new Promise(r=>release=r);
+ await page.evaluate(()=>{void people('org:client.example')});
+ await page.locator('.name-form button').click();
+ for(let i=0;i<100&&!calls.some(c=>c.action==='graph_rename');i++)await page.waitForTimeout(20);
+ assert.deepEqual(calls.find(c=>c.action==='graph_rename'),{action:'graph_rename',args:{node_id:pat.id,name:'Pat Owner Name'}});
+ holdOrg=null;release();
  assert.deepEqual(errors,[]);
  console.log(JSON.stringify({widths,actions:calls.length,page_errors:errors}));
 }finally{if(browser)await browser.close();await new Promise(r=>server.close(r))}

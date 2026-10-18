@@ -174,8 +174,9 @@ class Preparation(unittest.TestCase):
         self.store.decide(self.sid,'other','Use a shorter version','feedback','telegram')
         current=self.job()['job_id'];self.assertNotEqual(current,old)
         with self.assertRaises(ValueError):self.store.prepare(self.sid,'Stale draft',old)
-        self.app.preparation_step(lambda req:{'status':'lost' if req['action']=='stop' else 'pending'})  # the old run is gone
-        self.app.preparation_step(lambda req:{'status':'admitted'})
+        # One pass may stop the old run and start the replacement: model both receipts.
+        self.app.preparation_step(lambda req:{'status':'lost' if req['action']=='stop' else 'admitted'})
+        self.app.preparation_step(lambda req:{'status':'pending'})
         with self.assertRaises(ValueError):self.store.prepare(self.sid,'Unowned heartbeat draft')
         self.store.prepare(self.sid,'Actual useful short draft',current)
         self.assertTrue(self.store.prepare(self.sid,'Actual useful short draft',current)['replayed'])

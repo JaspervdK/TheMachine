@@ -47,7 +47,7 @@ class Graph(unittest.TestCase):
     def build(self):
         with self.store.connect() as db:
             db.isolation_level = None
-            return graph.build(db, CONFIG, NOW.isoformat())
+            return graph.build(db, {**CONFIG, 'embeddings': {'model': 'test', 'dims': getattr(self, 'vector_dims', 4)}}, NOW.isoformat())
 
     def node(self, node_id):
         with self.store.connect() as db:
@@ -274,6 +274,7 @@ class Graph(unittest.TestCase):
             self.app.graph_action({'merge': ['email:ann@client.com']})
 
     def vectors(self, pairs):
+        self.vector_dims = len(pairs[0][1])
         import struct
         with self.store.connect() as db:
             for source_id, values in pairs:

@@ -149,7 +149,8 @@ def due(db, now, limit):
 
 
 def save(db, domain, status, profile, now):
-    db.execute('INSERT OR REPLACE INTO org_profiles(domain,status,profile,fetched_at) VALUES(?,?,?,?)',
+    db.execute('INSERT INTO org_profiles(domain,status,profile,fetched_at) VALUES(?,?,?,?) '
+               "ON CONFLICT(domain) DO UPDATE SET status=excluded.status,profile=CASE WHEN excluded.status='error' THEN org_profiles.profile ELSE excluded.profile END,fetched_at=excluded.fetched_at",
                (domain, status, json.dumps(profile) if profile else None, now))
 
 
