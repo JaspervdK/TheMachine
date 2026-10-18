@@ -7,6 +7,7 @@ import datetime
 from email.message import EmailMessage
 from email.utils import format_datetime
 import hashlib
+import google_api
 import html
 from html.parser import HTMLParser
 import json
@@ -23,6 +24,24 @@ from urllib.parse import urlsplit
 SEND_SCOPES = {'https://www.googleapis.com/auth/gmail.send',
                'https://www.googleapis.com/auth/gmail.compose',
                'https://www.googleapis.com/auth/gmail.modify', 'https://mail.google.com/'}
+
+
+def granted_scopes(config, credential, account):
+    """The Google scopes the owner granted this account: from gog's own list, or from the broker."""
+    if account.get('transport') == 'broker':
+        try:
+            return google_api.scopes(config, credential, account)
+        except google_api.BrokerError:
+            raise ValueError('I could not verify Gmail permissions. Nothing was sent.') from None
+    env = os.environ.copy()
+    env.update(GOG_KEYRING_BACKEND='file', GOG_KEYRING_PASSWORD=credential(config, 'gog-password'))
+    env.pop('DBUS_SESSION_BUS_ADDRESS', None)
+    result = subprocess.run([config['gog'], 'auth', 'list', '--json', '--no-input'], env=env, capture_output=True, text=True, timeout=20)
+    if result.returncode:
+        raise ValueError('I could not verify Gmail permissions. Nothing was sent.')
+    auth = next((a for a in json.loads(result.stdout).get('accounts', [])
+                 if a['email'].lower() == account['email'].lower() and a.get('client') == account['client']), None)
+    return set(auth.get('scopes', [])) if auth else set()
 
 
 # Email attachments. A draft may attach files the preparation saved in its
@@ -594,13 +613,7 @@ class EmailTransport:
 
     def preflight(self, action):
         account = self.account(action)
-        result = subprocess.run([self.config['gog'], 'auth', 'list', '--json', '--no-input'],
-                                env=self.env(), capture_output=True, text=True, timeout=20)
-        if result.returncode:
-            raise ValueError('I could not verify Gmail permissions. Nothing was sent.')
-        auth = next((a for a in json.loads(result.stdout).get('accounts', [])
-                     if a['email'].lower() == account['email'].lower() and a.get('client') == account['client']), None)
-        if not auth or not (set(auth.get('scopes', [])) & SEND_SCOPES):
+        if not (granted_scopes(self.config, self.credential, account) & SEND_SCOPES):
             raise ValueError('Gmail is connected read-only. Sending permission needs to be enabled for this account; nothing was sent.')
         profile = self.read(self.config, account, 'gmail', 'v1', 'gmail.users.getProfile',
                             {'userId': 'me'}, 'https://www.googleapis.com/auth/gmail.readonly')
@@ -632,6 +645,16 @@ class EmailTransport:
         request = {'raw': base64.urlsafe_b64encode(mime_bytes(action, job, self.signature(action, account), self.config)).decode().rstrip('=')}
         if action.get('thread_id'):
             request['threadId'] = action['thread_id']
+        if account.get('transport') == 'broker':
+            try:
+                result = google_api.call(self.config, self.credential, account, 'gmail.users.messages.send', {'userId': 'me'},
+                                         'https://www.googleapis.com/auth/gmail.send', body=request, write=True)
+            except google_api.BrokerError as error:
+                # Same rule as below: only a definite client error from Gmail means nothing went out.
+                if error.category == 'gmail' and error.status and 400 <= error.status < 500 and error.status not in (408, 429):
+                    return {'rejected': error.status}
+                return {}
+            return {'message_id': result['id']} if result.get('id') else {}
         # Private temporary file avoids exposing the email in process arguments.
         # The worker must have committed exact owner approval/admission first.
         with tempfile.NamedTemporaryFile(mode='w',suffix='.json') as body:
@@ -1249,15 +1272,17 @@ class ThreadSnooze:
         return next(a for a in self.config['accounts'] if a['id'] == account_id)
 
     def allowed(self, account):
-        result = subprocess.run([self.config['gog'], 'auth', 'list', '--json', '--no-input'],
-                                env=EmailTransport.env(self), capture_output=True, text=True, timeout=20)
-        if result.returncode:
-            raise RuntimeError('auth list failed')
-        auth = next((a for a in json.loads(result.stdout).get('accounts', [])
-                     if a['email'].lower() == account['email'].lower() and a.get('client') == account['client']), None)
-        return bool(auth and {MODIFY_SCOPE, 'https://mail.google.com/'} & set(auth.get('scopes', [])))
+        try:
+            return bool({MODIFY_SCOPE, 'https://mail.google.com/'} & granted_scopes(self.config, self.credential, account))
+        except ValueError:
+            raise RuntimeError('auth list failed') from None
 
     def write(self, account, method, params, body):
+        if account.get('transport') == 'broker':
+            try:
+                return google_api.call(self.config, self.credential, account, method, params, MODIFY_SCOPE, body=body, write=True)
+            except google_api.BrokerError:
+                raise RuntimeError(f'{method} failed') from None
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as file:
             file.write(canonical(body));file.flush()
             result = subprocess.run([self.config['gog'], 'api', 'call', 'gmail', 'v1', method, '--params', canonical(params),

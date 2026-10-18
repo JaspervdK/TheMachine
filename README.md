@@ -164,7 +164,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | `dashboard_aliases`, `dashboard_alias_path` | `[]`, `/assistant/` | Extra host names and their path |
 | `port` | `8787` | Local API and dashboard port on 127.0.0.1 |
 | `database` | — | SQLite file; tokens and keys sit next to it |
-| `credentials` | — | Name → file path of each secret: `api-token`, `owner-token`, `gog-password`, and one per source credential. systemd `LoadCredential` with the same names takes precedence |
+| `credentials` | — | Name → file path of each secret: `api-token`, `owner-token`, `gog-password`, `google-broker` (with a broker), and one per source credential. systemd `LoadCredential` with the same names takes precedence |
 | `app_dir` | `~/.openclaw/workspace/tools/personal-assistant` | This checkout; the plugin reads `AGENTS.md`/`PREPARATION.md` here and protects it from edits |
 | `fix_dir` | `~/.cache/the-machine/fixes` | Where Do it clones The Machine to fix it ([The Machine fixes itself](#the-machine-fixes-itself)) |
 | `self_test`, `self_test_seconds`, `self_fix_push` | `scripts/test.py`, `1200`, `true` | The test command Merge now runs in the fix (a list), its time limit, and whether a merged fix is pushed |
@@ -173,6 +173,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | `openclaw_package_dir` | `<node prefix>/lib/node_modules/openclaw` | Installed OpenClaw package (Gateway SDK) |
 | `openclaw_state`, `agent_db` | OpenClaw defaults | OpenClaw state and agent transcript databases (read-only: Telegram receipts, progress steps) |
 | `gog`, `wacli` | `gog`, `wacli` | Binaries for Google and WhatsApp |
+| `google_broker` | — | `url` of a Google token broker, for accounts with `"transport": "broker"` (below) |
 | `heartbeat_job_id` | `""` | Optional OpenClaw cron job ID of your main heartbeat, for its health line |
 | `browser_lease_script` | `integrations/browser-lease.py` | Lease helper Do it runs use for the shared browser |
 | `delivery_enabled` | `false` | Send cards to Telegram (leave off while you test) |
@@ -205,12 +206,14 @@ Every account has `id`, `service`, `transport` and `boundary`, plus optional `sc
 
 ## Sources
 
+**Gmail and Calendar through a token broker.** Instead of `gog`, a Gmail or Calendar account can use `"transport": "broker"`: a service you run (a hosted control plane, say) keeps the Google OAuth client and refresh tokens, and this machine never sees either. Set `google_broker.url` and put this machine's token in the `google-broker` credential. For each call, `google_api.py` asks the broker for a short-lived access token for that one account and scope, then calls Google's REST API directly. The broker answers `POST {"email", "scope"}` with `{"access_token", "expires_in", "scopes"}`, `POST {"email"}` with the granted `scopes`, and 403 for a scope the owner didn't grant. Only a fixed list of Gmail and Calendar methods can be called; anything else is refused before a token is asked for. Sending and snoozing work only when the owner granted `gmail.send` or `gmail.modify` at the broker, as with `gog`.
+
 Collectors read existing source content. The optional Salesflare `join_pipelines` setting also adds your own user to matching CRM accounts; it is empty by default. Each collector runs in its own thread with its own checkpoint, so a slow or failing source never blocks the others. Absence from a later read is never treated as deletion.
 
 | `service` | Needs | Account keys |
 |---|---|---|
-| `gmail` | `gog` OAuth for the account | `email`, `client` (gog OAuth client), `excluded_terms` (text that drops a message, e.g. a warmup tag) |
-| `calendar` | `gog` OAuth | `email`, `client`, `calendar_id`, `excluded_title_terms` |
+| `gmail` | `gog` OAuth for the account, or a token broker | `email`, `client` (gog OAuth client), `excluded_terms` (text that drops a message, e.g. a warmup tag) |
+| `calendar` | `gog` OAuth, or a token broker | `email`, `client`, `calendar_id`, `excluded_title_terms` |
 | `slack` | A [Maton](https://maton.ai) Slack connection | `credential` + `credential_variable` (file with `MATON_API_KEY=`), `connection_id`, `team_id`, `user_id`, `email`, `slack_host`, `fair_incremental` |
 | `salesflare` | Salesflare API key | `api_base`, `app_base`, `credential`, `credential_variable`, `user_id`, `team_id`, `email`, `owner_emails`, `join_pipelines`, `accounts_per_batch`, `meeting_window_days`, `timeout_seconds` |
 | `android` | OpenClaw Android app paired as a node | `transport: openclaw-feed`, `node_id`, `reconcile_seconds`, `direct_fallback`, `fallback_seconds` |
@@ -414,7 +417,7 @@ Sources can be added as a single-file plugin in `connectors/` without touching `
 
 - **Change prompt and OpenClaw versions.** The native Telegram reply prompt (`openclaw-plugin/change-prompt.ts`) uses the Telegram extension API and a bridge for three client helpers. It resolves them from the installed build's export table, without a version pin or hardcoded content hashes, so OpenClaw updates don't break it. CI loads the real transport modules of 2026.10.2 and of the latest release. If a release removes or renames a helper, Change falls back to a plain prompt before sending (replies still work); an uncertain send never triggers that fallback. The Gateway SDK entry points used elsewhere (`plugin-sdk/gateway-runtime`, `system-event-runtime`, `plugin-entry`) are public but experimental; check them when upgrading OpenClaw.
 - **Telegram only** for delivery; the dashboard needs Tailscale (or your own reverse proxy that sets the same identity headers).
-- **Gmail and Calendar need `gog`**, Slack needs Maton; there are no built-in OAuth flows.
+- **Gmail and Calendar need `gog`** or a token broker you run, Slack needs Maton; there are no built-in OAuth flows.
 - **Not realtime.** Sources poll (five minutes by default; Slack can take hours on a large workspace), and reviews batch signals.
 - **Android and WhatsApp are best effort**: notifications cleared during a gap are lost; WhatsApp depends on `wacli` staying synced.
 - Single owner, single machine. Not a multi-user product.

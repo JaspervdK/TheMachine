@@ -507,6 +507,10 @@ def missing(config, account):
     names = [account['credential']] if account.get('credential') else []
     if account.get('transport') == 'gog':
         names.append('gog-password')
+    if account.get('transport') == 'broker':
+        if not (config.get('google_broker') or {}).get('url'):
+            return 'google_broker url is not set'
+        names.append('google-broker')
     for name in names:
         path = config.get('credentials', {}).get(name)
         if not path or not Path(path).expanduser().exists():

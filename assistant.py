@@ -39,6 +39,7 @@ from zoneinfo import ZoneInfo
 import embeddings
 import graph
 import enrichment
+import google_api
 import next_actions
 import preparation_state
 
@@ -425,7 +426,13 @@ def owner_credential(config):
 
 
 def gog_read(config, account, api, version, method, params, scope):
-    """Use the existing account's gog token; never authorize or write from ingestion."""
+    """Use the existing account's gog token; never authorize or write from ingestion. An account with
+    "transport": "broker" gets a short-lived token from the configured Google broker instead (google_api.py)."""
+    if account['transport'] == 'broker':
+        try:
+            return google_api.call(config, credential, account, method, params, scope)
+        except google_api.BrokerError as error:
+            raise SourceError(error.category, error.status) from None
     if account['transport'] != 'gog':
         raise SourceError('unsupported_transport')
     env = os.environ.copy()
