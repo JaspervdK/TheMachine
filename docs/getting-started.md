@@ -4,7 +4,7 @@ From nothing to your first cards in about 15 minutes. Each step says how to chec
 
 ## Before you start
 
-- [ ] **OpenClaw** 2026.10.2 or later, with the Gateway running and its Telegram channel talking to your bot. Check: your bot answers you in Telegram.
+- [ ] **OpenClaw** 2026.10.2 or later, with the Gateway running and its Telegram channel talking to your bot. Check: your bot answers you in Telegram. No OpenClaw yet? Skip this one: the installer offers to install it and walks you through its setup (step 1).
 - [ ] **Node.js** 24.16+ (24.x) or 26.1+, and **Python 3.12+**.
 - [ ] **Tailscale** on this machine and your phone, logged in (`sudo tailscale up`), for the dashboard.
 - [ ] Your own user account, not root, with a systemd user session (a normal login; over SSH that works too).
@@ -17,6 +17,8 @@ git clone https://github.com/JeroenCorthout/TheMachine.git ~/.openclaw/workspace
 cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 ```
+
+Without OpenClaw, the installer first offers to install it, then starts OpenClaw's own setup and tells you what to pick there: your model provider, yes to running the Gateway as a service, and Telegram as a channel. For Telegram you make a bot first: message @BotFather, send /newbot, choose a name and paste the token it gives you. Check: your bot answers you in Telegram.
 
 The wizard fills in what it can find, so most questions only need Enter:
 

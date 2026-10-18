@@ -11,10 +11,15 @@ In a terminal, a healthy install goes on to connect each source (onboarding.py: 
 keys and IDs, a test read and the first sync), offers the dashboard on your tailnet and a
 starter USER.md, then a preview review and, after it, turning reviews and Telegram on.
 
+Without OpenClaw, a terminal install offers to install it (npm, after a yes) and then hands
+over to OpenClaw's own setup (`openclaw onboard`: your model, the Gateway service, Telegram),
+saying first what The Machine needs from it.
+
 Re-running is safe: an existing config.json is kept, missing keys are added, and secrets
 are only created when absent. OpenClaw's own configuration is only read (your approved
 Telegram ID, paired phones); the installer changes nothing there beyond `openclaw plugins
-install/enable/uninstall`, and approving your own Telegram pairing request if you say yes.
+install/enable/uninstall`, approving your own Telegram pairing request if you say yes, and
+OpenClaw's own setup commands when it offers them and you say yes.
 """
 import argparse
 import json
@@ -173,7 +178,8 @@ def check_prerequisites():
         facts['openclaw_version'] = have
     else:
         ok = False
-        say(f'  FAIL  openclaw CLI not found: install OpenClaw {want} (npm install -g openclaw@{want}) and set up its Telegram channel')
+        say(f'  FAIL  openclaw CLI not found: install OpenClaw {want} (npm install -g openclaw@{want}) and set up its Telegram channel,'
+            ' or run ./install.sh in a terminal and it offers to do that with you')
     facts['openclaw'] = openclaw
     facts['openclaw_package_dir'] = openclaw_package_dir(openclaw, node)
     if openclaw and not facts['openclaw_package_dir']:
@@ -196,6 +202,108 @@ def check_prerequisites():
     elif fresh and facts['tailscale'] and not tailscale_identity(facts['tailscale']).get('dashboard_host'):
         say('  note  tailscale is installed but not logged in; run `sudo tailscale up` first, or type your login and host below')
     return ok, facts
+
+
+# ---------------------------------------------------------------- OpenClaw itself
+
+def writable(path):
+    path = Path(path)
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return os.access(path, os.W_OK)
+
+
+def npm_beside(node):
+    """npm from the same Node install as `node`, else the one on PATH."""
+    beside = Path(node).parent / 'npm' if node else None
+    return str(beside) if beside and beside.exists() else shutil.which('npm')
+
+
+def openclaw_install_command(npm, want, home=None):
+    """npm install -g openclaw@<want>, into ~/.local when npm's global folder isn't yours: never sudo."""
+    command = [npm, 'install', '-g', f'openclaw@{want}']
+    prefix = run([npm, 'prefix', '-g']).stdout.strip()
+    if not prefix or not writable(Path(prefix) / 'lib/node_modules'):
+        command += ['--prefix', str(Path(home or Path.home()) / '.local')]
+    return command
+
+
+def installed_openclaw(npm, command):
+    """The openclaw CLI npm just installed, put on this run's PATH when it isn't there yet."""
+    if '--prefix' in command:
+        prefix = command[command.index('--prefix') + 1]
+    else:
+        prefix = run([npm, 'prefix', '-g']).stdout.strip()
+    if shutil.which('mise') and '/mise/' in str(npm):
+        run(['mise', 'reshim'], timeout=60)  # mise puts new global npm binaries on PATH through its shims
+    found = shutil.which('openclaw')
+    if found:
+        return found
+    binary = Path(prefix) / 'bin/openclaw'
+    if not binary.exists():
+        return None
+    os.environ['PATH'] = f'{binary.parent}{os.pathsep}{os.environ.get("PATH", "")}'
+    say(f'  note  {binary.parent} is not on your PATH; add it in your shell profile so `openclaw` works in new terminals')
+    return str(binary)
+
+
+def has_telegram(settings):
+    """OpenClaw's config has a Telegram channel (a bot token, a token file or accounts), whatever its shape."""
+    channel = (settings.get('channels') or {}).get('telegram')
+    return isinstance(channel, dict) and bool(channel) and channel.get('enabled') is not False
+
+
+def offer_openclaw(ui):
+    """In a terminal, before the prerequisite check: without OpenClaw, offer to install it; when it was never
+    set up, or has no Telegram bot, walk through OpenClaw's own setup with what The Machine needs from it.
+    Every step asks first and can be answered no; the prerequisite check after it says what is still missing."""
+    openclaw = resolve_tool(shutil.which('openclaw'))
+    want = required_openclaw()
+    acted = False
+    if not openclaw:
+        node = resolve_tool(shutil.which('node'))
+        npm = npm_beside(node)
+        if not (node and supported_node(version_tuple(run([node, '--version']).stdout)) and npm):
+            ui.say(f'\nThe Machine runs on OpenClaw, which is not installed here. It needs Node.js {NODE_REQUIREMENT} with npm first:\n'
+                   '  install it from https://nodejs.org or with a version manager (mise use -g node@24), then rerun ./install.sh')
+            return
+        command = openclaw_install_command(npm, want)
+        ui.say('\nThe Machine runs on OpenClaw: your own agent, with your model, talking to you through your Telegram bot.'
+               ' It is not installed here.')
+        if not ui.yes(f'Install OpenClaw {want} now? (runs: npm {" ".join(command[1:])})', True):
+            return
+        result = run(command, timeout=1800, capture_output=False)
+        openclaw = installed_openclaw(npm, command) if result.returncode == 0 else None
+        if not openclaw:
+            ui.say(f'  ✗ OpenClaw did not install. Run it yourself and rerun ./install.sh:\n    npm {" ".join(command[1:])}')
+            return
+        ui.say(f'  ✓ OpenClaw {want} installed')
+        acted = True
+    settings = onboarding.openclaw_settings()
+    if not settings:
+        ui.say('\nOpenClaw is not set up yet. Its own guided setup comes next; this is what The Machine needs from it:\n'
+               '  1. Model: pick the provider you use and sign in or paste its key. Reviews and Do it run on it.\n'
+               '  2. Gateway: say yes to running it as a service, so it keeps running in the background.\n'
+               '  3. Channels: choose Telegram. Make a bot first: in Telegram, message @BotFather, send /newbot,\n'
+               '     pick a name, and paste the token it gives you. The Machine sends its cards through this bot.\n'
+               '  The rest is up to you. When it finishes, you come back here.')
+        if ui.yes('Start OpenClaw\'s setup now?', True):
+            run([openclaw, 'onboard', '--install-daemon'], timeout=None, capture_output=False)
+            settings = onboarding.openclaw_settings()
+            acted = True
+        if not settings:
+            ui.say('  OpenClaw is still not set up; run `openclaw onboard --install-daemon`, then rerun ./install.sh')
+            return
+    if not has_telegram(settings):
+        ui.say('\nOpenClaw has no Telegram bot yet, and The Machine sends its cards through one. To make one: in Telegram,\n'
+               'message @BotFather, send /newbot, pick a name, and copy the token it gives you.')
+        if ui.yes('Connect a Telegram bot to OpenClaw now? (runs: openclaw channels add --channel telegram)', True):
+            run([openclaw, 'channels', 'add', '--channel', 'telegram'], timeout=None, capture_output=False)
+            acted = True
+        if not has_telegram(onboarding.openclaw_settings()):
+            ui.say('  No Telegram bot yet; add one later with `openclaw channels add --channel telegram`.')
+    if acted and run([openclaw, 'health'], timeout=60).returncode != 0:
+        ui.say('  note  the OpenClaw Gateway is not answering yet; `openclaw doctor --fix` says why (reviews and cards need it)')
 
 
 # ---------------------------------------------------------------- config
@@ -728,6 +836,12 @@ def main(argv=None):
         return subprocess.call([sys.executable, str(ROOT / 'cli.py'), '--config', str(paths.config), 'preview'])
     if args.uninstall:
         return uninstall(paths, args.purge, interactive)
+    if interactive:
+        try:
+            offer_openclaw(onboarding.UI())
+        except (KeyboardInterrupt, EOFError):
+            say('\nStopped; nothing of The Machine was written. Rerun ./install.sh to go on.')
+            return 1
     ok, facts = check_prerequisites()
     if not ok:
         say('\nFix the FAIL items above and rerun ./install.sh')

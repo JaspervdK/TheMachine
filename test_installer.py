@@ -204,6 +204,75 @@ class InstallerTest(unittest.TestCase):
         self.assertIn('npm install -g openclaw@2026.10.2', result.stdout)
         self.assertFalse(self.config.exists())
 
+    def test_without_openclaw_it_offers_to_install_it_and_walks_through_its_setup(self):
+        settings = self.tmp / 'openclaw/openclaw.json'
+        npm_prefix = self.tmp / 'root-owned'  # npm's global folder, not ours: install into ~/.local, never sudo
+        npm_prefix.mkdir(); npm_prefix.chmod(0o555); self.addCleanup(npm_prefix.chmod, 0o755)
+        ran, said = [], []
+
+        class UI(installer.onboarding.UI):
+            def __init__(self, answers): self.answers = answers
+            def say(self, text=''): said.append(text)
+            def yes(self, prompt, default=True):
+                said.append(prompt)
+                return self.answers.pop(0)
+
+        def run(args, check=False, **kwargs):
+            ran.append(args)
+            name = Path(args[0]).name
+            if name == 'node':
+                return subprocess.CompletedProcess(args, 0, 'v24.16.0\n', '')
+            if args[1:] == ['prefix', '-g']:
+                return subprocess.CompletedProcess(args, 0, f'{npm_prefix}\n', '')
+            if args[1:3] == ['install', '-g']:
+                binary = Path(args[args.index('--prefix') + 1]) / 'bin/openclaw'
+                binary.parent.mkdir(parents=True); binary.write_text('#!/bin/sh\n'); binary.chmod(0o755)
+            if args[1:] == ['onboard', '--install-daemon']:  # OpenClaw's own wizard: model, Gateway, Telegram bot
+                settings.parent.mkdir(exist_ok=True)
+                settings.write_text(json.dumps({'channels': {'telegram': {'botToken': 'x'}}}))
+            return subprocess.CompletedProcess(args, 0, '', '')
+
+        which = lambda name: {'node': str(self.bin / 'node'), 'npm': str(self.bin / 'npm')}.get(name)
+        with mock.patch.dict(os.environ, {'HOME': str(self.home), 'OPENCLAW_CONFIG_PATH': str(settings), 'PATH': str(self.bin)}), \
+             mock.patch.object(installer, 'run', side_effect=run), mock.patch.object(installer.shutil, 'which', side_effect=which), \
+             mock.patch.object(installer, 'say'):
+            installer.offer_openclaw(UI([False]))  # no: nothing installed
+            self.assertFalse(any(a[1:3] == ['install', '-g'] for a in ran))
+            installer.offer_openclaw(UI([True, True]))
+            self.assertIn(str(self.home / '.local/bin'), os.environ['PATH'])  # the rest of this run finds it
+        local = self.home / '.local'
+        self.assertIn([str(self.bin / 'npm'), 'install', '-g', 'openclaw@2026.10.2', '--prefix', str(local)], ran)
+        self.assertIn([str(local / 'bin/openclaw'), 'onboard', '--install-daemon'], ran)
+        self.assertIn([str(local / 'bin/openclaw'), 'health'], ran)
+        self.assertFalse(any('channels' in a for a in ran))  # the wizard already added the bot
+        text = '\n'.join(said)
+        self.assertIn('Install OpenClaw 2026.10.2 now? (runs: npm install -g openclaw@2026.10.2 --prefix', text)
+        self.assertIn('@BotFather', text)
+        self.assertIn('Gateway: say yes to running it as a service', text)
+
+        # Set up, but no Telegram bot: only that step. Set up with a bot: not a single question.
+        settings.write_text(json.dumps({'gateway': {}}))
+        (self.bin / 'openclaw').chmod(0o755)
+        ran.clear(); said.clear()
+        which = lambda name: str(self.bin / name) if name == 'openclaw' else None
+        with mock.patch.dict(os.environ, {'OPENCLAW_CONFIG_PATH': str(settings)}), mock.patch.object(installer, 'run', side_effect=run), \
+             mock.patch.object(installer.shutil, 'which', side_effect=which):
+            installer.offer_openclaw(UI([True]))
+            self.assertEqual(ran[:1], [[str(self.bin / 'openclaw'), 'channels', 'add', '--channel', 'telegram']], said)
+            settings.write_text(json.dumps({'channels': {'telegram': {'accounts': {'work': {'botToken': 'x'}}}}}))
+            ran.clear(); said.clear()
+            installer.offer_openclaw(UI([]))
+            self.assertEqual((ran, said), ([], []))
+
+    def test_without_node_it_says_what_to_install_first(self):
+        said = []
+        ui = installer.onboarding.UI(); ui.say = said.append
+        ui.yes = mock.Mock(side_effect=AssertionError('nothing to ask'))
+        with mock.patch.object(installer.shutil, 'which', return_value=None):
+            installer.offer_openclaw(ui)
+        self.assertIn('Node.js', said[0])
+        self.assertIn('nodejs.org', said[0])
+
     def test_failed_install_steps_exit_nonzero(self):
         for command in ('plugins install --link --force --accept-capabilities ' + str(ROOT / 'openclaw-plugin'),
                         'plugins enable personal-assistant-bridge',
