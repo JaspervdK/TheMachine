@@ -5868,7 +5868,7 @@ class App:
                     result = sync_slack(self.store, self.config, account, source) if source else sync_source(self.store, self.config, account)
                     LOG.info('sync account=%s mode=%s changed=%d filtered=%d', account['id'], result['mode'], result['events'], result.get('filtered', 0))
                     state = self.store.checkpoint(account['id'])
-                    if result.get('more') or state['mode'] != 'incremental' or state.get('page_token'):
+                    if result.get('more') or state.get('mode', result['mode']) != 'incremental' or state.get('page_token'):  # a plugin's checkpoint may not keep a mode
                         delay = account.get('poll_seconds', 3600) if account.get('service') == 'x' else 30 if account.get('service') == 'linkedin' else 0 if source else 5
                 except SourceError as error:
                     if self.stop.is_set():

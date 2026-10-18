@@ -35,6 +35,25 @@ class Reliability(unittest.TestCase):
 
     # Collector
 
+    def test_a_plugin_checkpoint_without_a_mode_is_not_a_failure(self):
+        # The RSS connector keeps only etag/last_modified in its checkpoint; a good sync must stay good.
+        class Stop:
+            calls = 0
+            def is_set(self): return self.calls >= 1
+            def wait(self, seconds): self.calls += 1; self.waited = seconds; return self.is_set()
+        account = {'id': 'feed', 'service': 'rss', 'poll_seconds': 1800}
+        app = object.__new__(a.App)
+        app.config, app.store, app.stop = {'accounts': [account]}, self.store, Stop()
+        def sync(store, config, acct):
+            store.commit_page(acct['id'], {'etag': 'x'}, [])
+            return {'mode': 'incremental', 'events': 0}
+        with patch.object(a, 'sync_source', side_effect=sync):
+            app.collector(account)
+        with self.store.connect() as db:
+            row = db.execute('SELECT failures, error FROM checkpoints WHERE account_id=?', ('feed',)).fetchone()
+        self.assertEqual((row['failures'], row['error']), (0, None))
+        self.assertEqual(app.stop.waited, 1800)
+
     def test_database_error_outside_sync_does_not_end_collector_thread(self):
         class Stop:
             calls = 0

@@ -41,6 +41,8 @@ class Profile(unittest.TestCase):
             signal('in1', 1, body='Weekly digest of things', labels=['INBOX'], **{'from': 'News <news@digest.test>'}),
             signal('in2', 2, body='Weekly digest of things', labels=['INBOX'], **{'from': 'News <news@digest.test>'}),
             signal('in3', 3, body='Can you sign?', labels=['INBOX'], to='alex@acme.test', **{'from': 'Sam <sam@globex.test>'}),
+            # A second day in touch, so Sam is past closeness 1 at any hour (a day's age counts from its noon UTC).
+            signal('in-yesterday', 1500, body='Here is the draft contract', labels=['INBOX'], to='alex@acme.test', **{'from': 'Sam <sam@globex.test>'}),
             signal('wa1', 1, 'whatsapp.message', 'Ok top, tot straks', from_me=True, chat_name='Family'),
             signal('wa2', 2, 'whatsapp.message', 'Not mine at all', from_me=False),
             signal('sl1', 1, 'slack.message', 'Shipping it today', user_id='U1', channel_name='product'),
