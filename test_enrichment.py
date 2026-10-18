@@ -8,7 +8,7 @@ import test_graph as tg
 
 a, graph = tg.a, tg.graph
 enrichment = a.enrichment
-KEY = 'sk-test-0123456789'
+KEY = 'not-a-real-key'  # a test value; a realistic-looking one trips secret scanners
 
 
 class Service(http.server.BaseHTTPRequestHandler):
