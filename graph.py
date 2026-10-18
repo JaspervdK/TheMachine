@@ -43,12 +43,13 @@ CREATE TABLE IF NOT EXISTS graph_nodes(id TEXT PRIMARY KEY,kind TEXT NOT NULL,na
   last_at TEXT,signals INTEGER NOT NULL,gap_days REAL,quiet INTEGER NOT NULL DEFAULT 0,trend REAL,info TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_links(a TEXT NOT NULL,b TEXT NOT NULL,kind TEXT NOT NULL,strength REAL NOT NULL,last_at TEXT,PRIMARY KEY(a,b));
 CREATE INDEX IF NOT EXISTS graph_links_b ON graph_links(b);
-CREATE TABLE IF NOT EXISTS graph_events(node_id TEXT NOT NULL,event_id INTEGER NOT NULL,at TEXT NOT NULL,probable INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,event_id));
+CREATE TABLE IF NOT EXISTS graph_events(node_id TEXT NOT NULL,event_id INTEGER NOT NULL,at TEXT NOT NULL,probable INTEGER NOT NULL DEFAULT 0,direct INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,event_id));
 CREATE INDEX IF NOT EXISTS graph_events_event ON graph_events(event_id);
 CREATE TABLE IF NOT EXISTS graph_state(id INTEGER PRIMARY KEY CHECK(id=1),built_at TEXT NOT NULL,signals INTEGER NOT NULL,took_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS person_roles(identifier TEXT PRIMARY KEY,role TEXT NOT NULL,source TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_unnamed(key INTEGER PRIMARY KEY,event_ids TEXT NOT NULL,people TEXT NOT NULL,titles TEXT NOT NULL,size INTEGER NOT NULL,last_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_offers(key INTEGER PRIMARY KEY,size INTEGER NOT NULL,run_id TEXT,offered_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS graph_names(node_id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_role_asks(identifier TEXT PRIMARY KEY,run_id TEXT,asked_at TEXT NOT NULL);
 '''
 HALF_LIFE = {'person': 60, 'pair': 45, 'project_person': 45, 'project': 21}
@@ -81,6 +82,8 @@ def ensure(db):
     db.executescript(SCHEMA)
     if 'probable' not in {r[1] for r in db.execute('PRAGMA table_info(graph_events)')}:
         db.execute('ALTER TABLE graph_events ADD COLUMN probable INTEGER NOT NULL DEFAULT 0')
+    if 'direct' not in {r[1] for r in db.execute('PRAGMA table_info(graph_events)')}:
+        db.execute('ALTER TABLE graph_events ADD COLUMN direct INTEGER NOT NULL DEFAULT 0')
 
 
 class Owner:
@@ -594,6 +597,7 @@ def build(db, config, now):
 
     # Write.
     nodes, links, members = [], [], collections.defaultdict(list)
+    named = {r['node_id']: r['name'] for r in db.execute('SELECT node_id,name FROM graph_names')}
     said = {r['identifier']: (r['role'], 'owner' if r['source'] == 'owner' else 'review') for r in db.execute('SELECT identifier,role,source FROM person_roles')}
     surnames = {n.split()[-1] for n in owner.names if len(n.split()) >= 2}
     for node, value in strength.items():
@@ -606,6 +610,7 @@ def build(db, config, now):
         name = counts.most_common(1)[0][0] if counts else shown_id(node, x_names)
         if plain_name(name) in owner.names:
             continue  # the owner on another channel (a note-to-self chat, an old address)
+        name = next((named[i] for i in group if i in named), name)  # the owner's own name for them wins
         talk = sorted(roles[node]['owner'] | roles[node]['them'] | roles[node]['met'])
         gaps = [(b - a).days for a, b in zip(talk, talk[1:])][-8:]
         usual = sorted(gaps)[len(gaps) // 2] if len(gaps) >= 3 else None
@@ -631,7 +636,7 @@ def build(db, config, now):
     kept = {n[0] for n in nodes}
     for domain, people in members.items():
         total = sum(v for _, v in people)
-        nodes.append(('org:' + domain, 'org', crm_names.get(domain) or paying_names.get(domain) or domain[:200], round(total, 4),
+        nodes.append(('org:' + domain, 'org', named.get('org:' + domain) or crm_names.get(domain) or paying_names.get(domain) or domain[:200], round(total, 4),
                       max((last_day[p].isoformat() for p, _ in people if p in last_day), default=None), len(people), None, 0, None,
                       json.dumps({'domain': domain})))
         for node, value in people:
@@ -662,7 +667,8 @@ def build(db, config, now):
     for node, items in [(n, [(at, e, 0) for at, e in v]) for n, v in node_events.items()] + [('project:' + str(p), v) for p, v in project_events.items()]:
         if node in kept:
             # Complete membership for old task evidence; only readers cap display lists.
-            event_rows += [(node, e, at.isoformat(), guess) for at, e, guess in sorted(items)]
+            # direct: the person was in contact with the owner on it, not merely on it.
+            event_rows += [(node, e, at.isoformat(), guess, int(node in direct_people.get(e, ()))) for at, e, guess in sorted(items)]
     names_of = {n[0]: n[2] for n in nodes}
     unnamed_rows = []
     for group, people, last in unnamed:
@@ -681,7 +687,8 @@ def build(db, config, now):
         db.executemany('INSERT OR REPLACE INTO graph_nodes(id,kind,name,strength,last_at,signals,gap_days,quiet,trend,info) VALUES(?,?,?,?,?,?,?,?,?,?)', nodes)
         db.executemany('INSERT OR REPLACE INTO graph_links(a,b,kind,strength,last_at) VALUES(?,?,?,?,?)', links)
         # A confirmed label wins over a probable one for the same signal.
-        db.executemany('INSERT INTO graph_events(node_id,event_id,at,probable) VALUES(?,?,?,?) ON CONFLICT(node_id,event_id) DO UPDATE SET probable=min(probable,excluded.probable)', event_rows)
+        db.executemany('INSERT INTO graph_events(node_id,event_id,at,probable,direct) VALUES(?,?,?,?,?) '
+                       'ON CONFLICT(node_id,event_id) DO UPDATE SET probable=min(probable,excluded.probable),direct=max(direct,excluded.direct)', event_rows)
         db.executemany('INSERT OR REPLACE INTO graph_unnamed(key,event_ids,people,titles,size,last_at) VALUES(?,?,?,?,?,?)', unnamed_rows)
         db.execute('INSERT OR REPLACE INTO graph_state(id,built_at,signals,took_ms) VALUES(1,?,?,?)', (now, len(signals), took))
         db.execute('COMMIT')
@@ -732,6 +739,36 @@ def neighbours(db, node_id, limit=12):
                       'WHERE l.a=? OR l.b=? ORDER BY l.strength DESC LIMIT ?', (node_id, node_id, node_id, limit)).fetchall()
     return [{'id': r['b'] if r['a'] == node_id else r['a'], 'name': r['name'], 'kind': r['node_kind'], 'link': r['kind'],
              'strength': round(r['strength'], 2), 'last_at': r['last_at']} for r in rows]
+
+
+def excerpt(text, head=320, tail=220):
+    """A message without quoted history; long ones keep their start and their end, where a signature is."""
+    text = re.split(r'\[Quoted earlier messages|\n-{2,} ?(?:Original Message|Forwarded message)|\nOn .{6,80} wrote:', str(text or ''), maxsplit=1)[0]
+    text = re.sub(r'[ \t]+', ' ', re.sub(r'\n\s*\n+', '\n', text)).strip()
+    return text if len(text) <= head + tail + 20 else text[:head].rstrip() + ' … ' + text[-tail:].lstrip()
+
+
+def person_evidence(db, node_id, owner, limit=8):
+    """What a review needs to tell who someone is to the owner: their first direct contact (often an
+    introduction) and the latest ones, meetings as titles only."""
+    rows = db.execute('SELECT e.id,e.kind,e.occurred_at,e.title,e.body,e.metadata FROM graph_events g JOIN events e ON e.id=g.event_id '
+                      'WHERE g.node_id=? AND g.direct=1 AND e.deleted=0 ORDER BY e.occurred_at', (node_id,)).fetchall()
+    meetings = [r for r in rows if r['kind'] in ('calendar.event', 'salesflare.meeting')]
+    messages = [r for r in rows if r not in meetings]
+    picked = (messages[:1] + messages[1:][-(limit - 3):]) if messages else []
+    picked += meetings[-2:]
+    out = []
+    for r in sorted({r['id']: r for r in picked}.values(), key=lambda r: r['occurred_at']):
+        m = json.loads(r['metadata'] or '{}')
+        sent = ('SENT' in (m.get('labels') or ()) or bool(m.get('from_me')) or m.get('user_id') in owner.slack
+                or any(a in owner.emails for _, a in addresses(m.get('from'))[:1]))
+        item = {'event_id': r['id'], 'kind': r['kind'], 'at': r['occurred_at'][:10], 'title': str(r['title'] or '')[:120]}
+        if r in meetings:
+            item['attendees'] = len(m.get('attendees') or m.get('contacts') or ())
+        else:
+            item.update({'from': 'the owner' if sent else str(m.get('from') or m.get('chat_name') or '')[:120], 'text': excerpt(r['body'])})
+        out.append(item)
+    return out
 
 
 def find(db, text, limit=10, kinds=('person', 'project', 'org')):
@@ -912,6 +949,39 @@ def set_role(db, node_id, role, source, now):
     else:
         db.execute('DELETE FROM person_roles WHERE identifier=?', (row['id'],))
     return {'role': role or None}
+
+
+def rename(db, node_id, name, now):
+    """The owner's name for a person, organisation or project. A project renamed to another project's
+    name joins it; an empty name gives a person or organisation back the name from their messages."""
+    node_id, name = str(node_id or ''), ' '.join(str(name or '').split())
+    if node_id.startswith('project:'):
+        row = db.execute('SELECT id,name FROM projects WHERE id=?', (node_id.split(':', 1)[1],)).fetchone()
+        if not row:
+            raise ValueError('Unknown project')
+        if not name or len(name) > 60:
+            raise ValueError('A project name is a short label (up to 60 characters), like "Acme VAT" or "Q4 board deck"')
+        other = db.execute('SELECT id,name FROM projects WHERE name=? COLLATE NOCASE AND id!=?', (name, row['id'])).fetchone()
+        try:  # cards keep their project by name
+            db.execute('UPDATE suggestions SET project=? WHERE project=? COLLATE NOCASE', (other['name'] if other else name, row['name']))
+        except sqlite3.OperationalError:
+            pass
+        if not other:
+            db.execute('UPDATE projects SET name=? WHERE id=?', (name, row['id']))
+            return {'node_id': node_id, 'name': name}
+        db.execute('UPDATE OR IGNORE event_projects SET project_id=? WHERE project_id=?', (other['id'], row['id']))
+        db.execute('DELETE FROM event_projects WHERE project_id=?', (row['id'],))
+        db.execute('DELETE FROM projects WHERE id=?', (row['id'],))
+        return {'node_id': 'project:' + str(other['id']), 'name': other['name'], 'merged': True}
+    if not db.execute("SELECT 1 FROM graph_nodes WHERE id=? AND kind IN ('person','org')", (node_id,)).fetchone():
+        raise ValueError('Rename a person, organisation or project from graph results')
+    if len(name) > 100:
+        raise ValueError('A name is up to 100 characters')
+    if name:
+        db.execute('INSERT OR REPLACE INTO graph_names(node_id,name,created_at) VALUES(?,?,?)', (node_id, name, now))
+    else:
+        db.execute('DELETE FROM graph_names WHERE node_id=?', (node_id,))
+    return {'node_id': node_id, 'name': name or None}
 
 
 # Writing labels and merges.

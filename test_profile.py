@@ -40,7 +40,7 @@ class Profile(unittest.TestCase):
         self.store.commit_page('work', {}, sent + [
             signal('in1', 1, body='Weekly digest of things', labels=['INBOX'], **{'from': 'News <news@digest.test>'}),
             signal('in2', 2, body='Weekly digest of things', labels=['INBOX'], **{'from': 'News <news@digest.test>'}),
-            signal('in3', 3, body='Can you sign?', labels=['INBOX'], **{'from': 'Sam <sam@globex.test>'}),
+            signal('in3', 3, body='Can you sign?', labels=['INBOX'], to='alex@acme.test', **{'from': 'Sam <sam@globex.test>'}),
             signal('wa1', 1, 'whatsapp.message', 'Ok top, tot straks', from_me=True, chat_name='Family'),
             signal('wa2', 2, 'whatsapp.message', 'Not mine at all', from_me=False),
             signal('sl1', 1, 'slack.message', 'Shipping it today', user_id='U1', channel_name='product'),
@@ -84,16 +84,36 @@ class Profile(unittest.TestCase):
             self.app.action('save_profile', {'_profile_session': session, 'profile': {}})
 
     def test_onboarding_also_names_what_the_closest_people_are(self):
-        self.assertIn('set it with graph node_id and role', a.profile_prompt('r', {'email': 6}))
-        run_id = self.app.action('profile_start', {})['run_id']
+        self.assertNotIn('role', a.profile_prompt('r', {'email': 6}).split('2. ')[1].split('3. ')[0])  # its own turn, after the draft
+        self.app.graph_build()
+        started = self.app.action('profile_start', {})
+        roles_id = started['roles_run_id']
+        session = a.PROFILE_SESSION_PREFIX + roles_id
+        # The draft runs first; the roles turn after it.
+        self.app.profile_step(Runner('admitted'))
+        self.app.action('save_profile', {'_profile_session': a.PROFILE_SESSION_PREFIX + started['run_id'], 'profile': {'tone': 'Warm'}})
+        self.app.profile_step(Runner('ok'))
+        runner = Runner('admitted', 'ok')
+        self.app.profile_step(runner)
+        self.assertEqual(runner.requests[0]['job_id'], roles_id)
+        self.assertIn('roles run', runner.requests[0]['message'])
+        self.assertIn('a wrong role is worse than none', runner.requests[0]['message'])
+        page = self.app.action('profile_evidence', {'page': 1, '_profile_session': session})
+        sam = page['people'][0]
+        self.assertEqual((sam['name'], sam['node_id']), ('Sam', 'email:sam@globex.test'))
+        texts = [(m['from'], m['text']) for m in sam['messages']]
+        self.assertIn(('Sam <sam@globex.test>', 'Can you sign?'), texts)  # theirs and the owner's, both directions
+        self.assertTrue(any(who == 'the owner' and 'secret' not in text for who, text in texts))
+        self.assertNotIn('news@digest.test', json.dumps(page))  # only people close enough
+        with self.assertRaisesRegex(ValueError, 'no draft'):
+            self.app.action('save_profile', {'_profile_session': session, 'profile': {'tone': 'x'}})
         with self.store.connect() as db:
-            for node, name, strength in (('email:sam@globex.test', 'Sam', 3), ('email:kim@globex.test', 'Kim', 2), ('email:lee@globex.test', 'Lee', 1)):
-                db.execute("INSERT INTO graph_nodes(id,kind,name,strength,signals,info) VALUES(?,'person',?,?,1,'{}')", (node, name, strength))
-            db.execute("INSERT INTO person_roles VALUES('email:lee@globex.test','old friend','owner',?)", (a.now(),))  # the owner's own
-            a.graph.set_role(db, 'email:kim@globex.test', 'designer at Globex', 'agent', a.now())
             a.graph.set_role(db, 'email:sam@globex.test', 'CFO at Globex', 'agent', a.now())
-        self.assertEqual(self.app.action('profile_status', {'run_id': run_id})['roles'],
-                         [{'name': 'Sam', 'role': 'CFO at Globex'}, {'name': 'Kim', 'role': 'designer at Globex'}])
+        self.app.profile_step(runner)
+        run = self.app.action('profile_status', {'run_id': roles_id})
+        self.assertEqual((run['status'], run['roles']), ('ok', [{'name': 'Sam', 'role': 'CFO at Globex'}]))  # done without a draft
+        self.app.graph_build()
+        self.assertEqual(self.app.action('roles_start', {'again': True}), {'people': 0})  # everyone close has a role
 
     def test_one_voice_per_channel_most_used_first(self):
         run_id = self.app.action('profile_start', {})['run_id']
@@ -195,16 +215,30 @@ class ProfileCommand(unittest.TestCase):
         if existing is not None:
             (self.workspace / 'USER.md').write_text(existing)
         statuses = [{'status': 'running', 'started_at': a.now()},
-                    {'status': 'ok', 'started_at': a.now(), 'draft': {'tone': 'Short and friendly', 'based_on': '6 sent emails'},
-                     'roles': [{'name': 'Sam', 'role': 'CFO at Globex'}]}]
+                    {'status': 'ok', 'started_at': a.now(), 'draft': {'tone': 'Short and friendly', 'based_on': '6 sent emails'}}]
         def fake(config, action, args=None):
-            return {'run_id': 'r' * 32, 'started_at': a.now(), 'counts': {'email': 6}} if action == 'profile_start' else statuses.pop(0)
+            if action == 'profile_start':
+                return {'run_id': 'r' * 32, 'started_at': a.now(), 'counts': {'email': 6}, 'roles_run_id': 'q' * 32}
+            if args.get('run_id') == 'q' * 32:  # the roles turn that follows the draft
+                return {'status': 'ok', 'started_at': a.now(), 'roles': [{'name': 'Sam', 'role': 'CFO at Globex'}]}
+            return statuses.pop(0)
         out = io.StringIO()
         with patch.object(cli, 'call', side_effect=fake), patch.object(cli, 'load_config', return_value={'owner_name': 'Alex', 'accounts': []}), \
              patch.object(cli.time, 'sleep'), patch('builtins.input', return_value=answer), patch.object(cli.sys.stdin, 'isatty', return_value=True), \
              contextlib.redirect_stdout(out):
             cli.main(['profile', '--workspace', str(self.workspace), *argv])
         return out.getvalue()
+
+    def test_roles_alone_without_redoing_the_profile(self):
+        calls = []
+        def fake(config, action, args=None):
+            calls.append(action)
+            return {'run_id': 'q' * 32} if action == 'roles_start' else {'status': 'ok', 'started_at': a.now(), 'roles': [{'name': 'Kim', 'role': 'accountant'}]}
+        out = io.StringIO()
+        with patch.object(cli, 'call', side_effect=fake), patch.object(cli, 'load_config', return_value={'accounts': []}), contextlib.redirect_stdout(out):
+            cli.main(['roles'])
+        self.assertEqual(calls, ['roles_start', 'profile_status'])  # no USER.md draft
+        self.assertIn('  - Kim: accountant', out.getvalue())
 
     def test_shows_the_draft_and_saves_only_after_yes(self):
         out = self.run_cli(answer='n')

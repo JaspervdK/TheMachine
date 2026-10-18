@@ -19,7 +19,7 @@ const server=createServer(async(req,res)=>{
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],connectors:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[]}));return}
  if(url.pathname==='/api/graph'){res.end(JSON.stringify(url.searchParams.get('node')?person:{projects:[],people:[person],quiet:[],new:[],orgs:[]}));return}
- if(url.pathname==='/api/action'){let body='';for await(const b of req)body+=b;const call=JSON.parse(body);calls.push(call);if(call.action==='graph_role')person={...person,role:call.args.role,role_by:'owner'};res.end('{}');return}
+ if(url.pathname==='/api/action'){let body='';for await(const b of req)body+=b;const call=JSON.parse(body);calls.push(call);if(call.action==='graph_role')person={...person,role:call.args.role,role_by:'owner'};if(call.action==='graph_rename'){person={...person,name:call.args.name};res.end(JSON.stringify({node_id:person.id,name:call.args.name}));return}res.end('{}');return}
  if(url.pathname.startsWith('/brand/')||url.pathname.startsWith('/assets/')){res.statusCode=404;res.end();return}
  res.end('{}');
 });
@@ -59,6 +59,14 @@ try{
  await page.locator('.graph-open [data-promise="7"][data-close="kept"]').click();
  for(let i=0;i<100&&calls.length<2;i++)await page.waitForTimeout(20);
  assert.deepEqual(calls[1],{action:'promise_close',args:{id:7,status:'kept'}});
+ // The owner renames them; the detail shows the new name.
+ await page.locator('[data-name-edit]').click();
+ assert.equal(await page.locator('.name-form input').inputValue(),'Ann Example');
+ await page.locator('.name-form input').fill('Ann Exemplar');
+ await page.locator('.name-form button').click();
+ for(let i=0;i<100&&calls.length<3;i++)await page.waitForTimeout(20);
+ assert.deepEqual(calls[2],{action:'graph_rename',args:{node_id:'email:ann@client.example',name:'Ann Exemplar'}});
+ await page.locator('.graph-detail h3',{hasText:'Ann Exemplar'}).waitFor();
  assert.deepEqual(errors,[]);
  console.log(JSON.stringify({widths,actions:calls.length,page_errors:errors}));
 }finally{if(browser)await browser.close();await new Promise(r=>server.close(r))}

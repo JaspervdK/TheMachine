@@ -317,6 +317,39 @@ class Graph(unittest.TestCase):
         self.assertIn('Possibly one piece of work nobody named', a.review_prompt('run', ['work'], unnamed=first))
         self.assertNotIn('Possibly one piece of work', a.review_prompt('run', ['work']))
 
+    def test_the_owner_renames_people_organisations_and_projects(self):
+        self.add(mail(3, 'Sam Stone <sam@acme.com>', 'Lee <lee@globex.com>', ('SENT',), thread='t1'),
+                 mail(2, 'Lee <lee@globex.com>', 'sam@acme.com', thread='t1'), mail(1, 'Lee <lee@globex.com>', 'sam@acme.com', thread='t2'))
+        with self.store.connect() as db:
+            ids = [r[0] for r in db.execute('SELECT id FROM events ORDER BY id')]
+            graph.label(db, ids[:2], 'Globex deal', 'agent', a.now())
+            graph.label(db, ids[2:], 'Globex renewal', 'agent', a.now())
+        self.build()
+        self.app.graph_build = self.build
+        rename = lambda node, name: self.app.action('graph_rename', {'node_id': node, 'name': name}, owner_dashboard=True)
+        with self.assertRaisesRegex(ValueError, 'Only the owner'):
+            self.app.action('graph_rename', {'node_id': 'email:lee@globex.com', 'name': 'Leon'})
+        self.assertEqual(rename('email:lee@globex.com', '  Lee   Parker ')['name'], 'Lee Parker')
+        self.assertEqual(self.node('email:lee@globex.com')['name'], 'Lee Parker')
+        rename('email:lee@globex.com', '')  # back to the name in their messages
+        self.assertEqual(self.node('email:lee@globex.com')['name'], 'Lee')
+        rename('org:globex.com', 'Globex Corp')
+        self.assertEqual(self.node('org:globex.com')['name'], 'Globex Corp')
+        with self.store.connect() as db:
+            deal, renewal = (db.execute('SELECT id FROM projects WHERE name=?', (n,)).fetchone()[0] for n in ('Globex deal', 'Globex renewal'))
+            db.execute("INSERT INTO suggestions(id,dedupe_key,title,body,event_ids,account_ids,project,created_at) VALUES('s1','k1','Reply to Lee','','[]','[]','Globex deal',?)", (a.now(),))
+        self.assertEqual(rename(f'project:{deal}', 'Globex expansion'), {'node_id': f'project:{deal}', 'name': 'Globex expansion'})
+        self.assertEqual(self.node(f'project:{deal}')['name'], 'Globex expansion')
+        joined = rename(f'project:{renewal}', 'globex EXPANSION')  # another project's name: they become one
+        self.assertEqual(joined, {'node_id': f'project:{deal}', 'name': 'Globex expansion', 'merged': True})
+        self.assertIsNone(self.node(f'project:{renewal}'))
+        self.assertEqual(self.node(f'project:{deal}')['signals'], 3)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT project FROM suggestions WHERE id='s1'").fetchone()[0], 'Globex expansion')
+        with self.assertRaisesRegex(ValueError, 'short label'):
+            rename(f'project:{deal}', '')
+        self.assertIn('graph_rename', a.OWNER_ACTIONS)
+
     def test_roles_only_as_said_by_the_owner_or_a_review(self):
         self.add(mail(3, 'Sam Stone <sam@acme.com>', 'Ann Stone <ann@home.example>, Pat <pat@client.com>, Lee <lee@globex.com>', ('SENT',)),
                  {'account_id': 'work', 'source_id': 'st1', 'kind': 'stripe.event', 'occurred_at': at(2), 'title': 'Payment failed', 'body': '', 'deleted': False,

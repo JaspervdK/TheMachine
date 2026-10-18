@@ -402,9 +402,13 @@ def cmd_profile(config, args):
         raise CliError(f"The profile draft didn't finish ({run.get('error') or run['status']}). See openclaw logs, then run assistant profile --again.")
     if args.json:
         return out_json(run)
-    if run.get('roles'):
-        print('What your closest people are to you, read from your messages (change them in the dashboard\'s Graph tab):')
-        print('\n'.join(f"  - {r['name']}: {r['role']}" for r in run['roles']) + '\n')
+    save_draft(config, args, path, run)
+    if started.get('roles_run_id'):
+        print()
+        follow_roles(config, started['roles_run_id'])
+
+
+def save_draft(config, args, path, run):
     day = dt.datetime.now(TZ).date().isoformat()
     while True:
         # The owner can edit USER.md while inference or the save prompt is running.
@@ -435,6 +439,48 @@ def cmd_profile(config, args):
     print(f'Saved to {path}. Reviews and drafts read it from the next turn on.'
           + (f' It is now {len(merged):,} characters; OpenClaw chat sessions load the first {onboarding.USER_MD_BUDGET:,}.'
              if len(merged) > onboarding.USER_MD_BUDGET else ''))
+
+
+def follow_roles(config, run_id):
+    """Follow a roles turn and list what it named; it runs in the service either way."""
+    print('Now your agent reads the first and latest messages with your closest people and notes what each is to you.')
+    deadline, tty = time.monotonic() + assistant.PROFILE_SECONDS + 1500, sys.stdout.isatty()
+    try:
+        while True:
+            run = call(config, 'profile_status', {'run_id': run_id})
+            if run['status'] not in ('starting', 'running'):
+                break
+            if time.monotonic() > deadline:
+                raise CliError('Still naming roles. They show up in the dashboard\'s Graph tab when done.')
+            if tty:
+                elapsed = int((dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(run['started_at'])).total_seconds())
+                print(f"\r  {elapsed // 60}m {elapsed % 60:02d}s · " + ('starting in OpenClaw' if run['status'] == 'starting' else 'your agent is reading'),
+                      end='', flush=True)
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print('\nStopped following. Roles keep coming in the service; see the dashboard\'s Graph tab.')
+        return None
+    finally:
+        if tty:
+            print()
+    if run['status'] != 'ok':
+        raise CliError(f"Naming roles didn't finish ({run.get('error') or run['status']}). See openclaw logs, then run assistant roles --again.")
+    if run.get('roles'):
+        print('What your closest people are to you (change any in the dashboard\'s Graph tab):')
+        print('\n'.join(f"  - {r['name']}: {r['role']}" for r in run['roles']))
+    else:
+        print('Their messages didn\'t make it clear for anyone yet. Reviews keep asking as more comes in.')
+    return run
+
+
+def cmd_roles(config, args):
+    started = call(config, 'roles_start', {'again': bool(args.again)})
+    if not started.get('run_id'):
+        print('Everyone you are close to already has a role. See the dashboard\'s Graph tab.')
+        return
+    run = follow_roles(config, started['run_id'])
+    if args.json and run:
+        return out_json(run)
 
 
 def cmd_connect(config, args):
@@ -527,7 +573,9 @@ def parser():
     source.add_argument('--body')
     source.add_argument('--file', help='file with the text, or - for stdin')
     add('preview', f'First run: one review of the last {assistant.PREVIEW_DAYS} days, shown here and on the dashboard; nothing is sent', cmd_preview)
-    c = add('profile', 'Draft how you write and what matters to you from your own messages, for USER.md (you see it first), and note what your closest people are to you', cmd_profile)
+    c = add('roles', 'Note what your closest people are to you, from your messages with them (also part of profile)', cmd_roles)
+    c.add_argument('--again', action='store_true', help='run again even if it just ran')
+    c = add('profile', 'Draft how you write and what matters to you from your own messages, for USER.md (you see it first), then note what your closest people are to you', cmd_profile)
     c.add_argument('--again', action='store_true', help='make a new draft even if one was just made')
     c.add_argument('--yes', action='store_true', help='save the draft without asking')
     c.add_argument('--all', action='store_true', help='keep every line, even past the 4,000 characters OpenClaw chats load')
