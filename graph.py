@@ -417,6 +417,8 @@ def build(db, config, now):
                     appears['email:' + str(c['email']).lower()].add('a Salesflare contact' + (' at ' + str(crm['name']) if crm and crm.get('name') else ''))
         elif kind in ('stripe.event', 'intercom.conversation'):
             for _, addr in addresses(m.get('from'))[:1]:
+                if addr.rsplit('@', 1)[1] in owner.domains:
+                    continue  # a teammate answering support or sending an invoice
                 appears['email:' + addr].add(('billed through Stripe' + (' as ' + str(m['customer_name']) if m.get('customer_name') else ''))
                                              if kind == 'stripe.event' else 'wrote to support (Intercom)')
                 domain = addr.rsplit('@', 1)[1]

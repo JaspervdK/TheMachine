@@ -321,6 +321,8 @@ class Graph(unittest.TestCase):
         self.add(mail(3, 'Sam Stone <sam@acme.com>', 'Ann Stone <ann@home.example>, Pat <pat@client.com>, Lee <lee@globex.com>', ('SENT',)),
                  {'account_id': 'work', 'source_id': 'st1', 'kind': 'stripe.event', 'occurred_at': at(2), 'title': 'Payment failed', 'body': '', 'deleted': False,
                   'metadata': {'from': 'pat@client.com', 'customer_name': 'Client Ltd', 'type': 'invoice.payment_failed'}},
+                 {'account_id': 'work', 'source_id': 'ic1', 'kind': 'intercom.conversation', 'occurred_at': at(2), 'title': 'Re: login', 'body': '', 'deleted': False,
+                  'metadata': {'from': 'Kai <kai@acme.com>'}},
                  {'account_id': 'work', 'source_id': 'cr1', 'kind': 'salesflare.email', 'occurred_at': at(2), 'title': 'Hi', 'body': '', 'deleted': False,
                   'metadata': {'contacts': [{'email': 'lee@globex.com', 'name': 'Lee'}], 'crm_account': {'domain': 'globex.com', 'name': 'Globex'}}},
                  {'account_id': 'slack', 'source_id': 's1', 'kind': 'slack.message', 'occurred_at': at(1), 'title': 'DM', 'body': 'hey', 'deleted': False,
@@ -334,6 +336,7 @@ class Graph(unittest.TestCase):
         self.assertEqual(hints('email:lee@globex.com'), ['a Salesflare contact at Globex'])
         self.assertEqual(hints('email:ann@home.example'), ["shares the owner's surname"])
         self.assertEqual(hints('slack:U0TEAM1'), ["in the owner's Slack"])
+        self.assertEqual(hints('email:kai@acme.com'), ["an address at the owner's own domain"])  # a teammate answering support
         # A review is asked about the strongest people without a role, each once a month, and reads their messages.
         with self.store.connect() as db:
             db.execute("UPDATE graph_nodes SET strength=1 WHERE kind='person'")
