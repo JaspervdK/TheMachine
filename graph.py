@@ -14,10 +14,11 @@ appears on two different channels, or when the owner or agent says so (merges). 
 by the review agent and the owner, and spread to the rest of their threads; a signal that reads like
 a labelled one and shares a person with it is probably part of it too (weaker, until a review
 confirms). Threads that read alike and share people, but nobody named, are offered to a review as
-possibly one piece of work. Each person gets a role (what they are to the owner): said by the owner
-or a review, else seen from the sources (teammate, customer, CRM contact, family). Going quiet
-compares the silence with that person's own usual gap. Messages are never deleted; links that faded
-away are just not stored."""
+possibly one piece of work. People and organisations get a role (what they are to the owner), said
+by the owner or by a review that read it in a message (kept with the line it came from, so the owner
+can confirm it); the sources only give hints. People can be related to each other ("assistant of",
+"introduced by"). Going quiet compares the silence with that person's own usual gap. Messages are
+never deleted; links that faded away are just not stored."""
 from __future__ import annotations
 
 import collections
@@ -51,7 +52,12 @@ CREATE TABLE IF NOT EXISTS graph_unnamed(key INTEGER PRIMARY KEY,event_ids TEXT 
 CREATE TABLE IF NOT EXISTS graph_offers(key INTEGER PRIMARY KEY,size INTEGER NOT NULL,run_id TEXT,offered_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_names(node_id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_role_asks(identifier TEXT PRIMARY KEY,run_id TEXT,asked_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS role_corrections(id INTEGER PRIMARY KEY,identifier TEXT NOT NULL,name TEXT NOT NULL,old_role TEXT NOT NULL,
+  new_role TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS graph_relations(a TEXT NOT NULL,b TEXT NOT NULL,relation TEXT NOT NULL,source TEXT NOT NULL,event_id INTEGER,
+  created_at TEXT NOT NULL,PRIMARY KEY(a,b));
 '''
+RECHECK_DAYS = 90       # a review's role is read again after this, when there was contact since
 HALF_LIFE = {'person': 60, 'pair': 45, 'project_person': 45, 'project': 21}
 DAY_CAP = 1.0           # one day of contact, however many messages
 FLOOR = 0.01            # faded below this: not stored
@@ -84,6 +90,10 @@ def ensure(db):
         db.execute('ALTER TABLE graph_events ADD COLUMN probable INTEGER NOT NULL DEFAULT 0')
     if 'direct' not in {r[1] for r in db.execute('PRAGMA table_info(graph_events)')}:
         db.execute('ALTER TABLE graph_events ADD COLUMN direct INTEGER NOT NULL DEFAULT 0')
+    have = {r[1] for r in db.execute('PRAGMA table_info(person_roles)')}
+    for column in ('event_id INTEGER', 'quote TEXT', 'hints TEXT', 'checked_at TEXT'):  # a role's evidence and when it was last read
+        if column.split()[0] not in have:
+            db.execute('ALTER TABLE person_roles ADD COLUMN ' + column)
 
 
 class Owner:
@@ -599,6 +609,7 @@ def build(db, config, now):
     nodes, links, members = [], [], collections.defaultdict(list)
     named = {r['node_id']: r['name'] for r in db.execute('SELECT node_id,name FROM graph_names')}
     said = {r['identifier']: (r['role'], 'owner' if r['source'] == 'owner' else 'review') for r in db.execute('SELECT identifier,role,source FROM person_roles')}
+    related = db.execute('SELECT a,b,relation,source FROM graph_relations').fetchall()
     surnames = {n.split()[-1] for n in owner.names if len(n.split()) >= 2}
     for node, value in strength.items():
         if value < FLOOR:
@@ -636,9 +647,10 @@ def build(db, config, now):
     kept = {n[0] for n in nodes}
     for domain, people in members.items():
         total = sum(v for _, v in people)
+        role, role_by = said.get('org:' + domain, (None, None))
         nodes.append(('org:' + domain, 'org', named.get('org:' + domain) or crm_names.get(domain) or paying_names.get(domain) or domain[:200], round(total, 4),
                       max((last_day[p].isoformat() for p, _ in people if p in last_day), default=None), len(people), None, 0, None,
-                      json.dumps({'domain': domain})))
+                      json.dumps({'domain': domain, 'role': role, 'role_by': role_by, 'paying': domain in paying_names})))
         for node, value in people:
             links.append((node, 'org:' + domain, 'member', round(value, 4), None))
     two_weeks = current - dt.timedelta(days=14)
@@ -659,9 +671,24 @@ def build(db, config, now):
     for (a, b, day), weight in pair_day.items():
         pairs[(a, b)] += fade(weight, age(day), HALF_LIFE['pair'])
         pair_last[(a, b)] = max(pair_last.get((a, b), day), day)
+    # Relations a review or the owner read in the messages ("assistant of", "sister of", "introduced by").
+    relations = {}
+    for r in related:
+        a, b = union.find(r['a']), union.find(r['b'])
+        if a != b and a in kept and b in kept:
+            relations[tuple(sorted((a, b)))] = (a, b, r['relation'], 'owner' if r['source'] == 'owner' else 'review')
     for (a, b), value in pairs.items():
-        if value >= FLOOR and a in kept and b in kept:
+        if value >= FLOOR and a in kept and b in kept and (a, b) not in relations:
             links.append((a, b, 'together', round(value, 4), pair_last[(a, b)].isoformat()))
+    by_node = {n[0]: i for i, n in enumerate(nodes)}
+    for pair, (a, b, relation, by) in relations.items():
+        links.append((*pair, 'relation', round(max(0.5, pairs.get(pair, 0)), 4), pair_last[pair].isoformat() if pair in pair_last else None))
+        for node in (a, b):
+            row = list(nodes[by_node[node]])
+            info = json.loads(row[9])
+            info.setdefault('relations', []).append({'a': a, 'a_name': nodes[by_node[a]][2], 'relation': relation, 'b': b, 'b_name': nodes[by_node[b]][2], 'by': by})
+            row[9] = json.dumps(info)
+            nodes[by_node[node]] = tuple(row)
     kept |= {n[0] for n in nodes}
     event_rows = []
     for node, items in [(n, [(at, e, 0) for at, e in v]) for n, v in node_events.items()] + [('project:' + str(p), v) for p, v in project_events.items()]:
@@ -714,7 +741,9 @@ def node_view(row, links=None):
                     usual_gap_days=row['gap_days'], wrote_days=info.get('wrote'), heard_days=info.get('heard'), met_days=info.get('met'),
                     next_meeting=info.get('next_meeting'), colleague=info.get('colleague'), role=info.get('role'),
                     role_by=info.get('role_by'), hints=info.get('hints', []),
-                    seen_only=bool(info.get('seen_only')))
+                    seen_only=bool(info.get('seen_only')), relations=info.get('relations', []))
+    elif row['kind'] == 'org':
+        view.update(role=info.get('role'), role_by=info.get('role_by'), domain=info.get('domain'))
     elif row['kind'] == 'project':
         view.update(trend=row['trend'], state=project_state(row), closed=bool(info.get('closed_at')), probable_signals=info.get('probable', 0))
     if links is not None:
@@ -827,7 +856,11 @@ def context_lines(db, event_ids, limit_chars=1500, skip_card=None):
         if row['kind'] == 'person':
             projects = [n for n in neighbours(db, row['id'], 12) if n['kind'] == 'project'][:3]
             people = [n for n in neighbours(db, row['id'], 12) if n['kind'] == 'person'][:3]
-            bits = ([view['role']] if view['role'] else []) + [f"{view['closeness']} contact", f"last {'seen' if view['seen_only'] else 'contact'} {short_date(view['last_at'])}"]
+            org = db.execute('SELECT name,info FROM graph_nodes WHERE id=?', (view['org'],)).fetchone() if view['org'] else None
+            org_role = json.loads(org['info']).get('role') if org else None
+            bits = ([view['role']] if view['role'] else ['no role yet']) + ([f"at {org['name']}" + (f" ({org_role})" if org_role else '')] if org else []) \
+                + [relation_text(r) for r in view['relations'][:2]] \
+                + [f"{view['closeness']} contact", f"last {'seen' if view['seen_only'] else 'contact'} {short_date(view['last_at'])}"]
             if view['usual_gap_days']:
                 gap = int(view['usual_gap_days'])
                 bits.append(('usually daily' if gap <= 1 else f'usually every {gap} days') + (' (gone quiet)' if view['quiet'] else ''))
@@ -867,7 +900,8 @@ def overview(db, limit=12):
             'quiet': rows("SELECT * FROM graph_nodes WHERE kind='person' AND quiet=1 ORDER BY strength DESC LIMIT ?", limit),
             'new': rows("SELECT * FROM graph_nodes WHERE kind='person' AND signals<=3 AND last_at>=? ORDER BY strength DESC LIMIT ?",
                         week_ago, 8),
-            'orgs': rows("SELECT * FROM graph_nodes WHERE kind='org' ORDER BY strength DESC LIMIT ?", 8)}
+            'orgs': rows("SELECT * FROM graph_nodes WHERE kind='org' ORDER BY strength DESC LIMIT ?", 8),
+            'whos_who': unconfirmed(db)}
 
 
 def detail(db, node_id, events=12):
@@ -879,6 +913,12 @@ def detail(db, node_id, events=12):
     view['event_ids'] = [r[0] for r in rows]
     view['probable_ids'] = [r[0] for r in rows if r[1]]
     view['open'] = open_between(db, node_id)
+    said = db.execute('SELECT quote,event_id,created_at FROM person_roles WHERE identifier=?', (node_id,)).fetchone()
+    if said and view.get('role'):
+        view.update(role_quote=said['quote'], role_event_id=said['event_id'], role_set_at=said['created_at'][:10])
+    if row['kind'] == 'org':
+        view['people_roles'] = [{'id': r['id'], 'name': r['name'], 'role': json.loads(r['info']).get('role')} for r in db.execute(
+            "SELECT n.id,n.name,n.info FROM graph_links l JOIN graph_nodes n ON n.id=l.a WHERE l.b=? AND l.kind='member' ORDER BY n.strength DESC LIMIT 12", (node_id,))]
     return view
 
 
@@ -919,6 +959,26 @@ def open_line(items):
     return '; '.join(bits)
 
 
+def card_people(db, event_ids, limit=3):
+    """Who a card is directly about, closest first, with their role, and a weight to rank cards by: how close
+    they are to the owner, more when their organisation pays the owner (billed through Stripe)."""
+    ids = [int(i) for i in event_ids or ()]
+    if not ids:
+        return [], 0.0
+    marks = ','.join('?' for _ in ids)
+    rows = db.execute(f"SELECT DISTINCT n.id,n.name,n.strength,n.info,o.info org_info FROM graph_events g JOIN graph_nodes n ON n.id=g.node_id "
+                      f"LEFT JOIN graph_nodes o ON o.id=json_extract(n.info,'$.org') WHERE g.direct=1 AND n.kind='person' AND g.event_id IN ({marks}) "
+                      "ORDER BY n.strength DESC", ids).fetchall()
+    people = [{'id': r['id'], 'name': r['name'], 'role': json.loads(r['info']).get('role'),
+               'paying': bool(r['org_info'] and json.loads(r['org_info']).get('paying'))} for r in rows]
+    weight = max((r['strength'] + (2 if p['paying'] else 0) for r, p in zip(rows, people)), default=0.0)
+    return people[:limit], round(weight, 3)
+
+
+def relation_text(r):
+    return f"{r['a_name']} is {r['relation']} {r['b_name']}"
+
+
 def projects_for(db, event_ids):
     """{event_id: [(project name, probable)]} for a batch, so a review can confirm or correct."""
     ids = [int(i) for i in event_ids]
@@ -932,23 +992,106 @@ def projects_for(db, event_ids):
     return dict(out)
 
 
-def set_role(db, node_id, role, source, now):
-    """Say what someone is to the owner ("accountant", "Ann's partner", "customer at Globex"). The owner's
-    word stays until the owner changes it; an empty role from the owner clears it."""
-    row = db.execute("SELECT id,info FROM graph_nodes WHERE id=? AND kind='person'", (str(node_id),)).fetchone()
+def set_role(db, node_id, role, source, now, event_id=None, quote=None):
+    """Say what someone (or an organisation) is to the owner ("accountant", "Ann's partner", "customer at
+    Globex", "accounting firm"). A review gives the message it read it in (event_id) and the line that
+    shows it (quote, words from that message), so the owner can confirm it. The owner's word stays until
+    the owner changes it; the owner saying the same role confirms it; an empty role from the owner
+    clears it. When the owner replaces a review's role, the correction is kept for later reviews to learn from."""
+    row = db.execute("SELECT id,kind,name,info FROM graph_nodes WHERE id=? AND kind IN ('person','org')", (str(node_id),)).fetchone()
     if not row:
-        raise ValueError('role needs a person node_id from graph results')
+        raise ValueError('role needs a person or organisation node_id from graph results')
     role = ' '.join(str(role or '').split())
     if len(role) > 60 or (not role and source != 'owner'):
-        raise ValueError('A role is a few words (up to 60 characters): "accountant", "investor", "customer at Globex"')
-    current = db.execute('SELECT source FROM person_roles WHERE identifier=?', (row['id'],)).fetchone()
+        raise ValueError('A role is a few words (up to 60 characters): "accountant", "investor", "customer at Globex", "accounting firm"')
+    current = db.execute('SELECT * FROM person_roles WHERE identifier=?', (row['id'],)).fetchone()
     if current and current['source'] == 'owner' and source != 'owner':
-        return {'role': json.loads(row['info']).get('role'), 'kept': 'The owner set this role; it stays.'}
-    if role:
-        db.execute('INSERT OR REPLACE INTO person_roles(identifier,role,source,created_at) VALUES(?,?,?,?)', (row['id'], role, source, now))
-    else:
+        return {'role': current['role'], 'kept': 'The owner set this role; it stays.'}
+    quote = ' '.join(str(quote or '').split())[:200] or None
+    if source != 'owner' and event_id is not None:
+        members = [row['id']] if row['kind'] == 'person' else [r[0] for r in db.execute("SELECT a FROM graph_links WHERE b=? AND kind='member'", (row['id'],))]
+        marks = ','.join('?' for _ in members)
+        found = db.execute(f'SELECT e.title,e.body FROM graph_events g JOIN events e ON e.id=g.event_id WHERE g.event_id=? AND g.node_id IN ({marks})',
+                           (int(event_id), *members)).fetchone()
+        if not found:
+            raise ValueError('event_id must be one of their own signals (see graph node_id)')
+        if quote and folded_words(quote.strip('"\'…. ')) not in folded_words(f"{found['title']} {found['body']}"):
+            raise ValueError('quote must be words copied from that message (a short line: their title, a signature, an introduction)')
+    if not role:
         db.execute('DELETE FROM person_roles WHERE identifier=?', (row['id'],))
+    elif current and current['role'].casefold() == role.casefold():  # confirmed by the owner, or read again by a review
+        db.execute('UPDATE person_roles SET source=?,checked_at=?,event_id=coalesce(?,event_id),quote=coalesce(?,quote),hints=? WHERE identifier=?',
+                   (source if source == 'owner' else current['source'], now, event_id, quote, json.dumps(json.loads(row['info']).get('hints', [])), row['id']))
+    else:
+        db.execute('INSERT OR REPLACE INTO person_roles(identifier,role,source,created_at,event_id,quote,hints,checked_at) VALUES(?,?,?,?,?,?,?,?)',
+                   (row['id'], role, source, now, event_id if source != 'owner' else None, quote if source != 'owner' else None,
+                    json.dumps(json.loads(row['info']).get('hints', [])), now))
+    if source == 'owner' and current and current['source'] != 'owner' and current['role'].casefold() != role.casefold():
+        db.execute('INSERT INTO role_corrections(identifier,name,old_role,new_role,created_at) VALUES(?,?,?,?,?)',
+                   (row['id'], row['name'], current['role'], role, now))
     return {'role': role or None}
+
+
+def folded_words(text):
+    return ' '.join(re.findall(r'\w+', unicodedata.normalize('NFKD', str(text or '')).encode('ascii', 'ignore').decode().casefold()))
+
+
+def relate(db, a, b, relation, source, now, event_id=None):
+    """Say how two people are related, read so that "<a> is <relation> <b>": "assistant of", "sister of",
+    "introduced by", "manager of". The owner's word stays; an empty relation removes it."""
+    a, b = str(a or ''), str(b or '')
+    found = {r['id'] for r in db.execute("SELECT id FROM graph_nodes WHERE kind='person' AND id IN (?,?)", (a, b))}
+    if a == b or found != {a, b}:
+        raise ValueError('related_to needs two different person node_ids from graph results')
+    relation = ' '.join(str(relation or '').split())
+    if len(relation) > 40 or (not relation and source != 'owner'):
+        raise ValueError('A relation reads "<node_id> is <relation> <related_to>", in a few words: "assistant of", "sister of", "introduced by"')
+    current = db.execute('SELECT source FROM graph_relations WHERE (a=? AND b=?) OR (a=? AND b=?)', (a, b, b, a)).fetchone()
+    if current and current['source'] == 'owner' and source != 'owner':
+        return {'kept': 'The owner set how they are related; it stays.'}
+    db.execute('DELETE FROM graph_relations WHERE (a=? AND b=?) OR (a=? AND b=?)', (a, b, b, a))
+    if relation:
+        db.execute('INSERT INTO graph_relations(a,b,relation,source,event_id,created_at) VALUES(?,?,?,?,?,?)', (a, b, relation, source, event_id, now))
+    return {'relation': relation or None}
+
+
+def corrections(db, limit=8):
+    """The owner's recent corrections of review roles, newest first, so later reviews learn from them."""
+    return [dict(r) for r in db.execute('SELECT name,old_role,new_role,created_at FROM role_corrections ORDER BY created_at DESC LIMIT ?', (limit,))]
+
+
+def corrections_lines(db, limit=8):
+    return '\n'.join(f"- {c['name']}: a review said \"{c['old_role']}\", the owner " + (f"made it \"{c['new_role']}\"" if c['new_role'] else 'removed it')
+                     for c in corrections(db, limit))
+
+
+def unconfirmed(db, limit=30):
+    """Roles a review set and the owner hasn't confirmed yet, closest first, each with the line it came from."""
+    rows = db.execute("SELECT r.identifier,r.role,r.quote,r.event_id,r.created_at,n.kind,n.name,n.strength FROM person_roles r "
+                      "JOIN graph_nodes n ON n.id=r.identifier WHERE r.source!='owner' ORDER BY n.kind='org',n.strength DESC LIMIT ?", (limit,)).fetchall()
+    return [{'id': r['identifier'], 'kind': r['kind'], 'name': r['name'], 'role': r['role'], 'quote': r['quote'], 'event_id': r['event_id'],
+             'set_at': r['created_at'][:10], 'closeness': closeness(r['strength']) if r['kind'] == 'person' else None} for r in rows]
+
+
+def stale_roles(db, now, limit=3, days=RECHECK_DAYS):
+    """A review's roles to read again: older than RECHECK_DAYS with contact since, with new hints since it
+    was set (now billed through Stripe, a new organisation), or saved without the line it came from. The
+    owner's own roles are never rechecked."""
+    current = parse_time(now)
+    out = []
+    for r in db.execute("SELECT r.*,n.name,n.info,n.last_at,n.strength FROM person_roles r JOIN graph_nodes n ON n.id=r.identifier "
+                        "WHERE r.source!='owner' ORDER BY n.strength DESC"):
+        checked = r['checked_at'] or r['created_at']
+        then = json.loads(r['hints']) if r['hints'] else None
+        new = sorted(set(json.loads(r['info']).get('hints', [])) - set(then)) if then is not None else []
+        old = (current - parse_time(checked)).days >= days and (r['last_at'] or '') > checked[:10]
+        if new or old or not r['quote']:
+            out.append({'id': r['identifier'], 'name': r['name'], 'role': r['role'], 'quote': r['quote'], 'set_at': checked[:10],
+                        'why': ('new since: ' + ', '.join(new)) if new else f'read {(current - parse_time(checked)).days} days ago, in touch since' if old
+                        else 'saved without the line it came from'})
+        if len(out) >= limit:
+            break
+    return out
 
 
 def rename(db, node_id, name, now):

@@ -404,6 +404,90 @@ class Graph(unittest.TestCase):
             lines = graph.context_lines(db, self.ids(['st1']))
         self.assertIn('- Pat (pat@client.com): CFO at Client Ltd; ', lines)
 
+    def test_roles_keep_their_evidence_the_owner_confirms_and_corrects_and_reviews_learn(self):
+        pat = mail(3, 'Pat Doe <pat@client.com>', 'sam@acme.com', title='Intro')
+        pat['body'] = 'Hi Sam,\nAs the CFO at Client Ltd I look after the renewal.\nPat'
+        kim = mail(4, 'Kim <kim@client.com>', 'sam@acme.com')
+        self.add(pat, mail(2, 'Sam <sam@acme.com>', 'Pat Doe <pat@client.com>', ('SENT',)), kim,
+                 mail(2, 'Sam <sam@acme.com>', 'Kim <kim@client.com>, Ann Assist <ann@client.com>', ('SENT',)),
+                 mail(5, 'Lee <lee@other.example>', 'sam@acme.com'), mail(4, 'Sam <sam@acme.com>', 'Lee <lee@other.example>', ('SENT',)))
+        self.build()
+        self.app.graph_build = self.build
+        pat_id, kim_id = self.ids([pat['source_id'], kim['source_id']])
+        with self.assertRaisesRegex(ValueError, 'words copied from that message'):
+            self.app.graph_action({'node_id': 'email:pat@client.com', 'role': 'CFO at Client Ltd', 'event_id': pat_id, 'quote': 'I am the CFO'})
+        with self.assertRaisesRegex(ValueError, 'one of their own signals'):
+            self.app.graph_action({'node_id': 'email:pat@client.com', 'role': 'CFO at Client Ltd', 'event_id': kim_id, 'quote': 'Hello'})
+        self.app.graph_action({'node_id': 'email:pat@client.com', 'role': 'CFO at Client Ltd', 'event_id': pat_id, 'quote': '"the CFO at  Client Ltd…"'})
+        found = self.app.graph_action({'node_id': 'email:pat@client.com'})
+        self.assertEqual((found['role'], found['role_by'], found['role_event_id']), ('CFO at Client Ltd', 'review', pat_id))
+        self.assertEqual(found['role_quote'], '"the CFO at Client Ltd…"')
+        # Who's who: a review's roles wait for the owner's ✓, with the line they came from.
+        self.assertEqual([(w['name'], w['role'], w['event_id']) for w in self.app.graph_action({})['whos_who']], [('Pat Doe', 'CFO at Client Ltd', pat_id)])
+        self.app.action('graph_role', {'node_id': 'email:pat@client.com', 'role': 'CFO at Client Ltd'}, owner_dashboard=True)
+        found = self.app.graph_action({'node_id': 'email:pat@client.com'})
+        self.assertEqual((found['role_by'], found['role_event_id']), ('owner', pat_id))  # confirmed: the owner's word, evidence kept
+        self.assertEqual(self.app.graph_action({})['whos_who'], [])
+        # A correction is kept, and later reviews learn from it.
+        self.app.graph_action({'node_id': 'email:lee@other.example', 'role': 'intern'})
+        self.app.action('graph_role', {'node_id': 'email:lee@other.example', 'role': 'head of finance'}, owner_dashboard=True)
+        with self.store.connect() as db:
+            self.assertEqual(graph.corrections_lines(db), '- Lee: a review said "intern", the owner made it "head of finance"')
+            db.execute("UPDATE graph_nodes SET strength=1 WHERE kind IN ('person','org')")
+        asked = self.store.role_text('run1', limit=10)
+        self.assertIn('means by a role:\n- Lee: a review said "intern"', asked)
+        self.assertIn('Organisations with no role yet', asked)
+        self.assertIn('node_id org:client.com', asked)
+        # Organisations get a role, and their people carry it as context.
+        self.app.graph_action({'node_id': 'org:client.com', 'role': 'customer', 'event_id': pat_id, 'quote': 'look after the renewal'})
+        self.assertEqual(self.node('org:client.com')['role'], 'customer')
+        with self.store.connect() as db:
+            self.assertIn('- Kim (kim@client.com): no role yet; at client.com (customer); ', graph.context_lines(db, [kim_id]))
+        # How two people are related, as a link both ways; the owner's word stays and the owner can remove it.
+        self.app.graph_action({'node_id': 'email:ann@client.com', 'related_to': 'email:kim@client.com', 'relation': 'assistant of'})
+        self.assertEqual([(r['a_name'], r['relation'], r['b_name']) for r in self.node('email:kim@client.com')['relations']], [('Ann Assist', 'assistant of', 'Kim')])
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT kind FROM graph_links WHERE a='email:ann@client.com' AND b='email:kim@client.com'").fetchone()[0], 'relation')
+            self.assertIn('Ann Assist is assistant of Kim', graph.context_lines(db, [kim_id]))
+        self.app.action('graph_relation', {'node_id': 'email:ann@client.com', 'related_to': 'email:kim@client.com', 'relation': 'manager of'}, owner_dashboard=True)
+        self.app.graph_action({'node_id': 'email:kim@client.com', 'related_to': 'email:ann@client.com', 'relation': 'boss of'})
+        self.assertEqual(self.node('email:kim@client.com')['relations'][0]['relation'], 'manager of')
+        self.app.action('graph_relation', {'node_id': 'email:kim@client.com', 'related_to': 'email:ann@client.com', 'relation': ''}, owner_dashboard=True)
+        self.assertEqual(self.node('email:kim@client.com')['relations'], [])
+        # A review's role is read again when it's old and there was contact since, or when something new shows up.
+        self.app.graph_action({'node_id': 'email:kim@client.com', 'role': 'trial user'})
+        with self.store.connect() as db:
+            self.assertEqual(graph.stale_roles(db, NOW.isoformat())[0]['why'], 'saved without the line it came from')
+        self.app.graph_action({'node_id': 'email:kim@client.com', 'role': 'trial user', 'event_id': kim_id, 'quote': 'Hello'})
+        with self.store.connect() as db:
+            self.assertEqual(graph.stale_roles(db, NOW.isoformat()), [])
+            db.execute("UPDATE person_roles SET checked_at=? WHERE identifier='email:kim@client.com'", (at(120),))
+            self.assertEqual([(r['name'], r['why']) for r in graph.stale_roles(db, NOW.isoformat())], [('Kim', 'read 120 days ago, in touch since')])
+            db.execute("UPDATE person_roles SET checked_at=?,hints='[]' WHERE identifier='email:kim@client.com'", (at(1),))
+            db.execute("UPDATE graph_nodes SET info=json_set(info,'$.hints',json('[\"billed through Stripe as Client Ltd\"]')) WHERE id='email:kim@client.com'")
+            self.assertEqual(graph.stale_roles(db, NOW.isoformat())[0]['why'], 'new since: billed through Stripe as Client Ltd')
+            db.execute('DELETE FROM graph_role_asks')
+        self.assertIn('may be out of date', self.store.role_text('run2'))
+        # Cards: who they're about, ranked closest (and paying customers) first; nobody unnamed for long.
+        with self.store.connect() as db:
+            db.execute("UPDATE graph_nodes SET info=json_set(info,'$.paying',json('true')) WHERE id='org:client.com'")
+            people, weight = graph.card_people(db, [kim_id])
+        self.assertEqual((people[0]['name'], people[0]['role'], people[0]['paying']), ('Kim', 'trial user', True))
+        self.assertGreater(weight, 2)  # closeness, plus a paying customer
+        self.assertEqual(self.store.no_role_yet([kim_id]), [])
+        with self.store.connect() as db:
+            db.execute("DELETE FROM person_roles WHERE identifier='email:kim@client.com'")
+        self.build()
+        self.assertEqual(self.store.no_role_yet([kim_id]), [{'node_id': 'email:kim@client.com', 'name': 'Kim'}])
+        card = self.store.suggest('k', 'Answer Kim', 'Kim asked.', [kim_id])['id']
+        lines = self.app.graph_lines(card)
+        self.assertIn('a cofounder, a sister or a friend reads differently', lines)
+        self.assertIn('No role yet for Kim (email:kim@client.com)', lines)
+        with self.store.connect() as db:
+            db.execute('DELETE FROM graph_role_asks')
+            db.execute("UPDATE graph_nodes SET strength=0.2 WHERE id='email:kim@client.com'")
+        self.assertIn('- Kim (node_id email:kim@client.com; faint; ', self.store.role_text('run3'))  # on an open card: asked though faint
+
     def test_what_is_open_between_you_shows_on_the_person(self):
         ask = mail(3, 'Ann Example <ann@client.com>', 'sam@acme.com', thread='deal')
         reply = mail(2, 'Sam <sam@acme.com>', 'Ann Example <ann@client.com>', ('SENT',), thread='deal')

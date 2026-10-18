@@ -443,7 +443,7 @@ def save_draft(config, args, path, run):
 
 def follow_roles(config, run_id):
     """Follow a roles turn and list what it named; it runs in the service either way."""
-    print('Now your agent reads the first and latest messages with your closest people and notes what each is to you.')
+    print('Now your agent reads the first and latest messages with your closest people and notes what each, and their organisation, is to you.')
     deadline, tty = time.monotonic() + assistant.PROFILE_SECONDS + 1500, sys.stdout.isatty()
     try:
         while True:
@@ -466,7 +466,7 @@ def follow_roles(config, run_id):
     if run['status'] != 'ok':
         raise CliError(f"Naming roles didn't finish ({run.get('error') or run['status']}). See openclaw logs, then run assistant roles --again.")
     if run.get('roles'):
-        print('What your closest people are to you (change any in the dashboard\'s Graph tab):')
+        print('What your closest people and organisations are to you (confirm or change them in Who\'s who, in the dashboard\'s Graph tab):')
         print('\n'.join(f"  - {r['name']}: {r['role']}" for r in run['roles']))
     else:
         print('Their messages didn\'t make it clear for anyone yet. Reviews keep asking as more comes in.')
@@ -573,7 +573,7 @@ def parser():
     source.add_argument('--body')
     source.add_argument('--file', help='file with the text, or - for stdin')
     add('preview', f'First run: one review of the last {assistant.PREVIEW_DAYS} days, shown here and on the dashboard; nothing is sent', cmd_preview)
-    c = add('roles', 'Note what your closest people are to you, from your messages with them (also part of profile)', cmd_roles)
+    c = add('roles', 'Note what your closest people and organisations are to you, from your messages with them (also part of profile)', cmd_roles)
     c.add_argument('--again', action='store_true', help='run again even if it just ran')
     c = add('profile', 'Draft how you write and what matters to you from your own messages, for USER.md (you see it first), then note what your closest people are to you', cmd_profile)
     c.add_argument('--again', action='store_true', help='make a new draft even if one was just made')
