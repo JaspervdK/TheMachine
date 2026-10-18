@@ -202,7 +202,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close'}
+OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -1660,7 +1660,7 @@ class Store:
             db.execute('CREATE INDEX IF NOT EXISTS events_pending_account ON events(account_id,ingested_at,id) WHERE analyzed_version<version')
             db.execute('CREATE INDEX IF NOT EXISTS analyses_owner ON analyses(owner_run,owner_session)')
             db.execute(embeddings.SCHEMA)  # after the monotonic-ID migration, which rebuilds events
-            db.executescript(graph.SCHEMA)
+            graph.ensure(db)
             if 'project' not in {r[1] for r in db.execute('PRAGMA table_info(suggestions)')}:
                 db.execute('ALTER TABLE suggestions ADD COLUMN project TEXT')
 
@@ -2239,11 +2239,41 @@ class Store:
                 found[row['id']] = card
         return found
 
+    def project_hints(self, event_ids):
+        """The projects a signal is in: named ones, and probable ones the graph guessed from meaning and
+        people, so the review can confirm a guess in finish_analysis projects."""
+        try:
+            with self.connect() as db:
+                found = graph.projects_for(db, event_ids)
+        except sqlite3.Error:
+            return {}
+        out = {}
+        for event_id, items in found.items():
+            named, guessed = [n for n, p in items if not p], [n for n, p in items if p]
+            out[event_id] = {**({'projects': named} if named else {}), **({'probably_project': guessed[0]} if guessed and not named else {})}
+        return out
+
+    def unnamed_text(self, run_id, limit=2):
+        """Up to two groups of threads that read alike and share people but have no project, each offered
+        to one review (again only once it has doubled)."""
+        lines = []
+        with self.connect() as db:
+            rows = db.execute('SELECT u.* FROM graph_unnamed u LEFT JOIN graph_offers o ON o.key=u.key WHERE o.key IS NULL OR u.size>=2*o.size '
+                              'ORDER BY u.last_at DESC LIMIT ?', (limit,)).fetchall()
+            for r in rows:
+                people, titles, ids = json.loads(r['people']), json.loads(r['titles']), json.loads(r['event_ids'])
+                lines.append(f"- {r['size']} signals" + (f" with {', '.join(people)}" if people else '') + ': ' + ' / '.join(f'"{t}"' for t in titles)
+                             + f" (event_ids {', '.join(map(str, ids[:12]))}{', …' if len(ids) > 12 else ''})")
+                db.execute('INSERT OR REPLACE INTO graph_offers(key,size,run_id,offered_at) VALUES(?,?,?,?)', (r['key'], r['size'], run_id, now()))
+        return '\n'.join(lines)
+
     def review_claim(self, rows):
         """Page the claim once, so every later page read returns the same signals."""
         context = self.conversation_context(rows)
         replies = self.card_replies(rows)
-        pages = review_pages([{**review_view(r, earlier=context.get(r['id'])), **({'answers_your_card': replies[r['id']]} if r['id'] in replies else {})} for r in rows])
+        hints = self.project_hints([r['id'] for r in rows])
+        pages = review_pages([{**review_view(r, earlier=context.get(r['id'])), **({'answers_your_card': replies[r['id']]} if r['id'] in replies else {}),
+                               **hints.get(r['id'], {})} for r in rows])
         page_of = {view['id']: n for n, page in enumerate(pages) for view in page}
         return [{'id': r['id'], 'version': r['version'], 'page': page_of[r['id']]} for r in rows], pages
 
@@ -2269,7 +2299,9 @@ class Store:
         context = self.conversation_context([rows[i] for i in ids if i in rows])
         # A signal may grow after the original page layout was committed.
         replies = self.card_replies([rows[i] for i in ids if i in rows])
-        views = [{**review_view(rows[i], earlier=context.get(i)), **({'answers_your_card': replies[i]} if i in replies else {})} for i in ids if i in rows]
+        hints = self.project_hints([i for i in ids if i in rows])
+        views = [{**review_view(rows[i], earlier=context.get(i)), **({'answers_your_card': replies[i]} if i in replies else {}), **hints.get(i, {})}
+                 for i in ids if i in rows]
         row_offset = int(row_offset)
         if row_offset < 0 or row_offset > len(views):
             raise ValueError('Use a valid row_offset')
@@ -5070,7 +5102,8 @@ def recap_graph_lines(store):
         if names:
             out.append(f"• {state[0].upper() + state[1:]}: {', '.join(names)}")
     if view['quiet']:
-        out.append('• Gone quiet: ' + ', '.join(p['name'] + (' (usually daily)' if round(p['usual_gap_days']) <= 1 else f" (usually every {round(p['usual_gap_days'])} days)")
+        out.append('• Gone quiet: ' + ', '.join(p['name'] + ' (' + (p['role'] + ', ' if p.get('role') else '')
+                                               + ('usually daily)' if round(p['usual_gap_days']) <= 1 else f"usually every {round(p['usual_gap_days'])} days)")
                                                for p in view['quiet']))
     if view['new']:
         out.append(f"• New this week: {', '.join(p['name'] for p in view['new'][:3])}")
@@ -5198,12 +5231,12 @@ Goal: draft the lines of the owner's USER.md that their own messages show, so re
 Do not send messages, change files or do anything else. End with exactly NO_REPLY.'''
 
 
-def review_prompt(run_id, accounts, preferences='', facts='', slipped='', promises=''):
+def review_prompt(run_id, accounts, preferences='', facts='', slipped='', promises='', unnamed=''):
     return f'''This is a signal review started by the personal-assistant service (review run {run_id}). It is not a chat with the owner and not a preparation task.
 The assistant instructions (tools/personal-assistant/AGENTS.md) and the owner's profile (USER.md) are included in this turn's context; follow the "Reviewing signals" section. Don't re-read those files.
 With the assistant_signals tool: call status, then ONE begin_analysis with account_ids {json.dumps(accounts)} and limit 120. The reply is paged: read every page with analysis_page before finishing, including next_row_offset continuations on the same page. Where body_clipped matters, read the rest with events (the account, event_ids and body_offset). Events replies contain events and remaining_event_ids; read the remaining IDs with the same accounts. Follow body_next_offset to the end of long bodies.
 Save only genuinely useful, distinct suggestions with suggest; the service delivers them. Then finish_analysis with reviewed_ids. Defer only what you expect to judge better later.
-Name the ongoing work: finish_analysis projects ({{"Project name": [event_ids from this batch]}}) for signals that clearly belong to a deal, hire, launch, renovation or other piece of work, and project on a suggest that belongs to one. Reuse begin_analysis's projects names when they fit. graph tells who someone is to the owner (closeness, rhythm, gone quiet, their projects).
+Name the ongoing work: finish_analysis projects ({{"Project name": [event_ids from this batch]}}) for signals that clearly belong to a deal, hire, launch, renovation or other piece of work, and project on a suggest that belongs to one. Reuse begin_analysis's projects names when they fit; a signal's probably_project is the graph's guess from meaning and people, so add it to projects when it's right. graph tells who someone is to the owner (role, closeness, rhythm, gone quiet, their projects, what's open between them); when a message shows what someone is to them (their title, "our accountant", an introduction) and graph has no role or a wrong one, set it with graph node_id and role.
 Before suggesting, check it isn't already handled: search related signals (same thread, sender or chat) for a later reply from the owner or from a colleague (e.g. a teammate on the owner's own email domain answering the thread), or a confirmation (signed, paid, booked, resolved). If so, don't suggest it. When a signal in this batch shows that an OPEN suggestion (pending, prepared, accepted or snoozed in status) is now done, call looks_handled with suggestion_id, a short plain reason and the event_ids that show it; the owner still closes it themselves. For anything tied to a date, check the calendars for that date (days off, travel, existing plans).
 When a note the owner wrote on a suggestion (decisions with source telegram or dashboard) states something that stays true beyond that card, save it once with remember_fact (text, decision_id); skip one-off wording requests.
 Promises: when a message in this batch commits the owner to doing something for someone, or someone to doing something for the owner, record it with promise (direction, event_id, who, what, due when a date was said). Most are silent: a "sure", "ok" or 👍 to a request (what comes from the request in earlier_in_conversation), "I'll check", a yes to an invitation, or something the owner asked of someone that they took on. It is not a card; the service checks it when due. When a signal shows an open promise below kept, cancelled or moved, update it with promise and its id.
@@ -5214,6 +5247,9 @@ Facts the owner told you earlier (true unless newer evidence says otherwise):
 
 Open promises (the owner's and those made to them):
 {promises}''' if promises else '') + (f'''
+
+Possibly one piece of work nobody named: threads that read alike and share people. If one is a deal, hire, launch, case or other ongoing work, name it with graph (project and its event_ids); if not, skip it without comment.
+{unnamed}''' if unnamed else '') + (f'''
 
 Possibly slipped. Each is shown once. Read it with events (its account and event_ids) and search the thread, the person and other sources for a later answer, a call or a Slack message. Suggest a follow-up only when it still matters and nothing shows it handled: for the owner's own email, offer a short nudge (prepare_ahead when they'd clearly want it); for a question to them, offer the reply. Use its event as evidence. Skip the rest without comment.
 {slipped}''' if slipped else '') + (f'''
@@ -5513,6 +5549,10 @@ class App:
             return {'subscribed': True}
         if name == 'promise':
             return self.store.promise(args, self.config.get('digest_at', '08:30'))
+        if name == 'graph_role':
+            if not owner_dashboard:
+                raise ValueError('Only the owner sets a role here, on the dashboard; reviews use graph with node_id and role')
+            return self.graph_action({'node_id': args.get('node_id'), 'role': args.get('role') or ''}, source='owner')
         if name == 'promise_close':
             if not owner_dashboard or args.get('status') not in ('kept', 'dropped'):
                 raise ValueError('Only the owner closes a promise, on the dashboard')
@@ -6236,7 +6276,8 @@ class App:
         if request['action'] == 'start':
             self.store.note_rule_files(RULE_FILES)
             request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text(),
-                                               self.store.slipped(run['run_id']), self.store.promises_text())
+                                               self.store.slipped(run['run_id']), self.store.promises_text(),
+                                               self.store.unnamed_text(run['run_id']))
         receipt = runner(request)
         result = receipt.get('status', 'unavailable')
         with self.store.connect() as db:
@@ -6411,8 +6452,8 @@ class App:
         rows = self.store.events([a['id'] for a in self.config['accounts']], event_ids=list(event_ids)) if event_ids else []
         return [f"{r['id']} ({r['account_id']}) {source_line([r])[8:]} · {clamp(' '.join(r['title'].split()), 100)}" for r in sorted(rows, key=lambda r: r['occurred_at'], reverse=True)]
 
-    def graph_action(self, args):
-        """People and projects for the agent: look up, explore around, label and merge."""
+    def graph_action(self, args, source='agent'):
+        """People and projects for the agent: look up, explore around, label, merge and say who someone is."""
         changed = False
         with self.store.connect() as db:
             if args.get('merge') or args.get('different'):
@@ -6431,6 +6472,11 @@ class App:
                 if not db.execute('UPDATE projects SET closed_at=? WHERE name=? COLLATE NOCASE AND closed_at IS NULL', (now(), str(args['close_project']).strip())).rowcount:
                     raise ValueError('No open project by that name')
                 changed = True
+            if 'role' in args:
+                if not args.get('node_id'):
+                    raise ValueError('role goes with the person node_id')
+                said = graph.set_role(db, args['node_id'], args['role'], source, now())
+                changed = changed or 'kept' not in said
         if changed:
             self.graph_build()
         limit = min(int(args.get('limit') or 12), 30)
@@ -6440,7 +6486,9 @@ class App:
                 if not found:
                     raise ValueError('Unknown node_id; find people and projects with query')
                 found['around'] = graph.spread(db, [found['id']], limit)
-                found['recent'] = self.graph_event_lines(found.pop('event_ids'))
+                guessed = set(found['probable_ids'])
+                found['recent'] = [line + (' (probably part of it)' if int(line.split(' ', 1)[0]) in guessed else '')
+                                   for line in self.graph_event_lines(found.pop('event_ids'))]
                 return found
             if args.get('query'):
                 hits = graph.find(db, args['query'], limit)
@@ -6456,7 +6504,7 @@ class App:
         with self.store.connect() as db:
             row = db.execute('SELECT event_ids,project FROM suggestions WHERE id=?', (suggestion_id,)).fetchone()
             ids = json.loads(row['event_ids'] or '[]') if row else []
-            text = graph.context_lines(db, ids) if ids else ''
+            text = graph.context_lines(db, ids, skip_card=suggestion_id) if ids else ''
         if not text:
             return ''
         return ('\n\nPeople and projects (from all signals, closeness fades with time; look up anyone with assistant_signals graph '
@@ -6571,7 +6619,8 @@ class App:
                             found = app.graph_action({'node_id': node, 'limit': 10, 'events': 40})
                             rows = app.store.events([a['id'] for a in app.config['accounts']], event_ids=[int(line.split(' ', 1)[0]) for line in found['recent']])
                             found['recent'] = [{'id': r['id'], 'account_id': r['account_id'], 'kind': r['kind'], 'occurred_at': r['occurred_at'], 'title': r['title'][:200],
-                                                'source_url': r['metadata'].get('source_url')} for r in sorted(rows, key=lambda r: r['occurred_at'], reverse=True)]
+                                                'source_url': r['metadata'].get('source_url'), 'probable': r['id'] in found['probable_ids']}
+                                               for r in sorted(rows, key=lambda r: r['occurred_at'], reverse=True)]
                             self.output(200, found)
                         else:
                             self.output(200, app.graph_action({'limit': 15}))
@@ -6650,7 +6699,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','push_subscribe','push_unsubscribe')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','push_subscribe','push_unsubscribe')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

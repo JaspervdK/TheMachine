@@ -11,9 +11,13 @@ and Mark done strengthen the people on the evidence, Not relevant weakens them.
 People are matched by identifiers only (email address, phone, Slack user, LinkedIn or X
 conversation, GitHub login), joined when Slack reports the user's email, when the same full name
 appears on two different channels, or when the owner or agent says so (merges). Projects are named
-by the review agent and the owner, and spread to the rest of their threads. Going quiet compares
-the silence with that person's own usual gap. Messages are never deleted; links that faded away
-are just not stored."""
+by the review agent and the owner, and spread to the rest of their threads; a signal that reads like
+a labelled one and shares a person with it is probably part of it too (weaker, until a review
+confirms). Threads that read alike and share people, but nobody named, are offered to a review as
+possibly one piece of work. Each person gets a role (what they are to the owner): said by the owner
+or a review, else seen from the sources (teammate, customer, CRM contact, family). Going quiet
+compares the silence with that person's own usual gap. Messages are never deleted; links that faded
+away are just not stored."""
 from __future__ import annotations
 
 import collections
@@ -21,7 +25,10 @@ import datetime as dt
 import email.utils
 import json
 import math
+import operator
 import re
+import sqlite3
+import struct
 import unicodedata
 
 SCHEMA = '''
@@ -34,9 +41,12 @@ CREATE TABLE IF NOT EXISTS graph_nodes(id TEXT PRIMARY KEY,kind TEXT NOT NULL,na
   last_at TEXT,signals INTEGER NOT NULL,gap_days REAL,quiet INTEGER NOT NULL DEFAULT 0,trend REAL,info TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_links(a TEXT NOT NULL,b TEXT NOT NULL,kind TEXT NOT NULL,strength REAL NOT NULL,last_at TEXT,PRIMARY KEY(a,b));
 CREATE INDEX IF NOT EXISTS graph_links_b ON graph_links(b);
-CREATE TABLE IF NOT EXISTS graph_events(node_id TEXT NOT NULL,event_id INTEGER NOT NULL,at TEXT NOT NULL,PRIMARY KEY(node_id,event_id));
+CREATE TABLE IF NOT EXISTS graph_events(node_id TEXT NOT NULL,event_id INTEGER NOT NULL,at TEXT NOT NULL,probable INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,event_id));
 CREATE INDEX IF NOT EXISTS graph_events_event ON graph_events(event_id);
 CREATE TABLE IF NOT EXISTS graph_state(id INTEGER PRIMARY KEY CHECK(id=1),built_at TEXT NOT NULL,signals INTEGER NOT NULL,took_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS person_roles(identifier TEXT PRIMARY KEY,role TEXT NOT NULL,source TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS graph_unnamed(key INTEGER PRIMARY KEY,event_ids TEXT NOT NULL,people TEXT NOT NULL,titles TEXT NOT NULL,size INTEGER NOT NULL,last_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS graph_offers(key INTEGER PRIMARY KEY,size INTEGER NOT NULL,run_id TEXT,offered_at TEXT NOT NULL);
 '''
 HALF_LIFE = {'person': 60, 'pair': 45, 'project_person': 45, 'project': 21}
 DAY_CAP = 1.0           # one day of contact, however many messages
@@ -54,6 +64,20 @@ ROLE = re.compile(r'^(?:info|support|hello|hi|team|sales|billing|admin|office|co
 GENERIC_NAMES = {'you', 'linkedin member', 'x conversation', 'linkedin conversation', 'unknown'}
 WEIGHTS = {'owner': 0.6, 'them': 0.3, 'met': 0.5}
 DECISION_WEIGHT = {'accept': 1.0, 'send': 1.0, 'complete': 1.0, 'other': 0.5, 'reject': -0.5}
+# Cosine between local embeddings (see embeddings.py). Meaning alone groups by genre (every partnership
+# email reads alike), so a probable link also needs a shared person; tried on live data, 2026-10-18.
+PROBABLE = 0.72
+UNNAMED = 0.75
+UNNAMED_DAYS = 45
+UNNAMED_KINDS = {'gmail.message', 'calendar.event', 'salesflare.email', 'salesflare.meeting', 'intercom.conversation', 'github.notification'}
+OPEN_CARD = ('pending', 'accepted', 'prepared', 'instructions', 'snoozed')
+
+
+def ensure(db):
+    """Create the graph tables, and add columns that came later."""
+    db.executescript(SCHEMA)
+    if 'probable' not in {r[1] for r in db.execute('PRAGMA table_info(graph_events)')}:
+        db.execute('ALTER TABLE graph_events ADD COLUMN probable INTEGER NOT NULL DEFAULT 0')
 
 
 class Owner:
@@ -195,6 +219,9 @@ def touches(kind, m, owner, wrote_to):
     if kind == 'intercom.conversation':
         found = addresses(m.get('from'))
         return [('email:' + found[0][1], None, 0.05, 'seen')] if found and not owner.mine(found[0][1]) and not bulk(found[0][1]) else []
+    if kind == 'stripe.event':
+        found = addresses(m.get('from'))
+        return [('email:' + found[0][1], None, 0.05, 'seen')] if found and not owner.mine(found[0][1]) and not bulk(found[0][1]) else []
     if kind in ('salesflare.email', 'salesflare.meeting'):
         contacts = [c for c in m.get('contacts') or () if isinstance(c, dict) and '@' in str(c.get('email') or '')][:5]
         met = kind == 'salesflare.meeting' and str(m.get('host') or '').lower() in owner.emails
@@ -216,6 +243,8 @@ def thread_key(kind, m):
         return kind + ':' + str(m['conversation_id']), False
     if kind == 'x.mention' and m.get('conversation_id'):
         return 'xc:' + str(m['conversation_id']), True
+    if kind == 'salesflare.email' and m.get('thread_id'):
+        return 'sf:' + str(m['thread_id']), True
     if kind == 'intercom.conversation' and m.get('conversation_id'):
         return 'ic:' + str(m['conversation_id']), True
     if kind == 'github.notification' and m.get('repo') and m.get('number'):
@@ -264,6 +293,112 @@ def shown_id(identifier, x_names):
             'x': '@' + x_names[identifier] if x_names.get(identifier) else 'X', 'gh': 'GitHub ' + value}.get(space, identifier)
 
 
+def load_vectors(db, event_ids):
+    """Unit vectors by event, when embeddings are on; empty otherwise."""
+    try:
+        rows = db.execute('SELECT event_id,vector FROM event_vectors').fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r[0]: struct.unpack('<%df' % (len(r[1]) // 4), r[1]) for r in rows if r[0] in event_ids}
+
+
+def cosine(a, b):
+    return sum(map(operator.mul, a, b))
+
+
+def probable_projects(labelled, event_people, vectors, times, current, open_projects, kinds=None):
+    """Signals that read like a labelled one (cosine >= PROBABLE) and share a person with it:
+    {event_id: {project ids}}. Only for open projects and signals no label reached, and not for
+    meetings: a bare calendar title reads like every other one with the same people."""
+    by_person = collections.defaultdict(list)
+    for event_id, ids in labelled.items():
+        ids = ids & open_projects
+        if ids and event_id in vectors:
+            for node in event_people.get(event_id, ()):
+                by_person[node].append((event_id, ids))
+    found = {}
+    for event_id, people in event_people.items():
+        if event_id in labelled or event_id not in vectors or times.get(event_id, current) > current or (kinds or {}).get(event_id) == 'calendar.event':
+            continue
+        vector, best = vectors[event_id], set()
+        for node in people:
+            for other, ids in by_person.get(node, ()):
+                if not ids <= best and cosine(vector, vectors[other]) >= PROBABLE:
+                    best |= ids
+        if best:
+            found[event_id] = best
+    return found
+
+
+def unnamed_work(per_event, event_people, owner_events, labelled, vectors, current):
+    """Threads from the last weeks that read alike and share a person, with no project: possibly one
+    piece of work nobody named. [(event ids, people by weight, last time)]. Chats are left out (they
+    read alike per person, whatever the topic), and so are groups of only meetings (a calendar reads
+    alike too); the owner must have written or met in at least one."""
+    since = current - dt.timedelta(days=UNNAMED_DAYS)
+    threads = collections.defaultdict(list)
+    for event_id, (kind, at, account_id, m, _) in per_event.items():
+        if kind in UNNAMED_KINDS and since <= at <= current and event_id not in labelled and event_id in vectors:
+            key, exact = thread_key(kind, m)
+            threads[(account_id, key) if key and exact else ('event', event_id)].append(event_id)
+    units = []
+    for key, ids in threads.items():
+        total = [sum(values) for values in zip(*(vectors[e] for e in ids))]
+        size = math.sqrt(sum(v * v for v in total)) or 1.0
+        people = {p for e in ids for p in event_people.get(e, ())}
+        units.append({'ids': ids, 'vector': [v / size for v in total], 'people': people,
+                      'meeting': all(per_event[e][0] == 'calendar.event' for e in ids), 'mine': any(e in owner_events for e in ids)})
+    by_person = collections.defaultdict(list)
+    for index, unit in enumerate(units):
+        for node in unit['people']:
+            by_person[node].append(index)
+    union = Union()
+    compared = set()
+    for indexes in by_person.values():
+        if len(indexes) > 150:
+            continue  # someone on everything says nothing about which work
+        for i, a in enumerate(indexes):
+            for b in indexes[i + 1:]:
+                if (a, b) not in compared:
+                    compared.add((a, b))
+                    if cosine(units[a]['vector'], units[b]['vector']) >= UNNAMED:
+                        union.join(str(a), str(b))
+    groups = collections.defaultdict(list)
+    for index in range(len(units)):
+        groups[union.find(str(index))].append(units[index])
+    out = []
+    for members in groups.values():
+        if len(members) < 3 or sum(not u['meeting'] for u in members) < 2 or not any(u['mine'] for u in members):
+            continue
+        ids = sorted(e for u in members for e in u['ids'])
+        weight = collections.Counter(p for e in ids for p in event_people.get(e, ()))
+        out.append((ids, [p for p, _ in weight.most_common()], max(per_event[e][1] for e in ids)))
+    return sorted(out, key=lambda g: g[2], reverse=True)
+
+
+def role_for(group, name, colleague, said, seen_as, surnames):
+    """What someone is to the owner: (role, 'said' | 'seen'). Said by the owner or a review wins;
+    then what the sources show."""
+    for identifier in group:
+        if said.get(identifier):
+            return said[identifier], 'said'
+    if colleague or any(i.startswith('slack:') for i in group):
+        return 'teammate', 'seen'
+    seen = {}
+    for identifier in group:
+        seen.update(seen_as.get(identifier, {}))
+    if seen.get('customer'):
+        return 'customer', 'seen'
+    full = plain_name(name)
+    if full and surnames & set(full.split()[1:]):
+        return 'family', 'seen'
+    if 'crm' in seen:
+        return ('in the CRM, ' + seen['crm']) if seen['crm'] else 'in the CRM', 'seen'
+    if seen.get('support'):
+        return 'wrote to support', 'seen'
+    return None, None
+
+
 def build(db, config, now):
     """Recompute graph_nodes, graph_links and graph_events. Returns a short summary."""
     started = dt.datetime.now(dt.timezone.utc)
@@ -287,7 +422,9 @@ def build(db, config, now):
     # Who: identifiers per signal, joined into people.
     seen_message_ids = set()
     per_event, names, x_names = {}, collections.defaultdict(collections.Counter), {}
-    crm_names = {}
+    crm_names, paying_names = {}, {}
+    seen_as = collections.defaultdict(dict)  # identifier -> {'customer': True, 'crm': account name, 'support': True}
+    owner_events = set()
     for event_id, account_id, kind, at, m in signals:
         if kind == 'gmail.message' and m.get('message-id'):
             if m['message-id'] in seen_message_ids:
@@ -296,10 +433,22 @@ def build(db, config, now):
         crm = m.get('crm_account') if isinstance(m.get('crm_account'), dict) else None
         if crm and crm.get('domain') and crm.get('name'):
             crm_names[str(crm['domain']).lower()] = str(crm['name'])
+        if kind in ('salesflare.email', 'salesflare.meeting'):
+            for c in m.get('contacts') or ():
+                if isinstance(c, dict) and '@' in str(c.get('email') or ''):
+                    seen_as['email:' + str(c['email']).lower()]['crm'] = str((crm or {}).get('name') or '')
+        elif kind in ('stripe.event', 'intercom.conversation'):
+            for _, addr in addresses(m.get('from'))[:1]:
+                seen_as['email:' + addr]['customer' if kind == 'stripe.event' else 'support'] = True
+                domain = addr.rsplit('@', 1)[1]
+                if kind == 'stripe.event' and m.get('customer_name') and domain not in FREEMAIL:
+                    paying_names.setdefault(domain, str(m['customer_name']))
         found = touches(kind, m, owner, wrote_to)
         if not found:
             continue
         per_event[event_id] = (kind, at, account_id, m, found)
+        if any(role in ('owner', 'met') for _, _, _, role in found):
+            owner_events.add(event_id)
         for identifier, name, _, _ in found:
             if name and str(name).strip() and '@' not in str(name) and str(name).strip().casefold() not in GENERIC_NAMES:
                 names[identifier][re.sub(r'\s*\(@[^)]*\)\s*$', '', str(name)).strip()] += 1
@@ -394,22 +543,27 @@ def build(db, config, now):
                 if exact or abs((at - tagged_at).total_seconds()) <= 2 * 86400:
                     spread.setdefault(event_id, set()).update(ids)
     times = {event_id: at for event_id, _, _, at, _ in signals}
+    vectors = load_vectors(db, set(per_event))
+    probable = probable_projects(spread, event_people, vectors, times, current, {pid for pid, p in projects.items() if not p['closed_at']},
+                                 {e: v[0] for e, v in per_event.items()})
     heat_day = collections.defaultdict(float)
     project_events = collections.defaultdict(list)
     project_people = collections.defaultdict(float)
     project_people_last = {}
-    for event_id, ids in spread.items():
+    for event_id, ids, guess in [(e, ids, 0) for e, ids in spread.items()] + [(e, ids, 1) for e, ids in probable.items()]:
         at = times.get(event_id)
         if at is None:
             continue
         for pid in ids:
-            project_events[pid].append((at, event_id))
+            project_events[pid].append((at, event_id, guess))
             if at <= current:
-                heat_day[(pid, at.date())] += 0.2
+                # A probable one counts half until a review confirms it.
+                heat_day[(pid, at.date())] += 0.1 if guess else 0.2
                 for node in event_people.get(event_id, ()):
                     key = (node, pid)
-                    project_people[key] += fade(0.3, age(at.date()), HALF_LIFE['project_person'])
+                    project_people[key] += fade(0.15 if guess else 0.3, age(at.date()), HALF_LIFE['project_person'])
                     project_people_last[key] = max(project_people_last.get(key, at), at)
+    unnamed = unnamed_work(per_event, event_people, owner_events, set(spread) | set(probable), vectors, current)
 
     # The owner's decisions on cards: once per card, for the people it was directly about.
     decided = collections.defaultdict(float)
@@ -449,6 +603,8 @@ def build(db, config, now):
 
     # Write.
     nodes, links, members = [], [], collections.defaultdict(list)
+    said = {r['identifier']: r['role'] for r in db.execute('SELECT identifier,role FROM person_roles')}
+    surnames = {n.split()[-1] for n in owner.names if len(n.split()) >= 2}
     for node, value in strength.items():
         if value < FLOOR:
             continue
@@ -467,16 +623,18 @@ def build(db, config, now):
         domains = sorted({i.split('@', 1)[1] for i in group if i.startswith('email:')} - FREEMAIL - owner.domains)
         if domains:
             members[domains[0]].append((node, value))
+        colleague = any(i.startswith('email:') and i.rsplit('@', 1)[1] in owner.domains for i in group)
+        role, role_by = role_for(group, name, colleague, said, seen_as, surnames)
         info = {'ids': sorted({shown_id(i, x_names) for i in group}), 'org': ('org:' + domains[0]) if domains else None,
                 'wrote': len(roles[node]['owner']), 'heard': len(roles[node]['them']), 'met': len(roles[node]['met']),
                 'accounts': sorted(accounts[node]), 'next_meeting': next_meeting[node].isoformat() if node in next_meeting else None,
-                'colleague': any(i.startswith('email:') and i.rsplit('@', 1)[1] in owner.domains for i in group)}
+                'colleague': colleague, 'role': role, 'role_by': role_by}
         nodes.append((node, 'person', name[:200], round(value, 4), last_day[node].isoformat() if node in last_day else None,
                       len(node_events[node]), usual, int(quiet), None, json.dumps(info)))
     kept = {n[0] for n in nodes}
     for domain, people in members.items():
         total = sum(v for _, v in people)
-        nodes.append(('org:' + domain, 'org', crm_names.get(domain, domain)[:200], round(total, 4),
+        nodes.append(('org:' + domain, 'org', crm_names.get(domain) or paying_names.get(domain) or domain[:200], round(total, 4),
                       max((last_day[p].isoformat() for p, _ in people if p in last_day), default=None), len(people), None, 0, None,
                       json.dumps({'domain': domain})))
         for node, value in people:
@@ -489,7 +647,7 @@ def build(db, config, now):
         events_ = sorted(project_events.get(pid, ()))
         nodes.append(('project:' + str(pid), 'project', project['name'], round(value, 4), events_[-1][0].date().isoformat() if events_ else None,
                       len(events_), None, 0, round(value / before, 2) if before > FLOOR else None,
-                      json.dumps({'closed_at': project['closed_at'], 'created_at': project['created_at']})))
+                      json.dumps({'closed_at': project['closed_at'], 'created_at': project['created_at'], 'probable': sum(1 for e in events_ if e[2])})))
         kept.add('project:' + str(pid))
     for (node, pid), value in project_people.items():
         if value >= FLOOR and node in kept:
@@ -504,26 +662,37 @@ def build(db, config, now):
             links.append((a, b, 'together', round(value, 4), pair_last[(a, b)].isoformat()))
     kept |= {n[0] for n in nodes}
     event_rows = []
-    for node, items in list(node_events.items()) + [('project:' + str(p), v) for p, v in project_events.items()]:
+    for node, items in [(n, [(at, e, 0) for at, e in v]) for n, v in node_events.items()] + [('project:' + str(p), v) for p, v in project_events.items()]:
         if node in kept:
             # Complete membership for old task evidence; only readers cap display lists.
-            event_rows += [(node, e, at.isoformat()) for at, e in sorted(items)]
+            event_rows += [(node, e, at.isoformat(), guess) for at, e, guess in sorted(items)]
+    names_of = {n[0]: n[2] for n in nodes}
+    unnamed_rows = []
+    for group, people, last in unnamed:
+        marks = ','.join('?' for _ in group)
+        titles = list(dict.fromkeys(re.sub(r'^(?:(?:re|fwd?|aw|tr)\s*:\s*)+', '', r[0], flags=re.I)[:80]
+                                    for r in db.execute(f'SELECT title FROM events WHERE id IN ({marks}) ORDER BY occurred_at DESC', group)))
+        unnamed_rows.append((min(group), json.dumps(sorted(group)), json.dumps([names_of[p] for p in people if p in names_of][:4]),
+                             json.dumps(titles[:4]), len(group), last.isoformat()))
     took = int((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000)
     db.execute('BEGIN IMMEDIATE')
     try:
         db.execute('DELETE FROM graph_nodes')
         db.execute('DELETE FROM graph_links')
         db.execute('DELETE FROM graph_events')
+        db.execute('DELETE FROM graph_unnamed')
         db.executemany('INSERT OR REPLACE INTO graph_nodes(id,kind,name,strength,last_at,signals,gap_days,quiet,trend,info) VALUES(?,?,?,?,?,?,?,?,?,?)', nodes)
         db.executemany('INSERT OR REPLACE INTO graph_links(a,b,kind,strength,last_at) VALUES(?,?,?,?,?)', links)
-        db.executemany('INSERT OR IGNORE INTO graph_events(node_id,event_id,at) VALUES(?,?,?)', event_rows)
+        # A confirmed label wins over a probable one for the same signal.
+        db.executemany('INSERT INTO graph_events(node_id,event_id,at,probable) VALUES(?,?,?,?) ON CONFLICT(node_id,event_id) DO UPDATE SET probable=min(probable,excluded.probable)', event_rows)
+        db.executemany('INSERT OR REPLACE INTO graph_unnamed(key,event_ids,people,titles,size,last_at) VALUES(?,?,?,?,?,?)', unnamed_rows)
         db.execute('INSERT OR REPLACE INTO graph_state(id,built_at,signals,took_ms) VALUES(1,?,?,?)', (now, len(signals), took))
         db.execute('COMMIT')
     except BaseException:
         db.execute('ROLLBACK')
         raise
     return {'people': sum(1 for n in nodes if n[1] == 'person'), 'projects': sum(1 for n in nodes if n[1] == 'project'),
-            'links': len(links), 'signals': len(signals), 'took_ms': took}
+            'links': len(links), 'signals': len(signals), 'probable': len(probable), 'unnamed': len(unnamed_rows), 'took_ms': took}
 
 
 # Reading.
@@ -539,9 +708,9 @@ def node_view(row, links=None):
     if row['kind'] == 'person':
         view.update(closeness=closeness(row['strength']), ids=info.get('ids', []), org=info.get('org'), quiet=bool(row['quiet']),
                     usual_gap_days=row['gap_days'], wrote_days=info.get('wrote'), heard_days=info.get('heard'), met_days=info.get('met'),
-                    next_meeting=info.get('next_meeting'), colleague=info.get('colleague'))
+                    next_meeting=info.get('next_meeting'), colleague=info.get('colleague'), role=info.get('role'), role_by=info.get('role_by'))
     elif row['kind'] == 'project':
-        view.update(trend=row['trend'], state=project_state(row), closed=bool(info.get('closed_at')))
+        view.update(trend=row['trend'], state=project_state(row), closed=bool(info.get('closed_at')), probable_signals=info.get('probable', 0))
     if links is not None:
         view['links'] = links
     return view
@@ -614,7 +783,7 @@ def short_date(value):
     return f'{day:%a} {day.day} {day:%b}'
 
 
-def context_lines(db, event_ids, limit_chars=1500):
+def context_lines(db, event_ids, limit_chars=1500, skip_card=None):
     """A few lines for a preparation: who these people are to the owner, and the projects around them."""
     lines = []
     for row in for_events(db, event_ids)[:8]:
@@ -622,7 +791,7 @@ def context_lines(db, event_ids, limit_chars=1500):
         if row['kind'] == 'person':
             projects = [n for n in neighbours(db, row['id'], 12) if n['kind'] == 'project'][:3]
             people = [n for n in neighbours(db, row['id'], 12) if n['kind'] == 'person'][:3]
-            bits = [f"{view['closeness']} contact", f"last contact {short_date(view['last_at'])}"]
+            bits = ([view['role']] if view['role'] else []) + [f"{view['closeness']} contact", f"last contact {short_date(view['last_at'])}"]
             if view['usual_gap_days']:
                 gap = int(view['usual_gap_days'])
                 bits.append(('usually daily' if gap <= 1 else f'usually every {gap} days') + (' (gone quiet)' if view['quiet'] else ''))
@@ -632,10 +801,15 @@ def context_lines(db, event_ids, limit_chars=1500):
                 bits.append('projects: ' + ', '.join(p['name'] for p in projects))
             if people:
                 bits.append('often with ' + ', '.join(p['name'] for p in people))
+            between = open_line(open_between(db, row['id'], 2, skip_card))
+            if between:
+                bits.append('open: ' + between)
             lines.append(f"- {view['name']} ({', '.join(view['ids'][:2])}): " + '; '.join(bits))
         elif row['kind'] == 'project':
             people = [n['name'] for n in neighbours(db, row['id'], 6) if n['kind'] == 'person'][:4]
-            lines.append(f"- Project {view['name']}: {view['state']}, last signal {short_date(view['last_at'])}" + (f"; people: {', '.join(people)}" if people else ''))
+            between = open_line(open_between(db, row['id'], 2, skip_card))
+            lines.append(f"- Project {view['name']}: {view['state']}, last signal {short_date(view['last_at'])}" + (f"; people: {', '.join(people)}" if people else '')
+                         + (f"; open: {between}" if between else ''))
     text = ''
     for line in lines:
         if len(text) + len(line) + 1 > limit_chars:
@@ -665,8 +839,80 @@ def detail(db, node_id, events=12):
     if not row:
         return None
     view = node_view(row, neighbours(db, node_id, 20))
-    view['event_ids'] = [r[0] for r in db.execute('SELECT event_id FROM graph_events WHERE node_id=? ORDER BY at DESC LIMIT ?', (node_id, events))]
+    rows = db.execute('SELECT event_id,probable FROM graph_events WHERE node_id=? ORDER BY at DESC LIMIT ?', (node_id, events)).fetchall()
+    view['event_ids'] = [r[0] for r in rows]
+    view['probable_ids'] = [r[0] for r in rows if r[1]]
+    view['open'] = open_between(db, node_id)
     return view
+
+
+def open_between(db, node_id, limit=6, skip_card=None):
+    """What is open between the owner and this person or project: promises both ways, open cards and
+    the facts learned on them. Read from the signals each sits on."""
+    out = {'you_promised': [], 'they_promised': [], 'cards': [], 'facts': []}
+    project = db.execute("SELECT name FROM graph_nodes WHERE id=? AND kind='project'", (node_id,)).fetchone()
+    on_node = 'SELECT 1 FROM json_each({}) j JOIN graph_events g ON g.event_id=j.value WHERE g.node_id=?'
+    try:
+        for r in db.execute("SELECT p.id,p.direction,p.who,p.what,p.due FROM promises p LEFT JOIN suggestions s ON s.id=p.suggestion_id "
+                            "WHERE (p.status='open' OR (p.status='carded' AND s.status IN ('pending','accepted','prepared','instructions','snoozed'))) "
+                            "AND p.event_id IN (SELECT event_id FROM graph_events WHERE node_id=?) ORDER BY coalesce(p.due,p.check_at) LIMIT ?", (node_id, limit * 2)):
+            out['you_promised' if r['direction'] == 'mine' else 'they_promised'].append({'id': r['id'], 'who': r['who'], 'what': r['what'], 'due': r['due']})
+        marks = ','.join('?' for _ in OPEN_CARD)
+        out['cards'] = [dict(r) for r in db.execute(
+            f"SELECT s.id,s.title,s.status,s.due FROM suggestions s WHERE s.status IN ({marks}) AND s.id IS NOT ? AND (EXISTS ({on_node.format('s.event_ids')}) "
+            "OR (? IS NOT NULL AND s.project=? COLLATE NOCASE)) ORDER BY coalesce(s.due,s.created_at) LIMIT ?",
+            (*OPEN_CARD, skip_card, node_id, project and project['name'], project and project['name'], limit))]
+        out['facts'] = [r[0] for r in db.execute(
+            f"SELECT f.text FROM facts f JOIN suggestions s ON s.id=f.suggestion_id WHERE f.removed_at IS NULL AND EXISTS ({on_node.format('s.event_ids')}) "
+            "ORDER BY f.created_at DESC LIMIT ?", (node_id, limit))]
+    except sqlite3.OperationalError:
+        pass  # a bare graph without the assistant's tables
+    out['you_promised'], out['they_promised'] = out['you_promised'][:limit], out['they_promised'][:limit]
+    return {k: v for k, v in out.items() if v}
+
+
+def open_line(items):
+    """One short line from open_between, for a preparation or review."""
+    bits = []
+    for p in items.get('you_promised', ())[:2]:
+        bits.append(f"you promised to {p['what']}" + (f" by {short_date(p['due'])}" if p['due'] else ''))
+    for p in items.get('they_promised', ())[:2]:
+        bits.append(f"they promised to {p['what']}" + (f" by {short_date(p['due'])}" if p['due'] else ''))
+    bits += [f"card \"{c['title']}\"" for c in items.get('cards', ())[:2]]
+    bits += [f"fact: {f}" for f in items.get('facts', ())[:2]]
+    return '; '.join(bits)
+
+
+def projects_for(db, event_ids):
+    """{event_id: [(project name, probable)]} for a batch, so a review can confirm or correct."""
+    ids = [int(i) for i in event_ids]
+    if not ids:
+        return {}
+    out = collections.defaultdict(list)
+    marks = ','.join('?' for _ in ids)
+    for r in db.execute(f"SELECT g.event_id,n.name,g.probable FROM graph_events g JOIN graph_nodes n ON n.id=g.node_id "
+                        f"WHERE n.kind='project' AND g.event_id IN ({marks}) ORDER BY g.probable,n.strength DESC", ids):
+        out[r[0]].append((r[1], bool(r[2])))
+    return dict(out)
+
+
+def set_role(db, node_id, role, source, now):
+    """Say what someone is to the owner ("accountant", "Ann's partner", "customer at Globex"). The owner's
+    word stays until the owner changes it; an empty role from the owner clears it."""
+    row = db.execute("SELECT id,info FROM graph_nodes WHERE id=? AND kind='person'", (str(node_id),)).fetchone()
+    if not row:
+        raise ValueError('role needs a person node_id from graph results')
+    role = ' '.join(str(role or '').split())
+    if len(role) > 60 or (not role and source != 'owner'):
+        raise ValueError('A role is a few words (up to 60 characters): "accountant", "investor", "customer at Globex"')
+    current = db.execute('SELECT source FROM person_roles WHERE identifier=?', (row['id'],)).fetchone()
+    if current and current['source'] == 'owner' and source != 'owner':
+        return {'role': json.loads(row['info']).get('role'), 'kept': 'The owner set this role; it stays.'}
+    if role:
+        db.execute('INSERT OR REPLACE INTO person_roles(identifier,role,source,created_at) VALUES(?,?,?,?)', (row['id'], role, source, now))
+    else:
+        db.execute('DELETE FROM person_roles WHERE identifier=?', (row['id'],))
+    return {'role': role or None}
 
 
 # Writing labels and merges.
@@ -674,7 +920,7 @@ def detail(db, node_id, events=12):
 def project_id(db, name, now):
     name = re.sub(r'\s+', ' ', str(name or '')).strip()
     if not name or len(name) > 60:
-        raise ValueError('A project name is a short label (up to 60 characters), like "Doctura VAT" or "Q4 board deck"')
+        raise ValueError('A project name is a short label (up to 60 characters), like "Acme VAT" or "Q4 board deck"')
     row = db.execute('SELECT id,closed_at FROM projects WHERE name=? COLLATE NOCASE', (name,)).fetchone()
     if row:
         if row['closed_at']:

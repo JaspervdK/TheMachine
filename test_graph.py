@@ -18,9 +18,9 @@ def at(days_ago, hour=0):
     return (NOW - dt.timedelta(days=days_ago, hours=hour)).isoformat()
 
 
-def mail(days_ago, sender, to, labels=('INBOX',), cc='', thread=None, hour=0, **extra):
+def mail(days_ago, sender, to, labels=('INBOX',), cc='', thread=None, hour=0, title=None, **extra):
     n = next(counter)
-    return {'account_id': 'work', 'source_id': f'm{n}', 'kind': 'gmail.message', 'occurred_at': at(days_ago, hour), 'title': f'Mail {n}', 'body': 'Hello',
+    return {'account_id': 'work', 'source_id': f'm{n}', 'kind': 'gmail.message', 'occurred_at': at(days_ago, hour), 'title': title or f'Mail {n}', 'body': 'Hello',
             'deleted': False, 'metadata': {'from': sender, 'to': to, 'cc': cc, 'labels': list(labels), 'message-id': f'<{n}@x>',
                                            'thread_id': thread or f't{n}', **extra}}
 
@@ -261,6 +261,114 @@ class Graph(unittest.TestCase):
             self.assertEqual(graph.overview(db)['projects'], [])
         with self.assertRaises(ValueError):
             self.app.graph_action({'merge': ['email:ann@client.com']})
+
+    def vectors(self, pairs):
+        import struct
+        with self.store.connect() as db:
+            for source_id, values in pairs:
+                size = sum(v * v for v in values) ** 0.5
+                event_id, version = db.execute('SELECT id,version FROM events WHERE source_id=?', (source_id,)).fetchone()
+                db.execute('INSERT OR REPLACE INTO event_vectors(event_id,version,model,dims,vector) VALUES(?,?,?,?,?)',
+                           (event_id, version, 'test', len(values), struct.pack('<%df' % len(values), *[v / size for v in values])))
+
+    def test_a_signal_that_reads_like_a_project_and_shares_a_person_is_probably_part_of_it(self):
+        labelled = mail(5, 'Ann <ann@client.com>', 'sam@acme.com', title='Pricing')
+        alike = mail(3, 'Ann <ann@client.com>', 'sam@acme.com')
+        stranger = mail(3, 'Zed <zed@else.com>', 'sam@acme.com')
+        other = mail(2, 'Ann <ann@client.com>', 'sam@acme.com')
+        meeting = {'account_id': 'work', 'source_id': 'meet1', 'kind': 'calendar.event', 'occurred_at': at(2), 'title': 'Call', 'body': '', 'deleted': False,
+                   'metadata': {'attendees': [{'email': 'sam@acme.com', 'self': True}, {'email': 'ann@client.com'}]}}
+        self.add(labelled, alike, stranger, other, meeting)
+        self.vectors([(labelled['source_id'], [1, 0.1, 0, 0]), (alike['source_id'], [1, 0.2, 0, 0]), (stranger['source_id'], [1, 0.1, 0, 0]),
+                      (other['source_id'], [0, 0, 1, 0]), ('meet1', [1, 0.1, 0, 0])])
+        first, guess, zed, unrelated, call = self.ids([labelled['source_id'], alike['source_id'], stranger['source_id'], other['source_id'], 'meet1'])
+        with self.store.connect() as db:
+            graph.label(db, [first], 'Acme deal', 'review', NOW.isoformat())
+        self.build()
+        with self.store.connect() as db:
+            rows = dict(db.execute("SELECT event_id,probable FROM graph_events WHERE node_id LIKE 'project:%'").fetchall())
+        self.assertEqual(rows, {first: 0, guess: 1})  # not the stranger, not a different topic, not a bare meeting
+        self.assertEqual(self.store.project_hints([first, guess, zed]), {first: {'projects': ['Acme deal']}, guess: {'probably_project': 'Acme deal'}})
+        detail = self.app.graph_action({'node_id': 'project:1'})
+        self.assertEqual(detail['probable_signals'], 1)
+        self.assertTrue(any(line.startswith(f'{guess} ') and line.endswith('(probably part of it)') for line in detail['recent']))
+        claim = self.store.begin_analysis(['work'], 10)
+        page = self.store.analysis_page(claim['analysis_id'], 1) if claim.get('pages', 1) > 1 else claim
+        shown = {e['id']: e for e in page['events']}
+        self.assertEqual(shown[guess].get('probably_project'), 'Acme deal')
+        with self.store.connect() as db:  # a review confirms it
+            graph.label(db, [guess], 'Acme deal', 'review', NOW.isoformat())
+        self.build()
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT probable FROM graph_events WHERE event_id=? AND node_id=?', (guess, 'project:1')).fetchone()[0], 0)
+
+    def test_threads_that_read_alike_without_a_project_are_offered_once(self):
+        threads = [mail(9 - n, 'Ann <ann@client.com>', 'sam@acme.com', thread=f'x{n}') for n in range(3)]
+        threads.append(mail(5, 'Sam Stone <sam@acme.com>', 'Ann <ann@client.com>', ('SENT',), thread='x0'))
+        chats = [chat(4 - n, '32470000001', 'Bo Chat', mine=n == 0) for n in range(3)]
+        self.add(*threads, *chats)
+        self.vectors([(e['source_id'], [1, 0.05 * i, 0, 0]) for i, e in enumerate(threads + chats)])
+        self.build()
+        first = self.store.unnamed_text('run1')
+        self.assertIn('4 signals with Ann: ', first)
+        self.assertIn('"Mail ', first)
+        self.assertNotIn('Bo Chat', first)  # chats read alike per person, whatever the topic
+        self.assertEqual(self.store.unnamed_text('run2'), '')
+        self.assertIn('Possibly one piece of work nobody named', a.review_prompt('run', ['work'], unnamed=first))
+        self.assertNotIn('Possibly one piece of work', a.review_prompt('run', ['work']))
+
+    def test_roles_from_sources_and_said_by_the_owner_or_a_review(self):
+        self.add(mail(3, 'Sam Stone <sam@acme.com>', 'Ann Stone <ann@home.example>, Pat <pat@client.com>, Lee <lee@globex.com>', ('SENT',)),
+                 {'account_id': 'work', 'source_id': 'st1', 'kind': 'stripe.event', 'occurred_at': at(2), 'title': 'Payment failed', 'body': '', 'deleted': False,
+                  'metadata': {'from': 'pat@client.com', 'customer_name': 'Client Ltd', 'type': 'invoice.payment_failed'}},
+                 {'account_id': 'work', 'source_id': 'cr1', 'kind': 'salesflare.email', 'occurred_at': at(2), 'title': 'Hi', 'body': '', 'deleted': False,
+                  'metadata': {'contacts': [{'email': 'lee@globex.com', 'name': 'Lee'}], 'crm_account': {'domain': 'globex.com', 'name': 'Globex'}}},
+                 {'account_id': 'slack', 'source_id': 's1', 'kind': 'slack.message', 'occurred_at': at(1), 'title': 'DM', 'body': 'hey', 'deleted': False,
+                  'metadata': {'channel_id': 'D1', 'channel_name': 'DM U0TEAM1', 'conversation_type': 'dm', 'user_id': 'U0TEAM1'}})
+        self.build()
+        role = lambda node: (self.node(node)['role'], self.node(node)['role_by'])
+        self.assertEqual(role('slack:U0TEAM1'), ('teammate', 'seen'))
+        self.assertEqual(role('email:pat@client.com'), ('customer', 'seen'))
+        self.assertEqual(role('email:ann@home.example'), ('family', 'seen'))
+        self.assertEqual(role('email:lee@globex.com'), ('in the CRM, Globex', 'seen'))
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT name FROM graph_nodes WHERE id='org:client.com'").fetchone()[0], 'Client Ltd')
+        self.app.graph_build = self.build
+        self.app.graph_action({'node_id': 'email:pat@client.com', 'role': 'CFO at Client Ltd'})
+        self.assertEqual(role('email:pat@client.com'), ('CFO at Client Ltd', 'said'))
+        with self.assertRaisesRegex(ValueError, 'Only the owner'):
+            self.app.action('graph_role', {'node_id': 'email:pat@client.com', 'role': 'friend'})
+        self.app.action('graph_role', {'node_id': 'email:ann@home.example', 'role': 'sister'}, owner_dashboard=True)
+        self.app.graph_action({'node_id': 'email:ann@home.example', 'role': 'cousin'})  # a review can't overrule the owner
+        self.assertEqual(role('email:ann@home.example'), ('sister', 'said'))
+        self.app.action('graph_role', {'node_id': 'email:ann@home.example', 'role': ''}, owner_dashboard=True)
+        self.assertEqual(role('email:ann@home.example'), ('family', 'seen'))
+        self.assertIn('graph_role', a.OWNER_ACTIONS)
+        with self.store.connect() as db:
+            lines = graph.context_lines(db, self.ids(['st1']))
+        self.assertIn('- Pat (pat@client.com): CFO at Client Ltd; ', lines)
+
+    def test_what_is_open_between_you_shows_on_the_person(self):
+        ask = mail(3, 'Ann Example <ann@client.com>', 'sam@acme.com', thread='deal')
+        reply = mail(2, 'Sam <sam@acme.com>', 'Ann Example <ann@client.com>', ('SENT',), thread='deal')
+        self.add(ask, reply)
+        ask_id, reply_id = self.ids([ask['source_id'], reply['source_id']])
+        self.store.owner_user_ids = set()
+        self.app.action('promise', {'direction': 'mine', 'event_id': reply_id, 'who': 'Ann', 'what': 'send the deck', 'due': '2026-10-20'})
+        self.app.action('promise', {'direction': 'theirs', 'event_id': ask_id, 'who': 'Ann', 'what': 'sign the contract'})
+        task = self.store.suggest('ann-1', 'Answer Ann', 'Ann asked about pricing.', [ask_id])
+        other = self.store.suggest('ann-2', 'Book the call with Ann', 'Ann wants a call.', [reply_id])
+        with self.store.connect() as db:
+            db.execute("INSERT INTO facts(text,decision_id,suggestion_id,created_at) VALUES('Ann prefers calls before 10','d1',?,?)", (other['id'], NOW.isoformat()))
+        self.build()
+        detail = self.app.graph_action({'node_id': 'email:ann@client.com'})
+        self.assertEqual([p['what'] for p in detail['open']['you_promised']], ['send the deck'])
+        self.assertEqual([p['what'] for p in detail['open']['they_promised']], ['sign the contract'])
+        self.assertEqual({c['title'] for c in detail['open']['cards']}, {'Answer Ann', 'Book the call with Ann'})
+        self.assertEqual(detail['open']['facts'], ['Ann prefers calls before 10'])
+        lines = self.app.graph_lines(task['id'])
+        self.assertIn('open: you promised to send the deck by Tue 20 Oct; they promised to sign the contract; card "Book the call with Ann"', lines)
+        self.assertNotIn('card "Answer Ann"', lines)  # the task itself
 
 
 if __name__ == '__main__':
