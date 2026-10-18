@@ -317,7 +317,7 @@ class Graph(unittest.TestCase):
         self.assertIn('Possibly one piece of work nobody named', a.review_prompt('run', ['work'], unnamed=first))
         self.assertNotIn('Possibly one piece of work', a.review_prompt('run', ['work']))
 
-    def test_roles_from_sources_and_said_by_the_owner_or_a_review(self):
+    def test_roles_only_as_said_by_the_owner_or_a_review(self):
         self.add(mail(3, 'Sam Stone <sam@acme.com>', 'Ann Stone <ann@home.example>, Pat <pat@client.com>, Lee <lee@globex.com>', ('SENT',)),
                  {'account_id': 'work', 'source_id': 'st1', 'kind': 'stripe.event', 'occurred_at': at(2), 'title': 'Payment failed', 'body': '', 'deleted': False,
                   'metadata': {'from': 'pat@client.com', 'customer_name': 'Client Ltd', 'type': 'invoice.payment_failed'}},
@@ -326,23 +326,21 @@ class Graph(unittest.TestCase):
                  {'account_id': 'slack', 'source_id': 's1', 'kind': 'slack.message', 'occurred_at': at(1), 'title': 'DM', 'body': 'hey', 'deleted': False,
                   'metadata': {'channel_id': 'D1', 'channel_name': 'DM U0TEAM1', 'conversation_type': 'dm', 'user_id': 'U0TEAM1'}})
         self.build()
-        role = lambda node: (self.node(node)['role'], self.node(node)['role_by'])
-        self.assertEqual(role('slack:U0TEAM1'), ('teammate', 'seen'))
-        self.assertEqual(role('email:pat@client.com'), ('customer', 'seen'))
-        self.assertEqual(role('email:ann@home.example'), ('family', 'seen'))
-        self.assertEqual(role('email:lee@globex.com'), ('in the CRM, Globex', 'seen'))
+        role = lambda node: self.node(node)['role']
+        for node in ('slack:U0TEAM1', 'email:pat@client.com', 'email:ann@home.example', 'email:lee@globex.com'):
+            self.assertIsNone(role(node))  # a source doesn't say what someone is to the owner
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT name FROM graph_nodes WHERE id='org:client.com'").fetchone()[0], 'Client Ltd')
         self.app.graph_build = self.build
         self.app.graph_action({'node_id': 'email:pat@client.com', 'role': 'CFO at Client Ltd'})
-        self.assertEqual(role('email:pat@client.com'), ('CFO at Client Ltd', 'said'))
+        self.assertEqual(role('email:pat@client.com'), 'CFO at Client Ltd')
         with self.assertRaisesRegex(ValueError, 'Only the owner'):
             self.app.action('graph_role', {'node_id': 'email:pat@client.com', 'role': 'friend'})
         self.app.action('graph_role', {'node_id': 'email:ann@home.example', 'role': 'sister'}, owner_dashboard=True)
         self.app.graph_action({'node_id': 'email:ann@home.example', 'role': 'cousin'})  # a review can't overrule the owner
-        self.assertEqual(role('email:ann@home.example'), ('sister', 'said'))
+        self.assertEqual(role('email:ann@home.example'), 'sister')
         self.app.action('graph_role', {'node_id': 'email:ann@home.example', 'role': ''}, owner_dashboard=True)
-        self.assertEqual(role('email:ann@home.example'), ('family', 'seen'))
+        self.assertIsNone(role('email:ann@home.example'))
         self.assertIn('graph_role', a.OWNER_ACTIONS)
         with self.store.connect() as db:
             lines = graph.context_lines(db, self.ids(['st1']))

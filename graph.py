@@ -376,29 +376,6 @@ def unnamed_work(per_event, event_people, owner_events, labelled, vectors, curre
     return sorted(out, key=lambda g: g[2], reverse=True)
 
 
-def role_for(group, name, colleague, said, seen_as, surnames):
-    """What someone is to the owner: (role, 'said' | 'seen'). Said by the owner or a review wins;
-    then what the sources show."""
-    for identifier in group:
-        if said.get(identifier):
-            return said[identifier], 'said'
-    if colleague or any(i.startswith('slack:') for i in group):
-        return 'teammate', 'seen'
-    seen = {}
-    for identifier in group:
-        seen.update(seen_as.get(identifier, {}))
-    if seen.get('customer'):
-        return 'customer', 'seen'
-    full = plain_name(name)
-    if full and surnames & set(full.split()[1:]):
-        return 'family', 'seen'
-    if 'crm' in seen:
-        return ('in the CRM, ' + seen['crm']) if seen['crm'] else 'in the CRM', 'seen'
-    if seen.get('support'):
-        return 'wrote to support', 'seen'
-    return None, None
-
-
 def build(db, config, now):
     """Recompute graph_nodes, graph_links and graph_events. Returns a short summary."""
     started = dt.datetime.now(dt.timezone.utc)
@@ -423,7 +400,6 @@ def build(db, config, now):
     seen_message_ids = set()
     per_event, names, x_names = {}, collections.defaultdict(collections.Counter), {}
     crm_names, paying_names = {}, {}
-    seen_as = collections.defaultdict(dict)  # identifier -> {'customer': True, 'crm': account name, 'support': True}
     owner_events = set()
     for event_id, account_id, kind, at, m in signals:
         if kind == 'gmail.message' and m.get('message-id'):
@@ -433,15 +409,10 @@ def build(db, config, now):
         crm = m.get('crm_account') if isinstance(m.get('crm_account'), dict) else None
         if crm and crm.get('domain') and crm.get('name'):
             crm_names[str(crm['domain']).lower()] = str(crm['name'])
-        if kind in ('salesflare.email', 'salesflare.meeting'):
-            for c in m.get('contacts') or ():
-                if isinstance(c, dict) and '@' in str(c.get('email') or ''):
-                    seen_as['email:' + str(c['email']).lower()]['crm'] = str((crm or {}).get('name') or '')
-        elif kind in ('stripe.event', 'intercom.conversation'):
+        if kind == 'stripe.event' and m.get('customer_name'):
             for _, addr in addresses(m.get('from'))[:1]:
-                seen_as['email:' + addr]['customer' if kind == 'stripe.event' else 'support'] = True
                 domain = addr.rsplit('@', 1)[1]
-                if kind == 'stripe.event' and m.get('customer_name') and domain not in FREEMAIL:
+                if domain not in FREEMAIL:
                     paying_names.setdefault(domain, str(m['customer_name']))
         found = touches(kind, m, owner, wrote_to)
         if not found:
@@ -604,7 +575,6 @@ def build(db, config, now):
     # Write.
     nodes, links, members = [], [], collections.defaultdict(list)
     said = {r['identifier']: r['role'] for r in db.execute('SELECT identifier,role FROM person_roles')}
-    surnames = {n.split()[-1] for n in owner.names if len(n.split()) >= 2}
     for node, value in strength.items():
         if value < FLOOR:
             continue
@@ -624,11 +594,11 @@ def build(db, config, now):
         if domains:
             members[domains[0]].append((node, value))
         colleague = any(i.startswith('email:') and i.rsplit('@', 1)[1] in owner.domains for i in group)
-        role, role_by = role_for(group, name, colleague, said, seen_as, surnames)
+        role = next((said[i] for i in group if said.get(i)), None)  # only what the owner or a review said
         info = {'ids': sorted({shown_id(i, x_names) for i in group}), 'org': ('org:' + domains[0]) if domains else None,
                 'wrote': len(roles[node]['owner']), 'heard': len(roles[node]['them']), 'met': len(roles[node]['met']),
                 'accounts': sorted(accounts[node]), 'next_meeting': next_meeting[node].isoformat() if node in next_meeting else None,
-                'colleague': colleague, 'role': role, 'role_by': role_by}
+                'colleague': colleague, 'role': role}
         nodes.append((node, 'person', name[:200], round(value, 4), last_day[node].isoformat() if node in last_day else None,
                       len(node_events[node]), usual, int(quiet), None, json.dumps(info)))
     kept = {n[0] for n in nodes}
@@ -708,7 +678,7 @@ def node_view(row, links=None):
     if row['kind'] == 'person':
         view.update(closeness=closeness(row['strength']), ids=info.get('ids', []), org=info.get('org'), quiet=bool(row['quiet']),
                     usual_gap_days=row['gap_days'], wrote_days=info.get('wrote'), heard_days=info.get('heard'), met_days=info.get('met'),
-                    next_meeting=info.get('next_meeting'), colleague=info.get('colleague'), role=info.get('role'), role_by=info.get('role_by'))
+                    next_meeting=info.get('next_meeting'), colleague=info.get('colleague'), role=info.get('role'))
     elif row['kind'] == 'project':
         view.update(trend=row['trend'], state=project_state(row), closed=bool(info.get('closed_at')), probable_signals=info.get('probable', 0))
     if links is not None:
