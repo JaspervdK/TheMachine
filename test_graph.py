@@ -450,6 +450,14 @@ class Graph(unittest.TestCase):
         self.assertIn('means by a role:\n- Lee: a review said "intern"', asked)
         self.assertIn('Organisations with no role yet', asked)
         self.assertIn('node_id org:client.com', asked)
+        self.assertIn('Pat Doe (CFO at Client Ltd)', asked)  # its people with what they are to the owner
+        self.assertNotIn('org:client.com', self.store.role_text('org-run2', limit=10))
+        # One of its people getting a role after the ask makes the organisation worth reading again.
+        a.now = lambda: (NOW + dt.timedelta(minutes=5)).isoformat()
+        self.app.action('graph_role', {'node_id': 'email:ann@client.com', 'role': 'office manager'}, owner_dashboard=True)
+        a.now = lambda: NOW.isoformat()
+        self.assertIn('node_id org:client.com', self.store.role_text('org-run3', limit=10))
+        self.app.action('graph_role', {'node_id': 'email:ann@client.com', 'role': ''}, owner_dashboard=True)
         # Organisations get a role, and their people carry it as context.
         self.app.graph_action({'node_id': 'org:client.com', 'role': 'customer', 'event_id': pat_id, 'quote': 'look after the renewal'})
         self.assertEqual(self.node('org:client.com')['role'], 'customer')

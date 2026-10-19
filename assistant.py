@@ -2304,15 +2304,19 @@ class Store:
             strongest = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='person' AND strength>=0.5 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' {asked} "
                                    'ORDER BY strength DESC LIMIT ?', (since, run_id, limit)).fetchall()
             people = list({r['id']: r for r in on_cards + strongest}.values())[:limit]
-            orgs = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='org' AND strength>=1 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' {asked} "
-                              'ORDER BY strength DESC LIMIT 2', (since, run_id)).fetchall()
+            # An organisation is asked again as soon as one of its people got a role after the last ask.
+            news = ("EXISTS(SELECT 1 FROM graph_links l JOIN graph_nodes p ON p.id=l.a JOIN person_roles r ON r.identifier=coalesce(json_extract(p.info,'$.role_id'),p.id) "
+                    "WHERE l.b=n.id AND l.kind='member' AND r.role!='' AND coalesce(r.checked_at,r.created_at)>(SELECT max(asked_at) FROM graph_role_asks WHERE identifier=n.id))")
+            orgs = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='org' AND strength>=1 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' "
+                              f"AND ({asked[4:]} OR {news}) ORDER BY {news} DESC,strength DESC LIMIT 2", (since, run_id)).fetchall()
             stale = [r for r in graph.stale_roles(db, now()) if not db.execute("SELECT 1 FROM graph_role_asks o WHERE identifier=? AND asked_at>? AND (o.run_id IS NULL OR (o.run_id<>? AND (NOT EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id) OR EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id AND r.status='ok') OR EXISTS(SELECT 1 FROM analyses a WHERE a.owner_run=o.run_id AND a.status='complete'))))", (r['id'], since, run_id)).fetchone()]
             if people:
                 parts.append('\n'.join(line(r, json.loads(r['info'] or '{}')) + (' on an open card' if r in on_cards else '') for r in people))
             if orgs:
-                parts.append('Organisations with no role yet (what they are to the owner: "accounting firm", "customer", "trial customer", "possible acquirer"):\n'
-                             + '\n'.join(f"- {r['name']} (node_id {r['id']}; people: " + ', '.join(
-                                 n['name'] for n in graph.neighbours(db, r['id'], 4) if n['kind'] == 'person') + ')' for r in orgs))
+                parts.append('Organisations with no role yet: what each is to the owner ("accounting firm", "customer", "trial customer", "supplier", "possible acquirer"). '
+                             'Judge it from what goes on with its people and in its projects, not from its name or where it shows up; open graph with its node_id and its people, '
+                             'and set it with event_id and quote from the message that shows it best. When it isn\'t clear, leave it:\n'
+                             + '\n'.join(f"- {r['name']} (node_id {r['id']}; " + self.org_context(db, r['id']) + ')' for r in orgs))
             if stale:
                 parts.append('Roles a review set that may be out of date: read their latest messages; set the role again (same or new) with a fresh event_id and quote:\n'
                              + '\n'.join(f"- {r['name']} (node_id {r['id']}): \"{r['role']}\" from {r['set_at']}" + (f" (\"{r['quote']}\")" if r['quote'] else '')
@@ -2323,6 +2327,16 @@ class Store:
         if fixed:
             parts.append("The owner corrected these review roles before; learn what the owner means by a role:\n" + fixed)
         return '\n\n'.join(parts)
+
+    @staticmethod
+    def org_context(db, node_id):
+        """An organisation's people with what they are to the owner, and its projects."""
+        near = graph.neighbours(db, node_id, 12)
+        roles = {r['id']: r['role'] for r in db.execute("SELECT id,json_extract(info,'$.role') role FROM graph_nodes WHERE id IN (" + ','.join('?' for _ in near) + ')',
+                                                        [n['id'] for n in near])} if near else {}
+        people = [n['name'] + (f" ({roles[n['id']]})" if roles.get(n['id']) else '') for n in near if n['kind'] == 'person'][:4]
+        projects = [n['name'] for n in near if n['kind'] == 'project'][:3]
+        return 'people: ' + (', '.join(people) or 'none yet') + (f"; projects: {', '.join(projects)}" if projects else '')
 
     def review_claim(self, rows):
         """Page the claim once, so every later page read returns the same signals."""
