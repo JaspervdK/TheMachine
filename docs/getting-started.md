@@ -4,7 +4,7 @@ From nothing to your first cards in about 15 minutes. Each step says how to chec
 
 ## Before you start
 
-- [ ] **OpenClaw** 2026.10.2 or later, with the Gateway running. Telegram is optional: with a bot, check that it answers you in Telegram; without one, cards reach you through the dashboard app (see Phone notifications below). No OpenClaw yet? Skip this one: the installer offers to install it and walks you through its setup (step 1).
+- [ ] **OpenClaw** 2026.10.5 or later, with the Gateway running. Telegram is optional: with a bot, check that it answers you in Telegram; without one, cards reach you through the dashboard app (see Phone notifications below). No OpenClaw yet? Skip this one: the installer offers to install it and walks you through its setup (step 1).
 - [ ] **Node.js** 24.16+ (24.x) or 26.1+, and **Python 3.12+**.
 - [ ] **Tailscale** on this machine and your phone, logged in (`sudo tailscale up`), for the dashboard.
 - [ ] Your own user account, not root, with a systemd user session (a normal login; over SSH that works too).

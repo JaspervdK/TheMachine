@@ -2,7 +2,7 @@
 
 ## Supported release
 
-Security fixes target the latest `main` revision and its pinned OpenClaw 2026.10.2 dependency.
+Security fixes target the latest `main` revision and its pinned OpenClaw 2026.10.5 dependency.
 Older snapshots and other OpenClaw builds are not covered by the compatibility tests.
 This is an early release for one owner on a trusted machine, not a public multi-user service.
 

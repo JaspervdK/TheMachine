@@ -6,7 +6,7 @@ Small fixes, clearer setup instructions and additional general-purpose sources a
 ## Development
 
 1. Clone the repository. Use Python 3.12+ and a supported Node version from the README.
-2. Install the pinned SDK: `npm install -g openclaw@2026.10.2`.
+2. Install the pinned SDK: `npm install -g openclaw@2026.10.5`.
 3. Install Chromium, or set `CHROMIUM_PATH` to an existing Chromium executable.
 4. Run `python3 scripts/test.py`. It runs every Python and Node suite, uses a disposable
    HOME and returns a failing exit code if any suite fails. No real accounts or Gateway are needed.

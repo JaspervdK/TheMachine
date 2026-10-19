@@ -3,7 +3,7 @@
   "version": "0.1.1",
   "type": "module",
   "peerDependencies": {
-    "openclaw": "2026.10.2"
+    "openclaw": "2026.10.5"
   },
   "openclaw": {
     "extensions": [
@@ -14,8 +14,8 @@
       "minGatewayVersion": "2026.10.2"
     },
     "build": {
-      "openclawVersion": "2026.10.2",
-      "pluginSdkVersion": "2026.10.2"
+      "openclawVersion": "2026.10.5",
+      "pluginSdkVersion": "2026.10.5"
     }
   }
 }

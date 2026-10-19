@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parent
 PLUGIN_ID = 'personal-assistant-bridge'
 UNIT_NAME = 'personal-assistant.service'
 MIN_PYTHON = (3, 12)
-NODE_REQUIREMENT = '>=24.16.0 <25 or >=26.1.0 (OpenClaw 2026.10.2 or later)'
+NODE_REQUIREMENT = '>=24.16.0 <25 or >=26.1.0 (OpenClaw 2026.10.5 or later)'
 
 
 def supported_node(version):
