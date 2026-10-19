@@ -27,6 +27,47 @@ They resolve their model the same way your chats do: `agents.defaults.model.prim
 
 Check what you have with `openclaw models list` and `openclaw models status`. No restart of The Machine is needed after a model change.
 
+Or set them from the command line, from any model `openclaw models list` shows (a ChatGPT sign-in, API-key providers and your own providers alike):
+
+```bash
+openclaw models set openai/gpt-6.1-sol                        # main model
+openclaw models fallbacks clear                               # then the fallbacks, in the order they are tried
+openclaw models fallbacks add anthropic/claude-sonnet-5-5
+openclaw models fallbacks add my-azure/gpt-6.1-sol
+openclaw models fallbacks list
+```
+
+## A provider of your own
+
+Any endpoint that speaks one of OpenClaw's APIs can be a provider: an Azure OpenAI deployment, a company API gateway, LiteLLM, vLLM. Add it under `models.providers` with its base URL, API type (`openai-responses`, `openai-completions`, `azure-openai-responses`, `anthropic-messages`, `ollama`, ...) and model ids. Keep the key out of the config: put it in a file only you can read (`chmod 600`) and point a file secret at it.
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  secrets: {
+    providers: {
+      my_azure_key: { source: "file", path: "/home/you/.openclaw/secrets/my-azure.key", mode: "singleValue" },
+    },
+  },
+  models: {
+    providers: {
+      "my-azure": {
+        baseUrl: "https://example.openai.azure.com/openai/v1",  // on Azure: the /openai/v1 address
+        api: "openai-responses",
+        apiKey: { source: "file", provider: "my_azure_key", id: "value" },
+        // Sent as "Authorization: Bearer <key>" by default. For a gateway that wants the key in another header
+        // (Azure's "api-key", or Azure API Management's bare "Authorization"), turn that off and name the header:
+        // authHeader: false,
+        // headers: { "api-key": { source: "file", provider: "my_azure_key", id: "value" } },
+        models: [{ id: "gpt-6.1-sol", name: "gpt-6.1-sol" }],  // on Azure: the deployment name
+      },
+    },
+  },
+}
+```
+
+Its models are then `my-azure/<id>`, usable as main model or fallback; `openclaw models list` shows them. Check the address, key and model id with one small request of your own before relying on it. If nothing sets `agents.defaults.model.primary`, OpenClaw may start using the new provider's model by default: set your main model explicitly.
+
 ## What the model has to be good at
 
 | Job | Needs |
