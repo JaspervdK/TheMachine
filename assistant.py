@@ -3254,8 +3254,12 @@ class Store:
             db.execute('UPDATE suggestions SET status=?,snoozed_until=?,resume_status=?,undo_until=NULL,feedback_until=NULL WHERE id=?',
                        (restored,previous.get('snoozed_until'),previous.get('resume_status'),suggestion_id))
             db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL',(suggestion_id,))
-            if restored in ('accepted','instructions'):
-                prior=previous.get('preparation') or {}
+            prior=previous.get('preparation') or {}
+            if restored in ('accepted','instructions') and prior.get('status') == 'blocked' and db.execute(
+                    "UPDATE preparations SET status='blocked' WHERE suggestion_id=? AND job_id=? AND status='cancelled'",
+                    (suggestion_id,prior.get('job_id'))).rowcount:
+                pass  # back exactly as it was, waiting on the owner: Try again restarts it, Undo doesn't
+            elif restored in ('accepted','instructions'):
                 if prior.get('status') == 'queued':
                     # Resume custody of the same job, not another still-running
                     # preparation cancelled only by the reversible owner close.

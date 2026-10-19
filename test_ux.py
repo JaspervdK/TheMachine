@@ -32,6 +32,14 @@ class UX(unittest.TestCase):
         self.decide('reject');self.decide('undo');self.assertNotEqual(self.job()['job_id'],before);self.assertEqual(self.job()['status'],'queued')
         self.assertEqual(self.job()['session_job_id'],before)
 
+    def test_undo_keeps_a_blocked_preparation_blocked_instead_of_starting_over(self):
+        self.decide('accept');before=self.job()
+        with self.store.connect() as db:db.execute("UPDATE preparations SET status='blocked',reason='Needs a browser'")
+        self.decide('complete');self.decide('undo')
+        self.assertEqual(self.row()['status'],'accepted')
+        self.assertEqual((self.job()['job_id'],self.job()['status'],self.job()['reason']),(before['job_id'],'blocked','Needs a browser'))
+        self.assertEqual(self.row()['preparation_status'],'blocked')
+
     def test_undo_expiration(self):
         self.decide('reject')
         with self.store.connect() as db:db.execute("UPDATE suggestions SET undo_until='2020-01-01'")
