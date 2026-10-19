@@ -468,6 +468,8 @@ The runner returns nonzero if any suite fails and isolates HOME/config from your
 
 ## Contributing and security
 
+Something's wrong? The dashboard's footer link opens a [GitHub issue](https://github.com/JeroenCorthout/TheMachine/issues/new); leave out personal data and paste only the relevant lines of `assistant doctor` or the logs.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull requests, and [SECURITY.md](SECURITY.md) for private vulnerability reports and publishing checks. CI runs every Python and Node suite on two supported toolchains and scans all reachable history for secrets. Personal account data belongs outside the checkout.
 
 ## License

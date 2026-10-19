@@ -30,6 +30,11 @@ class HomeScreenApp(unittest.TestCase):
     def test_dashboard_links_the_manifest(self):
         self.assertIn('<link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">', (a.ROOT / 'dashboard.html').read_text())
 
+    def test_something_wrong_goes_to_github_issues_or_the_hosted_support_form(self):
+        page = (a.ROOT / 'dashboard.html').read_text()
+        self.assertIn('id="report-problem" class="footer-link" href="https://github.com/JeroenCorthout/TheMachine/issues/new"', page)
+        self.assertIn("$('#report-problem').href=new URL('/support',state.manage_url).href", page)
+
 
 if __name__ == '__main__':
     unittest.main()
