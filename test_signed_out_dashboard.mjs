@@ -11,6 +11,7 @@ const ok=new Date().toISOString(),later=new Date(Date.now()+6e5).toISOString();
 const linkedin={id:'work-linkedin',service:'linkedin',boundary:'work',display_name:'Work LinkedIn',error:'linkedin_signed_out',error_at:ok,retry_at:later,
  signed_out:true,sign_in_hint:'the browser it reads with is not signed in to LinkedIn; sign in there, then connect again'};
 const x={id:'work-x',service:'x',boundary:'work',display_name:'Work X',error:'x_browser_busy',retry_at:later,last_success:ok};
+const gateway={id:'openclaw-gateway',service:'gateway',boundary:'owner:system',display_name:'OpenClaw Gateway',last_success:ok};
 const crm={id:'crm',service:'salesflare',boundary:'work',display_name:'CRM',error:'salesflare_read_failed',retry_at:later,last_success:ok};
 let hosted=true;
 const server=createServer((req,res)=>{
@@ -18,7 +19,7 @@ const server=createServer((req,res)=>{
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],
    manage_url:hosted?'https://app.example.test/setup':null,
-   connectors:[{...linkedin,sign_in_url:hosted?'https://app.example.test/open?to=browser&site=linkedin':null},x,crm]}));return}
+   connectors:[{...linkedin,sign_in_url:hosted?'https://app.example.test/open?to=browser&site=linkedin':null},x,crm,gateway]}));return}
  if(url.pathname.startsWith('/brand/')||url.pathname.startsWith('/assets/')){res.statusCode=404;res.end();return}
  res.end('{}');
 });
@@ -37,6 +38,7 @@ try{
  assert.match(await page.locator('#badge-health').textContent(),/3/);
  await page.locator('nav [data-tab="health"]').click();
  const card=page.locator('#connectors article',{hasText:'Work LinkedIn'});
+ assert.match(await page.locator('#connectors article',{hasText:'OpenClaw Gateway'}).textContent(),/notices when it has trouble itself/);
  assert.match(await card.locator('.connection-status').textContent(),/Signed out of LinkedIn/);
  assert.equal(await card.locator('.alert a').getAttribute('href'),'https://app.example.test/open?to=browser&site=linkedin');
  // The alerts are in words (the raw code stays in Details, for whoever debugs).
