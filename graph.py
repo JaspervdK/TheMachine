@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS role_corrections(id INTEGER PRIMARY KEY,identifier TE
 CREATE TABLE IF NOT EXISTS org_profiles(domain TEXT PRIMARY KEY,status TEXT NOT NULL,profile TEXT,fetched_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_relations(a TEXT NOT NULL,b TEXT NOT NULL,relation TEXT NOT NULL,source TEXT NOT NULL,event_id INTEGER,
   created_at TEXT NOT NULL,PRIMARY KEY(a,b));
+CREATE TABLE IF NOT EXISTS hidden_domains(domain TEXT PRIMARY KEY,hidden INTEGER NOT NULL,source TEXT NOT NULL,event_id INTEGER,
+  name TEXT,created_at TEXT NOT NULL);
 '''
 RECHECK_DAYS = 90       # a review's role is read again after this, when there was contact since
 HALF_LIFE = {'person': 60, 'pair': 45, 'project_person': 45, 'project': 21}
@@ -468,6 +470,8 @@ def _build(db, config, now):
         if kind == 'gmail.message' and ('SENT' in (m.get('labels') or ()) or any(a in owner.emails for _, a in addresses(m.get('from'))[:1])):
             wrote_to |= {a for _, a in addresses(m.get('to')) + addresses(m.get('cc'))}
 
+    warmup = hidden(db)  # addresses there are a warm-up tool's traffic: nobody in the graph
+
     # Who: identifiers per signal, joined into people.
     seen_message_ids = set()
     per_event, names, x_names = {}, collections.defaultdict(collections.Counter), {}
@@ -495,7 +499,7 @@ def _build(db, config, now):
                 domain = addr.rsplit('@', 1)[1]
                 if kind == 'stripe.event' and m.get('customer_name') and domain not in FREEMAIL:
                     paying_names.setdefault(domain, str(m['customer_name']))
-        found = touches(kind, m, owner, wrote_to)
+        found = [t for t in touches(kind, m, owner, wrote_to) if not (t[0].startswith('email:') and t[0].rsplit('@', 1)[1] in warmup)]
         if not found:
             continue
         per_event[event_id] = (kind, at, account_id, m, found)
@@ -957,7 +961,8 @@ def overview(db, limit=12):
             'new': rows("SELECT * FROM graph_nodes WHERE kind='person' AND signals<=3 AND last_at>=? ORDER BY strength DESC LIMIT ?",
                         week_ago, 8),
             'orgs': rows("SELECT * FROM graph_nodes WHERE kind='org' ORDER BY strength DESC LIMIT ?", 8),
-            'whos_who': unconfirmed(db)}
+            'whos_who': unconfirmed(db),
+            'warmup': hidden_list(db)}
 
 
 def detail(db, node_id, events=12):
@@ -1092,6 +1097,41 @@ def set_role(db, node_id, role, source, now, event_id=None, quote=None):
         db.execute('INSERT INTO role_corrections(identifier,name,old_role,new_role,created_at) VALUES(?,?,?,?,?)',
                    (row['id'], row['name'], current['role'], role, now))
     return {'role': role or None}
+
+
+def hidden(db):
+    """Domains whose mail is an email warm-up tool's traffic, kept out of the graph."""
+    return {r[0] for r in db.execute('SELECT domain FROM hidden_domains WHERE hidden=1')}
+
+
+def hidden_list(db):
+    return [dict(r) for r in db.execute('SELECT domain,name,source,created_at FROM hidden_domains WHERE hidden=1 ORDER BY created_at DESC,domain')]
+
+
+def hide_warmup(db, node_id, warmup, source, now, event_id=None):
+    """Say an organisation's mail is an email warm-up tool's traffic (templated exchanges between inboxes that
+    keep a sender's reputation up, with no real conversation behind them): its domain and its people leave the
+    graph, and it isn't looked up. A review judges it from what the messages are; the owner's word stays, so an
+    owner's undo is never hidden again by a review. The owner can undo with warmup false and the domain or node_id."""
+    if not db.in_transaction:
+        db.execute('BEGIN IMMEDIATE')
+    node_id = str(node_id or '')
+    domain = node_id[4:] if node_id.startswith('org:') else node_id
+    domain = domain.strip().lower()
+    row = db.execute("SELECT name FROM graph_nodes WHERE id=? AND kind='org'", ('org:' + domain,)).fetchone()
+    current = db.execute('SELECT * FROM hidden_domains WHERE domain=?', (domain,)).fetchone()
+    if not row and not (source == 'owner' and current):
+        raise ValueError('warmup needs an organisation node_id (org:…) from graph results')
+    if current and current['source'] == 'owner' and source != 'owner':
+        return {'warmup': bool(current['hidden']), 'kept': 'The owner decided about this organisation; it stays.'}
+    if source != 'owner' and event_id is not None:
+        members = [r[0] for r in db.execute("SELECT a FROM graph_links WHERE b=? AND kind='member'", ('org:' + domain,))]
+        if not db.execute(f"SELECT 1 FROM graph_events WHERE event_id=? AND node_id IN ({','.join('?' for _ in members) or 'NULL'})",
+                          (int(event_id), *members)).fetchone():
+            raise ValueError('event_id must be one of its people\'s signals (see graph node_id)')
+    db.execute('INSERT OR REPLACE INTO hidden_domains(domain,hidden,source,event_id,name,created_at) VALUES(?,?,?,?,?,?)',
+               (domain, int(bool(warmup)), source, event_id, row['name'] if row else current['name'], now))
+    return {'warmup': bool(warmup), 'domain': domain}
 
 
 def folded_words(text):

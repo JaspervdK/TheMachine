@@ -8,6 +8,7 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location('graph_assistant', Path(__file__).with_name('assistant.py'))
 a = importlib.util.module_from_spec(spec); spec.loader.exec_module(a)
 graph = a.graph
+enrichment = a.enrichment
 NOW = dt.datetime(2026, 10, 16, 12, tzinfo=dt.timezone.utc)
 CONFIG = {'accounts': [{'id': 'work', 'email': 'sam@acme.com'}, {'id': 'chat', 'service': 'whatsapp', 'email': 'Personal WhatsApp'},
                        {'id': 'slack', 'service': 'slack', 'email': 'sam@acme.com', 'user_id': 'U0OWNER'}]}
@@ -415,6 +416,42 @@ class Graph(unittest.TestCase):
         with self.store.connect() as db:
             lines = graph.context_lines(db, self.ids(['st1']))
         self.assertIn('- Pat (pat@client.com): CFO at Client Ltd; ', lines)
+
+    def test_a_warm_up_tools_traffic_leaves_the_graph_and_the_owner_can_undo_it(self):
+        self.add(mail(3, 'Rotating Name <ana@warmup-pool.example>', 'sam@acme.com', title='Your thoughts on our update, Sam'),
+                 mail(2, 'Sam <sam@acme.com>', 'ana@warmup-pool.example', ('SENT',), title='Re: Your thoughts on our update, Sam'),
+                 mail(2, 'Bo Other <bo@warmup-pool.example>', 'sam@acme.com', title='Seeking your input, Sam'),
+                 mail(1, 'Pat Doe <pat@client.com>', 'sam@acme.com'), mail(1, 'Sam <sam@acme.com>', 'pat@client.com', ('SENT',)))
+        self.build()
+        with self.store.connect() as db:
+            db.execute("UPDATE graph_nodes SET strength=1 WHERE kind='org'")
+        with self.store.connect() as db:
+            warm_id = db.execute("SELECT g.event_id FROM graph_events g WHERE g.node_id='email:ana@warmup-pool.example' LIMIT 1").fetchone()[0]
+        # A roles turn sees the organisation's own messages, to judge what the exchanges are.
+        _, orgs = self.store.role_evidence()
+        warm = next(o for o in orgs if o['node_id'] == 'org:warmup-pool.example')
+        self.assertTrue(warm['messages'])
+        with self.assertRaisesRegex(ValueError, 'organisation node_id'):
+            self.app.graph_action({'node_id': 'email:ana@warmup-pool.example', 'warmup': True})
+        self.app.graph_action({'node_id': 'org:warmup-pool.example', 'warmup': True, 'event_id': warm_id})
+        self.assertIsNone(self.node('org:warmup-pool.example'))
+        self.assertIsNone(self.node('email:ana@warmup-pool.example'))
+        self.assertIsNotNone(self.node('org:client.com'))
+        seen = self.app.graph_action({})
+        self.assertEqual([(w['domain'], w['source']) for w in seen['warmup']], [('warmup-pool.example', 'agent')])
+        self.assertNotIn('org:warmup-pool.example', [o['id'] for o in seen['orgs']])
+        with self.store.connect() as db:
+            self.assertNotIn('warmup-pool.example', enrichment.due(db, NOW.isoformat(), 10))
+            self.assertIn('client.com', enrichment.due(db, NOW.isoformat(), 10))
+        # Only the owner undoes it here, and the owner's word stays: a later review can't hide it again.
+        with self.assertRaisesRegex(ValueError, 'Only the owner'):
+            self.app.action('graph_warmup', {'domain': 'warmup-pool.example', 'warmup': False})
+        self.app.action('graph_warmup', {'domain': 'warmup-pool.example', 'warmup': False}, owner_dashboard=True)
+        self.assertIsNotNone(self.node('email:ana@warmup-pool.example'))
+        self.assertEqual(self.app.graph_action({})['warmup'], [])
+        kept = self.app.graph_action({'node_id': 'org:warmup-pool.example', 'warmup': True})
+        self.assertIsNotNone(self.node('org:warmup-pool.example'))
+        self.assertEqual(self.app.graph_action({})['warmup'], [])
 
     def test_roles_keep_their_evidence_the_owner_confirms_and_corrects_and_reviews_learn(self):
         pat = mail(3, 'Pat Doe <pat@client.com>', 'sam@acme.com', title='Intro')

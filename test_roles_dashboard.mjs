@@ -17,17 +17,18 @@ let pat={id:'email:pat@client.example',kind:'person',name:'Pat Doe',strength:2,c
  relations:[{a:'email:ann@client.example',a_name:'Ann Assist',relation:'assistant of',b:'email:pat@client.example',b_name:'Pat Doe',by:'review'}],open:{},recent:[],around:[]};
 const org={id:'org:client.example',kind:'org',name:'Client Ltd',strength:3,last_at:made,signals:3,role:'customer',role_by:'review',links:[],open:{},recent:[],around:[],
  about:'Logistics, 51-200 people, Ghent',profile:{industry:'Logistics',about:'Client Ltd moves boxes.',linkedin_url:'https://www.linkedin.com/company/client',website:'javascript:alert(1)'}};
-let holdOrg=null;
+let holdOrg=null,warmup=[{domain:'warmup-pool.example',name:'warmup-pool.example',source:'agent',created_at:made}];
 const calls=[],errors=[],opened=[];
 const server=createServer(async(req,res)=>{
  const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions,promises:[],connectors:[],suggestion_counts:{pending:2},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[]}));return}
- if(url.pathname==='/api/graph'){const node=url.searchParams.get('node');if(node===org.id&&holdOrg)await holdOrg;res.end(JSON.stringify(node==='org:client.example'?org:node?pat:{projects:[],people:[],quiet:[],new:[],orgs:[{...org}],whos_who:whos}));return}
+ if(url.pathname==='/api/graph'){const node=url.searchParams.get('node');if(node===org.id&&holdOrg)await holdOrg;res.end(JSON.stringify(node==='org:client.example'?org:node?pat:{projects:[],people:[],quiet:[],new:[],orgs:[{...org}],whos_who:whos,warmup}));return}
  if(url.pathname==='/api/event'||url.pathname==='/api/events'){opened.push(url.search);res.end(JSON.stringify([]));return}
  if(url.pathname==='/api/action'){let body='';for await(const b of req)body+=b;const call=JSON.parse(body);calls.push(call);
   if(call.action==='graph_role'){whos=whos.filter(w=>w.id!==call.args.node_id);if(call.args.node_id===pat.id)pat={...pat,role:call.args.role,role_by:'owner'}}
   if(call.action==='graph_relation')pat={...pat,relations:[]};
+  if(call.action==='graph_warmup')warmup=warmup.filter(w=>w.domain!==call.args.domain);
   res.end('{}');return}
  if(url.pathname.startsWith('/brand/')||url.pathname.startsWith('/assets/')){res.statusCode=404;res.end();return}
  res.end('{}');
@@ -125,6 +126,15 @@ try{
   {action:'graph_role',args:{node_id:'email:b@y.example',role:'partner at Y'}}]);
  for(let i=0;i<100&&await list.locator('.whos').count();i++)await page.waitForTimeout(20);
  assert.equal(await list.locator('.whos').count(),0);
+ // Warm-up domains a review hid: a short folded line under Organisations, each with Undo.
+ assert.equal((await list.locator('.warmup summary').textContent()).trim(),'Hidden as warm-up (1)');
+ await list.locator('.warmup summary').click();
+ const beforeUndo=calls.length;
+ await list.locator('[data-warmup-undo="warmup-pool.example"]').click();
+ for(let i=0;i<100&&calls.length<=beforeUndo;i++)await page.waitForTimeout(20);
+ assert.deepEqual(calls.at(-1),{action:'graph_warmup',args:{domain:'warmup-pool.example',warmup:false}});
+ for(let i=0;i<100&&await list.locator('.warmup').count();i++)await page.waitForTimeout(20);
+ assert.equal(await list.locator('.warmup').count(),0);
  assert.deepEqual(errors,[]);
  console.log(JSON.stringify({widths,actions:calls.length,page_errors:errors}));
 }finally{if(browser)await browser.close();await new Promise(r=>server.close(r))}
