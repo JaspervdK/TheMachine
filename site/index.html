@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>The Machine: an open-source assistant that reads everything and only bothers you when it matters</title>
-<meta name="description" content="The Machine reads your email, calendar, chats and phone notifications, finds the few things that need you, and sends them to Telegram as short cards. Tap Do it and your own OpenClaw agent carries the task out. Open source and self-hosted.">
+<meta name="description" content="The Machine reads your email, calendar, chats and phone notifications, finds the few things that need you, and sends them to your phone as short cards: in its own app, or in Telegram. Tap Do it and your own OpenClaw agent carries the task out. Open source and self-hosted.">
 <meta name="theme-color" content="#131518">
 <meta property="og:title" content="The Machine">
 <meta property="og:description" content="An open-source, self-hosted assistant inbox for OpenClaw. It reads everything and only bothers you when it matters.">
@@ -224,7 +224,7 @@ footer a{color:var(--muted);text-decoration:none}
   <div>
     <div class="eyebrow">Open source · for OpenClaw</div>
     <h1>It reads everything.<br><em>It only bothers you when it matters.</em></h1>
-    <p class="lede">The Machine reads your email, calendar, chats and phone notifications, finds the few things that actually need you, and sends them to Telegram as short cards. Tap <b>Do it</b> and your own agent carries the task out.</p>
+    <p class="lede">The Machine reads your email, calendar, chats and phone notifications, finds the few things that actually need you, and sends them to your phone as short cards: in its own app, or in Telegram. Tap <b>Do it</b> and your own agent carries the task out.</p>
     <div class="ctas">
       <a class="btn primary" href="https://github.com/JeroenCorthout/TheMachine#quick-start">Get started</a>
       <a class="btn ghost" href="#demo">See how it works</a>
@@ -316,13 +316,13 @@ footer a{color:var(--muted);text-decoration:none}
     <h2>Try it on last week first</h2>
     <p class="sub tight">See what it would have done before it does anything.</p>
     <ol class="start">
-      <li><b>OpenClaw.</b> Not installed yet? The installer offers to install it and walks you through its setup: your model and a Telegram bot.</li>
+      <li><b>OpenClaw.</b> Not installed yet? The installer offers to install it and walks you through its setup: your model and, if you like, a Telegram bot. Telegram is optional: the dashboard installs as a phone app with notifications (Android, or iPhone with iOS 16.4+).</li>
       <li><b>Connect.</b> The installer finds your accounts and keys, and tests each source.</li>
       <li><b>Your voice.</b> It learns how you write from your sent messages. You check it first.</li>
       <li><b>Preview.</b> Your agent reviews the last 7 days and shows the cards it would have sent.</li>
       <li><b>Turn it on.</b> Until then, nothing is sent or done in your accounts.</li>
     </ol>
-    <p class="req">Linux with systemd · Python 3.12+ · Node.js 24 or 26 · OpenClaw 2026.10.2+ with its Telegram channel (or let the installer set it up) · Tailscale for the dashboard.</p>
+    <p class="req">Linux with systemd · Python 3.12+ · Node.js 24 or 26 · OpenClaw 2026.10.2+ (or let the installer set it up) · Telegram optional · Tailscale for the dashboard.</p>
   </div>
   <div>
 <pre><span class="c"># install, connect your sources, preview, turn on</span>
@@ -468,7 +468,7 @@ function view(){
   if(v==='dismissAsk')return content(S.base)+'<div class="panel"><div class="ph">Why isn’t this needed?</div>'
     +rows([[`<button type="button" class="b" data-reason="Not relevant">Not relevant</button>`,`<button type="button" class="b" data-reason="Wrong facts">Wrong facts</button>`],
       [`<button type="button" class="b" data-reason="">No reason</button>`,B('cancel','Cancel')]])+'</div>'+foot;
-  if(v==='snoozed')return head(chip('Later','lavender'))+`<p class="note">Snoozed until ${when(S.until)}. I’ll remind you in Telegram.</p>`+srcLine()+undoRow(B('snooze','Change time'))+foot;
+  if(v==='snoozed')return head(chip('Later','lavender'))+`<p class="note">Snoozed until ${when(S.until)}. I’ll remind you on your phone.</p>`+srcLine()+undoRow(B('snooze','Change time'))+foot;
   if(v==='done')return head(chip('Done','mint'))+`<p class="note ok">Done.</p><p class="note">${S.undoGone?'':'Undo is available for five minutes.'}</p>`+srcLine()+undoRow()+foot;
   if(v==='dismissed')return head(chip('Not needed',''))+`<p class="note">Dismissed${S.reason?': '+esc(S.reason.toLowerCase())+'. Your reason steers later reviews.':'.'} The card is closed${S.undoGone?'.':'; Undo is available for five minutes.'}</p>`+srcLine()+undoRow()+foot;
   return '';

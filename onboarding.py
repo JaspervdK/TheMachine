@@ -469,6 +469,44 @@ def save(path, config):
     write_private(path, json.dumps(config, indent=2) + '\n')
 
 
+def set_telegram(config_path, owner=None, remove_bot=False, restart=True, runner=None):
+    """Turn The Machine's Telegram delivery on (owner = your Telegram user ID) or off (owner None).
+    Off: cards, reminders and recaps reach you through the dashboard app instead. With remove_bot
+    the OpenClaw Telegram account is deleted too, its bot token included. Returns notes to show."""
+    runner = runner or run
+    config = load(config_path)
+    notes = []
+    if owner is not None:
+        owner = telegram_id(owner)
+        if not owner:
+            raise SetupError('That is not a Telegram user ID', 'a number like 123456789; your bot\'s pairing reply shows it')
+        config['telegram_owner'] = owner
+        bot = telegram_account(owner)
+        if bot != 'default':
+            config['telegram_account'] = bot
+        else:
+            config.pop('telegram_account', None)
+        if owner not in telegram_owners(config):
+            notes.append('message your bot; if it asks for pairing: openclaw pairing approve telegram <code>')
+    else:
+        account = str(config.get('telegram_account') or 'default')
+        if remove_bot:
+            openclaw = tool(config, 'openclaw')
+            if not openclaw:
+                raise SetupError('openclaw CLI not found, so the bot stays', 'install OpenClaw, or leave out --remove-bot')
+            result = runner([openclaw, 'channels', 'remove', '--channel', 'telegram', '--account', account, '--delete'], timeout=120)
+            if result.returncode:
+                raise SetupError('OpenClaw could not remove the Telegram bot: ' + ((result.stderr or result.stdout or '').strip()[:300] or 'no details'),
+                                 f'openclaw channels remove --channel telegram --account {account} --delete')
+            notes.append(f'removed the Telegram bot ({account}) and its token from OpenClaw')
+        config['telegram_owner'] = ''
+        config.pop('telegram_account', None)
+    save(config_path, config)
+    if restart and shutil.which('systemctl'):
+        runner(['systemctl', '--user', 'restart', UNIT_NAME], timeout=60)
+    return notes
+
+
 def data_dir(config):
     return Path(config['database']).expanduser().parent
 
@@ -1494,7 +1532,7 @@ def doctor(config_path, workspace=None):
     except SetupError as error:
         return [('✗', error.message, error.fix)]
     add('✓', f'config {config_path}')
-    for key in ('telegram_owner', 'tailscale_owner', 'dashboard_host'):
+    for key in ('tailscale_owner', 'dashboard_host'):
         if not config.get(key):
             add('✗', f'{key} is empty in config.json', './install.sh, or set it in config.json')
     # Service
@@ -1528,17 +1566,19 @@ def doctor(config_path, workspace=None):
                 ' && openclaw plugins reload personal-assistant-bridge --wait')
         else:
             add('✓', 'OpenClaw bridge plugin loaded')
-    # Telegram
+    # Telegram (optional: without it cards reach you through the dashboard app)
     owners = telegram_owners(config)
-    owner = str(config.get('telegram_owner', ''))
-    if not owners:
+    owner = str(config.get('telegram_owner') or '')
+    if not owner:
+        add('✓', 'Telegram off: cards reach you through the dashboard app (add it to your home screen and turn on notifications)')
+    elif not owners:
         add('!', 'could not confirm your Telegram ID in OpenClaw', 'message your bot; if it asks for pairing: openclaw pairing approve telegram <code>')
     elif owner in owners:
         add('✓', f'Telegram {owner} is approved in OpenClaw')
     else:
         add('✗', f'telegram_owner {owner} is not an approved Telegram sender in OpenClaw (found {", ".join(owners)})',
             'set telegram_owner in config.json to your own ID, or approve it: openclaw pairing list telegram')
-    bots = telegram_accounts(openclaw_settings())
+    bots = telegram_accounts(openclaw_settings()) if owner else []
     configured = str(config.get('telegram_account') or 'default')
     if bots and configured not in bots:
         add('✗', f'telegram_account {configured} is not a Telegram account in OpenClaw (there: {", ".join(bots)})',

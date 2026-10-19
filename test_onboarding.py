@@ -157,6 +157,31 @@ class OnboardingTest(unittest.TestCase):
         self.assertEqual(onboarding.telegram_owners()[:1], ['555555'])
         self.assertEqual(onboarding.telegram_account('999'), 'bot')
 
+    def test_telegram_turns_off_and_back_on_and_only_removes_the_bot_when_asked(self):
+        openclaw = self.home / '.openclaw'
+        openclaw.mkdir(parents=True, exist_ok=True)
+        (openclaw / 'openclaw.json').write_text(json.dumps({'channels': {'telegram': {'accounts': {'work': {'allowFrom': ['333333']}}}}}))
+        path = self.tmp / 'config.json'
+        path.write_text(json.dumps({'telegram_owner': '333333', 'telegram_account': 'work', 'openclaw': sys.executable}))
+        calls = []
+        runner = lambda args, **kw: calls.append(args) or onboarding.subprocess.CompletedProcess(args, 0, '', '')
+        self.assertEqual(onboarding.set_telegram(path, None, runner=runner, restart=False), [])
+        self.assertEqual(calls, [])  # The Machine stops using Telegram; the OpenClaw bot stays for chatting
+        self.assertEqual(json.loads(path.read_text())['telegram_owner'], '')
+        self.assertNotIn('telegram_account', json.loads(path.read_text()))
+        onboarding.set_telegram(path, '333333', runner=runner, restart=False)
+        self.assertEqual({k: json.loads(path.read_text())[k] for k in ('telegram_owner', 'telegram_account')}, {'telegram_owner': '333333', 'telegram_account': 'work'})
+        notes = onboarding.set_telegram(path, None, remove_bot=True, runner=runner, restart=False)
+        self.assertEqual(calls[-1][1:], ['channels', 'remove', '--channel', 'telegram', '--account', 'work', '--delete'])
+        self.assertIn('removed the Telegram bot', notes[0])
+        failing = lambda args, **kw: onboarding.subprocess.CompletedProcess(args, 1, '', 'gateway busy')
+        path.write_text(json.dumps({'telegram_owner': '333333', 'openclaw': sys.executable}))
+        with self.assertRaises(onboarding.SetupError):
+            onboarding.set_telegram(path, None, remove_bot=True, runner=failing, restart=False)
+        self.assertEqual(json.loads(path.read_text())['telegram_owner'], '333333')  # nothing half-done
+        with self.assertRaises(onboarding.SetupError):
+            onboarding.set_telegram(path, '@alex', runner=runner, restart=False)
+
     def test_pairing_fallback_picks_up_the_new_sender_and_approves_only_on_yes(self):
         counter = self.tmp / 'count'
         openclaw = self.stub('openclaw', f'''

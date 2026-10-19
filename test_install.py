@@ -28,7 +28,7 @@ class HomeScreenApp(unittest.TestCase):
         self.assertEqual(a.dashboard_hosts({'dashboard_host': 'm.ts.net'}), ['m.ts.net'])
 
     def test_dashboard_links_the_manifest(self):
-        self.assertIn('<link rel="manifest" href="manifest.webmanifest">', (a.ROOT / 'dashboard.html').read_text())
+        self.assertIn('<link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">', (a.ROOT / 'dashboard.html').read_text())
 
 
 if __name__ == '__main__':

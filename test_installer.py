@@ -162,10 +162,18 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(self.install().returncode, 1)
         self.assertEqual(self.config.read_text(), before)
 
-    def test_missing_answers_fail_clearly_without_writing(self):
+    def test_telegram_is_optional(self):
         result = self.install('--no-start', ASSISTANT_TELEGRAM_OWNER='')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('No Telegram', result.stdout)
+        config = json.loads(self.config.read_text())
+        self.assertEqual(config['telegram_owner'], '')
+        self.assertNotIn('telegram_account', config)
+
+    def test_missing_answers_fail_clearly_without_writing(self):
+        result = self.install('--no-start', ASSISTANT_TAILSCALE_OWNER='')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('ASSISTANT_TELEGRAM_OWNER', result.stdout + result.stderr)
+        self.assertIn('tailscale', result.stdout + result.stderr)
         self.assertFalse(self.config.exists())
         result = self.install('--no-start', ASSISTANT_TELEGRAM_OWNER='@alex')
         self.assertIn('numeric chat ID', result.stdout + result.stderr)

@@ -152,6 +152,38 @@ class PhoneNotifications(unittest.TestCase):
         with self.store.connect() as db:
             self.assertEqual({r[0] for r in db.execute('SELECT status FROM deliveries WHERE suggestion_id IN (?,?)', (first, second))}, {'sent'})
 
+    def test_without_telegram_cards_reach_the_app_and_nothing_goes_to_telegram(self):
+        self.store.commit_page('work', {}, [{'account_id': 'work', 'source_id': 'one', 'kind': 'gmail.message', 'occurred_at': a.now(),
+                                             'title': 'Evidence', 'body': 'Evidence', 'metadata': {}, 'deleted': False}])
+        card = self.store.suggest('one', 'First', 'First body', [1])['id']
+        with self.store.connect() as db: db.execute('UPDATE suggestions SET deliver_after=NULL')
+        config = dict(self.config, telegram_owner='')
+        self.assertFalse(a.telegram_on(config))
+        with patch.object(a.dt, 'datetime', Daytime), patch.object(a.subprocess, 'run', side_effect=AssertionError('no Telegram helper')), \
+                patch.object(a, 'push_notify') as push:
+            self.assertTrue(a.deliver_one(self.store, config, edit_cards=False))
+            a.telegram(config, {'id': card, 'title': 'First', 'body': 'Edited', 'status': 'accepted'}, 'edit', 'web-1')  # edits are local too
+        self.assertEqual([c.args[2]['id'] for c in push.call_args_list], [card])
+        with self.store.connect() as db:
+            status, message = db.execute('SELECT status,message_id FROM deliveries WHERE suggestion_id=?', (card,)).fetchone()
+        self.assertEqual(status, 'sent'); self.assertTrue(message.startswith('web-'))
+
+    def test_without_telegram_the_recap_is_a_push_and_change_prompts_stay_on_the_dashboard(self):
+        self.app.action('push_subscribe', SUB, owner_dashboard=True)
+        self.app.config = dict(self.config, telegram_owner='', weekly_recap={'enabled': True})
+        sent = []
+        friday = a.dt.datetime(2026, 10, 16, 17, 0, tzinfo=a.dt.timezone.utc)
+        with patch.object(a, 'push_node', side_effect=lambda config, request: sent.append(request) or {'results': []}), \
+                patch.object(a, 'telegram_request', side_effect=AssertionError('no Telegram')), \
+                patch.object(a, 'local_tz', return_value=a.dt.timezone.utc), patch.object(a, 'assistant_token_usage', return_value=None):
+            self.assertEqual(self.app.recap_step(current=friday), 'sent')
+        self.assertEqual((sent[0]['payload']['title'], sent[0]['payload']['url']), ('Your week', 'https://the-machine.example/assistant/'))
+        with self.store.connect() as db:
+            db.execute("INSERT INTO feedback_prompts(request_id,suggestion_id,card_id,title,status,created_at,updated_at,kind) VALUES('r','s','c','T','queued',?,?,'change')", (a.now(), a.now()))
+        self.assertIsNone(self.app.feedback_prompt_step(sender=lambda row: self.fail('no Telegram prompt')))
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT status FROM feedback_prompts WHERE request_id='r'").fetchone()[0], 'cancelled')
+
     def test_no_subscription_means_no_push_call(self):
         a.push_notify(self.store, self.config, {'id': 'x', 'title': 'T', 'body': 'B', 'status': 'pending'}, lambda r: self.fail('no phone subscribed'))
 
