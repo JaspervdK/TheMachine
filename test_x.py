@@ -420,7 +420,7 @@ class XInboxSend(unittest.TestCase):
         # The primary account also needs custody: another run may have left
         # the global X session on a brand account before this command starts.
         self.calls.clear()
-        code, _, _ = self.main('send', '--handle', 'JeroenCorthout', '--primary', 'JeroenCorthout',
+        code, _, _ = self.main('send', '--handle', 'acme', '--primary', 'acme',
                                '--reply-to', MENTION_ID, '--text', 'Yes!', '--check')
         self.assertEqual(code, 0)
         self.assertEqual(self.calls[0], ('tab', True))

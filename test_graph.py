@@ -77,7 +77,7 @@ class Graph(unittest.TestCase):
                  mail(2, 'Robot <noreply@service.com>', 'sam@acme.com'),
                  mail(2, 'Acme info <info@acme.com>', 'sam@acme.com'),  # a shared role address at the owner's own domain
                  mail(3, 'Ann <ann@client.com>', 'Sam <sam@acme.com>, Sam Owner <sam@home.org>'),
-                 chat(1, '32470000001', 'Sam Owner'),  # the owner's own name on another channel
+                 chat(1, '00000000001', 'Sam Owner'),  # the owner's own name on another channel
                  {'account_id': 'work', 'source_id': 'crm1', 'kind': 'salesflare.email', 'occurred_at': at(2), 'title': 'Your workspace',
                   'body': 'Hi', 'deleted': False, 'metadata': {'contacts': [{'email': 'no-reply@email.slackhq.com', 'name': 'Slack'}]}})
         self.build()
@@ -87,30 +87,30 @@ class Graph(unittest.TestCase):
         self.assertEqual(self.node('org:client.com')['name'], 'client.com')
 
     def test_owner_messages_weigh_more_a_burst_is_one_day_and_it_fades(self):
-        self.add(*[chat(1, '32470000001', 'Bea Burst', hour=h) for h in range(10)],
-                 chat(1, '32470000002', 'Cas Owner', mine=True),
-                 chat(120, '32470000003', 'Dee Old'), chat(120, '32470000003', 'Dee Old', mine=True))
+        self.add(*[chat(1, '00000000001', 'Bea Burst', hour=h) for h in range(10)],
+                 chat(1, '00000000002', 'Cas Owner', mine=True),
+                 chat(120, '00000000003', 'Dee Old'), chat(120, '00000000003', 'Dee Old', mine=True))
         self.build()
-        bea, cas, dee = (self.node('wa:3247000000' + n)['strength'] for n in '123')
+        bea, cas, dee = (self.node('wa:0000000000' + n)['strength'] for n in '123')
         self.assertAlmostEqual(bea, 1.0 * 0.5 ** (1 / 60), places=2)  # ten messages, one day, capped
         self.assertGreater(cas, 0.55)
         self.assertLess(dee, 0.25)  # two months of fading, twice over
 
     def test_same_full_name_joins_channels_unless_said_to_differ(self):
-        self.add(mail(1, 'Ann Example <ann@client.com>', 'sam@acme.com'), chat(2, '32470000001', 'Ann Example'),
-                 chat(2, '32470000009', 'Bo Ambiguous'), mail(2, 'Bo Ambiguous <bo@one.com>', 'sam@acme.com'), mail(2, 'Bo Ambiguous <bo@two.com>', 'sam@acme.com'))
+        self.add(mail(1, 'Ann Example <ann@client.com>', 'sam@acme.com'), chat(2, '00000000001', 'Ann Example'),
+                 chat(2, '00000000009', 'Bo Ambiguous'), mail(2, 'Bo Ambiguous <bo@one.com>', 'sam@acme.com'), mail(2, 'Bo Ambiguous <bo@two.com>', 'sam@acme.com'))
         self.build()
-        self.assertEqual(self.node('email:ann@client.com')['ids'], ['+32470000001', 'ann@client.com'])
-        self.assertIsNone(self.node('wa:32470000001'))
-        self.assertIsNotNone(self.node('wa:32470000009'))  # two addresses carry that name: not joined
+        self.assertEqual(self.node('email:ann@client.com')['ids'], ['+00000000001', 'ann@client.com'])
+        self.assertIsNone(self.node('wa:00000000001'))
+        self.assertIsNotNone(self.node('wa:00000000009'))  # two addresses carry that name: not joined
         with self.store.connect() as db:
-            graph.merge(db, 'wa:32470000001', 'email:ann@client.com', False, NOW.isoformat())
+            graph.merge(db, 'wa:00000000001', 'email:ann@client.com', False, NOW.isoformat())
         self.build()
-        self.assertIsNotNone(self.node('wa:32470000001'))
+        self.assertIsNotNone(self.node('wa:00000000001'))
         with self.store.connect() as db:
-            graph.merge(db, 'wa:32470000009', 'email:bo@one.com', True, NOW.isoformat())
+            graph.merge(db, 'wa:00000000009', 'email:bo@one.com', True, NOW.isoformat())
         self.build()
-        self.assertIn('+32470000009', self.node('email:bo@one.com')['ids'])
+        self.assertIn('+00000000009', self.node('email:bo@one.com')['ids'])
 
     def test_slack_email_joins_the_mail_identity(self):
         n = next(counter)
@@ -240,15 +240,15 @@ class Graph(unittest.TestCase):
             self.assertEqual(graph.project_state({'strength': 1.0, 'trend': ratio}), expected)
 
     def test_going_quiet_is_measured_against_their_own_rhythm(self):
-        weekly = [chat(d, '32470000001', 'Wes Weekly', mine=d % 2 == 0) for d in range(30, 120, 7)]
-        self.add(*weekly, chat(30, '32470000001', 'Wes Weekly', mine=True),
-                 *[chat(d, '32470000002', 'Rae Recent', mine=True) for d in (2, 9, 16, 23)])
+        weekly = [chat(d, '00000000001', 'Wes Weekly', mine=d % 2 == 0) for d in range(30, 120, 7)]
+        self.add(*weekly, chat(30, '00000000001', 'Wes Weekly', mine=True),
+                 *[chat(d, '00000000002', 'Rae Recent', mine=True) for d in (2, 9, 16, 23)])
         self.build()
-        wes, rae = self.node('wa:32470000001'), self.node('wa:32470000002')
+        wes, rae = self.node('wa:00000000001'), self.node('wa:00000000002')
         self.assertEqual((wes['usual_gap_days'], wes['quiet']), (7, True))
         self.assertFalse(rae['quiet'])
         with self.store.connect() as db:
-            self.assertEqual([p['id'] for p in graph.overview(db)['quiet']], ['wa:32470000001'])
+            self.assertEqual([p['id'] for p in graph.overview(db)['quiet']], ['wa:00000000001'])
         self.assertIn('• Gone quiet: Wes Weekly (usually every 7 days)', a.recap_graph_lines(self.store))
 
     def test_preparation_context_and_agent_lookup(self):
@@ -318,7 +318,7 @@ class Graph(unittest.TestCase):
     def test_threads_that_read_alike_without_a_project_are_offered_once(self):
         threads = [mail(9 - n, 'Ann <ann@client.com>', 'sam@acme.com', thread=f'x{n}') for n in range(3)]
         threads.append(mail(5, 'Sam Stone <sam@acme.com>', 'Ann <ann@client.com>', ('SENT',), thread='x0'))
-        chats = [chat(4 - n, '32470000001', 'Bo Chat', mine=n == 0) for n in range(3)]
+        chats = [chat(4 - n, '00000000001', 'Bo Chat', mine=n == 0) for n in range(3)]
         self.add(*threads, *chats)
         self.vectors([(e['source_id'], [1, 0.05 * i, 0, 0]) for i, e in enumerate(threads + chats)])
         self.build()
