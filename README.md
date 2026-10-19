@@ -350,7 +350,17 @@ Off unless you set it up. Full-text search finds the same words; this finds the 
 
 **How it works.** `event_vectors` holds one normalized float32 vector per event version (Matryoshka-truncated to `dims`), deleted with its event; changing `model` or `dims` re-embeds. The embedded text is the title plus the first 2,000 characters of the body, without quoted earlier messages. `assistant_signals related` takes explicit `account_ids` and `event_ids` and/or a `query`, `limit` up to 20 and optional `exclude_event_ids`, and returns the `events` shape plus a `similarity`; the given events themselves are never returned. With a query, the meaning ranking is fused with full-text ranking. `events` with `semantic:true` and a `query` uses the same fused ranking. `account_ids:["all"]` searches every configured account (for `events` and `related` only; reviews still name their accounts). The dashboard's Events tab searches All accounts by default, by meaning and words together, and labels each result with its account. If the embedding server is down, the service logs `embeddings error=<class>` and retries after five minutes; queries still get keyword matches (`semantic:false`), and nothing else is affected.
 
-**Costs.** No GPU needed. On CPU the server embeds a few signals per second; a first backfill of 5,000 signals takes about 30–40 minutes on a 4-core desktop CPU, and each new signal well under a second. The model takes about 0.3–0.5 GB of RAM while the server runs and no CPU when idle. Vectors are about 1 KB each at 256 dimensions (5 MB for 5,000 signals). Search is brute-force cosine in plain Python, about 0.1 s over 5,000 vectors.
+**Costs.** No GPU needed. On CPU the server embeds a few signals per second; a first backfill of 5,000 signals takes about 30–40 minutes on a 4-core desktop CPU, and each new signal well under a second. The model takes about 0.3–0.5 GB of RAM while the server runs and no CPU when idle. On a small 2-core arm64 server (October 2026) it was slower and bigger: about 130 tokens a second on one core (a few thousand signals take a few hours once), and 370 MB idle growing to 850 MB while embedding with `--no-repack`, or 300 MB more without it (llama.cpp repacks the weights on arm64 for speed). A first `openclaw memory index` (below) took another 940 MB while it ran. Next to OpenClaw and a browser that is tight on 4 GB of RAM; 8 GB is comfortable. Give the unit its own `MemoryMax` and `MemorySwapMax=0`, so when it grows too big the kernel ends it alone and systemd restarts it. Vectors are about 1 KB each at 256 dimensions (5 MB for 5,000 signals). Search is brute-force cosine in plain Python, about 0.1 s over 5,000 vectors.
+
+**OpenClaw's memory search on the same server.** One server can serve both. Point OpenClaw at it as a provider (the model name containing `embeddinggemma` makes OpenClaw add EmbeddingGemma's task prompts), then build its index once at low priority:
+
+```bash
+openclaw config set --batch-json '[{"path":"models.providers.machine-embeddings","value":{"api":"openai-completions","baseUrl":"http://127.0.0.1:8792/v1","apiKey":"local","models":[]}},{"path":"memory.search","value":{"enabled":true,"provider":"machine-embeddings","model":"embeddinggemma-300m","sources":["memory","sessions"]}}]'
+systemctl --user restart openclaw-gateway
+nice -n 19 openclaw memory index --agent main
+```
+
+An explicit provider fails closed: while the server is down, `memory_search` answers "unavailable" instead of falling back to keywords, so keep the unit's `Restart=`.
 
 **Off again:** remove `embeddings` (or set `enabled: false`) and restart; the `event_vectors` table can stay or be dropped.
 
