@@ -276,3 +276,40 @@ class Transport(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Tabs(unittest.TestCase):
+    """The browser readers close what they open, also after a run that was stopped halfway."""
+    def test_a_stopped_run_leaves_no_tab_and_the_owners_tabs_stay(self):
+        import importlib.util
+        for name in ('linkedin_inbox', 'x_inbox'):
+            spec = importlib.util.spec_from_file_location(name, Path(__file__).parent / 'integrations' / f'{name}.py')
+            reader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reader)
+            tabs, closed = {'OWNER'}, []
+
+            def oc(*args, timeout=60):
+                if args[0] == 'tabs':
+                    return ''.join(f'id: {t}\n' for t in sorted(tabs))
+                if args[0] == 'open':
+                    tabs.add('NEW%d' % len(tabs))
+                    return 'id: NEW%d\n' % (len(tabs) - 1)
+                if args[0] == 'close':
+                    tabs.discard(args[1])
+                    closed.append(args[1])
+                    return ''
+            with tempfile.TemporaryDirectory() as tmp, patch.object(reader, 'oc', oc), \
+                    patch.object(reader, 'OPEN_TABS', Path(tmp) / 'tabs'), patch.object(reader, 'lease', lambda *a, **k: subprocess.CompletedProcess(a, 0, '', '')):
+                first = reader.open_tab('reader-1', 'https://example.test')  # the run is killed here: never closed
+                reader.with_tab('https://example.test', lambda target: None)
+                self.assertIn(first, closed)
+                self.assertEqual(tabs, {'OWNER'}, name)
+
+                def slow(*args, timeout=60):  # the tab appears, then the open times out
+                    if args[0] == 'open':
+                        tabs.add('LATE')
+                        raise reader.Fail('timed out')
+                    return oc(*args, timeout=timeout)
+                with patch.object(reader, 'oc', slow), self.assertRaises(reader.Fail):
+                    reader.with_tab('https://example.test', lambda target: None)
+                self.assertEqual(tabs, {'OWNER'}, name)

@@ -881,8 +881,14 @@ def maton_connection(config, account, ui, app, label, describe=None):
                                                 for c in found])
 
 
+def explain(ui, text):
+    """How to get a key or sign in: for a terminal. A web form (ui.explains False) already said it next to its fields."""
+    if getattr(ui, 'explains', True):
+        ui.say(text)
+
+
 def step_slack(config, account, ui):
-    ui.say('Slack is read through Maton (maton.ai), which holds the Slack sign-in.\n'
+    explain(ui, 'Slack is read through Maton (maton.ai), which holds the Slack sign-in.\n'
            'In Maton: connect Slack, then copy your API key; the Slack connection is found with it.')
     account.setdefault('credential_variable', 'MATON_API_KEY')
     store_secret(config, account, ui, 'Maton API key', 'MATON_')
@@ -909,7 +915,7 @@ def step_slack(config, account, ui):
 
 
 def step_salesflare(config, account, ui):
-    ui.say('Salesflare: create an API key in Salesflare\'s settings (API keys).')
+    explain(ui, 'Salesflare: create an API key in Salesflare\'s settings (API keys).')
     account.setdefault('credential_variable', 'SALESFLARE_API_KEY')
     store_secret(config, account, ui, 'Salesflare API key', 'SALESFLARE_')
     account.setdefault('api_base', 'https://api.salesflare.com')
@@ -992,7 +998,7 @@ def step_gateway(config, account, ui):
 def step_plugin(config, account, ui):
     setup = setup_of(account.get('service', 'gmail'))
     if setup.get('note') and not setup.get('maton'):
-        ui.say(setup['note'])
+        explain(ui, setup['note'])
     for key, prompt, *rest in setup.get('ask', []):
         command = (setup.get('detect') or {}).get(key)
         detected = run(command, timeout=20).stdout.strip() if command and shutil.which(command[0]) else ''
@@ -1013,7 +1019,7 @@ def step_plugin(config, account, ui):
                                                     setup.get('label', account['service']) + ' account')
     elif setup.get('secret'):
         if setup.get('note') and setup.get('maton'):
-            ui.say(setup['note'])
+            explain(ui, setup['note'])
         if account.get('transport') == 'maton':
             account.update(transport=(setup.get('account') or {}).get('transport', 'api'))
             account.pop('connection_id', None)

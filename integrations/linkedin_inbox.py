@@ -247,6 +247,53 @@ def lease(action):
     return subprocess.run(args, capture_output=True, text=True, timeout=30)
 
 
+OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'the-machine' / 'linkedin-inbox-tabs'
+
+
+def tab_ids():
+    try:
+        return set(re.findall(r'^\s*id:\s*(\S+)', oc('tabs', timeout=30), re.M))
+    except Exception:
+        return None
+
+
+def remember_tab(target, opened):
+    ids = set(OPEN_TABS.read_text().split()) if OPEN_TABS.exists() else set()
+    ids = ids | {target} if opened else ids - {target}
+    OPEN_TABS.parent.mkdir(parents=True, exist_ok=True)
+    OPEN_TABS.write_text('\n'.join(sorted(ids)))
+
+
+def close_tab(target):
+    try:
+        oc('close', target, timeout=30)
+    except Exception as e:  # never leave our tab behind silently
+        print('warning: could not close tab ' + target + ': ' + str(e), file=sys.stderr)
+        return False
+    remember_tab(target, False)
+    return True
+
+
+def open_tab(label, url):
+    """A tab of our own, remembered until it is closed: tabs left by a run that was stopped (or whose open
+    timed out after the tab appeared) are closed by the next run, never the owner's own tabs."""
+    for target in (OPEN_TABS.read_text().split() if OPEN_TABS.exists() else []):
+        if not close_tab(target) and target not in (tab_ids() or {target}):
+            remember_tab(target, False)  # already gone
+    before = tab_ids()
+    try:
+        receipt = oc('open', '--label', label, url)
+    except Exception:
+        after = tab_ids()
+        for target in (after - before) if before is not None and after is not None else ():
+            close_tab(target)
+        raise
+    match = re.search(r'^(?:id|tab):\s*(\S+)', receipt, re.M)
+    target = match[1] if match else label
+    remember_tab(target, True)
+    return target
+
+
 def with_tab(url, fn):
     claim = lease('claim')
     if claim.returncode == 3:
@@ -254,21 +301,13 @@ def with_tab(url, fn):
         raise Fail('the OpenClaw browser is busy (' + holder + '); try again later')
     if claim.returncode:
         raise Fail('could not claim the browser lease: ' + (claim.stderr or claim.stdout).strip()[:200])
-    label = 'linkedin-inbox-' + uuid.uuid4().hex[:6]
-    opened = False
-    target = label
+    target = None
     try:
-        receipt=oc('open', '--label', label, url)
-        opened = True
-        match=re.search(r'^id:\s*(\S+)',receipt,re.M)
-        if match: target=match[1]
+        target = open_tab('linkedin-inbox-' + uuid.uuid4().hex[:6], url)
         return fn(target)
     finally:
-        if opened:
-            try:
-                oc('close', target, timeout=30)
-            except Exception as e:  # never leave our tab behind silently
-                print('warning: could not close tab ' + label + ': ' + str(e), file=sys.stderr)
+        if target:
+            close_tab(target)
         lease('release')
 
 
