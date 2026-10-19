@@ -41,6 +41,7 @@ import graph
 import enrichment
 import google_api
 import next_actions
+import browser_viewer
 import preparation_state
 
 ROOT = Path(__file__).resolve().parent
@@ -204,7 +205,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong'}
+OWNER_ACTIONS = {'browser_focus', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -3701,6 +3702,9 @@ class Store:
             if action['kind']!='menu' and action['revision'] in states:extra['action_status']=states[action['revision']]
         prompt=db.execute('SELECT status,error FROM feedback_prompts WHERE request_id=?',(suggestion.get('feedback_request_id'),)).fetchone()
         if prompt:extra['change_prompt']=dict(prompt)
+        job=db.execute('SELECT job_id,status FROM preparations WHERE suggestion_id=?',(suggestion['id'],)).fetchone()
+        waiting=browser_wait(db,job['job_id'],job['status']) if job else None
+        if waiting:extra['preparation_browser']={**waiting,'link':browser_link(self.config)}
         if self.accounts and suggestion.get('account_ids') is not None:
             extra['scope']=suggestion_scope(suggestion['account_ids'], self.accounts)
         return extra
@@ -4519,6 +4523,52 @@ STEP_NAMES = {'exec': 'Running a command', 'browser': 'Using the browser', 'read
               'assistant_signals': 'Checking the assistant', 'memory_search': 'Searching memory'}
 
 
+BROWSER_WAIT = 45  # seconds on the browser before a card offers it to the owner
+
+
+def browser_wait(db, job_id, status, at=None):
+    """The browser a preparation waits on, as {since, page}: it has been on the browser for BROWSER_WAIT seconds or
+    more (a sign-in, a captcha, a code or a page that does not load), or it stopped right after a browser step and
+    asks for help. None otherwise. `page` is the last address it opened, when it said one."""
+    if status not in ('starting', 'running', 'blocked'):
+        return None
+    try:
+        calls = db.execute('SELECT tool,params,started_at FROM preparation_calls WHERE job_id=? ORDER BY started_at DESC,rowid DESC LIMIT 50',
+                           (job_id,)).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    if status == 'blocked':  # saving the blocker is its own last step
+        calls = [c for c in calls if c['tool'] != 'assistant_signals']
+    streak = []
+    for call in calls:
+        if call['tool'] != 'browser':
+            break
+        streak.append(call)
+    if not streak:
+        return None
+    since = streak[-1]['started_at']
+    if status != 'blocked' and (at or dt.datetime.now(dt.timezone.utc)) - dt.datetime.fromisoformat(since) < dt.timedelta(seconds=BROWSER_WAIT):
+        return None
+    page = None
+    for call in calls:
+        try:
+            params = json.loads(call['params']) if call['tool'] == 'browser' else {}
+        except ValueError:
+            continue
+        found = isinstance(params, dict) and (params.get('url') or params.get('targetUrl'))
+        if isinstance(found, str) and urllib.parse.urlsplit(found).scheme in ('http', 'https'):
+            page = found
+            break
+    return {'since': since, 'page': page}
+
+
+def browser_link(config):
+    """Where the owner sees the assistant's browser: `browser_url` (a hosted machine's viewer behind its sign-in, or
+    the local noVNC viewer of browser_viewer.py). None: the dashboard brings the tab to the front instead."""
+    url = str(config.get('browser_url') or '')
+    return url if urllib.parse.urlsplit(url).scheme in ('http', 'https') else None
+
+
 def preparation_steps(job_id, agent_db=None, limit=4):
     """The latest step titles of a running preparation, read from the agent's own transcript (read-only).
 
@@ -4725,7 +4775,8 @@ def card(row):
             pass
     if row.get('early') and row['status'] == 'prepared':
         status = 'Prepared ahead, so you only need to approve it. Nothing was sent or changed.'
-    if row.get('preparation_status') in ('starting','running'): status='Preparing…'
+    if row.get('preparation_status') in ('starting','running'):
+        status='Preparing… I’ve been in the browser a while; it may need you there (a sign-in or a check).' if row.get('preparation_browser') else 'Preparing…'
     elif row.get('preparation_status') == 'queued': status='Next up. I’ll start shortly.'
     elif row.get('preparation_status') == 'blocked': status='I’m stuck: '+(row.get('preparation_reason') or 'Preparation did not finish. I’ll keep this in your list.')
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed','undoing','undone')),None)
@@ -4780,6 +4831,9 @@ def controls(row):
         choices = [('Do it','accept'),('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
     buttons=[]
+    link=(row.get('preparation_browser') or {}).get('link') or ''
+    if link.startswith('https://') and row['status'] in ('accepted','instructions'):
+        buttons.append({'label':'Open the browser','action':{'type':'url','url':link}})
     if row['status']=='prepared':
         for action in actions:
             state=action.get('state') or row.get('action_status',{})
@@ -5833,6 +5887,12 @@ class App:
                 raise ValueError('Only the owner sets a role here, on the dashboard; reviews use graph with node_id and role')
             # The same role as a review's confirms it: it becomes the owner's word.
             return self.graph_action({'node_id': args.get('node_id'), 'role': args.get('role') or ''}, source='owner')
+        if name == 'browser_focus':
+            if not owner_dashboard:
+                raise ValueError('Only the owner brings the browser to the front, from the dashboard')
+            page = args.get('page') if isinstance(args.get('page'), str) else None
+            shown = browser_viewer.focus(page, self.config.get('browser_cdp_url') or browser_viewer.CDP_URL)
+            return {'shown': shown is not None}
         if name == 'graph_warmup':
             if not owner_dashboard:
                 raise ValueError('Only the owner undoes a warm-up domain here, on the dashboard; reviews use graph with warmup')
@@ -6467,10 +6527,12 @@ class App:
     def preparation_progress(self, suggestion_id):
         with self.store.connect() as db:
             job = db.execute('SELECT job_id,session_job_id,status,started_at FROM preparations WHERE suggestion_id=?', (suggestion_id,)).fetchone()
+            waiting = browser_wait(db, job['job_id'], job['status']) if job else None
         if not job:
             raise ValueError('No preparation')
         steps = preparation_steps(job['session_job_id'] or job['job_id'], self.config.get('agent_db')) if job['status'] in ('starting', 'running') else []
-        return {'status': job['status'], 'started_at': job['started_at'], 'steps': steps}
+        return {'status': job['status'], 'started_at': job['started_at'], 'steps': steps,
+                'browser': {**waiting, 'link': browser_link(self.config)} if waiting else None}
 
     def preparation_gateway(self, request):
         try:
@@ -6484,6 +6546,19 @@ class App:
             except Exception as error:LOG.error('preparation error=%s',type(error).__name__)
             try:self.release_finished_browser_lease()
             except Exception as error:LOG.error('browser lease error=%s',type(error).__name__)
+            try:self.flag_browser_waits()
+            except Exception as error:LOG.error('browser wait error=%s',type(error).__name__)
+
+    def flag_browser_waits(self):
+        """A sent card is redrawn once when its running preparation starts waiting on the browser, so it says so and,
+        with a viewer link, gets its Open the browser button. A blocked one is redrawn anyway."""
+        flagged = self.__dict__.setdefault('browser_flagged', set())
+        with self.store.connect() as db:
+            for job in db.execute("SELECT job_id,suggestion_id,status FROM preparations WHERE status IN ('starting','running')").fetchall():
+                if job['job_id'] in flagged or not browser_wait(db, job['job_id'], job['status']):
+                    continue
+                flagged.add(job['job_id'])
+                db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (job['suggestion_id'],))
 
     def release_finished_browser_lease(self, lease_file=BROWSER_LEASE):
         """A Do it run holds the browser as `assistant-<first 8 of its job ID>`. Runs can end without
@@ -7032,7 +7107,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','push_subscribe','push_unsubscribe')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','push_subscribe','push_unsubscribe','browser_focus')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

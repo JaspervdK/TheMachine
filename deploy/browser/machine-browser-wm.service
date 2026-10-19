@@ -1,0 +1,12 @@
+[Unit]
+Description=The Machine browser: window manager (one maximized window at a time)
+BindsTo=machine-browser-display.service
+After=machine-browser-display.service
+StopWhenUnneeded=yes
+
+[Service]
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/matchbox-window-manager -use_titlebar yes -use_cursor yes
+SuccessExitStatus=1
+Restart=on-failure
+RestartSec=2

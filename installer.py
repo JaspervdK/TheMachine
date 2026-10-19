@@ -5,6 +5,8 @@
     ./install.sh --non-interactive   read answers from ASSISTANT_* environment variables
     ./install.sh --preview           one review of the last 7 days, shown only; nothing is sent
     ./install.sh --uninstall         remove the service, plugin and CLI link; keep data
+    ./install.sh --browser-viewer    existing install: give the assistant a browser of its own that you watch and
+                                     use from yours (noVNC on 127.0.0.1:6080; see browser_viewer.py)
     ./install.sh --uninstall --purge also delete the data directory (config, database, secrets)
 
 In a terminal, a healthy install goes on to connect each source (onboarding.py: sign-ins,
@@ -866,6 +868,21 @@ def uninstall(paths, purge, interactive):
 
 # ---------------------------------------------------------------- main
 
+def browser_viewer_setup(paths, install=None):
+    """The optional viewer: its units and files, then the dashboard links stuck cards to it (`browser_url`) and
+    brings tabs to the front through its DevTools port (`browser_cdp_url`)."""
+    import browser_viewer
+    url = (install or browser_viewer.install)(say=say)
+    if not url:
+        return 1
+    config = onboarding.load(paths.config)
+    config.update(browser_url=url, browser_cdp_url=browser_viewer.CDP_URL)
+    onboarding.save(paths.config, config)
+    restarted = run(['systemctl', '--user', 'try-restart', UNIT_NAME]).returncode == 0
+    say('  Cards that wait on the browser now link to it.' if restarted else f'  Saved; restart to apply: systemctl --user restart {UNIT_NAME}')
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--non-interactive', action='store_true', help='take answers from ASSISTANT_* environment variables')
@@ -875,6 +892,7 @@ def main(argv=None):
     parser.add_argument('--skip-plugin', action='store_true', help='do not install the OpenClaw plugin')
     parser.add_argument('--activate', action='store_true', help='enable reviews and Telegram delivery on an existing install')
     parser.add_argument('--preview', action='store_true', help='existing install: one review of the last 7 days, shown only (assistant preview)')
+    parser.add_argument('--browser-viewer', action='store_true', help='existing install: a browser of its own on a virtual display, viewed in yours (127.0.0.1 only)')
     parser.add_argument('--health-timeout', type=float, default=30)
     args = parser.parse_args(argv)
     interactive = not args.non_interactive and sys.stdin.isatty()
@@ -888,6 +906,10 @@ def main(argv=None):
             parser.error('--preview needs an existing installation and a running service (no --activate/--uninstall)')
         # Installs nothing and changes no config: the CLI asks the running service for one preview review.
         return subprocess.call([sys.executable, str(ROOT / 'cli.py'), '--config', str(paths.config), 'preview'])
+    if args.browser_viewer:
+        if args.uninstall or not paths.config.exists():
+            parser.error('--browser-viewer needs an existing installation (no --uninstall)')
+        return browser_viewer_setup(paths)
     if args.uninstall:
         return uninstall(paths, args.purge, interactive)
     if interactive:

@@ -1,0 +1,11 @@
+[Unit]
+Description=The Machine browser: noVNC web client and websocket bridge (127.0.0.1:6081)
+Requires=machine-browser-display.service
+After=machine-browser-display.service
+StopWhenUnneeded=yes
+
+[Service]
+ExecStart=/usr/bin/websockify --web %h/.local/share/machine-browser/web --heartbeat 25 --unix-target %t/machine-browser/vnc.sock 127.0.0.1:6081
+ExecStartPost=/bin/sh -c 'for i in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:6081/vnc.html && exit 0; sleep 0.1; done; exit 1'
+Restart=on-failure
+RestartSec=2

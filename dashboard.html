@@ -353,6 +353,7 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .graph-open{padding:4px 16px}#people-view .graph-open .promise:first-child{border-top:0}
 .role-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}:is(.role-row,.name-row) button{padding:3px 10px;font-size:.82rem}
 .org-form{display:grid;gap:6px;margin:8px 0 0}.org-buttons{display:flex;gap:8px;flex-wrap:wrap}.org-buttons button{padding:3px 10px;font-size:.82rem}.org-form label{display:grid;gap:2px}.org-form :is(input,textarea){width:100%;box-sizing:border-box;font:inherit}.role-form,.name-form{display:flex;gap:8px;margin:8px 0 0}:is(.role-form,.name-form) input{flex:1;min-width:0}
+.browser-link{padding:0;border:0;background:none;color:inherit;text-decoration:underline;cursor:pointer;font:inherit;white-space:nowrap}
 .role-why{font-style:italic}.role-why button.link{font-style:normal;padding:0;border:0;background:none;color:inherit;text-decoration:underline;cursor:pointer;font-size:inherit}
 .warmup{margin:14px 0 0}.warmup summary{cursor:pointer}.relation{display:flex;align-items:center;justify-content:space-between;gap:8px}.relation button,.whos .role-row button{padding:3px 10px;font-size:.82rem}
 .name-row{display:flex;align-items:center;justify-content:space-between;gap:8px}.name-row h3{min-width:0;overflow-wrap:anywhere}
@@ -556,10 +557,13 @@ const notice=(text,error=false)=>{$('#notice').textContent=text;$('#notice').cla
 // Preparing shows a live clock and the latest steps the AI run took; Needs your help keeps the technical details folded away.
 const steps=new Map(),openTech=new Set();
 const elapsed=v=>{const t=Math.max(0,Math.floor((Date.now()-new Date(v))/1000));return Math.floor(t/60)+':'+String(t%60).padStart(2,'0')};
+// A preparation that waits on the browser (a sign-in, a captcha, a code) offers it: the viewer when this install has one,
+// otherwise its tab brought to the front on this computer.
+const browserLink=(id,b)=>!b?'':b.link?`<a class="browser-link" href="${esc(b.link)}" target="_blank" rel="noopener">Open the browser</a>`:`<button type="button" class="browser-link" data-browser-focus="${esc(id)}" data-page="${esc(b.page||'')}">Open the browser</button>`;
 function preparationNote(s){
 if(s.preparation_status==='queued')return `<p class="note">${s.preparation_retried?'That attempt didn’t finish, so I’m trying once more…':'I’ll start shortly.'}</p>`;
-if(s.preparation_status==='blocked')return `<p class="note">${esc(s.preparation_reason||'I couldn’t finish this. You can try again or change the request.')}</p>${s.preparation_details?`<details class="tech" data-tech="${s.id}" ${openTech.has(s.id)?'open':''}><summary>Details</summary><pre>${esc(s.preparation_details)}</pre></details>`:''}`;
-return `<p class="note">Preparing… ${s.preparation_started_at?`<span class="elapsed" data-since="${esc(s.preparation_started_at)}">${elapsed(s.preparation_started_at)}</span>`:''}${s.preparation_retried?' · second try':''}</p><ul class="steps" data-steps="${s.id}" aria-live="polite">${(steps.get(s.id)||[]).map(x=>`<li>${esc(x.title)}</li>`).join('')}</ul>`}
+if(s.preparation_status==='blocked')return `<p class="note">${esc(s.preparation_reason||'I couldn’t finish this. You can try again or change the request.')} ${browserLink(s.id,s.preparation_browser)}</p>${s.preparation_details?`<details class="tech" data-tech="${s.id}" ${openTech.has(s.id)?'open':''}><summary>Details</summary><pre>${esc(s.preparation_details)}</pre></details>`:''}`;
+return `<p class="note">Preparing… ${s.preparation_started_at?`<span class="elapsed" data-since="${esc(s.preparation_started_at)}">${elapsed(s.preparation_started_at)}</span>`:''}${s.preparation_retried?' · second try':''} <span data-browser="${s.id}">${browserLink(s.id,s.preparation_browser)}</span></p><ul class="steps" data-steps="${s.id}" aria-live="polite">${(steps.get(s.id)||[]).map(x=>`<li>${esc(x.title)}</li>`).join('')}</ul>`}
 async function request(path,options){let r=await fetch(path,options);let d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d}
 function connectorHealth(c){
 if(c.error){const help=/(auth|unauthor|forbidden|permission|invalid_grant|HTTP_40[13])/.test(c.error);return {tone:help?'orange':'amber',text:help?'Needs your help':'Reconnecting automatically'}}
@@ -873,7 +877,7 @@ const saved=await request('api/action',{method:'POST',headers:{'Content-Type':'a
 changing.delete(id);await refresh();
 if(['complete','reject'].includes(choice))toast(saved?.status==='completed'?'Marked done':'Marked not needed',false,id);else toast(({accept:'I’ll prepare it.',other:'Changes saved.',retry:'Trying again.',undo:'Undone.',reopen:'Reopened.'})[choice]||'Saved.');
 }
-$('#suggestions').onclick=async e=>{const b=e.target.closest('button');if(!b)return;const id=b.dataset.id;
+$('#suggestions').onclick=async e=>{const b=e.target.closest('button');if(!b||b.dataset.browserFocus)return;const id=b.dataset.id;
 if(b.dataset.unmerge){b.disabled=true;try{await request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'undo_merge',args:{suggestion_id:id,approval_id:crypto.randomUUID()}})});toast('Undoing the merge…');await refresh()}catch(e){toast(e.message,true)}finally{b.disabled=false}return}
 if(b.dataset.smart){const a=taskActions(state.suggestions.find(s=>s.id===id)).find(a=>a.revision===b.dataset.smart);if(!a){toast('That result changed. Use its current buttons.',true);return}if(['email','email_demo','linkedin','slack','x','merge','finish'].includes(a.kind)){openSend(id,b.dataset.smart);return}b.disabled=true;try{await request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'confirm_action',args:{suggestion_id:id,revision:b.dataset.smart,approval_id:crypto.randomUUID()}})});toast('I’ll prepare that next.');await refresh()}catch(e){toast(e.message,true)}finally{b.disabled=false}return}
 if(b.dataset.original){openEmail(id).catch(e=>toast(e.message,true));return}
@@ -979,6 +983,7 @@ document.querySelectorAll('.refresh-tap').forEach(e=>{e.addEventListener('click'
 $('#toast').onclick=async e=>{const b=e.target.closest('[data-undo]');if(!b)return;b.disabled=true;try{await saveDecision(b.dataset.undo,'undo')}catch(e){toast(e.message,true)}};
 document.addEventListener('toggle',e=>{const id=e.target.dataset?.tech;if(id)e.target.open?openTech.add(id):openTech.delete(id)},true);
 setInterval(()=>document.querySelectorAll('.elapsed[data-since]').forEach(x=>x.textContent=elapsed(x.dataset.since)),1000);
-setInterval(async()=>{if(document.hidden)return;for(const list of [...document.querySelectorAll('[data-steps]')].slice(0,3)){const id=list.dataset.steps;try{const p=await request('api/progress?id='+encodeURIComponent(id));if(!['starting','running'].includes(p.status)){refresh();return}steps.set(id,p.steps);list.innerHTML=p.steps.map(x=>`<li>${esc(x.title)}</li>`).join('')}catch{}}},4000);
+setInterval(async()=>{if(document.hidden)return;for(const list of [...document.querySelectorAll('[data-steps]')].slice(0,3)){const id=list.dataset.steps;try{const p=await request('api/progress?id='+encodeURIComponent(id));if(!['starting','running'].includes(p.status)){refresh();return}steps.set(id,p.steps);list.innerHTML=p.steps.map(x=>`<li>${esc(x.title)}</li>`).join('');const slot=document.querySelector(`[data-browser="${CSS.escape(id)}"]`),html=browserLink(id,p.browser);if(slot&&slot.innerHTML!==html)slot.innerHTML=html}catch{}}},4000);
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-browser-focus]');if(!b)return;b.disabled=true;try{const r=await request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'browser_focus',args:{page:b.dataset.page||null}})});toast(r.shown?'The browser is in front now.':'I couldn’t reach the browser on this computer.',!r.shown)}catch(err){toast(err.message,true)}finally{b.disabled=false}});
 refresh();setInterval(()=>{if(!document.querySelector('textarea:focus')&&!$('#snooze-dialog').open&&!$('#result-dialog').open&&!$('#email-dialog').open&&!$('#send-dialog').open)refresh()},30000);
 </script></html>

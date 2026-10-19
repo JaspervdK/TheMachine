@@ -1,0 +1,22 @@
+[Unit]
+Description=The Machine browser: Chrome with its own persistent profile (CDP on 127.0.0.1:9223)
+Requires=machine-browser-display.service
+Wants=machine-browser-wm.service
+After=machine-browser-display.service machine-browser-wm.service
+StopWhenUnneeded=yes
+
+[Service]
+Environment=DISPLAY=:99 BROWSER_BIN=google-chrome-stable
+# optional: BROWSER_BIN=chromium, TZ, LANG
+EnvironmentFile=-%h/.config/machine-browser/browser.env
+ExecStart=/bin/sh -c 'exec "$BROWSER_BIN" --user-data-dir=%h/.local/share/machine-browser/chrome \
+  --remote-debugging-address=127.0.0.1 --remote-debugging-port=9223 \
+  --no-first-run --no-default-browser-check --password-store=basic --disable-dev-shm-usage \
+  --window-position=0,0 --window-size=1280,800 --start-maximized --restore-last-session \
+  --disable-features=Translate,MediaRouter'
+ExecStartPost=/bin/sh -c 'for i in $(seq 150); do curl -sf -o /dev/null http://127.0.0.1:9223/json/version && exit 0; sleep 0.2; done; exit 1'
+KillMode=mixed
+TimeoutStopSec=20
+# also when you close the last window (stops for idleness are not restarts)
+Restart=always
+RestartSec=2

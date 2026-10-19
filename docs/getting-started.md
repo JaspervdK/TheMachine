@@ -62,6 +62,8 @@ The installer offers a **preview**: your agent reviews the last 7 days once and 
 
 If the cards look useful, say yes to **turning on reviews and Telegram cards**. Read [Security model](../README.md#security-model) first: **Do it** lets the agent act with your accounts, only after you tap it. You can also do both later with `./install.sh --preview` and `./install.sh --activate`.
 
+On a server without a screen, `./install.sh --browser-viewer` gives the assistant a browser you can watch and use from your own (sign in to LinkedIn or X there, or help when a task waits on a sign-in). See [README](../README.md#sources).
+
 ## Check everything
 
 ```bash

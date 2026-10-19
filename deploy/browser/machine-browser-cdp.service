@@ -1,0 +1,7 @@
+[Unit]
+Description=The Machine browser: CDP entry proxy (exits after 15 idle minutes, which stops the browser)
+Requires=machine-browser-cdp.socket machine-browser-chrome.service
+After=machine-browser-cdp.socket machine-browser-chrome.service
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=15min 127.0.0.1:9223

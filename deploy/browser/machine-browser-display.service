@@ -1,0 +1,13 @@
+[Unit]
+Description=The Machine browser: virtual display with built-in VNC (unix socket only)
+StopWhenUnneeded=yes
+
+[Service]
+RuntimeDirectory=machine-browser
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/Xtigervnc :99 -geometry 1280x800 -depth 24 -dpi 96 -desktop "The Machine browser" \
+  -rfbport -1 -rfbunixpath %t/machine-browser/vnc.sock -rfbunixmode 0600 -nolisten tcp \
+  -SecurityTypes None -AlwaysShared -AcceptSetDesktopSize=1 -SendPrimary=0
+ExecStartPost=/bin/sh -c 'for i in $(seq 100); do [ -S /tmp/.X11-unix/X99 ] && [ -S %t/machine-browser/vnc.sock ] && exit 0; sleep 0.1; done; exit 1'
+Restart=on-failure
+RestartSec=2

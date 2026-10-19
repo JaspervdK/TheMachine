@@ -1,0 +1,8 @@
+[Unit]
+Description=The Machine browser: viewer entry point on 127.0.0.1:6080 (starts the browser on first connection)
+
+[Socket]
+ListenStream=127.0.0.1:6080
+
+[Install]
+WantedBy=sockets.target
