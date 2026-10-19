@@ -90,6 +90,22 @@ try{
  assert.ok(detail.includes('Logistics, 51-200 people, Ghent')&&detail.includes('Client Ltd moves boxes.'));
  assert.equal(await page.locator('.graph-detail a[href^="https://www.linkedin.com"]').count(),1);
  assert.equal(await page.locator('.graph-detail a[href^="javascript"]').count(),0);
+ // One Edit for an organisation: only the changed fields become the owner's; Wrong company clears a bad match.
+ assert.equal(await page.locator('.graph-detail [data-name-edit]').count(),0);
+ await page.locator('[data-org-edit]').click();
+ await page.locator('.org-form input[name="industry"]').fill('Freight');
+ await page.locator('.org-form input[name="name"]').fill('Client Group');
+ let mark=calls.length;
+ await page.locator('.org-form button:not([type])').click();
+ for(let i=0;i<100&&calls.length<=mark;i++)await page.waitForTimeout(20);
+ assert.deepEqual(calls.at(-1),{action:'graph_org_edit',args:{node_id:org.id,fields:{industry:'Freight'},name:'Client Group'}});
+ await page.locator('.graph-detail h3',{hasText:'Client Ltd'}).waitFor();
+ await page.locator('[data-org-edit]').click();
+ page.once('dialog',d=>{assert.ok(d.message().startsWith('Clear the looked-up details?'));d.accept()});
+ mark=calls.length;
+ await page.locator('[data-org-wrong]').click();
+ for(let i=0;i<100&&calls.length<=mark;i++)await page.waitForTimeout(20);
+ assert.deepEqual(calls.at(-1),{action:'graph_org_wrong',args:{node_id:org.id,wrong:true}});
  // The shown form is Pat's even when a slow navigation has selected another node.
  await page.evaluate(()=>people('email:pat@client.example'));
  await page.locator('.graph-detail h3',{hasText:'Pat Doe'}).waitFor();

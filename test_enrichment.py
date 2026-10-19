@@ -104,6 +104,44 @@ class Enrichment(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Give a domain'):
             self.app.action('enrich', {'domain': 'not a domain'})
 
+    def test_the_owner_edits_an_organisation_and_drops_a_wrong_match(self):
+        self.add(tg.mail(3, 'Lee <lee@globex.com>', 'sam@acme.com'), tg.mail(2, 'Sam <sam@acme.com>', 'Lee <lee@globex.com>', ('SENT',)))
+        self.build()
+        now = tg.NOW.isoformat()
+        enrichment.step(self.store.connect, self.config, now)
+        edit = lambda args: self.app.action('graph_org_edit', {'node_id': 'org:globex.com', **args}, owner_dashboard=True)
+        with self.assertRaisesRegex(ValueError, 'Only the owner'):
+            self.app.action('graph_org_edit', {'node_id': 'org:globex.com', 'fields': {'industry': 'Toys'}})
+        self.assertIn('graph_org_edit', a.OWNER_ACTIONS)
+        with self.assertRaisesRegex(ValueError, 'Founded is a year'):
+            edit({'fields': {'founded': 'long ago'}})
+        edit({'fields': {'industry': 'Toys', 'website': 'globex.example', 'founded': '2001'}, 'name': 'Globex Toys'})
+        org = self.node('org:globex.com')
+        self.assertEqual((org['name'], org['profile']['industry'], org['profile']['website'], org['profile']['founded'], org['edited']),
+                         ('Globex Toys', 'Toys', 'https://globex.example', 2001, ['founded', 'industry', 'website']))
+        self.assertEqual(org['profile']['about'], 'Globex makes everything.')  # what the owner left alone stays looked up
+        with self.store.connect() as db:  # a refresh never undoes the owner's details
+            enrichment.save(db, 'globex.com', 'found', {'name': 'Globex', 'industry': 'Manufacturing'}, now)
+        self.build()
+        self.assertEqual(self.node('org:globex.com')['profile']['industry'], 'Toys')
+        edit({'fields': {'industry': ''}})
+        self.build()
+        self.assertEqual(self.node('org:globex.com')['profile']['industry'], 'Manufacturing')  # an empty field gives it back
+        # Wrong company: the looked-up details go and the domain isn't looked up again; the owner's stay.
+        self.app.action('graph_org_wrong', {'node_id': 'org:globex.com', 'wrong': True}, owner_dashboard=True)
+        org = self.node('org:globex.com')
+        self.assertTrue(org['wrong'])
+        self.assertEqual(org['profile'], {'website': 'https://globex.example', 'founded': 2001})
+        with self.store.connect() as db:
+            self.assertEqual(enrichment.due(db, '2030-01-01T00:00:00+00:00', 10), [])
+            enrichment.save(db, 'globex.com', 'found', {'name': 'Globex'}, now)  # a late answer doesn't bring it back
+            self.assertEqual(db.execute("SELECT status FROM org_profiles WHERE domain='globex.com'").fetchone()[0], 'wrong')
+        self.app.action('graph_org_wrong', {'node_id': 'org:globex.com', 'wrong': False}, owner_dashboard=True)
+        with self.store.connect() as db:
+            self.assertEqual(enrichment.due(db, now, 10), ['globex.com'])
+        with self.assertRaisesRegex(ValueError, 'organisation'):
+            self.app.action('graph_org_wrong', {'node_id': 'email:lee@globex.com', 'wrong': True}, owner_dashboard=True)
+
 
 if __name__ == '__main__':
     unittest.main()

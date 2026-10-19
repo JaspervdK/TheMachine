@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS role_corrections(id INTEGER PRIMARY KEY,identifier TE
 CREATE TABLE IF NOT EXISTS org_profiles(domain TEXT PRIMARY KEY,status TEXT NOT NULL,profile TEXT,fetched_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_relations(a TEXT NOT NULL,b TEXT NOT NULL,relation TEXT NOT NULL,source TEXT NOT NULL,event_id INTEGER,
   created_at TEXT NOT NULL,PRIMARY KEY(a,b));
+CREATE TABLE IF NOT EXISTS org_edits(domain TEXT PRIMARY KEY,fields TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hidden_domains(domain TEXT PRIMARY KEY,hidden INTEGER NOT NULL,source TEXT NOT NULL,event_id INTEGER,
   name TEXT,created_at TEXT NOT NULL);
 '''
@@ -665,7 +666,9 @@ def _build(db, config, now):
     role_rows = {r['identifier']: dict(r) for r in db.execute('SELECT * FROM person_roles')}
     said = {i: (r['role'] or None, 'owner' if r['source'] == 'owner' else 'review') for i, r in role_rows.items()}
     related = db.execute("SELECT a,b,relation,source FROM graph_relations ORDER BY source='owner',created_at").fetchall()
-    profiles = {r['domain']: json.loads(r['profile']) for r in db.execute("SELECT domain,profile FROM org_profiles WHERE profile IS NOT NULL")}
+    profiles = {r['domain']: json.loads(r['profile']) for r in db.execute("SELECT domain,profile FROM org_profiles WHERE profile IS NOT NULL AND status!='wrong'")}
+    wrong = {r[0] for r in db.execute("SELECT domain FROM org_profiles WHERE status='wrong'")}
+    edits = {r['domain']: json.loads(r['fields']) for r in db.execute('SELECT domain,fields FROM org_edits')}
     surnames = {n.split()[-1] for n in owner.names if len(n.split()) >= 2}
     for node, value in strength.items():
         if value < FLOOR:
@@ -705,11 +708,12 @@ def _build(db, config, now):
     for domain, people in members.items():
         total = sum(v for _, v in people)
         role, role_by = said.get('org:' + domain, (None, None))
-        profile = profiles.get(domain)
+        profile = {**(profiles.get(domain) or {}), **edits.get(domain, {})} or None  # what the owner wrote wins
         nodes.append(('org:' + domain, 'org', (named.get('org:' + domain) or crm_names.get(domain) or paying_names.get(domain)
                                                or (profile or {}).get('name') or domain)[:200], round(total, 4),
                       max((last_day[p].isoformat() for p, _ in people if p in last_day), default=None), len(people), None, 0, None,
-                      json.dumps({'domain': domain, 'role': role, 'role_by': role_by, 'paying': domain in paying_names, 'profile': profile})))
+                      json.dumps({'domain': domain, 'role': role, 'role_by': role_by, 'paying': domain in paying_names, 'profile': profile,
+                                  'edited': sorted(edits.get(domain, {})), 'wrong': domain in wrong})))
         for node, value in people:
             links.append((node, 'org:' + domain, 'member', round(value, 4), None))
     two_weeks = current - dt.timedelta(days=14)
@@ -804,7 +808,7 @@ def node_view(row, links=None):
                     seen_only=bool(info.get('seen_only')), relations=info.get('relations', []))
     elif row['kind'] == 'org':
         view.update(role=info.get('role'), role_by=info.get('role_by'), domain=info.get('domain'), profile=info.get('profile'),
-                    about=enrichment.summary(info.get('profile')))
+                    about=enrichment.summary(info.get('profile')), edited=info.get('edited', []), wrong=bool(info.get('wrong')))
     elif row['kind'] == 'project':
         view.update(trend=row['trend'], state=project_state(row), closed=bool(info.get('closed_at')), probable_signals=info.get('probable', 0))
     if links is not None:
@@ -1237,6 +1241,57 @@ def rename(db, node_id, name, now):
     else:
         db.execute('DELETE FROM graph_names WHERE node_id=?', (node_id,))
     return {'node_id': node_id, 'name': name or None}
+
+
+ORG_FIELDS = {'website': 200, 'linkedin_url': 200, 'industry': 120, 'size': 40, 'location': 120, 'founded': 4, 'about': 600}
+
+
+def org_domain(db, node_id):
+    row = db.execute("SELECT info FROM graph_nodes WHERE id=? AND kind='org'", (str(node_id or ''),)).fetchone()
+    if not row or not json.loads(row['info']).get('domain'):
+        raise ValueError('Edit an organisation from graph results')
+    return json.loads(row['info'])['domain']
+
+
+def org_edit(db, node_id, fields, now):
+    """The owner's own details for an organisation. They win over what an enrichment service says and survive
+    every refresh; an empty field gives that one back to the service."""
+    domain, fields = org_domain(db, node_id), fields if isinstance(fields, dict) else {}
+    row = db.execute('SELECT fields FROM org_edits WHERE domain=?', (domain,)).fetchone()
+    kept = json.loads(row['fields']) if row else {}
+    for field, limit in ORG_FIELDS.items():
+        if field not in fields:
+            continue
+        text = ' '.join(str(fields[field] or '').split())
+        if field == 'founded' and text:
+            if not re.fullmatch(r'1[5-9]\d\d|20\d\d', text):
+                raise ValueError('Founded is a year, like 2014')
+            text = int(text)
+        elif len(text) > limit:
+            raise ValueError(f"{field.replace('_url', '').replace('_', ' ').capitalize()} is up to {limit} characters")
+        elif field in ('website', 'linkedin_url') and text and not re.match(r'https?://', text):
+            text = 'https://' + text
+        if text:
+            kept[field] = text
+        else:
+            kept.pop(field, None)
+    if kept:
+        db.execute('INSERT OR REPLACE INTO org_edits(domain,fields,updated_at) VALUES(?,?,?)', (domain, json.dumps(kept), now))
+    else:
+        db.execute('DELETE FROM org_edits WHERE domain=?', (domain,))
+    return {'node_id': 'org:' + domain, 'edited': sorted(kept)}
+
+
+def org_wrong(db, node_id, wrong, now):
+    """The enrichment service matched the wrong company: its details go and the domain isn't looked up again,
+    until the owner asks for a new look-up."""
+    domain = org_domain(db, node_id)
+    if wrong:
+        db.execute("INSERT INTO org_profiles(domain,status,profile,fetched_at) VALUES(?,'wrong',NULL,?) "
+                   "ON CONFLICT(domain) DO UPDATE SET status='wrong',profile=NULL,fetched_at=excluded.fetched_at", (domain, now))
+    else:
+        db.execute("DELETE FROM org_profiles WHERE domain=? AND status='wrong'", (domain,))
+    return {'node_id': 'org:' + domain, 'wrong': bool(wrong)}
 
 
 # Writing labels and merges.

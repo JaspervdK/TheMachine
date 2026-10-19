@@ -143,14 +143,16 @@ def due(db, now, limit):
     fresh = (current - dt.timedelta(days=REFRESH_DAYS)).isoformat()
     retry = (current - dt.timedelta(hours=RETRY_HOURS)).isoformat()
     rows = db.execute("SELECT json_extract(n.info,'$.domain') domain FROM graph_nodes n LEFT JOIN org_profiles p ON p.domain=json_extract(n.info,'$.domain') "
-                      "WHERE n.kind='org' AND (p.domain IS NULL OR (p.status!='error' AND p.fetched_at<?) OR (p.status='error' AND p.fetched_at<?)) "
+                      "WHERE n.kind='org' AND (p.domain IS NULL OR (p.status NOT IN ('error','wrong') AND p.fetched_at<?) OR (p.status='error' AND p.fetched_at<?)) "
                       'ORDER BY n.strength DESC LIMIT ?', (fresh, retry, limit)).fetchall()
     return [r[0] for r in rows if r[0]]
 
 
 def save(db, domain, status, profile, now):
+    """Stores a look-up. A domain the owner marked as the wrong company keeps that mark."""
     db.execute('INSERT INTO org_profiles(domain,status,profile,fetched_at) VALUES(?,?,?,?) '
-               "ON CONFLICT(domain) DO UPDATE SET status=excluded.status,profile=CASE WHEN excluded.status='error' THEN org_profiles.profile ELSE excluded.profile END,fetched_at=excluded.fetched_at",
+               "ON CONFLICT(domain) DO UPDATE SET status=excluded.status,profile=CASE WHEN excluded.status='error' THEN org_profiles.profile ELSE excluded.profile END,fetched_at=excluded.fetched_at "
+               "WHERE org_profiles.status!='wrong'",
                (domain, status, json.dumps(profile) if profile else None, now))
 
 
@@ -161,7 +163,7 @@ def step(connect, config, now, per_pass=PER_PASS):
         return 0
     with connect() as db:
         today = now[:10]
-        used = db.execute('SELECT count(*) FROM org_profiles WHERE substr(fetched_at,1,10)=?', (today,)).fetchone()[0]
+        used = db.execute("SELECT count(*) FROM org_profiles WHERE substr(fetched_at,1,10)=? AND status!='wrong'", (today,)).fetchone()[0]
         domains = due(db, now, max(0, min(per_pass, int(cfg.get('per_day') or PER_DAY) - used)))
     found = 0
     for domain in domains:
@@ -205,5 +207,6 @@ def lookup(connect, config, domain, now):
         raise EnrichmentError('Give a domain, like globex.com')
     profile = fetch(cfg, domain)
     with connect() as db:
+        db.execute("DELETE FROM org_profiles WHERE domain=? AND status='wrong'", (domain,))  # asked for by name: the owner wants it again
         save(db, domain, 'found' if profile else 'none', profile, now)
     return {'domain': domain, 'profile': profile}

@@ -204,7 +204,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup'}
+OWNER_ACTIONS = {'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -5804,6 +5804,18 @@ class App:
                 renamed = graph.rename(db, args.get('node_id'), args.get('name'), now())
             self.graph_build()
             return renamed
+        if name in ('graph_org_edit', 'graph_org_wrong'):
+            if not owner_dashboard:
+                raise ValueError("Only the owner edits an organisation's details, on the dashboard")
+            with self.store.connect() as db:
+                if name == 'graph_org_wrong':
+                    done = graph.org_wrong(db, args.get('node_id'), args.get('wrong') is not False, now())
+                else:
+                    done = graph.org_edit(db, args.get('node_id'), args.get('fields'), now())
+                    if 'name' in args:
+                        graph.rename(db, args.get('node_id'), args.get('name'), now())
+            self.graph_build()
+            return done
         if name == 'graph_role':
             if not owner_dashboard:
                 raise ValueError('Only the owner sets a role here, on the dashboard; reviews use graph with node_id and role')
@@ -7008,7 +7020,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','push_subscribe','push_unsubscribe')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','push_subscribe','push_unsubscribe')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')
