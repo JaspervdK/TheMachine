@@ -497,7 +497,16 @@ if(rows<=lines+1.5)return `<div class="body">${html}</div>`;const open=expandedB
 return `<div class="body${open?'':' clamp'}" style="--lines:${lines}">${html}</div><button type="button" class="more" data-more="${s.id}" aria-expanded="${open}">${open?'Show less':'Show more'}</button>`}
 const backLabel=v=>'Back '+new Date(v).toLocaleString([],{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'})+' · '+ago(v);
 const sourceText=v=>{const t=String(v||'').replace(/^Source:\s*/i,'');return t.charAt(0).toUpperCase()+t.slice(1)};
-const syncError=v=>v==='android_feed_unavailable'?'Notification bridge unavailable':v==='android_offline'?'Phone disconnected':v==='android_notifications_unavailable'?'Phone notifications unavailable':v==='android_gateway_unavailable'?'OpenClaw connection unavailable':v?.startsWith('network')?'Connection problem':v==='timeout'?'Connection timed out':['slack:HTTP_429','slack_ratelimited'].includes(v)?'Slack rate limit':v||'Sync error';
+const syncError=v=>v==='android_feed_unavailable'?'Notification bridge unavailable':v==='android_offline'?'Phone disconnected':v==='android_notifications_unavailable'?'Phone notifications unavailable':v==='android_gateway_unavailable'?'OpenClaw connection unavailable':v?.startsWith('network')?'Connection problem':v==='timeout'?'Connection timed out':['slack:HTTP_429','slack_ratelimited'].includes(v)?'Slack rate limit':readableError(v);
+// Error codes like linkedin_read_failed, in words: the source's name and what went wrong.
+function readableError(v){if(!v)return 'Sync error';const m=/^([a-z]+)[_:](.+)$/.exec(v),name=m?service(m[1]):'',what=m?m[2]:v;
+if(/signed_out$/.test(what))return 'Signed out of '+name;
+if(/browser_busy$/.test(what))return 'The browser was busy with another read';
+if(/timeout$/.test(what))return (name||'The source')+' was slow to answer';
+if(/rate_?limit/.test(what))return (name||'The source')+' asked to slow down';
+if(/read_failed$/.test(what))return 'Couldn’t read '+(name||'the source');
+if(/^HTTP_5/.test(what))return (name||'The source')+' had a problem on its side';
+const words=v.replace(/[_:]+/g,' ').trim();return words[0].toUpperCase()+words.slice(1)}
 const service=v=>({gmail:'Email',calendar:'Calendar',slack:'Slack',salesflare:'Salesflare CRM',whatsapp:'WhatsApp',linkedin:'LinkedIn',android:'Android notifications',gateway:'OpenClaw Gateway',github:'GitHub',stripe:'Stripe',rss:'Feed',x:'X'}[v]||v);
 const label=v=>({pending:'Needs your decision',accepted:'Accepted',prepared:'Ready for you',rejected:'Not needed',snoozed:'Later',instructions:'Changes requested',completed:'Done'}[v]||v);
 const tone=v=>({pending:'amber',accepted:'lavender',instructions:'lavender',prepared:'mint',snoozed:'lavender',completed:'mint',rejected:'muted'}[v]||'muted');
@@ -566,6 +575,7 @@ if(s.preparation_status==='blocked')return `<p class="note">${esc(s.preparation_
 return `<p class="note">Preparing… ${s.preparation_started_at?`<span class="elapsed" data-since="${esc(s.preparation_started_at)}">${elapsed(s.preparation_started_at)}</span>`:''}${s.preparation_retried?' · second try':''} <span data-browser="${s.id}">${browserLink(s.id,s.preparation_browser)}</span></p><ul class="steps" data-steps="${s.id}" aria-live="polite">${(steps.get(s.id)||[]).map(x=>`<li>${esc(x.title)}</li>`).join('')}</ul>`}
 async function request(path,options){let r=await fetch(path,options);let d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d}
 function connectorHealth(c){
+if(c.error&&/_signed_out$/.test(c.error))return {tone:'orange',text:'Signed out of '+service(c.service)};
 if(c.error){const help=/(auth|unauthor|forbidden|permission|invalid_grant|HTTP_40[13])/.test(c.error);return {tone:help?'orange':'amber',text:help?'Needs your help':'Reconnecting automatically'}}
 if(!c.last_success)return {tone:'muted',text:'Waiting for first sync'};
 if(Date.now()-Date.parse(c.last_success)>Math.max(900000,(c.poll_seconds||300)*3000))return {tone:'amber',text:'Waiting for a fresh sync'};
@@ -580,7 +590,7 @@ return `<article><div class="conn-head">${icon(c.service)}<div><h3>${esc(c.displ
 <p class="connection-status">${esc(connectorHealth(c).text)}</p>
 <div class="figures"><div><b>${(c.total??0).toLocaleString()}</b><span>${unit}</span></div><div><b>${c.signals_24h||0}</b><span>last 24h</span></div><div><b>${c.pending||0}</b><span>not reviewed</span></div></div>
 ${spark(c)}<div class="conn-foot"><small>Last sync ${time(c.last_success,true)}</small><small title="Distinct signals first collected or updated; unchanged duplicates are not counted. Last sync is the most recent successful page. Last 24h uses collection/update time, not the message or appointment date.">${c.last_sync_signals==null?'—':c.last_sync_signals} in last sync</small></div>
-${c.error?`<p class="alert">${['slack:HTTP_429','slack_ratelimited'].includes(c.error)?'Slack is taking a short pause.':esc(syncError(c.error))+'.'} ${connectorTone(c)==='orange'?'Please reconnect this account.':c.retry_at?'Next try '+esc(ago(c.retry_at))+'.':'Retrying automatically.'}</p>`:''}
+${c.signed_out?`<p class="alert">Signed out of ${esc(service(c.service))}. ${c.sign_in_url?`<a class="head-link" href="${esc(c.sign_in_url)}" target="_blank" rel="noopener">Sign in again</a>`:esc(c.sign_in_hint?c.sign_in_hint[0].toUpperCase()+c.sign_in_hint.slice(1)+'.':'Sign in again in the browser it reads with.')}</p>`:c.error?`<p class="alert">${['slack:HTTP_429','slack_ratelimited'].includes(c.error)?'Slack is taking a short pause.':esc(syncError(c.error))+'.'} ${connectorTone(c)==='orange'?'Please reconnect this account.':c.retry_at?'Next try '+esc(ago(c.retry_at))+'.':'Retrying automatically.'}</p>`:''}
 
 ${c.service==='slack'?`<p class="note">${c.conversations_collected||0} of ${c.conversations||0} conversations collected${c.conversation_errors?` · ${c.conversation_errors} unavailable`:''}${c.deferred_threads?` · ${c.deferred_threads} thread read${c.deferred_threads===1?'':'s'} waiting for retry`:''}</p><p class="note">New messages sync as each conversation is checked. Slack’s limits mean a full round can take hours.</p>`:''}
 ${c.service==='android'?`<p class="note">${JSON.parse(c.state||'{}').transport==='direct_fallback'?'Using direct checks while the notification bridge is unavailable.':'Uses OpenClaw’s notification feed, plus a catch-up check of notifications still on your phone.'} Phone checks are at most every 10 minutes. Notifications cleared during a gap may be missed.${JSON.parse(c.state||'{}').reconciliation_error?`<br><span class="error">Last phone check: ${esc(syncError(JSON.parse(c.state||'{}').reconciliation_error))}</span>`:''}</p>`:''}
@@ -709,9 +719,10 @@ const row=p=>`<div class="promise"><span class="grow">${p.direction==='mine'?'To
 const group=(direction,title)=>{const rows=items.filter(p=>p.direction===direction);return rows.length?`<h3 class="day-head">${title}</h3>`+rows.map(row).join(''):''};
 return `<details id="promises-list" ${open?'open':''}><summary><span>Promises</span><span class="count">${items.length}</span></summary>${group('mine','You promised')}${group('theirs','Promised to you')}</details>`}
 function renderNeedsYou(){const items=[...(state.needs_you||[])],manage=state.manage_url;
-for(const c of state.connectors||[])if(c.error&&connectorHealth(c).tone==='orange')items.push({text:`${c.display_name||c.id} needs you to sign in again.`,url:manage?manage+(['gmail','calendar'].includes(c.service)?'#google':'#sources'):null,action:manage?'Reconnect':'Show',tab:manage?null:'health'});
+for(const c of state.connectors||[])if(c.signed_out)items.push({text:`Signed out of ${service(c.service)} (${c.display_name||c.id}).`,url:c.sign_in_url||null,action:c.sign_in_url?'Sign in again':'Show',tab:c.sign_in_url?null:'health',blank:true});
+else if(c.error&&connectorHealth(c).tone==='orange')items.push({text:`${c.display_name||c.id} needs you to sign in again.`,url:manage?manage+(['gmail','calendar'].includes(c.service)?'#google':'#sources'):null,action:manage?'Reconnect':'Show',tab:manage?null:'health'});
 const box=$('#needs-you');box.hidden=!items.length;
-box.innerHTML=items.length?`<strong>Needs you</strong><ul>${items.map(i=>`<li><span>${esc(i.text)}</span>${i.url?`<a class="head-link" href="${esc(i.url)}">${esc(i.action||'Open')}</a>`:i.tab?`<button type="button" class="head-link" data-show="${esc(i.tab)}">${esc(i.action)}</button>`:i.action?`<code>${esc(i.action.replace(/^Run: /,''))}</code>`:''}</li>`).join('')}</ul>`:''}
+box.innerHTML=items.length?`<strong>Needs you</strong><ul>${items.map(i=>`<li><span>${esc(i.text)}</span>${i.url?`<a class="head-link" href="${esc(i.url)}"${i.blank?' target="_blank" rel="noopener"':''}>${esc(i.action||'Open')}</a>`:i.tab?`<button type="button" class="head-link" data-show="${esc(i.tab)}">${esc(i.action)}</button>`:i.action?`<code>${esc(i.action.replace(/^Run: /,''))}</code>`:''}</li>`).join('')}</ul>`:''}
 $('#needs-you').onclick=e=>{const b=e.target.closest('[data-show]');if(b)document.querySelector(`nav button[data-tab="${b.dataset.show}"]`)?.click()};
 function render(){renderNeedsYou();
 const finishedOpen=$('#finished-list')?.open||false,laterOpen=$('#later-list')?.open||false,promisesOpen=$('#promises-list')?.open||false;

@@ -29,6 +29,8 @@ KINDS = {'x.mention': 'X', 'x.dm': 'X message'}
 # For `assistant connect x`: the account it adds and what it asks (see docs/adding-a-source.md).
 SETUP = {'label': 'X', 'what': 'Your mentions and direct messages on X.',
          'account': {'id': 'me-x', 'service': 'x', 'transport': 'x-inbox', 'boundary': 'work', 'poll_seconds': 3600},
+         # Read through the shared browser: a hosted install links to that browser on this site to sign in again.
+         'browser': 'x',
          'hints': {'x_signed_out': 'the browser it reads with is not signed in to X; sign in there, then connect again'},
          'note': 'Sign in to X once in the OpenClaw browser first: openclaw browser --browser-profile openclaw open https://x.com/login',
          'ask': [('handle', 'Your X handle, without @'), ('primary', 'Handle the browser is normally signed in to', '{handle}')]}

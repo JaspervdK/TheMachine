@@ -33,9 +33,14 @@ import argparse, fcntl, importlib.util, json, re, subprocess, sys, time, unicode
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_cdp  # noqa: E402
+
 LEASE = Path(__file__).resolve().parent / 'browser-lease.py'
 OWNER = 'x-inbox-' + str(os.getpid()) + '-' + uuid.uuid4().hex[:6]
 PROFILE = os.environ.get('X_INBOX_BROWSER_PROFILE', 'openclaw')
+# A DevTools address (e.g. http://127.0.0.1:9222) to talk to the browser directly instead of through OpenClaw.
+CDP = os.environ.get('X_INBOX_BROWSER_CDP', '')
 NEUTRAL_URL = 'https://x.com/robots.txt'
 # An account switch changes the cookies of every x.com tab in that browser, so x-inbox runs go
 # one at a time, and a run that has to switch waits while another job holds the browser.
@@ -359,12 +364,31 @@ def oc(*args, timeout=120):
 
 
 def evaluate(target, js, timeout_ms=90000):
+    if CDP:
+        try:
+            res = browser_cdp.evaluate(CDP, target, js, timeout_ms)
+        except browser_cdp.CdpError as e:
+            if 'context' in str(e):  # the tab was still navigating: same as a page that is not ready yet
+                return {'error': 'not-ready'}
+            raise Fail('browser command failed: ' + str(e)) from None
+        if not isinstance(res, dict):
+            raise Fail('unexpected browser output: ' + str(res)[:200])
+        return res
     out = oc('evaluate', '--target-id', target, '--timeout-ms', str(timeout_ms), '--fn', js, timeout=timeout_ms // 1000 + 30)
     start = out.find('{') if out.lstrip().startswith('{') else out.find('\n{') + 1
     try:
         return json.loads(out[start:])
     except ValueError:
         raise Fail('unexpected browser output: ' + out.strip()[:200])
+
+
+def navigate(target, url):
+    if CDP:
+        try:
+            return browser_cdp.navigate(CDP, target, url)
+        except browser_cdp.CdpError as e:
+            raise Fail('browser command failed: ' + str(e)) from None
+    oc('navigate', '--target-id', target, url)
 
 
 def lease(action, exclusive=False):
@@ -402,6 +426,8 @@ OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / '
 
 def tab_ids():
     try:
+        if CDP:
+            return browser_cdp.tab_ids(CDP)
         return set(re.findall(r'^\s*id:\s*(\S+)', oc('tabs', timeout=90), re.M))
     except Exception:
         return None
@@ -416,7 +442,7 @@ def remember_tab(target, opened):
 
 def close_tab(target):
     try:
-        oc('close', target, timeout=90)
+        browser_cdp.close_tab(CDP, target) if CDP else oc('close', target, timeout=90)
     except Exception as e:  # never leave our tab behind silently
         print('warning: could not close tab ' + target + ': ' + str(e), file=sys.stderr)
         return False
@@ -432,6 +458,10 @@ def open_tab(label, url):
             remember_tab(target, False)  # already gone
     before = tab_ids()
     try:
+        if CDP:
+            target = browser_cdp.open_tab(CDP, url)
+            remember_tab(target, True)
+            return target
         receipt = oc('open', '--label', label, url)
     except Exception:
         after = tab_ids()
@@ -621,7 +651,7 @@ def cmd_send(a):
                 except Exception as e:
                     out = {'sent': 'uncertain', 'detail': str(e)[:200]}
             else:
-                oc('navigate', '--target-id', target, 'https://x.com/intent/post?' + urllib.parse.urlencode({'in_reply_to': a.reply_to, 'text': text}, quote_via=urllib.parse.quote))
+                navigate(target, 'https://x.com/intent/post?' + urllib.parse.urlencode({'in_reply_to': a.reply_to, 'text': text}, quote_via=urllib.parse.quote))
                 compose = {'account_id': res['account']['id'], 'reply_to': a.reply_to, 'author': res['reply_to']['screen_name'], 'text': text}
                 checked = when_ready(target, COMPOSE_JS.replace('__PARAMS__', json.dumps({**compose, 'send': False})), tries=20)
                 if checked.get('error') or not a.yes:

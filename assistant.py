@@ -5529,6 +5529,23 @@ main{{max-width:900px;margin:auto}}h1{{font-size:24px}}pre{{background:#292c33;p
 
 
 
+def sign_in_help(service, error, manage):
+    """For a source read through the shared browser that is signed out: where to sign in again (the hosted page that
+    opens this server's browser on that site) or, without one, what to do in plain words."""
+    if not (error or '').endswith('_signed_out'):
+        return {}
+    import onboarding
+    try:
+        setup = onboarding.setup_of(service)
+    except Exception:
+        return {}
+    site = setup.get('browser')
+    hint = next((text for prefix, text in (setup.get('hints') or {}).items() if error.startswith(prefix)), '')
+    return {'signed_out': True, 'sign_in_hint': hint,
+            'sign_in_url': urllib.parse.urljoin(manage, '/open?' + urllib.parse.urlencode({'to': 'browser', 'site': site}))
+            if manage and site else None}
+
+
 def needs_you(config):
     """What only the owner can fix, for the top of the dashboard: sources that are not fully set up, and notes that a
     hosting layer leaves in `needs_you_file` (a JSON list of {id, text, url}). Connections whose sign-in fails are added
@@ -5669,6 +5686,8 @@ class App:
             manage = str(self.config.get('manage_url') or '')
             result['manage_url'] = manage if manage.startswith('https://') else None
             result['needs_you'] = needs_you(self.config)
+            for connector in result['connectors']:
+                connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
             # Read only the existing heartbeat's runtime facts, never conversation
             # content or scheduler configuration. Missing evidence stays unknown.
             try:

@@ -58,6 +58,7 @@ Do it → isolated preparation turn of the same agent → result, draft + Send, 
 | `*.mjs` | Small Node helpers that call the OpenClaw Gateway (`openclaw-root.mjs` finds the installed package) |
 | `integrations/browser-lease.py` | Shares the OpenClaw browser between concurrent Do it runs |
 | `browser_viewer.py`, `deploy/browser/` | Optional: a browser of its own on a virtual display that you watch and use from yours (noVNC, 127.0.0.1 only), and bringing a tab to the front on a desktop |
+| `integrations/browser_cdp.py` | Talks to a browser's DevTools address directly, for the LinkedIn and X readers when one is set |
 | `AGENTS.md`, `PREPARATION.md` | Instructions the plugin gives the agent for reviews and for Do it runs (templates; see below) |
 | `install.sh`, `installer.py` | Install, upgrade and uninstall |
 | `config.example.json` | Every configuration key with example values |
@@ -85,7 +86,7 @@ Python's standard library and SQLite are enough: no database server, queue, web 
   - **Caddy** only if you want the dashboard on your own domain (`deploy/Caddyfile`). Not needed: `tailscale serve` gives it an HTTPS address on your tailnet.
   - `wacli` for WhatsApp; a Maton connection for Slack (allowed to post as you, to send Slack messages); a Salesflare API key.
   - The `gh` CLI logged in as you for GitHub; a restricted read-only key (or a Maton connection) for Stripe.
-  - For LinkedIn and X: your accounts signed in to the OpenClaw browser (profile `openclaw`).
+  - For LinkedIn and X: your accounts signed in to the OpenClaw browser (profile `openclaw`). To use another browser profile set `LINKEDIN_INBOX_BROWSER_PROFILE` / `X_INBOX_BROWSER_PROFILE`; to read through a browser's DevTools address directly instead of OpenClaw's browser commands (faster and steadier on a small, busy server) set `LINKEDIN_INBOX_BROWSER_CDP` / `X_INBOX_BROWSER_CDP`, e.g. `http://127.0.0.1:9222`. When a read finds the browser signed out, the Connections tab says "Signed out of LinkedIn" with what to do (on a hosted install: a Sign in again link to the server's browser).
   - The OpenClaw Android app paired as a node for phone notifications.
 
 ## Install

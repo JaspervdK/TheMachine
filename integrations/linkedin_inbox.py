@@ -24,9 +24,14 @@ import argparse, json, os, subprocess, sys, time, uuid, fcntl, re
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_cdp  # noqa: E402
+
 LEASE = Path(__file__).resolve().parent / 'browser-lease.py'
 OWNER = 'linkedin-inbox-' + str(os.getpid()) + '-' + uuid.uuid4().hex[:6]
 PROFILE = os.environ.get('LINKEDIN_INBOX_BROWSER_PROFILE', 'openclaw')
+# A DevTools address (e.g. http://127.0.0.1:9222) to talk to the browser directly instead of through OpenClaw.
+CDP = os.environ.get('LINKEDIN_INBOX_BROWSER_CDP', '')
 NEUTRAL_URL = 'https://www.linkedin.com/robots.txt'
 # LinkedIn rotates these hashes now and then; `discover` refreshes them into IDS_FILE.
 DEFAULT_IDS = {
@@ -47,7 +52,8 @@ async () => {
   const h = {'csrf-token': csrf, 'accept': 'application/vnd.linkedin.normalized+json+2.1',
              'x-restli-protocol-version': '2.0.0'};
   const get = async (u) => { const r = await fetch(u, {headers: h, credentials: 'include', signal: AbortSignal.timeout(12000)});
-    if (r.status === 401 || r.status === 403) throw Object.assign(Error('signed-out'), {code: 'signed-out'});
+    // Only 401 means signed out; a 403 can be a checkpoint or a refused query on a signed-in browser.
+    if (r.status === 401) throw Object.assign(Error('signed-out'), {code: 'signed-out'});
     if (!r.ok) throw Object.assign(Error('http ' + r.status), {code: 'query-failed', status: r.status});
     return r.json(); };
   const gql = (id, vars) => get('/voyager/api/voyagerMessagingGraphQL/graphql?queryId=' + id + '&variables=' + vars);
@@ -145,7 +151,8 @@ async () => {
   const h = {'csrf-token': csrf, 'accept': 'application/vnd.linkedin.normalized+json+2.1',
              'x-restli-protocol-version': '2.0.0'};
   const get = async (u) => { const r = await fetch(u, {headers: h, credentials: 'include'});
-    if (r.status === 401 || r.status === 403) throw Object.assign(Error('signed-out'), {code: 'signed-out'});
+    // Only 401 means signed out; a 403 can be a checkpoint or a refused query on a signed-in browser.
+    if (r.status === 401) throw Object.assign(Error('signed-out'), {code: 'signed-out'});
     if (!r.ok) throw Object.assign(Error('http ' + r.status), {code: 'query-failed', status: r.status});
     return r.json(); };
   const enc = (v) => encodeURIComponent(v).replace(/\(/g, '%28').replace(/\)/g, '%29');
@@ -235,6 +242,16 @@ def oc(*args, timeout=120):
 
 
 def evaluate(label, js, timeout_ms=90000):
+    if CDP:
+        try:
+            res = browser_cdp.evaluate(CDP, label, js, timeout_ms)
+        except browser_cdp.CdpError as e:
+            if 'context' in str(e):  # the tab was still navigating: same as a page that is not ready yet
+                return {'error': 'not-ready'}
+            raise Fail('browser command failed: ' + str(e)) from None
+        if not isinstance(res, dict):
+            raise Fail('unexpected browser output: ' + str(res)[:200])
+        return res
     out = oc('evaluate', '--target-id', label, '--timeout-ms', str(timeout_ms), '--fn', js,
              timeout=timeout_ms // 1000 + 30)
     start = out.find('{') if out.lstrip().startswith('{') else out.find('\n{') + 1
@@ -254,6 +271,8 @@ OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / '
 
 def tab_ids():
     try:
+        if CDP:
+            return browser_cdp.tab_ids(CDP)
         return set(re.findall(r'^\s*id:\s*(\S+)', oc('tabs', timeout=90), re.M))
     except Exception:
         return None
@@ -268,7 +287,7 @@ def remember_tab(target, opened):
 
 def close_tab(target):
     try:
-        oc('close', target, timeout=90)
+        browser_cdp.close_tab(CDP, target) if CDP else oc('close', target, timeout=90)
     except Exception as e:  # never leave our tab behind silently
         print('warning: could not close tab ' + target + ': ' + str(e), file=sys.stderr)
         return False
@@ -284,6 +303,10 @@ def open_tab(label, url):
             remember_tab(target, False)  # already gone
     before = tab_ids()
     try:
+        if CDP:
+            target = browser_cdp.open_tab(CDP, url)
+            remember_tab(target, True)
+            return target
         receipt = oc('open', '--label', label, url)
     except Exception:
         after = tab_ids()

@@ -72,6 +72,7 @@ class LinkedInSource(unittest.TestCase):
         self.assertEqual(json.loads(command[command.index('--state') + 1]), {'cursor': 'C1'})
         for stderr, code, wait in (('the OpenClaw browser is busy (x)', 'linkedin_browser_busy', 600),
                                    ('LinkedIn is signed out in the OpenClaw browser', 'linkedin_signed_out', 3600),
+                                   ('LinkedIn is not signed in in the browser', 'linkedin_signed_out', 3600),
                                    ('the browser did not answer in time; try again', 'linkedin_read_timeout', 900),
                                    ('LinkedIn lookup failed: boom', 'linkedin_read_failed', 900)):
             with patch.object(a.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', 'linkedin-inbox: ' + stderr)):
@@ -281,6 +282,46 @@ if __name__ == '__main__':
 
 class Tabs(unittest.TestCase):
     """The browser readers close what they open, also after a run that was stopped halfway."""
+    def test_signed_out_shows_where_to_sign_in_again(self):
+        hosted = a.sign_in_help('linkedin', 'linkedin_signed_out', 'https://app.example.test/setup')
+        self.assertEqual(hosted['sign_in_url'], 'https://app.example.test/open?to=browser&site=linkedin')
+        self.assertTrue(hosted['signed_out'])
+        self.assertIn('not signed in to LinkedIn', hosted['sign_in_hint'])
+        self.assertEqual(a.sign_in_help('x', 'x_signed_out', 'https://app.example.test/setup')['sign_in_url'],
+                         'https://app.example.test/open?to=browser&site=x')
+        self.assertIsNone(a.sign_in_help('linkedin', 'linkedin_signed_out', None)['sign_in_url'])  # self-hosted: the hint only
+        self.assertEqual(a.sign_in_help('linkedin', 'linkedin_read_failed', 'https://app.example.test/setup'), {})
+        self.assertEqual(a.sign_in_help('linkedin', None, None), {})
+
+    def test_with_a_devtools_address_the_readers_skip_openclaw(self):
+        import importlib.util
+        for name in ('linkedin_inbox', 'x_inbox'):
+            spec = importlib.util.spec_from_file_location(name, Path(__file__).parent / 'integrations' / f'{name}.py')
+            reader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reader)
+            cdp, calls = reader.browser_cdp, []
+
+            def evaluate(base, target, js, timeout_ms):
+                calls.append(('evaluate', target))
+                if len([c for c in calls if c[0] == 'evaluate']) == 1:
+                    raise cdp.CdpError('script failed: Execution context was destroyed.')  # still navigating
+                return {'ok': True}
+            fakes = {'open_tab': lambda base, url: calls.append(('open', url)) or 'T1',
+                     'close_tab': lambda base, target: calls.append(('close', target)),
+                     'tab_ids': lambda base: {'OWNER'}, 'evaluate': evaluate}
+            with tempfile.TemporaryDirectory() as tmp, patch.object(reader, 'CDP', 'http://127.0.0.1:9222'), \
+                    patch.multiple(cdp, **fakes), patch.object(reader, 'OPEN_TABS', Path(tmp) / 'tabs'), \
+                    patch.object(reader, 'lease', lambda *a, **k: subprocess.CompletedProcess(a, 0, '', '')), \
+                    patch.object(reader.subprocess, 'run', side_effect=AssertionError('no OpenClaw call')), \
+                    patch.object(reader.time, 'sleep', lambda s: None):
+                self.assertEqual(reader.with_tab('https://example.test', lambda t: [reader.evaluate(t, 'f') for _ in range(2)][-1]), {'ok': True})
+                self.assertEqual(reader.evaluate('T1', 'f').get('ok'), True)
+            self.assertEqual(calls[0], ('open', 'https://example.test'), name)
+            self.assertIn(('close', 'T1'), calls, name)
+            with patch.object(reader, 'CDP', 'http://127.0.0.1:9222'), \
+                    patch.object(cdp, 'evaluate', side_effect=cdp.CdpError('browser not reachable')), self.assertRaises(reader.Fail):
+                reader.evaluate('T1', 'f')
+
     def test_a_stopped_run_leaves_no_tab_and_the_owners_tabs_stay(self):
         import importlib.util
         for name in ('linkedin_inbox', 'x_inbox'):
