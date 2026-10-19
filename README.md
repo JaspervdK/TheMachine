@@ -2,7 +2,7 @@
 
 A private, self-hosted assistant inbox for [OpenClaw](https://docs.openclaw.ai). It reads your email, calendar, chat and phone notifications, has your own OpenClaw agent look for what actually needs you, and sends a few short suggestions to Telegram. Tap **Do it** and the agent carries the task out.
 
-Website: [themachine.computer](https://themachine.computer). **Early release:** intended for a single owner who already uses OpenClaw. Managed installation is Linux-only.
+Built on [OpenClaw](https://docs.openclaw.ai) (MIT); see [third-party notices](THIRD_PARTY_NOTICES.md). Website: [themachine.computer](https://themachine.computer). **Early release:** intended for a single owner who already uses OpenClaw. Managed installation is Linux-only.
 
 **October 17 reliability fixes:** profile drafts use a fixed, mixed-source sample and preserve concurrent USER.md edits. Setup verifies connector reads before reporting success; unfinished catch-up resumes after a restart. Graph updates preserve older task context, exact account-scoped threads and valid feedback, and refresh without losing the current view. Permissions and normal polling budgets are unchanged.
 
@@ -456,7 +456,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull requests, and [S
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Built on OpenClaw (MIT); third-party licences are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 
 ## Final-step and self-repair recovery · October 17
