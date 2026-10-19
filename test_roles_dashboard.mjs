@@ -111,6 +111,20 @@ try{
  for(let i=0;i<100&&!calls.some(c=>c.action==='graph_rename');i++)await page.waitForTimeout(20);
  assert.deepEqual(calls.find(c=>c.action==='graph_rename'),{action:'graph_rename',args:{node_id:pat.id,name:'Pat Owner Name'}});
  holdOrg=null;release();
+ // All at once: one button above the list confirms every role a review read, after asking.
+ whos=[{id:'email:a@x.example',kind:'person',name:'A',role:'buyer at X',quote:null,event_id:null},
+  {id:'email:b@y.example',kind:'person',name:'B',role:'partner at Y',quote:null,event_id:null}];
+ await page.evaluate(()=>people(null,true));
+ await list.locator('[data-role-all]').waitFor();
+ assert.equal((await list.locator('[data-role-all]').textContent()).trim(),'✓ All 2 are right');
+ page.once('dialog',d=>{assert.equal(d.message(),'Mark all 2 roles as right?');d.accept()});
+ const before=calls.length;
+ await list.locator('[data-role-all]').click();
+ for(let i=0;i<100&&calls.length<before+2;i++)await page.waitForTimeout(20);
+ assert.deepEqual(calls.slice(before),[{action:'graph_role',args:{node_id:'email:a@x.example',role:'buyer at X'}},
+  {action:'graph_role',args:{node_id:'email:b@y.example',role:'partner at Y'}}]);
+ for(let i=0;i<100&&await list.locator('.whos').count();i++)await page.waitForTimeout(20);
+ assert.equal(await list.locator('.whos').count(),0);
  assert.deepEqual(errors,[]);
  console.log(JSON.stringify({widths,actions:calls.length,page_errors:errors}));
 }finally{if(browser)await browser.close();await new Promise(r=>server.close(r))}
