@@ -391,6 +391,8 @@ Read this before you turn on delivery.
 | `assistant connect [<source>]` | Set up or redo a source (sign-in or key, IDs, a test read, first sync); without a source, lists what still needs connecting. `--account <id>` picks or adds one of several |
 | `assistant doctor` | Checks the service, OpenClaw bridge, Telegram approval, every source, reviews, dashboard and `USER.md`; every problem comes with its fix. Exits 1 when something is broken |
 | `assistant enrich [domain]` | Organisation data from your enrichment service: status, or look up one domain now |
+| `assistant export` | Everything The Machine knows and how it is set up, in one archive (`--keys` adds your keys, encrypted with a passphrase you pick; `--estimate` only says how big). See [Moving to another computer](#moving-to-another-computer) |
+| `assistant import <file>` | Put an export back on a fresh install and list what to connect again |
 | `assistant raw <action> '<json>'` | Any other non-owner service action |
 
 ## Operations
@@ -400,6 +402,14 @@ Read this before you turn on delivery.
 - **One collector only:** don't run `assistant.py sync-once` while the service runs. Stop the service before manual syncs or migrations and resume from the existing checkpoints. Never reset a checkpoint to get past throttling.
 - **Backups:** use SQLite's backup API (`sqlite3 events.sqlite ".backup copy.sqlite"`); never copy the live file without its WAL.
 - **Rollback:** disable a source by removing its account from `config.json`; disable reviews with `review_worker.enabled: false`; stop delivery with `delivery_enabled: false`; disable the plugin with `openclaw plugins disable personal-assistant-bridge`. Keep the database.
+
+### Moving to another computer
+
+`assistant export` writes one archive with the databases (signals, suggestions, people and organisations with your own edits, promises), `config.json`, connectors you built yourself, your OpenClaw workspace files (`AGENTS.md`, `USER.md`, memory) and who may talk to your Telegram bot. Databases are copied with SQLite's backup API, so the service can keep running. Keys and tokens stay out unless you pass `--keys`: then the whole archive is encrypted with a passphrase you pick (AES-256, the passphrase stretched with PBKDF2 through `openssl`), and only that passphrase opens it. OpenClaw's own chat history and model sign-in stay behind.
+
+On the other computer, install The Machine first, then `assistant import the-machine-export-<date>.tar.gz` (or `.tar.gz.enc`; it asks the passphrase). It refuses to overwrite a setup that already has sources unless you pass `--force`, which keeps a copy of the current data folder first. A file you already have there (say `USER.md`) is kept, with the imported one next to it as `.from-export`. It ends with what to connect again: your model, Google (a hosted server's Google access does not move along), and without `--keys` every source's key and the Telegram bot token. Restart the service and check with `assistant doctor`.
+
+The hosted version has the same export on its Account page.
 
 ### Catch-up and search guarantees
 

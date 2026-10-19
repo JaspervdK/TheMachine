@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import importlib.util
 import json
+import os
 import sys
 import textwrap
 import time
@@ -27,6 +28,9 @@ _spec = importlib.util.spec_from_file_location('onboarding', Path(__file__).reso
 onboarding = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(onboarding)
 onboarding._assistant = assistant
+_spec = importlib.util.spec_from_file_location('moving', Path(__file__).resolve().with_name('moving.py'))
+moving = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(moving)
 
 TZ = assistant.LOCAL_TZ
 GROUPS = {
@@ -549,6 +553,49 @@ def cmd_doctor(config, args):
     sys.exit(onboarding.print_doctor(results, onboarding.UI(False)))
 
 
+def _passphrase(confirm):
+    import getpass
+    if os.environ.get(moving.PASSPHRASE_ENV):
+        return os.environ[moving.PASSPHRASE_ENV]
+    if not sys.stdin.isatty():
+        raise CliError(f'give the passphrase in {moving.PASSPHRASE_ENV}, or run this in a terminal')
+    value = getpass.getpass('Passphrase: ')
+    if confirm and getpass.getpass('Same passphrase again: ') != value:
+        raise CliError('the two passphrases differ; nothing was written')
+    return value
+
+
+def cmd_export(config, args):
+    try:
+        if args.estimate:
+            out = moving.estimate(args.config, secrets=args.keys)
+            return out_json(out) if args.json else print(f'{out["files"]} files, about {out["bytes"] / 1e6:.1f} MB before compression')
+        path, manifest = moving.export(args.config, args.out, passphrase=_passphrase(True) if args.keys else None)
+    except moving.MoveError as error:
+        raise CliError(str(error)) from None
+    if args.json:
+        return out_json({'file': str(path), 'bytes': path.stat().st_size, 'includes_keys': manifest['includes_keys']})
+    print(f'Wrote {path} ({path.stat().st_size / 1e6:.1f} MB)' + (', keys included and encrypted' if args.keys else ', without keys'))
+    print('Put it back on another computer with:  assistant import ' + path.name)
+
+
+def cmd_import(config, args):
+    try:
+        result = moving.import_(args.archive, args.config, passphrase=_passphrase(False) if args.archive.endswith('.enc') else None,
+                                force=args.force)
+    except moving.MoveError as error:
+        raise CliError(str(error)) from None
+    if args.json:
+        return out_json(result)
+    print(f'Restored {len(result["restored"])} files.')
+    for note in result['notes']:
+        print('  note: ' + note)
+    print('\nConnect again:')
+    for line in result['reconnect']:
+        print('  - ' + line)
+    print('\nThen restart the service (systemctl --user restart personal-assistant) and check with: assistant doctor')
+
+
 def cmd_raw(config, args):
     out_json(call(config, args.action, json.loads(args.args) if args.args else {}))
 
@@ -613,6 +660,13 @@ def parser():
     c.add_argument('source', nargs='?', help='gmail, calendar, slack, crm, whatsapp, android, gateway or a connector plugin')
     c.add_argument('--account', help='account id, to redo one of several or add another')
     add('doctor', 'Check the whole setup; every problem comes with its fix', cmd_doctor)
+    c = add('export', 'Everything The Machine knows and how it is set up, in one archive to move to another computer', cmd_export)
+    c.add_argument('--keys', action='store_true', help='include keys and tokens, encrypted with a passphrase you pick')
+    c.add_argument('--out', default='.', help='folder to write the archive to (default: here)')
+    c.add_argument('--estimate', action='store_true', help='only say how big it would be')
+    c = add('import', 'Put an export back on this computer (a fresh install)', cmd_import)
+    c.add_argument('archive', help='the .tar.gz or .tar.gz.enc file')
+    c.add_argument('--force', action='store_true', help='replace a setup that already has sources (a copy of it is kept)')
     c = add('raw', 'Call any non-owner service action with JSON args', cmd_raw)
     c.add_argument('action')
     c.add_argument('args', nargs='?', help='JSON object')
@@ -622,7 +676,7 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        args.func({} if args.func is cmd_doctor else load_config(args.config), args)
+        args.func({} if args.func in (cmd_doctor, cmd_import) else load_config(args.config), args)
     except CliError as error:
         sys.exit(f'assistant: {error}')
     except BrokenPipeError:

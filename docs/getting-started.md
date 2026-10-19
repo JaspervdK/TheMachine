@@ -76,3 +76,15 @@ One pass over the service, the OpenClaw bridge, your Telegram approval, every so
 - Sending approved emails needs `gmail.send` on top of read-only access; add it with gog when you want it. Connecting never asks for more than read access.
 - Company facts next to each organisation (industry, size, location): add a key for an enrichment service you use (Apollo, People Data Labs, Hunter or any that looks companies up by domain). Only domains are sent. When a look-up gets a company wrong, Edit on its page fixes the details or clears them. See [Organisation data](../README.md#organisation-data-optional-enrichment).
 - Upgrade: `git pull && ./install.sh`. Your config, data and secrets are kept.
+
+## Moving from hosted to your own computer
+
+Everything moves in one file: what The Machine knows, your settings, connectors you built, your workspace files (`AGENTS.md`, `USER.md`, memory) and who may talk to your Telegram bot.
+
+1. On the hosted Account page, click **Export everything**. Pick a passphrase if your keys should come along: then the whole file is encrypted with it. Without one, keys stay behind and you connect those sources again. Download the file; it is deleted from your server after 24 hours.
+2. On your own computer, follow steps 1 above to install The Machine.
+3. Put it back: `assistant import the-machine-export-<date>.tar.gz` (for `.tar.gz.enc` it asks the passphrase).
+4. Connect what the import lists. Always: your model, and Google (hosted Google access works through the hosting and does not move along: `assistant connect gmail --account <id>` and the same for `calendar`). Without a passphrase also every source's key and your Telegram bot token.
+5. `systemctl --user restart personal-assistant`, then `assistant doctor`.
+
+The same works between two of your own computers: `assistant export --keys` on the old one.
