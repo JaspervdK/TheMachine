@@ -22,3 +22,6 @@ prompt-receipts/
 memory/
 .test-deps/
 test-results/
+
+# Local source backup, never part of a public release.
+oss-prev/
