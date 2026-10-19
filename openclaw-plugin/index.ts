@@ -30,6 +30,9 @@ function cardButtons(item: any) {
       ? [...(item.preparation_status==='blocked' ? [[retryLabel(item.preparation_reason),'retry']] : []),['Mark done', 'complete'], ['Snooze', 'snooze'], ['Change', 'other'], ['Not needed', 'reject']]
       : [['Do it', 'accept'], ['Mark done', 'complete'], ['Snooze', 'snooze'], ['Change', 'other'], ['Not needed', 'reject']];
   const buttons:any[]=[];
+  // A run waiting on the browser keeps its Open the browser link on every redraw. Same rule as controls() in assistant.py.
+  const browser=String(item.preparation_browser?.link||'');
+  if(browser.startsWith('https://')&&['accepted','instructions'].includes(item.status))buttons.push({text:'Open the browser',url:browser});
   if(item.status==='prepared')for(const action of taskActions(item)){
     if(action.kind==='finish'&&(action.state||item.action_status)?.status==='done')continue;
     if(action.kind==='open')buttons.push({text:action.label,url:action.url});
