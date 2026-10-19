@@ -4900,6 +4900,29 @@ def dashboard_base(config, host):
     return config.get('dashboard_path', '/') if host == config.get('dashboard_host') else config.get('dashboard_alias_path', '/assistant/')
 
 
+def model_usage(config, run=subprocess.run):
+    """How much of its limits the AI sign-in reports used (ChatGPT: the 5-hour and weekly windows), as the running
+    OpenClaw Gateway reads it (`usage.status`): a short RPC client, not a second Gateway. Only names, labels,
+    percentages and reset times are kept; None when nothing is known."""
+    try:
+        result = run([str(config.get('openclaw') or 'openclaw'), 'gateway', 'call', 'usage.status', '--json',
+                      '--timeout', '60000', '--params', '{}'], capture_output=True, text=True, timeout=90)
+        data = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    found = []
+    for entry in (data.get('providers') or []) if isinstance(data, dict) else []:
+        if not isinstance(entry, dict) or not isinstance(entry.get('provider'), str):
+            continue
+        windows = [{'label': str(w.get('label') or '')[:20], 'used': max(0, min(100, round(float(w['usedPercent'])))),
+                    'reset': int(w['resetAt']) // 1000 if isinstance(w.get('resetAt'), (int, float)) else None}
+                   for w in entry.get('windows') or [] if isinstance(w, dict) and isinstance(w.get('usedPercent'), (int, float))]
+        if windows:
+            found.append({'provider': entry['provider'][:40], 'name': str(entry.get('displayName') or entry['provider'])[:40],
+                          'windows': windows[:4]})
+    return found or None
+
+
 def node_bin(config):
     """The Node binary for the helpers: config `node`, else the one next to the `openclaw` CLI, else PATH."""
     if config.get('node'):
@@ -5590,6 +5613,7 @@ class App:
         self.owner_token = owner_credential(config)
         self.stop = threading.Event()
         self.graph_dirty = threading.Event()
+        self.model_usage = None
 
     def gmail_message(self, account_id, message_id):
         account = next(a for a in self.config['accounts'] if a['id'] == account_id)
@@ -5688,6 +5712,7 @@ class App:
             result['needs_you'] = needs_you(self.config)
             for connector in result['connectors']:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
+            result['model_usage'] = getattr(self, 'model_usage', None)
             # Read only the existing heartbeat's runtime facts, never conversation
             # content or scheduler configuration. Missing evidence stays unknown.
             try:
@@ -6822,6 +6847,12 @@ class App:
             with self.store.connect() as db:
                 return [(i,None) for i in embeddings.fts_ids(db,accounts,query,limit) if i not in {*map(int,event_ids),*map(int,exclude)}],False
 
+    def model_usage_worker(self):
+        """Reads the AI sign-in's usage limits every five minutes; a failed read keeps the last one."""
+        while not self.stop.is_set():
+            self.model_usage = model_usage(self.config) or getattr(self, 'model_usage', None)
+            self.stop.wait(300)
+
     def graph_worker(self):
         """Rebuilds the people and projects graph every ten minutes, and soon after a label or merge."""
         wait = 30
@@ -7152,6 +7183,7 @@ class App:
         threading.Thread(target=self.action_worker, daemon=True).start()
         threading.Thread(target=self.review_worker, daemon=True).start()
         threading.Thread(target=self.graph_worker, daemon=True).start()
+        threading.Thread(target=self.model_usage_worker, daemon=True).start()
         if embeddings.settings(self.config):
             threading.Thread(target=self.embedding_worker, daemon=True).start()
         if enrichment.settings(self.config):

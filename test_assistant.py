@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import types
 from pathlib import Path
 import tempfile
 import unittest
@@ -842,6 +843,19 @@ class SlackInvariants(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class ModelUsage(unittest.TestCase):
+    def test_only_names_labels_percentages_and_reset_times_are_kept(self):
+        reply = {'providers': [{'provider': 'openai', 'displayName': 'OpenAI', 'plan': 'plus', 'accountEmail': 'someone@example.com',
+                                'windows': [{'label': '5h', 'usedPercent': 41.6, 'resetAt': 1793008294000}, {'label': 'Week', 'usedPercent': 180}]},
+                               {'provider': 'xai', 'windows': [], 'error': 'Timeout'}]}
+        run = lambda command, **kw: types.SimpleNamespace(stdout=json.dumps(reply))
+        usage = assistant.model_usage({'openclaw': '/bin/openclaw'}, run=run)
+        self.assertEqual(usage, [{'provider': 'openai', 'name': 'OpenAI', 'windows': [{'label': '5h', 'used': 42, 'reset': 1793008294},
+                                                                                       {'label': 'Week', 'used': 100, 'reset': None}]}])
+        self.assertNotIn('example.com', json.dumps(usage))
+        self.assertIsNone(assistant.model_usage({}, run=lambda command, **kw: types.SimpleNamespace(stdout='gateway timeout')))
 
 
 class NeedsYou(unittest.TestCase):

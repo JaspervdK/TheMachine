@@ -51,6 +51,7 @@ A mixed setup works well: a frontier model as `primary`, a local model as the la
 
 - Collected content stays in your SQLite database, but reviews and preparations send the signals they read to your model provider. With a local model, nothing leaves your machine.
 - Each review reads up to 120 signals; each Do it reads the card's full evidence. The Friday recap reports the week's token usage, so you can see what a setup costs before committing to it.
+- If your provider reports usage limits (a ChatGPT sign-in has a 5-hour and a weekly window), the dashboard shows how much of each is used and when it resets, under Signal reviews in the Connections tab. It asks OpenClaw's running Gateway (`usage.status`) every five minutes and keeps only the percentages and reset times. `openclaw status --usage` shows the same.
 - Prepare-ahead (cards that arrive already drafted) spends tokens on cards you may dismiss. Turn it off with `"prepare_ahead": false`, or cap it with `"prepare_ahead_per_day"` (default 10) in `config.json`.
 
 ## Known limitation
