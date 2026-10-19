@@ -26,7 +26,7 @@ await new Promise(r=>server.listen(0,'127.0.0.1',r));
 let browser;
 try{
 browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
-const context=await browser.newContext({viewport:{width:390,height:844}});const page=await context.newPage();let errors=[];page.on('pageerror',e=>errors.push(e.message));
+const context=await browser.newContext({viewport:{width:390,height:844},colorScheme:'dark'});const page=await context.newPage();let errors=[];page.on('pageerror',e=>errors.push(e.message));
 await page.addInitScript(()=>{window.copied=null;Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>window.copied=text}})});
 await page.goto('http://127.0.0.1:'+server.address().port+'/approval');
 assert.ok((await page.locator('pre').textContent()).endsWith('LAST STATEMENT'));
@@ -241,9 +241,13 @@ await page.screenshot({path:'/tmp/261011-assistant-connections.png',fullPage:tru
 // Light mode: a sun/moon switch in the footer, remembered per browser; HTML emails keep their own colours in light.
 {const theme=()=>page.evaluate(()=>[document.documentElement.dataset.theme,document.documentElement.dataset.themeMode]);
 const toggle=page.locator('#theme-toggle');const size=()=>toggle.evaluate(el=>{const b=el.getBoundingClientRect();return b.width+'x'+b.height});
-assert.deepEqual(await theme(),['dark','dark']);assert.equal(await toggle.getAttribute('aria-checked'),'false');const before=await size();
+assert.deepEqual(await theme(),['dark','auto']);assert.equal(await toggle.getAttribute('aria-checked'),'false');const before=await size();
+// Before any choice it follows the device, live.
+await page.emulateMedia({colorScheme:'light'});await page.waitForFunction(()=>document.documentElement.dataset.theme==='light');assert.deepEqual(await theme(),['light','auto']);
+await page.emulateMedia({colorScheme:'dark'});await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
 await toggle.scrollIntoViewIfNeeded();await toggle.screenshot({path:'/tmp/261013-toggle-dark.png',scale:'device'});
 await toggle.click();assert.deepEqual(await theme(),['light','light']);assert.equal(await toggle.getAttribute('aria-checked'),'true');assert.equal(await size(),before);
+assert.match(await page.evaluate(()=>document.cookie),/(^|; )theme=light(;|$)/);  // shared with the hosted app's pages
 await page.waitForTimeout(400);await toggle.screenshot({path:'/tmp/261013-toggle-light.png'});
 assert.equal(await page.evaluate(()=>getComputedStyle(document.body).color),'rgb(29, 31, 36)');
 await page.reload();await page.locator('#task-'+ids[0]).waitFor();assert.deepEqual(await theme(),['light','light']);
@@ -257,6 +261,10 @@ await page.locator('#email-dialog iframe.email-frame').evaluate(fr=>new Promise(
 assert.equal(await f.locator('#box').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)');
 assert.equal(await f.locator('html').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)');
 await page.getByRole('button',{name:'Close email'}).click();
+await toggle.click();assert.deepEqual(await theme(),['dark','dark']);
+// Picked in the app meanwhile (the shared cookie): coming back to the tab shows it.
+await page.evaluate(()=>{document.cookie='theme=light; Path=/';document.dispatchEvent(new Event('visibilitychange'))});
+assert.deepEqual(await theme(),['light','light']);assert.equal(await toggle.getAttribute('aria-checked'),'true');
 await toggle.click();assert.deepEqual(await theme(),['dark','dark']);}
 assert.match(await page.locator('#updated').textContent(),/\b\d{2}:\d{2}$/);  // 24-hour clock, no AM/PM
 // Tapping the logo or the time refreshes and shows a new tagline.

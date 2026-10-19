@@ -1,8 +1,14 @@
 <!doctype html><html lang="en"><meta charset="utf-8"><base href="__BASE__"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>The Machine · Suggestions</title>
 <meta name="theme-color" content="#131518">
-<script>// Theme: dark (default), light or auto (follows the device); saved per browser.
-(()=>{const pick=()=>{const m=localStorage.getItem('theme')||'dark',t=m==='auto'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):m;document.documentElement.dataset.theme=t;document.documentElement.dataset.themeMode=m;document.querySelector('meta[name=theme-color]')?.setAttribute('content',t==='light'?'#f6f4ef':'#131518')};window.applyTheme=pick;pick();matchMedia('(prefers-color-scheme: light)').addEventListener('change',pick)})();</script>
+<script>// Theme: light or dark as picked here or in the hosted app (the "theme" cookie, shared under the app's domain), else the device's own setting.
+(()=>{const root=document.documentElement,sys=matchMedia('(prefers-color-scheme: light)');
+const saved=()=>{const c=document.cookie.match(/(?:^|;\s*)theme=(light|dark)(?:;|$)/);if(c)return c[1];const l=localStorage.getItem('theme');return l==='light'||l==='dark'?l:'auto'};
+const pick=()=>{const m=saved(),t=m==='auto'?(sys.matches?'light':'dark'):m;root.dataset.theme=t;root.dataset.themeMode=m;document.querySelector('meta[name=theme-color]')?.setAttribute('content',t==='light'?'#f6f4ef':'#131518')};
+// On a hosted dashboard (<name>.app.example) the cookie goes on the app's domain, so the app's pages follow; else on this host only.
+window.chooseTheme=t=>{localStorage.setItem('theme',t);const h=location.hostname,parent=h.split('.').slice(1).join('.'),base=`theme=${t}; Path=/; Max-Age=31536000; SameSite=Lax${location.protocol==='https:'?'; Secure':''}`;
+if(parent.includes('.')&&!/^[\d.]+$/.test(h))document.cookie=base+'; Domain='+parent;if(!document.cookie.includes('theme='+t))document.cookie=base;pick()};
+window.applyTheme=pick;pick();sys.addEventListener('change',pick);document.addEventListener('visibilitychange',()=>{if(!document.hidden){pick();window.showTheme?.()}})})();</script>
 <link rel="icon" type="image/png" sizes="32x32" href="brand/favicon-32.png">
 <link rel="icon" type="image/png" sizes="512x512" href="brand/favicon-512.png">
 <link rel="apple-touch-icon" href="brand/favicon-512.png">
@@ -838,10 +844,10 @@ function openSendLink(){const match=/^#send=([a-f0-9]{16})&revision=([a-f0-9]{12
 // Edit the draft yourself: Send then sends exactly the edited text.
 function editSend(){$('#send-subject').value=sendDraft.subject||'';$('#send-body').value=sendDraft.body;$('#send-editor').hidden=false;sendHeader(false);$('#send-preview').hidden=true;$('#send-edit').hidden=true;$('#send-body').focus()}
 $('#send-edit').onclick=editSend;
-const showTheme=()=>$('#theme-toggle').setAttribute('aria-checked',String(document.documentElement.dataset.theme==='light'));
+const showTheme=window.showTheme=()=>$('#theme-toggle').setAttribute('aria-checked',String(document.documentElement.dataset.theme==='light'));
 {const lines=['Reads everything. Sends nothing you didn’t approve.','All rights reserved. All decisions yours.','Powered by coffee (yours) and electricity (mine).','No inboxes were harmed in the making of this list.','Handcrafted by one human and one very patient robot.'];
 const day=Math.floor(Date.now()/864e5);$('#copyright').textContent=`© ${new Date().getFullYear()} The Machine. ${lines[day%lines.length]}`}
-$('#theme-toggle').onclick=()=>{localStorage.setItem('theme',document.documentElement.dataset.theme==='light'?'dark':'light');applyTheme();showTheme()};showTheme();
+$('#theme-toggle').onclick=()=>{chooseTheme(document.documentElement.dataset.theme==='light'?'dark':'light');showTheme()};showTheme();
 matchMedia('(prefers-color-scheme: light)').addEventListener('change',showTheme);
 $('#send-cancel').onclick=()=>$('#send-dialog').close();
 $('#send-confirm').onclick=async()=>{const b=$('#send-confirm');b.disabled=true;try{
