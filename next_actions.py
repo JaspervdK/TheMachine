@@ -879,7 +879,7 @@ class WhatsAppTransport:
         env = {k: v for k, v in os.environ.items() if k != 'WACLI_READONLY'}
         if not write:
             env['WACLI_READONLY'] = '1'
-        command = [self.config.get('wacli', 'wacli'), '--store', self.account(action)['store'],
+        command = [self.config.get('wacli') or 'wacli', '--store', self.account(action)['store'],
                    *([] if write else ['--read-only']), '--json', *args]
         return subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout)
 
