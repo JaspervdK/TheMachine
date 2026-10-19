@@ -714,5 +714,29 @@ else: sys.stderr.write("Access denied: serve config denied"); sys.exit(1)''')
         self.assertIn('- Email: Hey [name]; Regards, Alex', fitted)
 
 
+class WhatsAppSyncTest(unittest.TestCase):
+    setUp, stub, calls = OnboardingTest.setUp, OnboardingTest.stub, OnboardingTest.calls
+
+    def test_linking_starts_one_sync_unit_unless_the_store_is_already_synced(self):
+        store = self.home / 'wa'
+        store.mkdir()
+        wacli = self.stub('wacli', 'print(json.dumps({"success": True, "data": {"authenticated": True, "linked_jid": "1@s.whatsapp.net"}}))')
+        account = {'id': 'personal-whatsapp', 'service': 'whatsapp', 'store': str(store)}
+        onboarding.step_whatsapp({'wacli': wacli}, account, FakeUI(answers=[str(store)]))
+        unit = self.home / '.config/systemd/user/the-machine-wacli-personal-whatsapp.service'
+        text = unit.read_text()
+        self.assertIn(f'ExecStart={wacli} --store {store} sync --follow', text)
+        self.assertNotIn('read-only', text)
+        self.assertIn('systemctl --user enable --now the-machine-wacli-personal-whatsapp.service', self.calls())
+        unit.unlink()
+        import fcntl
+        with open(store / 'LOCK', 'a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            ui = FakeUI(answers=[str(store)])
+            onboarding.step_whatsapp({'wacli': wacli}, account, ui)
+        self.assertFalse(unit.exists())
+        self.assertIn('another wacli already keeps this store synced', ui.text())
+
+
 if __name__ == '__main__':
     unittest.main()

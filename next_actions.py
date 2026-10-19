@@ -105,7 +105,7 @@ def attachment_bytes(record, config):
 
 
 # Owner-approved sends: each needs the Send review and Send now (Telegram) or the dashboard dialog.
-SEND_KINDS = ('email', 'email_demo', 'linkedin', 'slack', 'x')
+SEND_KINDS = ('email', 'email_demo', 'linkedin', 'slack', 'x', 'whatsapp')
 # Owner-approved changes to The Machine's own code: Merge reviews the fix, Merge now applies it.
 APPROVE_KINDS = SEND_KINDS + ('merge',)
 # The last step of a task taken up to it (a filled-in form, a cart, a payment): the owner reviews
@@ -115,7 +115,7 @@ FINISH_VERBS = ('Submit', 'Pay', 'Book', 'Confirm', 'Order', 'Buy', 'Publish', '
                 'Approve', 'Create', 'Delete', 'Cancel', 'Register', 'Renew', 'File', 'Upload', 'Schedule', 'Reserve',
                 'Apply', 'Transfer', 'Deploy', 'Send', 'Request', 'Unsubscribe', 'Close', 'Archive', 'Invite',
                 'Share', 'Update', 'Save', 'Claim', 'Return', 'Refund', 'Reply')
-TEXT_KINDS = ('linkedin', 'slack', 'x')  # a message without a subject
+TEXT_KINDS = ('linkedin', 'slack', 'x', 'whatsapp')  # a message without a subject
 LINKEDIN_INBOX = Path(__file__).resolve().parent / 'integrations/linkedin_inbox.py'
 X_INBOX = Path(__file__).resolve().parent / 'integrations/x_inbox.py'
 X_URLISH = re.compile(r'(?:https?://)?(?:[\w-]+\.)+[a-zA-Z]{2,}(?:/\S*)?')
@@ -155,7 +155,7 @@ def visible_actions(value):
 def label(value):
     if value['kind'] == 'x' and not value.get('label'):
         return 'Reply on X' if value.get('reply_to') else 'Send'
-    return value.get('label') or {'email':'Send','email_demo':'Send','linkedin':'Send','slack':'Send','merge':'Merge fix','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
+    return value.get('label') or {'email':'Send','email_demo':'Send','linkedin':'Send','slack':'Send','whatsapp':'Send','merge':'Merge fix','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
 
 
 def preview(value):
@@ -167,6 +167,8 @@ def preview(value):
         return merge_preview(value)
     if value['kind'] == 'finish':
         return value['preview'] + ('\n\n' + value['url'] if value.get('url') else '')
+    if value['kind'] == 'whatsapp':
+        return 'WhatsApp message to ' + value['to_name'] + '\n\n' + value['body']
     if value['kind'] == 'slack':
         return 'Slack message to ' + value['to_name'] + (' (' + value['to_email'] + ')' if value.get('to_email') else '') + '\n\n' + value['body'] + delegate_note(value)
     return email_preview(value) if value['kind'] in ('email','email_demo') else value['instructions']
@@ -208,13 +210,13 @@ def delegation(value, result, name=None):
         result['to_name'] = name
 
 
-def validate(value, config, allowed_accounts, recipient_options=None, linkedin_threads=None, x_threads=None):
+def validate(value, config, allowed_accounts, recipient_options=None, linkedin_threads=None, x_threads=None, whatsapp_chats=None):
     if value is None:
         return None
     if isinstance(value,list):
         if not 1<=len(value)<=3:raise ValueError('Offer one to three useful next actions, not a menu of everything')
         if any(not isinstance(item,dict) for item in value):raise ValueError('Each next action must be one concrete choice')
-        choices=[validate(item,config,allowed_accounts,recipient_options,linkedin_threads,x_threads) for item in value]
+        choices=[validate(item,config,allowed_accounts,recipient_options,linkedin_threads,x_threads,whatsapp_chats) for item in value]
         if len({item['revision'] for item in choices})!=len(choices) or len({label(item).lower() for item in choices})!=len(choices):
             raise ValueError('Next actions must be distinct concrete choices')
         return {'kind':'menu','actions':choices}
@@ -432,10 +434,31 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
             raise ValueError('Provide the concrete Slack message, at most 8000 characters')
         result['body'] = body.strip()
         delegation(value, result)
+    elif value.get('kind') == 'whatsapp':
+        # A WhatsApp reply in a chat from this task's own WhatsApp messages, from the owner's linked
+        # account; wacli sends it only after the owner's Send now. Text only.
+        if set(value) - {'kind', 'label', 'account_id', 'chat_id', 'body'}:
+            raise ValueError('Unsupported WhatsApp fields; plain text only, no media')
+        account = next((a for a in config['accounts'] if a['id'] == value.get('account_id') and a.get('service') == 'whatsapp'), None)
+        if not account or account['id'] not in allowed_accounts:
+            raise ValueError('Use the WhatsApp account belonging to this task')
+        result = {'kind': 'whatsapp', 'account_id': account['id']}
+        if value.get('label'):
+            if value['label'] != 'Send' and not value['label'].startswith('Send '):
+                raise ValueError('WhatsApp button labels must say Send, such as Send reply')
+            result['label'] = value['label']
+        chat = (whatsapp_chats or {}).get(str(value.get('chat_id') or ''))
+        if not chat or chat.get('account_id') != account['id']:
+            raise ValueError('Reply only in a WhatsApp chat from this task’s own messages (chat_id is its metadata.chat_id)')
+        result.update(chat_id=str(value['chat_id']), to_name=chat.get('name') or 'WhatsApp chat', max_length=4000)
+        body = value.get('body')
+        if not isinstance(body, str) or not body.strip() or len(body) > 4000 or '\x00' in body:
+            raise ValueError('Provide the concrete WhatsApp message, at most 4000 characters')
+        result['body'] = body.strip()
     elif value.get('kind') == 'merge':
         result = merge_action(value, config)
     else:
-        raise ValueError('Only email drafts, LinkedIn, Slack and X messages, local preparation and original-page links are supported; no payments or arbitrary writes')
+        raise ValueError('Only email drafts, LinkedIn, Slack, X and WhatsApp messages, local preparation and original-page links are supported; no payments or arbitrary writes')
     result['revision'] = hashlib.sha256(canonical(result).encode()).hexdigest()[:12]
     return result
 
@@ -469,7 +492,7 @@ def check(value, result='', own_addresses=()):
 def revise(action, subject=None, body=None):
     """The owner's own edit of a ready draft: same recipients, account and attachments, new text and revision."""
     if action['kind'] not in ('email',) + TEXT_KINDS:
-        raise ValueError('Only email, LinkedIn, Slack and X drafts can be edited')
+        raise ValueError('Only email, LinkedIn, Slack, X and WhatsApp drafts can be edited')
     result = {k: v for k, v in action.items() if k != 'revision'}
     if body is not None:
         if (not isinstance(body, str) or not body.strip() or '\x00' in body
@@ -838,6 +861,82 @@ class XTransport:
         except ValueError:
             return {}
         return {'message_id': ('x:' if action.get('reply_to') else 'xdm:') + str(out.get('id') or job['id'])} if out.get('found') else {}
+
+
+class WhatsAppTransport:
+    """Sends one owner-approved WhatsApp text into an existing chat with wacli. Only this send runs
+    wacli without --read-only; every check before and after it stays read-only. When the sync keeps
+    the store open, wacli hands the send to that running process. wacli has no idempotency token,
+    so an unclear outcome is checked in the chat afterwards and never resent."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def account(self, action):
+        return next(a for a in self.config['accounts'] if a['id'] == action['account_id'] and a.get('service') == 'whatsapp')
+
+    def run(self, action, args, write=False, timeout=30):
+        env = {k: v for k, v in os.environ.items() if k != 'WACLI_READONLY'}
+        if not write:
+            env['WACLI_READONLY'] = '1'
+        command = [self.config.get('wacli', 'wacli'), '--store', self.account(action)['store'],
+                   *([] if write else ['--read-only']), '--json', *args]
+        return subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout)
+
+    def read(self, action, args):
+        try:
+            result = self.run(action, ['--timeout', '15s', *args], timeout=25)
+            data = {} if result.returncode else json.loads(result.stdout or '{}')
+        except (subprocess.TimeoutExpired, ValueError):
+            data = {}
+        if not isinstance(data, dict) or data.get('success') is not True or not isinstance(data.get('data'), dict):
+            raise ValueError('I couldn’t reach WhatsApp on this computer. Nothing was sent; tap Send again.')
+        return data['data']
+
+    def preflight(self, action):
+        if action['kind'] != 'whatsapp':
+            raise ValueError('Only an owner-approved WhatsApp message can use the WhatsApp transport')
+        status = self.read(action, ['auth', 'status'])
+        linked = status.get('linked_jid')
+        if (status.get('authenticated') is not True or not isinstance(linked, str)
+                or hashlib.sha256(linked.encode()).hexdigest() != self.account(action).get('identity_sha256')):
+            raise ValueError('WhatsApp is signed out, or linked to another number. Nothing was sent.')
+        rows = self.read(action, ['messages', 'list', '--chat', action['chat_id'], '--limit', '1']).get('messages')
+        if not rows:
+            raise ValueError('I couldn’t find that WhatsApp chat. Nothing was sent.')
+
+    def send(self, action, job):
+        try:
+            result = self.run(action, ['--timeout', '90s', '--lock-wait', '30s', 'send', 'text', '--to', action['chat_id'],
+                                       '--message', action['body']], write=True, timeout=150)
+        except subprocess.TimeoutExpired:
+            return {}
+        try:
+            out = json.loads(result.stdout or '{}')
+        except ValueError:
+            out = {}
+        data = out.get('data') if isinstance(out.get('data'), dict) else {}
+        if not result.returncode and out.get('success') is True and data.get('sent') is True and data.get('id'):
+            return {'message_id': 'whatsapp:' + str(data['id'])}
+        err = ((out.get('error') or '') if isinstance(out.get('error'), str) else '') + ' ' + result.stderr
+        err = err.lower()
+        if 'may still have gone through' in err or 'after dispatch' in err:
+            return {}  # Unknown outcome: never resend; reconcile reads the chat.
+        if 'lock' in err and 'store' in err:
+            return {'not_sent': True}
+        if 'not authenticated' in err or 'not logged in' in err or 'read-only' in err or 'invalid' in err:
+            return {'rejected': 'refused'}
+        return {}
+
+    def reconcile(self, action, job):
+        since = datetime.datetime.fromisoformat(job['created_at']) - datetime.timedelta(minutes=1)
+        try:
+            rows = self.read(action, ['messages', 'list', '--chat', action['chat_id'], '--from-me',
+                                      '--after', since.isoformat(), '--limit', '50']).get('messages') or []
+        except ValueError:
+            return {}
+        found = [r for r in rows if isinstance(r, dict) and r.get('FromMe') is True and (r.get('Text') or '').strip() == action['body']]
+        return {'message_id': 'whatsapp:' + str(found[0]['MsgID'])} if len(found) == 1 and found[0].get('MsgID') else {}
 
 
 def slack_text(body):
@@ -1243,10 +1342,10 @@ print('MACHINE_PROOF='+json.dumps({'ran':result.testsRun,'failed':result.failed,
 
 
 class ActionTransport:
-    """Routes an approved send to Gmail, LinkedIn, Slack or X, or a fix to The Machine itself, by its kind."""
+    """Routes an approved send to Gmail, LinkedIn, Slack, X or WhatsApp, or a fix to The Machine itself, by its kind."""
 
-    def __init__(self, email, linkedin, slack=None, x=None, merge=None):
-        self.email, self.linkedin, self.slack, self.x, self.merge = email, linkedin, slack, x, merge
+    def __init__(self, email, linkedin, slack=None, x=None, merge=None, whatsapp=None):
+        self.email, self.linkedin, self.slack, self.x, self.merge, self.whatsapp = email, linkedin, slack, x, merge, whatsapp
 
     def pick(self, action):
         if action['kind'] == 'merge':
@@ -1261,6 +1360,10 @@ class ActionTransport:
             if not self.x:
                 raise ValueError('X sending isn’t set up. Nothing was sent.')
             return self.x
+        if action['kind'] == 'whatsapp':
+            if not self.whatsapp:
+                raise ValueError('WhatsApp sending isn’t set up. Nothing was sent.')
+            return self.whatsapp
         return self.linkedin if action['kind'] == 'linkedin' else self.email
 
     def preflight(self, action):

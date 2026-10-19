@@ -98,6 +98,10 @@ Reply in a conversation from the task's linkedin.message evidence: `{kind:linked
 
 Reply to a post from this task's x.mention evidence with `{kind:x,label:Reply on X,account_id:<task X account ID>,reply_to:<that event's metadata.tweet_id>,body:<reply>}`, or answer an x.dm with `{kind:x,label:Send,account_id:...,conversation_id:<its metadata.conversation_id>,body:...}`. Plain text, no media; a reply at most 280 characters (links count 23), a DM 10000. Public replies stay short and keep private or customer details out. It's sent through the owner's own x.com session after their Send now, or send_now when they asked you to send it.
 
+### WhatsApp message
+
+Reply in a chat from the task's whatsapp.message evidence: `{kind:whatsapp,label:Send reply,account_id:<task WhatsApp account>,chat_id:<its metadata.chat_id>,body:<message>}`. Plain text, no media, at most 4000 characters, short, the owner's WhatsApp voice from USER.md, no signature. Only existing chats, never a new number. It goes out from the owner's linked WhatsApp only after they tap Send now on the card; send_now does not apply to WhatsApp.
+
 ### Slack message, and handing a task to someone
 
 A Slack direct message from the owner's own account: `{kind:slack,label:Send to Sam,account_id:<the company's Slack account>,to_email:<their work email>,to_name:<their name as in Slack>,body:<message>}`, or `user_id:<metadata.user_id of their Slack signal>` instead of to_email. Plain text, short, the owner's Slack voice from USER.md; links as [text](https://url). The send checks the name against Slack.
@@ -126,7 +130,7 @@ When a prepared-ahead task ends in a click that commits something (submitting a 
 - `preview`: what goes out, as the owner should check it: amounts, dates, names, the text, the account it comes from.
 - `url`: the page where it happens, when there is one.
 
-The owner reviews the preview and taps Confirm; that runs a Do it turn for only this step, which stops with a blocker if anything differs from the preview. Messages keep their own send actions (email, LinkedIn, Slack, X) and fixes to The Machine `kind:merge`.
+The owner reviews the preview and taps Confirm; that runs a Do it turn for only this step, which stops with a blocker if anything differs from the preview. Messages keep their own send actions (email, LinkedIn, Slack, X, WhatsApp) and fixes to The Machine `kind:merge`.
 
 Retries keep this exact confirmed step and preview. Read preparation_history and check earlier results before repeating any write. Save `finish_state:completed` only with a verified receipt or changed state; `finish_state:not_performed` only after positively confirming nothing was submitted; otherwise `finish_state:uncertain`. An uncertain attempt resumes with source reconciliation first, never a blind new submission. If sign-in is needed, retain the same finish action: after sign-in Confirm resumes it, without creating another action.
 
@@ -135,7 +139,7 @@ Retries keep this exact confirmed step and preview. Read preparation_history and
 - A local follow-up is appropriate only if the current result isn't already the draft it would revise: `{kind:prepare,label:Draft support email,instructions:<concrete next local preparation>}`.
 - A follow-up `{kind:prepare,label:Apply fix,instructions:...}` runs another Do it turn with those exact instructions under the same limits; use it only when the change is a separate step the owner should start.
 - A useful verified original link can say Open the automation or View proposal.
-- Never label anything Pay, Create event, Send or Reply unless it is the email, LinkedIn, Slack or X send action or a `kind:finish` last step.
+- Never label anything Pay, Create event, Send or Reply unless it is the email, LinkedIn, Slack, X or WhatsApp send action or a `kind:finish` last step.
 
 ## Saving
 

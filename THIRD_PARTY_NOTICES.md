@@ -39,4 +39,4 @@ Installed from their own package sources only when you use the feature that need
 | Node.js | runs OpenClaw and the plugin | MIT |
 | Python | runs the service | PSF License |
 | Tailscale | private dashboard access | BSD-3-Clause |
-| `wacli` | local WhatsApp store | see its repository |
+| [`wacli`](https://github.com/openclaw/wacli) | local WhatsApp store and owner-approved WhatsApp sends | MIT, Copyright (c) 2026 Peter Steinberger |

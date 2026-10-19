@@ -9,6 +9,7 @@ after you say yes. Secrets are read without echo, written only to files with mod
 data directory, and never printed.
 """
 import datetime as dt
+import fcntl
 import getpass
 import hashlib
 import importlib.util
@@ -16,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -956,6 +958,42 @@ def step_whatsapp(config, account, ui):
         raise SetupError('WhatsApp is not linked', f'wacli --store {account["store"]} auth, then: assistant connect whatsapp')
     account['identity_sha256'] = hashlib.sha256(linked.encode()).hexdigest()
     ui.say('  WhatsApp: linked')
+    whatsapp_sync(wacli, account, ui)
+
+
+def store_busy(store):
+    """Whether another wacli (such as your own sync) holds the store: then that one keeps it synced."""
+    try:
+        with open(Path(store) / 'LOCK', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+
+
+def whatsapp_sync(wacli, account, ui):
+    """wacli only receives messages while its sync runs: keep one running as a systemd user unit, the
+    store's single writer. Sends hand off to it. Skipped when something else already syncs this store."""
+    unit = home() / '.config/systemd/user' / f"the-machine-wacli-{re.sub(r'[^A-Za-z0-9_-]', '-', account['id'])}.service"
+    if not unit.exists() and store_busy(account['store']):
+        ui.say('  WhatsApp: another wacli already keeps this store synced')
+        return
+    if not shutil.which('systemctl'):
+        ui.say(f'  WhatsApp: keep it synced yourself: {wacli} --store {account["store"]} sync --follow')
+        return
+    if not unit.exists() and not ui.yes('Keep WhatsApp synced in the background (wacli sync as a user service)?', True):
+        return
+    command = ' '.join(shlex.quote(str(part)) for part in (wacli, '--store', account['store'], 'sync', '--follow', '--presence-mode', 'quiet',
+                                                           '--max-messages', '0', '--max-db-size', '2GB', '--max-reconnect', '10m'))
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text('[Unit]\nDescription=The Machine: keep WhatsApp (wacli) synced\nAfter=network-online.target\n\n'
+                    f'[Service]\nExecStart={command}\nRestart=always\nRestartSec=30\nMemoryMax=512M\n\n[Install]\nWantedBy=default.target\n')
+    run(['systemctl', '--user', 'daemon-reload'], timeout=30)
+    started = run(['systemctl', '--user', 'enable', '--now', unit.name], timeout=60)
+    ui.say(f'  WhatsApp: synced by {unit.name}' if not started.returncode else f'  WhatsApp: start it with systemctl --user enable --now {unit.name}')
 
 
 def step_android(config, account, ui):

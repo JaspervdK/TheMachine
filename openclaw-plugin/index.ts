@@ -12,7 +12,7 @@ const button = (id: string, text: string, choice: string) => ({ text,
   callback_data: buildCallback(`assistant:${id}:${choice}`) });
 const taskActions=(item:any)=>{
  const choices=item.next_actions||(item.next_action?.kind==='menu'?item.next_action.actions:item.next_action?[item.next_action]:[]);
- const emailReady=choices.some((a:any)=>['email','email_demo','linkedin','slack','x','merge','finish'].includes(a.kind));
+ const emailReady=choices.some((a:any)=>['email','email_demo','linkedin','slack','x','whatsapp','merge','finish'].includes(a.kind));
  return choices.filter((a:any)=>a.kind!=='prepare'||(!emailReady&&!/^Draft (shorter|longer|another|alternative|follow-up)\b/i.test(a.label||'')));
 };
 const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge']);
@@ -36,7 +36,7 @@ function cardButtons(item: any) {
   if(item.status==='prepared')for(const action of taskActions(item)){
     if(action.kind==='finish'&&(action.state||item.action_status)?.status==='done')continue;
     if(action.kind==='open')buttons.push({text:action.label,url:action.url});
-    else if(['email','email_demo','linkedin','slack','x','merge','prepare','finish'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((action.state||item.action_status)?.status))
+    else if(['email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((action.state||item.action_status)?.status))
       buttons.push(button(item.id,action.label||(action.kind==='prepare'?'Prepare next step':'Send'),(action.kind==='prepare'?'next_':'send_')+action.revision));
   }
   // A merged fix stays reversible for a day. Same rule as controls() in assistant.py.
@@ -76,6 +76,8 @@ function sendReview(item:any,draft:any,dashboardBase=''){
  // X: a reply shows the account and the post it answers; a DM the conversation.
  if(draft.kind==='x')return {text:(draft.reply_to?[`Reply on X as @${draft.handle}?`,`To: @${draft.to_screen_name}${draft.to_name&&draft.to_name!=='@'+draft.to_screen_name?` (${draft.to_name})`:''}`,...(draft.to_text?[`“${draft.to_text}”`]:[])]
      :['Send this X message?',`As @${draft.handle} to ${draft.to_name}`]).concat(['',draft.body]).join('\n'),
+   buttons:[[button(item.id,'Send now','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')]]};
+ if(draft.kind==='whatsapp')return {text:['Send this WhatsApp message?',`To: ${draft.to_name}`,'',draft.body].join('\n'),
    buttons:[[button(item.id,'Send now','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')]]};
  if(draft.kind==='slack')return {text:['Send this Slack message?',`To: ${draft.to_name}${draft.to_email?` (${draft.to_email})`:''}`,'',draft.body,...(waits.length?['',...waits]:[])].join('\n'),
    buttons:[[button(item.id,'Send now','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')]]};
@@ -189,10 +191,10 @@ export default definePluginEntry({
         if(choice.startsWith('send_')||choice.startsWith('confirm_')||choice.startsWith('next_')){
           const [,revision,pick]=choice.split('_'),draft=taskActions(item).find((a:any)=>a.revision===revision);
           if(draft?.kind==='finish'&&(draft.state||item.action_status)?.status==='done'){await ctx.respond.editButtons({buttons:cardButtons(item)});return {handled:true};}
-          if(item.status!=='prepared'||!draft||!['email','email_demo','linkedin','slack','x','merge','prepare','finish'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((draft.state||item.action_status)?.status)){
+          if(item.status!=='prepared'||!draft||!['email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((draft.state||item.action_status)?.status)){
             await ctx.respond.editButtons({buttons:cardButtons(item)});return {handled:true};
           }
-          if((choice.startsWith('next_')&&draft.kind!=='prepare')||(choice.startsWith('confirm_')&&!['email','linkedin','slack','x','merge','finish'].includes(draft.kind))||(choice.startsWith('send_')&&!['email','email_demo','linkedin','slack','x','merge','finish'].includes(draft.kind)))return {handled:true};
+          if((choice.startsWith('next_')&&draft.kind!=='prepare')||(choice.startsWith('confirm_')&&!['email','linkedin','slack','x','whatsapp','merge','finish'].includes(draft.kind))||(choice.startsWith('send_')&&!['email','email_demo','linkedin','slack','x','whatsapp','merge','finish'].includes(draft.kind)))return {handled:true};
           if(choice.startsWith('send_')){
             if(sendReview(item,draft,`https://${config.dashboard_host}${config.dashboard_path||'/'}`).text.length>3200){
               await ctx.respond.editButtons({buttons:[[{text:draft.kind==='merge'?'Review and merge':draft.kind==='finish'?'Review':'Review and send',url:`https://${config.dashboard_host}${config.dashboard_path||'/'}#send=${id}&revision=${revision}`},button(id,'Cancel','back')]]});

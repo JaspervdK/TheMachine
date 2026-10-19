@@ -2242,6 +2242,8 @@ class Store:
                 by_key[('x-reply', action['account_id'], job['message_id'][2:])] = card
             elif action.get('kind') == 'x' and action.get('conversation_id'):
                 by_key[('x-dm', action['account_id'], action['conversation_id'])] = card
+            elif action.get('kind') == 'whatsapp' and action.get('chat_id'):
+                by_key[('whatsapp', action['account_id'], action['chat_id'])] = card
         found = {}
         for row in rows:
             m = row['metadata'] if isinstance(row['metadata'], dict) else json.loads(row['metadata'])
@@ -2256,6 +2258,8 @@ class Store:
                 card = by_key.get(('x-reply', row['account_id'], m.get('in_reply_to_id')))
             elif row['kind'] == 'x.dm' and not m.get('from_me'):
                 card = by_key.get(('x-dm', row['account_id'], m.get('conversation_id')))
+            elif row['kind'] == 'whatsapp.message' and not m.get('from_me'):
+                card = by_key.get(('whatsapp', row['account_id'], m.get('chat_id')))
             if card and row['occurred_at'] > card['sent_at']:
                 found[row['id']] = card
         return found
@@ -3503,7 +3507,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
-            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x'):
+            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','whatsapp'):
                 raise ValueError('This draft changed or is no longer ready. Use its current buttons.')
             if db.execute("SELECT 1 FROM action_jobs WHERE suggestion_id=? AND status IN ('sending','uncertain','sent')",(suggestion_id,)).fetchone():
                 raise ValueError('This draft is already being sent or was sent.')
@@ -3528,7 +3532,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
-            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','merge','prepare','finish'):
+            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','whatsapp','merge','prepare','finish'):
                 raise ValueError('This result changed or is no longer ready. Use its current buttons.')
             if action.get('to_options'):
                 # The owner picked who gets it, only from the addresses the service found in the thread.
@@ -4786,7 +4790,7 @@ def card(row):
         status={'queued':'Testing the fix. It merges by itself if every check passes.' if auto else 'Testing and merging the fix…' if merging else 'Sending your approved draft…','sending':'Testing and merging the fix…' if merging else 'Sending your approved draft…',
                 'sent':(('Merged by itself and restarted. You can undo it for 24 hours; it undoes itself if the error comes back.' if auto else 'Merged. The Machine restarts with the fix.')
                         +(' '+action_state['error'] if action_state.get('error') else '')) if merging else
-                ('LinkedIn message sent.' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Reply posted on X.' if str(action_state.get('message_id') or '').startswith('x:') else 'X message sent.' if str(action_state.get('message_id') or '').startswith('xdm:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':(action_state.get('error') or '')+(' Tap Merge fix to merge it anyway.' if auto else ''),'failed':action_state.get('error'),
+                ('LinkedIn message sent.' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Reply posted on X.' if str(action_state.get('message_id') or '').startswith('x:') else 'X message sent.' if str(action_state.get('message_id') or '').startswith('xdm:') else 'WhatsApp message sent.' if str(action_state.get('message_id') or '').startswith('whatsapp:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':(action_state.get('error') or '')+(' Tap Merge fix to merge it anyway.' if auto else ''),'failed':action_state.get('error'),
                 'undoing':'Undoing the merge…','undone':action_state.get('error') or 'Merge undone.'}.get(action_state['status'],status)
     try:
         handed = json.loads(row['awaiting']) if row.get('awaiting') else {}
@@ -4838,7 +4842,7 @@ def controls(row):
         for action in actions:
             state=action.get('state') or row.get('action_status',{})
             if action['kind']=='finish' and state.get('status')=='done':continue
-            if action['kind'] in ('email','email_demo','linkedin','slack','x','merge','prepare','finish') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation','undoing','undone'):
+            if action['kind'] in ('email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation','undoing','undone'):
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
                 buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
             elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
@@ -5838,7 +5842,10 @@ class App:
                                                              'text':re.split(r'\n\n\[(?:Quoting|In reply to)',body or '')[0][:280]}
                     elif kind=='x.dm' and m.get('conversation_id'):
                         x_threads['dms'][m['conversation_id']]={'account_id':account_id,'name':m.get('chat_name') or 'X conversation'}
-            action=next_actions.validate(args.get('next_actions',args.get('next_action')),self.config,json.loads(row['account_ids']),options,threads,x_threads)
+                whatsapp_chats={m['chat_id']:{'account_id':r[0],'name':m.get('chat_name') or 'WhatsApp chat'} for r in db.execute(
+                    "SELECT e.account_id,e.metadata FROM events e JOIN json_each(?) ids ON ids.value=e.id WHERE e.kind='whatsapp.message' ORDER BY e.occurred_at",(row['event_ids'],))
+                    for m in (json.loads(r[1]),) if m.get('chat_id')}
+            action=next_actions.validate(args.get('next_actions',args.get('next_action')),self.config,json.loads(row['account_ids']),options,threads,x_threads,whatsapp_chats)
             if any(item['kind']=='email_demo' for item in next_actions.actions(action)):
                 with self.store.connect() as db:
                     evidence=db.execute('SELECT e.kind,e.metadata FROM events e JOIN suggestions s ON s.id=? JOIN json_each(s.event_ids) ids ON ids.value=e.id',(args['suggestion_id'],)).fetchall()
@@ -6229,7 +6236,7 @@ class App:
                 LOG.error('delivery error=%s', type(error).__name__)
 
     def action_step(self,transport=None):
-        transport=transport or next_actions.ActionTransport(next_actions.EmailTransport(self.config,credential,gog_read),next_actions.LinkedInTransport(self.config),next_actions.SlackTransport(self.config,credential),next_actions.XTransport(self.config),next_actions.MergeTransport(self.config,restart_self))
+        transport=transport or next_actions.ActionTransport(next_actions.EmailTransport(self.config,credential,gog_read),next_actions.LinkedInTransport(self.config),next_actions.SlackTransport(self.config,credential),next_actions.XTransport(self.config),next_actions.MergeTransport(self.config,restart_self),next_actions.WhatsAppTransport(self.config))
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             for candidate in db.execute("SELECT j.id,j.revision,s.status,s.next_action FROM action_jobs j JOIN suggestions s ON s.id=j.suggestion_id WHERE j.status IN ('queued','blocked')").fetchall():
@@ -6252,7 +6259,7 @@ class App:
                 else:
                     # Keep checking Sent mail, every five minutes for a day, then hourly.
                     wait=dt.timedelta(minutes=5 if dt.datetime.fromisoformat(job['created_at'])>dt.datetime.fromisoformat(now())-dt.timedelta(days=1) else 60)
-                    db.execute("UPDATE action_jobs SET status='uncertain',error=?,retry_at=? WHERE id=? AND status IN ('sending','uncertain')",('I couldn’t confirm whether the fix was merged. I’m checking the code; I won’t merge it again.' if action['kind']=='merge' else 'I couldn’t confirm whether this X '+('reply' if action.get('reply_to') else 'message')+' was sent. I’m checking X; I won’t send it again.' if action['kind']=='x' else 'I couldn’t confirm whether this '+('LinkedIn' if action['kind']=='linkedin' else 'Slack')+' message was sent. I’m checking the conversation; I won’t send it again.' if action['kind'] in ('linkedin','slack') else 'I couldn’t confirm whether this email was sent. I’m checking Sent mail; I won’t send it again.',(dt.datetime.fromisoformat(now())+wait).isoformat(),job['id']))
+                    db.execute("UPDATE action_jobs SET status='uncertain',error=?,retry_at=? WHERE id=? AND status IN ('sending','uncertain')",('I couldn’t confirm whether the fix was merged. I’m checking the code; I won’t merge it again.' if action['kind']=='merge' else 'I couldn’t confirm whether this X '+('reply' if action.get('reply_to') else 'message')+' was sent. I’m checking X; I won’t send it again.' if action['kind']=='x' else 'I couldn’t confirm whether this WhatsApp message was sent. I’m checking the chat; I won’t send it again.' if action['kind']=='whatsapp' else 'I couldn’t confirm whether this '+('LinkedIn' if action['kind']=='linkedin' else 'Slack')+' message was sent. I’m checking the conversation; I won’t send it again.' if action['kind'] in ('linkedin','slack') else 'I couldn’t confirm whether this email was sent. I’m checking Sent mail; I won’t send it again.',(dt.datetime.fromisoformat(now())+wait).isoformat(),job['id']))
             if result.get('message_id') and action['kind']=='merge':
                 self.merge_effect(job,action,result,'merge',transport.pick(action) if hasattr(transport,'pick') else transport)
             return
@@ -6263,7 +6270,7 @@ class App:
                 db.execute("UPDATE action_jobs SET retry_at=?,updated_at=? WHERE id=? AND status='queued'",((dt.datetime.fromisoformat(now())+dt.timedelta(minutes=2)).isoformat(),now(),job['id']))
             return 'waiting'
         except Exception as error:
-            reason=str(error) if isinstance(error,ValueError) else 'The fix could not be checked. Nothing was merged.' if action['kind']=='merge' else ({'linkedin':'LinkedIn','slack':'Slack','x':'X'}.get(action['kind'],'Gmail')+' could not be checked. Nothing was sent.')
+            reason=str(error) if isinstance(error,ValueError) else 'The fix could not be checked. Nothing was merged.' if action['kind']=='merge' else ({'linkedin':'LinkedIn','slack':'Slack','x':'X','whatsapp':'WhatsApp'}.get(action['kind'],'Gmail')+' could not be checked. Nothing was sent.')
             with self.store.connect() as db:
                 db.execute("UPDATE action_jobs SET status='blocked',error=?,updated_at=? WHERE id=? AND status='queued'",(reason,now(),job['id']))
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
@@ -6286,7 +6293,7 @@ class App:
             return 'waiting'
         with self.store.connect() as db:
             status='sent' if result.get('message_id') else 'failed' if result.get('rejected') else 'uncertain'
-            what,where={'linkedin':('this LinkedIn message','LinkedIn'),'slack':('this Slack message','Slack'),'x':('this X '+('reply' if action.get('reply_to') else 'message'),'X')}.get(action['kind'],('this email','Gmail'))
+            what,where={'linkedin':('this LinkedIn message','LinkedIn'),'slack':('this Slack message','Slack'),'x':('this X '+('reply' if action.get('reply_to') else 'message'),'X'),'whatsapp':('this WhatsApp message','WhatsApp')}.get(action['kind'],('this email','Gmail'))
             error={'sent':None,'failed':f"{where} refused {what} (error {result.get('rejected')}). Nothing was sent; you can change it or tap Send again.",
                    'uncertain':f'I couldn’t confirm whether {what} was sent. I won’t resend it.'}[status]
             if action['kind']=='merge':

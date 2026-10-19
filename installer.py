@@ -840,6 +840,12 @@ def uninstall(paths, purge, interactive):
     if paths.unit.exists():
         paths.unit.unlink()
         say(f'Removed {paths.unit}')
+    for sync in sorted(paths.unit.parent.glob('the-machine-wacli-*.service')):
+        # The WhatsApp syncs it started; the linked wacli store itself stays.
+        if shutil.which('systemctl'):
+            run(['systemctl', '--user', 'disable', '--now', sync.name])
+        sync.unlink()
+        say(f'Removed {sync}')
     if shutil.which('systemctl'):
         if run(['systemctl', '--user', 'daemon-reload']).returncode != 0:
             say('systemd daemon-reload failed; rerun uninstall after fixing the user service manager.')
