@@ -175,6 +175,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | `gog`, `wacli` | `gog`, `wacli` | Binaries for Google and WhatsApp |
 | `google_broker` | — | `url` of a Google token broker, for accounts with `"transport": "broker"` (below) |
 | `heartbeat_job_id` | `""` | Optional OpenClaw cron job ID of your main heartbeat, for its health line |
+| `manage_url` | `""` | Optional https page where this install is set up (a hosted machine); the dashboard links to it for Setup and Add a connection |
 | `browser_lease_script` | `integrations/browser-lease.py` | Lease helper Do it runs use for the shared browser |
 | `delivery_enabled` | `false` | Send cards to Telegram (leave off while you test) |
 | `delivery_batch_size` | `5` | Cards per delivery pass |

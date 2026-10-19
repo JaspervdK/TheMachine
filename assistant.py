@@ -5545,6 +5545,9 @@ class App:
             raise ValueError('Choose explicit configured account_ids (or ["all"] to search every account with events or related); cross-account reads must be intentional')
         if name == 'status':
             result = self.store.snapshot(self.config['accounts'])
+            # `manage_url`: where this install is set up when that is a web page (a hosted machine); the dashboard links to it.
+            manage = str(self.config.get('manage_url') or '')
+            result['manage_url'] = manage if manage.startswith('https://') else None
             # Read only the existing heartbeat's runtime facts, never conversation
             # content or scheduler configuration. Missing evidence stays unknown.
             try:
