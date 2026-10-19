@@ -235,6 +235,9 @@ class XLease(unittest.TestCase):
         self.api.STATE = Path(self.tmp.name) / 'lease.json'
         self.api.LOCK = Path(self.tmp.name) / 'lease.lock'
         lease = patch.object(x, 'LEASE_API', self.api); lease.start(); self.addCleanup(lease.stop)
+        # The tab list and its lock would otherwise be the real ones, shared with a live inbox run on this computer.
+        for name, value in (('OPEN_TABS', Path(self.tmp.name) / 'x-inbox-tabs'), ('CDP', '')):
+            patcher = patch.object(x, name, value); patcher.start(); self.addCleanup(patcher.stop)
         cli = patch.object(x.subprocess, 'run', side_effect=self.cli); cli.start(); self.addCleanup(cli.stop)
         self.browser_calls = []
 
