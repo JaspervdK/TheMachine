@@ -130,7 +130,7 @@ It fits setups that aren't the example:
 - `assistant connect` on its own also lists what this machine has that no source reads yet: another Google account in gog, a `gh` login, a paired phone, a linked wacli store.
 
 - **Gmail and Calendar:** picks your gog OAuth client, or asks for a downloaded *Desktop app* client JSON (`gog auth setup` explains how to make one). Stores the gog file-keyring password in the `gog-password` credential: your `GOG_KEYRING_PASSWORD` when set, the password of the keyring you already have (never a new one over it), or for a new keyring one you type or a generated one. Signs in with `gog auth add --readonly` for Gmail and Calendar (browserless with `--manual` over SSH). Sending approved emails later needs `gmail.send`, and thread snoozes `gmail.modify`; connecting never asks for more than read access.
-- **Slack:** your Maton API key (or one you saved before) and Slack connection ID; `team_id`, `user_id`, `email` and `slack_host` come from Slack itself.
+- **Slack:** your Maton API key (or one you saved before); the Slack connection is found in Maton with it (you pick one if there are several), and `team_id`, `user_id`, `email` and `slack_host` come from Slack itself.
 - **Salesflare (`crm`):** an API key (or one you saved before); `user_id`, `team_id` and `email` come from `/me`.
 - **WhatsApp:** the wacli store; offers `wacli auth` (QR code) when it isn't linked, then records `identity_sha256` from `wacli auth status`.
 - **Android:** picks your paired Android node from `openclaw nodes list`, then asks per connected source with a phone app whether to skip that app's notifications (default no).

@@ -59,7 +59,7 @@ SETUP = {'label': 'RSS feed',                          # name in prompts, doctor
          'secret': None,                                 # a prompt here asks for a key without echo into the `credential` file (mode 600)
          'hints': {},                                    # error prefix -> plain fix, e.g. {'myapi:HTTP_401': 'MyAPI rejected the key'}
          'family': None,                                 # e.g. 'MYAPI_': offer keys named MYAPI_…KEY/TOKEN the owner already saved
-         'maton': None}                                  # a prompt here (the Maton connection ID) offers reading through Maton instead
+         'maton': None}                                  # truthy offers reading through Maton instead; the connection is found with the key ('maton_app' names the Maton app if not the service)
 ```
 
 `assistant connect` adds the account from `account`, asks each `ask` key (empty answers stop it), stores the secret, verifies a real read, saves `config.json`, restarts the service and shows the first sync. With `credential_variable` in `account`, the secret is written as `VARIABLE=value`, and other lines in that file stay as they were. When the owner already has an account of this service, the new one starts from it instead of `account`, without the identity keys (`id`, `email`, `handle`, `login`, `url`, `connection_id`, … and your first `ask` key). `assistant doctor` treats a missing `ask` key or credential file as not set up. A test checks every connector has a complete `SETUP`, including its one-line `what`.

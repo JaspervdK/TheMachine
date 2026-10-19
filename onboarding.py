@@ -840,15 +840,62 @@ def pick_calendar(config, account, ui):
         account.setdefault('display_name', next(text for value, text in options if value == chosen))
 
 
+def maton_connections(config, account, app):
+    """The active connections for this app in the owner's Maton, newest first; None when Maton cannot list them."""
+    try:
+        secret = assistant().credential(config, account['credential'])
+        found = re.findall(r'^' + re.escape(account['credential_variable']) + r'=(.*)$', secret, re.M)
+        request = urllib.request.Request('https://ctrl.maton.ai/connections?' + urllib.parse.urlencode({'app': app, 'status': 'ACTIVE'}),
+                                         headers={'Authorization': 'Bearer ' + found[0].strip().strip('"\''), 'Accept': 'application/json'})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            items = json.load(response).get('connections')
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise SetupError('Maton rejected the API key', 'copy the API key again from maton.ai') from None
+        return None
+    except (OSError, KeyError, IndexError, ValueError, AttributeError):
+        return None
+    if not isinstance(items, list):
+        return None
+    items = [c for c in items if isinstance(c, dict) and isinstance(c.get('connection_id'), str) and c.get('status', 'ACTIVE') == 'ACTIVE']
+    return [c['connection_id'] for c in sorted(items, key=lambda c: str(c.get('creation_time') or ''), reverse=True)]
+
+
+def maton_connection(config, account, ui, app, label, describe=None):
+    """The Maton connection to read: found with the key. With several, the owner picks one (by what it is, when
+    `describe` can tell); only when Maton cannot list them is the ID asked."""
+    found = maton_connections(config, account, app)
+    if found is None:
+        connection = ui.ask(f'Maton {label.split()[0]} connection ID', account.get('connection_id', ''))
+        if not connection:
+            raise SetupError('No Maton connection ID given', f'copy it from Maton, then rerun: assistant connect {account["service"]}')
+        return connection
+    if not found:
+        raise SetupError(f'Maton has no {label.split()[0]} connection yet',
+                         f'connect {label.split()[0]} at maton.ai, then rerun: assistant connect {account["service"]}')
+    if len(found) == 1:
+        return found[0]
+    taken = {a.get('connection_id') for a in config.get('accounts', []) if a.get('id') != account['id']}
+    found.sort(key=lambda c: (c != account.get('connection_id'), c in taken))
+    return ui.choose(f'Which {label} in Maton', [(c, (describe(c) if describe else c) + (' (already connected)' if c in taken else ''))
+                                                for c in found])
+
+
 def step_slack(config, account, ui):
     ui.say('Slack is read through Maton (maton.ai), which holds the Slack sign-in.\n'
-           'In Maton: connect Slack, then copy your API key and the Slack connection ID.')
+           'In Maton: connect Slack, then copy your API key; the Slack connection is found with it.')
     account.setdefault('credential_variable', 'MATON_API_KEY')
     store_secret(config, account, ui, 'Maton API key', 'MATON_')
-    current = '' if account.get('connection_id') == PLACEHOLDERS['connection_id'] else account.get('connection_id', '')
-    account['connection_id'] = ui.ask('Maton Slack connection ID', current)
-    if not account['connection_id']:
-        raise SetupError('No Maton connection ID given', 'copy it from Maton, then run: assistant connect slack')
+    if account.get('connection_id') == PLACEHOLDERS['connection_id']:
+        account.pop('connection_id')
+
+    def workspace(connection):
+        try:
+            me = assistant().Slack(config, {**account, 'connection_id': connection}).get('auth.test')
+        except assistant().SourceError:
+            return connection
+        return ' as '.join(x for x in ((urllib.parse.urlparse(me.get('url') or '').netloc or me.get('team')), me.get('user')) if x) or connection
+    account['connection_id'] = maton_connection(config, account, ui, 'slack', 'Slack workspace', workspace)
     slack = assistant().Slack(config, account)
     try:
         me = slack.get('auth.test')
@@ -959,12 +1006,11 @@ def step_plugin(config, account, ui):
                 [('maton', 'through Maton, which you already use'), ('api', 'with its own key')],
                 key=lambda o: o[0] != ('api' if own_key else 'maton'))) == 'maton'):
         account['transport'] = 'maton'
-        account['connection_id'] = ui.ask(setup['maton'], account.get('connection_id', ''))
-        if not account['connection_id']:
-            raise SetupError('No Maton connection ID given', f'copy it from Maton, then rerun: assistant connect {account["service"]}')
         account.setdefault('credential', 'maton')
         account.setdefault('credential_variable', 'MATON_API_KEY')
         store_secret(config, account, ui, 'Maton API key', 'MATON_')
+        account['connection_id'] = maton_connection(config, account, ui, setup.get('maton_app') or account['service'],
+                                                    setup.get('label', account['service']) + ' account')
     elif setup.get('secret'):
         if setup.get('note') and setup.get('maton'):
             ui.say(setup['note'])

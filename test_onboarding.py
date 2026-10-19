@@ -2,6 +2,7 @@
 Stub gog/openclaw/wacli/tailscale binaries and patched source reads; nothing contacts a real account."""
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import re
@@ -165,9 +166,12 @@ if args[:2] == ["pairing", "list"]:
         self.config(EXAMPLE['work-slack'])
         answers = {'auth.test': {'ok': True, 'team_id': 'T123', 'user_id': 'U456', 'url': 'https://acme.slack.com/'},
                    'users.info': {'ok': True, 'user': {'profile': {'email': 'alex@acme.test'}}}}
-        ui = FakeUI(answers=['conn-1'], secrets=['MATON_API_KEY=mk_SECRET'])
-        with mock.patch.object(onboarding.assistant().Slack, 'get', lambda self, method, params=None: answers[method]):
+        ui = FakeUI(secrets=['MATON_API_KEY=mk_SECRET'])
+        with mock.patch.object(onboarding.assistant().Slack, 'get', lambda self, method, params=None: answers[method]), \
+                mock.patch.object(onboarding, 'maton_connections', return_value=['conn-1']) as listed:
             onboarding.connect(self.path, 'slack', ui, restart=False)
+        self.assertEqual(listed.call_args.args[2], 'slack')
+        self.assertNotIn('connection ID', ui.text())  # found in Maton, not asked
         account = self.saved()['accounts'][0]
         self.assertEqual((account['team_id'], account['user_id'], account['email'], account['slack_host'], account['connection_id']),
                          ('T123', 'U456', 'alex@acme.test', 'acme.slack.com', 'conn-1'))
@@ -177,6 +181,49 @@ if args[:2] == ["pairing", "list"]:
         self.assertNotIn('mk_SECRET', ui.text())
         self.assertTrue((self.data / 'config.json.bak').exists())
         self.assertEqual(onboarding.missing(self.saved(), account), '')
+
+    def test_slack_with_several_workspaces_in_maton_asks_which_by_name(self):
+        self.config(EXAMPLE['work-slack'])
+        teams = {'conn-a': 'https://acme.slack.com/', 'conn-b': 'https://home.slack.com/'}
+
+        def get(slack, method, params=None):
+            if method == 'auth.test':
+                return {'ok': True, 'team_id': 'T' + slack.account['connection_id'][-1], 'user_id': 'U1', 'user': 'alex',
+                        'url': teams[slack.account['connection_id']]}
+            return {'ok': True, 'user': {'profile': {'email': 'alex@home.test'}}}
+        ui = FakeUI(answers=['2'], secrets=['mk'])
+        with mock.patch.object(onboarding.assistant().Slack, 'get', get), \
+                mock.patch.object(onboarding, 'maton_connections', return_value=['conn-a', 'conn-b']):
+            onboarding.connect(self.path, 'slack', ui, restart=False)
+        self.assertIn('acme.slack.com as alex', ui.text())
+        self.assertIn('Which Slack workspace in Maton', ui.text())
+        self.assertEqual(self.saved()['accounts'][0]['slack_host'], 'home.slack.com')
+
+    def test_maton_lists_active_connections_newest_first_and_says_when_it_cannot(self):
+        account = dict(EXAMPLE['work-slack'], credential='maton-slack', credential_variable='MATON_API_KEY')
+        onboarding.write_private(self.data / 'maton-slack.env', 'MATON_API_KEY=mk\n')
+        config = {'credentials': {'maton-slack': str(self.data / 'maton-slack.env')}}
+        body = {'connections': [{'connection_id': 'old', 'status': 'ACTIVE', 'creation_time': '2026-01-01'},
+                                {'connection_id': 'new', 'status': 'ACTIVE', 'creation_time': '2026-06-01'}, {'status': 'ACTIVE'}]}
+        seen = []
+
+        def urlopen(request, timeout):
+            seen.append(request)
+            return io.BytesIO(json.dumps(body).encode())
+        with mock.patch.object(onboarding.urllib.request, 'urlopen', urlopen):
+            self.assertEqual(onboarding.maton_connections(config, account, 'slack'), ['new', 'old'])
+        self.assertEqual(seen[0].full_url, 'https://ctrl.maton.ai/connections?app=slack&status=ACTIVE')
+        self.assertEqual(seen[0].get_header('Authorization'), 'Bearer mk')
+        with mock.patch.object(onboarding.urllib.request, 'urlopen', side_effect=OSError('down')):
+            self.assertIsNone(onboarding.maton_connections(config, account, 'slack'))
+        with mock.patch.object(onboarding.urllib.request, 'urlopen', side_effect=onboarding.urllib.error.HTTPError('u', 401, 'no', {}, None)):
+            with self.assertRaisesRegex(onboarding.SetupError, 'rejected the API key'):
+                onboarding.maton_connections(config, account, 'slack')
+        with mock.patch.object(onboarding, 'maton_connections', return_value=[]):
+            with self.assertRaisesRegex(onboarding.SetupError, 'no Slack connection'):
+                onboarding.maton_connection(config, account, FakeUI(), 'slack', 'Slack workspace')
+        with mock.patch.object(onboarding, 'maton_connections', return_value=None):
+            self.assertEqual(onboarding.maton_connection(config, account, FakeUI(answers=['typed']), 'slack', 'Slack workspace'), 'typed')
 
     def test_salesflare_ids_come_from_me(self):
         self.config(EXAMPLE['work-crm'])
@@ -324,8 +371,9 @@ else: sys.stderr.write("HTTP 401"); sys.exit(1)''')
         slack = dict(EXAMPLE['work-slack'], email='alex@acme.test', credential_variable='MATON_WORK_KEY', connection_id='conn-slack', team_id='T1', user_id='U1')
         self.config(slack)
         onboarding.write_private(self.data / 'maton-slack.env', 'MATON_WORK_KEY=mk\n')
-        ui = FakeUI(answers=['acct_123', '1', 'conn-stripe', '1'])  # account, through Maton, connection, the saved key
-        with mock.patch.object(onboarding.assistant().load_connector('stripe').Source, 'get', return_value={'id': 'acct_123'}):
+        ui = FakeUI(answers=['acct_123', '1', '1'])  # account, through Maton, the saved key; the connection is found
+        with mock.patch.object(onboarding.assistant().load_connector('stripe').Source, 'get', return_value={'id': 'acct_123'}), \
+                mock.patch.object(onboarding, 'maton_connections', return_value=['conn-stripe']):
             onboarding.connect(self.path, 'stripe', ui, restart=False)
         stripe = self.saved()['accounts'][1]
         self.assertEqual({k: stripe[k] for k in ('transport', 'credential', 'credential_variable', 'connection_id', 'stripe_account', 'boundary')},
@@ -335,8 +383,9 @@ else: sys.stderr.write("HTTP 401"); sys.exit(1)''')
         self.assertEqual(ui.secrets, [])
         # A new key for one of them goes to its own file; the other keeps the shared one.
         answers = {'auth.test': {'ok': True, 'team_id': 'T1', 'user_id': 'U1'}, 'users.info': {'ok': True, 'user': {'profile': {'email': 'alex@acme.test'}}}}
-        ui = FakeUI(answers=['1', '2', ''], secrets=['mk2'])  # redo the Slack account, a new key, same connection
-        with mock.patch.object(onboarding.assistant().Slack, 'get', lambda self, method, params=None: answers[method]):
+        ui = FakeUI(answers=['1', '2'], secrets=['mk2'])  # redo the Slack account, a new key
+        with mock.patch.object(onboarding.assistant().Slack, 'get', lambda self, method, params=None: answers[method]), \
+                mock.patch.object(onboarding, 'maton_connections', return_value=['conn-slack']):
             onboarding.connect(self.path, 'slack', ui, restart=False)
         config = self.saved()
         self.assertEqual(config['accounts'][0]['credential'], 'work-slack')
