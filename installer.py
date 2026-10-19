@@ -674,7 +674,11 @@ def install_plugin(facts, reload=True):
     if result.returncode != 0:
         say(f'  plugin install failed; run it yourself: openclaw plugins install --link --force --accept-capabilities {plugin}')
         return False
-    result = run([openclaw, 'plugins', 'enable', PLUGIN_ID], timeout=120)
+    for attempt in range(3):  # right after an install the Gateway may still be applying it; the CLI then fails briefly
+        result = run([openclaw, 'plugins', 'enable', PLUGIN_ID], timeout=120)
+        if result.returncode == 0:
+            break
+        time.sleep(5 * (attempt + 1))
     if result.returncode != 0:
         say('  plugin enable failed: ' + (result.stderr or result.stdout).strip()[:300])
         return False

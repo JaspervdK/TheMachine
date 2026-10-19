@@ -26,6 +26,17 @@ def free_port():
 
 
 class InstallerTest(unittest.TestCase):
+    def test_plugin_enable_is_retried_while_the_gateway_applies_the_install(self):
+        calls, tries = [], iter([1, 0])
+        def run(command, **kwargs):
+            calls.append(command[1:3])
+            code = next(tries) if command[1:3] == ['plugins', 'enable'] else 0
+            return subprocess.CompletedProcess(command, code, '', 'The CLI command failed.' if code else '')
+        with mock.patch.object(installer, 'run', side_effect=run), mock.patch.object(installer.time, 'sleep'), \
+             mock.patch.object(installer, 'say'):
+            self.assertTrue(installer.install_plugin({'openclaw': 'openclaw'}))
+        self.assertEqual(calls.count(['plugins', 'enable']), 2)
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='machine-install-'))
         self.addCleanup(shutil.rmtree, self.tmp, True)
