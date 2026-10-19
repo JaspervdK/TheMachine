@@ -34,6 +34,10 @@ Never include actual tokens, messages or a production database.
   those passwords encrypted in the data folder. They never go to the model or the logs, but the key sits next
   to them for the service user: protect that user's account and disk (full-disk encryption) accordingly.
 - Backups contain private evidence and may include secrets. Protect them like the live data.
+- Keep the operating system patched. On a dedicated Ubuntu server, let `unattended-upgrades` install the
+  `-security` pockets daily, and reboot when `/run/reboot-required` appears, at a quiet hour, then check that
+  the OpenClaw Gateway and `personal-assistant` came back. Update Node and OpenClaw yourself, after testing,
+  rather than unattended. The hosted service does exactly this on every server.
 
 ## Publishing a fork
 
