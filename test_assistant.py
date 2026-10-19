@@ -819,3 +819,22 @@ class SlackInvariants(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class NeedsYou(unittest.TestCase):
+    def test_unfinished_sources_and_hosting_notes_show_on_the_dashboard(self):
+        with tempfile.TemporaryDirectory() as folder:
+            notes = Path(folder) / 'needs-you.json'
+            notes.write_text(json.dumps([{'id': 'connector-linear', 'text': 'Your Linear connector is ready.',
+                                          'url': 'https://app.example.com/setup#source-linear', 'action': 'Connect it'},
+                                         {'text': 'Not a safe link', 'url': 'javascript:alert(1)'}, 'junk']))
+            config = {'manage_url': 'https://app.example.com/setup', 'needs_you_file': str(notes), 'credentials': {},
+                      'accounts': [{'id': 'work-slack', 'service': 'slack', 'credential': 'maton', 'display_name': 'Work Slack'}]}
+            items = assistant.needs_you(config)
+        self.assertEqual(items[0]['url'], 'https://app.example.com/setup#sources')
+        self.assertIn('Work Slack is not fully set up yet', items[0]['text'])
+        self.assertEqual(items[1], {'id': 'connector-linear', 'text': 'Your Linear connector is ready.',
+                                    'url': 'https://app.example.com/setup#source-linear', 'action': 'Connect it'})
+        self.assertIsNone(items[2]['url'])
+        self.assertEqual(len(items), 3)
+        self.assertEqual(assistant.needs_you({'accounts': []}), [])

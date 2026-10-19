@@ -5441,6 +5441,39 @@ main{{max-width:900px;margin:auto}}h1{{font-size:24px}}pre{{background:#292c33;p
 <pre>{detail}</pre></main></body></html>'''
 
 
+
+def needs_you(config):
+    """What only the owner can fix, for the top of the dashboard: sources that are not fully set up, and notes that a
+    hosting layer leaves in `needs_you_file` (a JSON list of {id, text, url}). Connections whose sign-in fails are added
+    by the dashboard itself, from their sync errors."""
+    import onboarding
+    manage = str(config.get('manage_url') or '')
+    manage = manage if manage.startswith('https://') else ''
+    items = []
+    for account in config.get('accounts', []):
+        try:
+            why = onboarding.missing(config, account)
+            name = account.get('display_name') or account.get('email') or onboarding.label(account.get('service', 'gmail'))
+        except Exception:
+            continue
+        if why:
+            items.append({'id': 'setup-' + account['id'], 'text': f'{name} is not fully set up yet ({why}).',
+                          'url': manage + '#sources' if manage else None, 'action': 'Finish it' if manage else 'Run: assistant connect'})
+    # `needs_you_file`: optional JSON list of notes from a hosting layer (a hosted machine), shown as they are.
+    path = config.get('needs_you_file')
+    if path:
+        try:
+            notes = json.loads(Path(path).expanduser().read_text())
+        except (OSError, ValueError):
+            notes = []
+        for note in notes if isinstance(notes, list) else []:
+            if isinstance(note, dict) and isinstance(note.get('text'), str) and note['text'].strip():
+                url = str(note.get('url') or '')
+                items.append({'id': str(note.get('id') or len(items))[:80], 'text': note['text'][:500],
+                              'url': url if url.startswith('https://') else None, 'action': str(note.get('action') or 'Open')[:40]})
+    return items
+
+
 class App:
     def __init__(self, config):
         set_timezone(config.get('timezone'))
@@ -5548,6 +5581,7 @@ class App:
             # `manage_url`: where this install is set up when that is a web page (a hosted machine); the dashboard links to it.
             manage = str(self.config.get('manage_url') or '')
             result['manage_url'] = manage if manage.startswith('https://') else None
+            result['needs_you'] = needs_you(self.config)
             # Read only the existing heartbeat's runtime facts, never conversation
             # content or scheduler configuration. Missing evidence stays unknown.
             try:

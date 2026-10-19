@@ -176,6 +176,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | `google_broker` | — | `url` of a Google token broker, for accounts with `"transport": "broker"` (below) |
 | `heartbeat_job_id` | `""` | Optional OpenClaw cron job ID of your main heartbeat, for its health line |
 | `manage_url` | `""` | Optional https page where this install is set up (a hosted machine); the dashboard links to it for Settings and Add a connection |
+| `needs_you_file` | unset | Optional JSON list of `{id, text, url, action}` notes from a hosting layer; the dashboard shows them under Needs you, with sources that are not fully set up and connections that need signing in again |
 | `browser_lease_script` | `integrations/browser-lease.py` | Lease helper Do it runs use for the shared browser |
 | `delivery_enabled` | `false` | Send cards to Telegram (leave off while you test) |
 | `delivery_batch_size` | `5` | Cards per delivery pass |
