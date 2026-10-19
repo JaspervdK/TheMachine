@@ -730,6 +730,29 @@ class SlackInvariants(unittest.TestCase):
         self.assertEqual(calls[3][1]['ts'], parent['ts'])
         self.assertEqual(self.store.checkpoint(self.account['id'])['mode'], 'incremental')
 
+    def test_slack_first_pass_reads_every_conversation_before_thread_replies(self):
+        other = {'id': 'C2', 'name': 'other', 'type': 'channel', 'threads': []}
+        self.state(channels=[self.channel, other])
+        now = assistant.time.time()
+        parent = {'ts': f'{now - 3600:.6f}', 'text': 'Prepare a proposal', 'reply_count': 1}
+        reply = {'ts': f'{now - 1800:.6f}', 'thread_ts': parent['ts'], 'text': 'Updated deadline'}
+        source, calls = self.source([{'messages': [parent]}, {'messages': [{'ts': f'{now - 60:.6f}', 'text': 'Hello'}]},
+                                     {'messages': []}, {'messages': [parent, reply]}])
+        assistant.sync_slack(self.store, {}, self.account, source)
+        assistant.sync_slack(self.store, {}, self.account, source)
+        self.assertEqual([(m, p['channel']) for m, p in calls], [('conversations.history', 'C1'), ('conversations.history', 'C2')])
+        cp = self.store.checkpoint(self.account['id'])
+        self.assertEqual(cp['mode'], 'incremental')
+        self.assertTrue(cp['channels'][0]['threads_waiting'])
+        self.assertEqual(cp['channels'][0]['threads'], [parent['ts']])
+        assistant.sync_slack(self.store, {}, self.account, source)  # C1 again: its new messages, then the thread
+        assistant.sync_slack(self.store, {}, self.account, source)
+        self.assertEqual(calls[3][0], 'conversations.replies')
+        self.assertEqual(calls[3][1]['ts'], parent['ts'])
+        self.assertLess(float(calls[3][1]['oldest']), float(parent['ts']))  # the whole window, not the overlap
+        self.assertNotIn('threads_waiting', self.store.checkpoint(self.account['id'])['channels'][0])
+        self.assertEqual(len(self.store.events([self.account['id']])), 3)
+
     def test_slack_missing_cursor_cannot_finish_a_scan(self):
         self.state();source, _ = self.source([{'messages': [{'ts': '2000.000001', 'text': 'Hello'}], 'has_more': True}])
         with self.assertRaises(assistant.SourceError):assistant.sync_slack(self.store, {}, self.account, source)

@@ -4027,7 +4027,10 @@ def sync_slack(store, config, account, source=None):
         channel['threads'] = [ts for ts in channel.get('threads', []) if float(ts) >= horizon]
         scan = {'oldest': oldest, 'latest': f'{time.time():.6f}', 'phase': 'history',
                 'thread_index': 0, 'threads': list(channel.get('threads', [])), 'full': full}
-        if account.get('fair_incremental') and channel.get('last_scan'):
+        if channel.get('threads_waiting'):
+            # Threads left for later on the first pass: read them now over the whole window.
+            scan.update(thread_oldest=str(retained), thread_latest=scan['latest'])
+        elif account.get('fair_incremental') and channel.get('last_scan'):
             # One old thread per channel turn, not its entire retained history.
             # Preserve all known threads and rotate durably on completed scans.
             scan['known_threads'] = list(scan['threads'])
@@ -4092,7 +4095,12 @@ def sync_slack(store, config, account, source=None):
         scan.pop('cursor', None)
         if scan['phase'] == 'history':
             scan['phase'] = 'threads'
-            if 'known_threads' in scan:
+            if state['mode'] == 'bootstrap' and len(state['channels']) > 1 and scan['threads']:
+                # First pass: every conversation's own messages before any thread replies. Slack
+                # allows about one read a minute, so one busy channel's threads would otherwise
+                # hold up all the others for hours. The next turn of this channel reads them.
+                scan['waiting'], scan['threads'] = scan['threads'], []
+            elif 'known_threads' in scan:
                 known = scan['known_threads']
                 selected = scan['threads'][:1]
                 if not selected and known:
@@ -4113,7 +4121,11 @@ def sync_slack(store, config, account, source=None):
             if postponed and params.get('ts') == postponed['ts']:
                 channel.pop('deferred_thread',None)
         if scan['thread_index'] >= len(scan['threads']):
-            channel.update(last_scan=scan['latest'], threads=scan.get('known_threads',scan['threads']))
+            channel.update(last_scan=scan['latest'], threads=scan.get('known_threads', scan['threads'] + scan.get('waiting', [])))
+            if scan.get('waiting'):
+                channel['threads_waiting'] = True
+            else:
+                channel.pop('threads_waiting', None)
             if 'known_threads' in scan:
                 channel['next_thread_index'] = scan['thread_start'] + 1
             channel.pop('error', None)
