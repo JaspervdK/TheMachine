@@ -30,6 +30,9 @@ Never include actual tokens, messages or a production database.
   repeated. Connectors only read.
 - Fresh installs collect configured sources with reviews and delivery disabled.
   `./install.sh --activate` explicitly enables both after setup.
+- The dashboard's sign-in dialog fills sites in the assistant's browser on the owner's behalf and can save
+  those passwords encrypted in the data folder. They never go to the model or the logs, but the key sits next
+  to them for the service user: protect that user's account and disk (full-disk encryption) accordingly.
 - Backups contain private evidence and may include secrets. Protect them like the live data.
 
 ## Publishing a fork

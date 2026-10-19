@@ -41,6 +41,7 @@ import graph
 import enrichment
 import google_api
 import next_actions
+import browser_login
 import browser_viewer
 import preparation_state
 
@@ -205,7 +206,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong'}
+OWNER_ACTIONS = {'browser_focus', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -5732,6 +5733,7 @@ class App:
             # `manage_url`: where this install is set up when that is a web page (a hosted machine); the dashboard links to it.
             manage = str(self.config.get('manage_url') or '')
             result['manage_url'] = manage if manage.startswith('https://') else None
+            result['browser_link'] = browser_link(self.config)  # the sign-in dialog's way out to the browser itself
             result['needs_you'] = needs_you(self.config)
             for connector in result['connectors']:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
@@ -5964,6 +5966,30 @@ class App:
             page = args.get('page') if isinstance(args.get('page'), str) else None
             shown = browser_viewer.focus(page, self.config.get('browser_cdp_url') or browser_viewer.CDP_URL)
             return {'shown': shown is not None}
+        if name in ('browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget'):
+            # A separate path: what the owner types goes into the page and, when asked, the encrypted store, never
+            # into a log, the model or an error message (see browser_login.py).
+            if not owner_dashboard:
+                raise ValueError('Only the owner signs in to sites, from the dashboard')
+            logins = browser_login.LoginStore(Path(self.config['database']).expanduser().parent)
+            if name == 'browser_login_pages':
+                return {'pages': browser_login.pages(self.config, logins)}
+            if name == 'browser_logins':
+                return {'logins': logins.list()}
+            if name == 'browser_login_forget':
+                return {'forgotten': logins.forget(args.get('site'))}
+            host = args.get('host') if isinstance(args.get('host'), str) else ''
+            username, password = (v if isinstance(v, str) else None for v in (args.get('username'), args.get('password')))
+            if args.get('use_saved') is True:
+                saved = logins.get(host)
+                if not saved:
+                    raise ValueError('Nothing is saved for ' + browser_login.site(host))
+                username, password = username or saved.get('username'), saved.get('password')
+            code = args.get('code') if isinstance(args.get('code'), str) else None
+            done = browser_login.fill(self.config, args.get('page'), host, username, password, code)
+            if args.get('save') is True and args.get('use_saved') is not True and done['result'] != 'still_here' and (username or password):
+                logins.save(host, username, password)
+            return done
         if name == 'graph_warmup':
             if not owner_dashboard:
                 raise ValueError('Only the owner undoes a warm-up domain here, on the dashboard; reviews use graph with warmup')
@@ -7205,7 +7231,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','push_subscribe','push_unsubscribe','browser_focus')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','push_subscribe','push_unsubscribe','browser_focus','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

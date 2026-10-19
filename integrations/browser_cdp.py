@@ -137,3 +137,39 @@ def evaluate(base, target, fn, timeout_ms=90000):
 
 def navigate(base, target, url, timeout=60):
     _call(base, target, 'Page.navigate', {'url': url}, timeout)
+
+
+class Session:
+    """Several calls on one connection to a tab, in order (events in between are skipped)."""
+
+    def __init__(self, base, target, timeout=30):
+        self.ws, self.next, self.timeout = _Socket(base, target, timeout), 0, timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.ws.close()
+
+    def call(self, method, params=None):
+        self.next += 1
+        try:
+            self.ws.send(json.dumps({'id': self.next, 'method': method, 'params': params or {}}))
+            while True:
+                reply = json.loads(self.ws.receive())
+                if reply.get('id') == self.next:
+                    if 'error' in reply:
+                        raise CdpError(method + ' failed: ' + str(reply['error'].get('message'))[:200])
+                    return reply.get('result') or {}
+        except socket.timeout:
+            raise CdpError('the browser did not answer in time') from None
+
+    def run(self, fn, *args):
+        """Call a JavaScript function (source text) with JSON arguments, passed as values, not written into the
+        script. Returns its JSON value."""
+        this = self.call('Runtime.evaluate', {'expression': 'globalThis'})['result']['objectId']
+        result = self.call('Runtime.callFunctionOn', {'functionDeclaration': fn, 'objectId': this, 'returnByValue': True,
+                                                      'awaitPromise': True, 'arguments': [{'value': a} for a in args]})
+        if result.get('exceptionDetails'):
+            raise CdpError('script failed')  # no details: they could quote what the script was given
+        return (result.get('result') or {}).get('value')

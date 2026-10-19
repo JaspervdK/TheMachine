@@ -29,7 +29,7 @@ OPENSSL = ['openssl', 'enc', '-aes-256-cbc', '-pbkdf2', '-iter', '600000', '-md'
 WORKSPACE_SKIP = {'tools', '.git', 'node_modules'}
 SKIP_SUFFIXES = ('.bak', '.lock', '.tmp', '-wal', '-shm', '-journal')
 # Files in the data folder that are keys even when config.json does not point at them
-SECRET_NAMES = {'owner-token', 'api-token', 'vapid.json', 'gog-password'}
+SECRET_NAMES = {'owner-token', 'api-token', 'vapid.json', 'gog-password', 'browser-logins.enc', 'browser-logins.key'}
 # Tokens that only work for a hosted server; they are never exported
 HOSTED_ONLY = {'google-broker'}
 # Settings a hosted server added that mean nothing elsewhere
