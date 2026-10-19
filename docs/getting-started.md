@@ -40,7 +40,7 @@ Right after the service starts, the installer walks through each source:
 | WhatsApp | Finds the wacli store, offers to link it (QR code) and records which account it is. |
 | Android | Picks your paired Android phone from OpenClaw. For each source you connect that also has a phone app (Gmail, Slack, WhatsApp, …) it asks whether to skip that app's notifications; the default keeps them, since the phone may show other inboxes too. |
 | Gateway log | Finds the Gateway's systemd unit. |
-| Plugins | `github`, `stripe`, `x`, `linkedin`, `rss`: not part of the installer; `assistant connect github` (and so on) asks for the few fields each needs. |
+| Plugins | `github`, `stripe`, `x`, `linkedin`, `trello`, `rss`: not part of the installer; `assistant connect github` (and so on) asks for the few fields each needs. |
 
 Every source is read once before it is saved, so a wrong key or account shows up immediately, with what to do about it. Afterwards you see the first sync per source: how many signals came in and from how far back.
 
@@ -54,7 +54,7 @@ The installer offers to publish the dashboard on your tailnet (`tailscale serve`
 
 The installer offers a starter `USER.md` in your OpenClaw workspace with your name, companies and email (added under OpenClaw's template if that is all it has). Reviews and drafts read it every time.
 
-Then it offers to fill in the rest from what you actually write: your agent reads your own recent messages once (nothing is sent) and drafts your role, languages, how you write on each channel (email, Slack, WhatsApp, …), what matters to you and what to leave alone. Then it reads your first and latest messages with your closest people and notes what each is to you ("cofounder", "accountant", "customer at Globex") and what their organisations are, where the messages show it, each with the line it read it in. Confirm them with ✓ or change them in the Graph tab's Who's who (reviews learn from your changes), and `assistant roles` runs that step again later. You see the draft first; it's saved only if you say yes, and it never overwrites what you wrote. Redo it later with `assistant profile`, or edit `USER.md` yourself. Check: `USER.md` has an "Observed from my messages" section.
+Then it offers to fill in the rest from what you actually write: your agent reads your own recent messages once (nothing is sent) and drafts your role, languages, how you write on each channel (email, Slack, WhatsApp, …), what matters to you and what to leave alone. Then it reads your first and latest messages with your closest people and notes what each is to you ("cofounder", "accountant", "customer at Globex") and what their organisations are ("customer", "supplier", "possible acquirer"), where the messages show it, each with the line it read it in. Confirm them with ✓ (or all at once with **All N are right**) or change them in the Graph tab's Who's who (reviews learn from your changes), and `assistant roles` runs that step again later. You see the draft first; it's saved only if you say yes, and it never overwrites what you wrote. Redo it later with `assistant profile`, or edit `USER.md` yourself. Check: `USER.md` has an "Observed from my messages" section.
 
 ## 5. Preview, then turn it on
 
