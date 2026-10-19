@@ -99,6 +99,8 @@ def ensure(db):
     for column in ('event_id INTEGER', 'quote TEXT', 'hints TEXT', 'checked_at TEXT'):  # a role's evidence and when it was last read
         if column.split()[0] not in have:
             db.execute('ALTER TABLE person_roles ADD COLUMN ' + column)
+    if 'people_shown' not in {r[1] for r in db.execute('PRAGMA table_info(graph_role_asks)')}:  # the ask showed an organisation's people with their roles
+        db.execute('ALTER TABLE graph_role_asks ADD COLUMN people_shown INTEGER NOT NULL DEFAULT 0')
 
 
 class Owner:

@@ -489,6 +489,11 @@ class Graph(unittest.TestCase):
         self.assertIn('node_id org:client.com', asked)
         self.assertIn('Pat Doe (CFO at Client Ltd)', asked)  # its people with what they are to the owner
         self.assertNotIn('org:client.com', self.store.role_text('org-run2', limit=10))
+        # An ask that didn't show its people with their roles yet is made once more.
+        with self.store.connect() as db:
+            db.execute("UPDATE graph_role_asks SET people_shown=0 WHERE identifier='org:client.com'")
+        self.assertIn('node_id org:client.com', self.store.role_text('org-run2b', limit=10))
+        self.assertNotIn('org:client.com', self.store.role_text('org-run2c', limit=10))
         # One of its people getting a role after the ask makes the organisation worth reading again.
         a.now = lambda: (NOW + dt.timedelta(minutes=5)).isoformat()
         self.app.action('graph_role', {'node_id': 'email:ann@client.com', 'role': 'office manager'}, owner_dashboard=True)

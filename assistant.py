@@ -2304,9 +2304,11 @@ class Store:
             strongest = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='person' AND strength>=0.5 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' {asked} "
                                    'ORDER BY strength DESC LIMIT ?', (since, run_id, limit)).fetchall()
             people = list({r['id']: r for r in on_cards + strongest}.values())[:limit]
-            # An organisation is asked again as soon as one of its people got a role after the last ask.
+            # An organisation is asked again as soon as one of its people got a role after the last ask,
+            # or when the last ask didn't show its people with their roles yet.
             news = ("EXISTS(SELECT 1 FROM graph_links l JOIN graph_nodes p ON p.id=l.a JOIN person_roles r ON r.identifier=coalesce(json_extract(p.info,'$.role_id'),p.id) "
-                    "WHERE l.b=n.id AND l.kind='member' AND r.role!='' AND coalesce(r.checked_at,r.created_at)>(SELECT max(asked_at) FROM graph_role_asks WHERE identifier=n.id))")
+                    "WHERE l.b=n.id AND l.kind='member' AND r.role!='' AND (coalesce(r.checked_at,r.created_at)>(SELECT max(asked_at) FROM graph_role_asks WHERE identifier=n.id) "
+                    "OR EXISTS(SELECT 1 FROM graph_role_asks o WHERE o.identifier=n.id AND o.people_shown=0)))")
             orgs = db.execute(f"SELECT * FROM graph_nodes n WHERE kind='org' AND strength>=1 AND json_extract(info,'$.role') IS NULL AND coalesce(json_extract(info,'$.role_by'),'')!='owner' "
                               f"AND ({asked[4:]} OR {news}) ORDER BY {news} DESC,strength DESC LIMIT 2", (since, run_id)).fetchall()
             stale = [r for r in graph.stale_roles(db, now()) if not db.execute("SELECT 1 FROM graph_role_asks o WHERE identifier=? AND asked_at>? AND (o.run_id IS NULL OR (o.run_id<>? AND (NOT EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id) OR EXISTS(SELECT 1 FROM review_runs r WHERE r.run_id=o.run_id AND r.status='ok') OR EXISTS(SELECT 1 FROM analyses a WHERE a.owner_run=o.run_id AND a.status='complete'))))", (r['id'], since, run_id)).fetchone()]
@@ -2322,7 +2324,7 @@ class Store:
                              + '\n'.join(f"- {r['name']} (node_id {r['id']}): \"{r['role']}\" from {r['set_at']}" + (f" (\"{r['quote']}\")" if r['quote'] else '')
                                           + f"; {r['why']}" for r in stale))
             for r in people + orgs + stale:
-                db.execute('INSERT OR REPLACE INTO graph_role_asks(identifier,run_id,asked_at) VALUES(?,?,?)', (r['id'], run_id, now()))
+                db.execute('INSERT OR REPLACE INTO graph_role_asks(identifier,run_id,asked_at,people_shown) VALUES(?,?,?,1)', (r['id'], run_id, now()))
             fixed = graph.corrections_lines(db) if parts else ''
         if fixed:
             parts.append("The owner corrected these review roles before; learn what the owner means by a role:\n" + fixed)
