@@ -113,3 +113,23 @@ class ConnectorPlugins(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ConnectorSetup(unittest.TestCase):
+    def test_every_connector_says_in_one_line_what_it_reads(self):
+        # The setup page shows this under the connector's name; a newly built connector needs one too.
+        for path in sorted(Path(__file__).with_name('connectors').glob('*.py')):
+            if path.name.startswith('_'):
+                continue
+            spec = importlib.util.spec_from_file_location('connector_' + path.stem, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            setup = getattr(module, 'SETUP', None)
+            if setup is None:
+                continue
+            with self.subTest(connector=path.stem):
+                what = setup.get('what')
+                self.assertTrue(isinstance(what, str) and what.strip(), f"connectors/{path.name}: add SETUP['what'], one line on what it reads")
+                self.assertLessEqual(len(what), 120)
+                self.assertNotIn('\n', what)
+

@@ -10,6 +10,19 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def openclaw_package(node):
+    """OpenClaw beside this node (a global npm install), else wherever the `openclaw` on PATH comes from
+    (a per-user install, as on hosted machines)."""
+    beside = Path(node).parent.parent / 'lib' / 'node_modules' / 'openclaw'
+    if beside.is_dir():
+        return None
+    found = shutil.which('openclaw')
+    for folder in Path(os.path.realpath(found)).parents if found else ():
+        if folder.name == 'openclaw' and (folder / 'package.json').exists():
+            return str(folder)
+    return None
+
+
 def main():
     node = shutil.which('node')
     if not node:
@@ -23,8 +36,13 @@ def main():
         env = {k:v for k,v in os.environ.items() if not k.startswith(('ASSISTANT_','OPENCLAW_','GOG_'))
                and k not in ('DBUS_SESSION_BUS_ADDRESS','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME')}
         env.update(HOME=home,PATH=str(Path(node).parent)+os.pathsep+os.environ.get('PATH',''))
-        if os.environ.get('OPENCLAW_PACKAGE_DIR'):
-            env['OPENCLAW_PACKAGE_DIR'] = os.environ['OPENCLAW_PACKAGE_DIR']
+        package = os.environ.get('OPENCLAW_PACKAGE_DIR') or openclaw_package(node)
+        if package:
+            env['OPENCLAW_PACKAGE_DIR'] = package
+        browser = os.environ.get('CHROMIUM_PATH') or next(
+            (found for name in ('chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome') if (found := shutil.which(name))), None)
+        if browser:
+            env['CHROMIUM_PATH'] = browser
         commands = [[sys.executable,'-m','unittest','discover','-p','test_*.py']]
         commands += [[node,str(file)] for file in sorted(ROOT.glob('test_*.mjs'))]
         failed = []

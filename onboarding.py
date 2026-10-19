@@ -1033,7 +1033,8 @@ def connect(config_path, name, ui, account_id=None, restart=True):
     if error and error.startswith(BUSY):
         ui.say(f'  ! not read yet: {hint(error) or error}. Saved; the first sync reads it.')
     elif error:
-        raise SetupError(f'{account["id"]} does not work yet: {error}', hint(error) or f'rerun: assistant connect {name}')
+        own = next((text for prefix, text in (setup_of(service).get('hints') or {}).items() if error.startswith(prefix)), '')
+        raise SetupError(f'{account["id"]} does not work yet: {error}', own or hint(error) or f'rerun: assistant connect {name}')
     offer_phone_skip(config, account, ui)
     config['accounts'] = [account if a['id'] == account['id'] else a for a in config.get('accounts', [])] + ([] if existing else [account])
     save(config_path, config)
