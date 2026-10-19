@@ -99,10 +99,14 @@ def site(host):
     return host[4:] if host.startswith('www.') else host
 
 
-def pages(config, store=None):
-    """The open tabs that show a sign-in form: [{id, host, title, username, password, code, saved}]."""
-    found = []
+def pages(config, store=None, account=None):
+    """The open tabs that show a sign-in form: [{id, host, title, username, password, code, saved}]. Looks in the
+    browser of `account` (an account id) when it has one of its own, else in the shared one: asking a browser that is
+    not running can start it."""
+    found, own = [], next((a.get('browser_cdp') for a in config.get('accounts', []) if a.get('id') == account), None)
     for i, base in enumerate(endpoints(config)):
+        if base != (own.rstrip('/') if isinstance(own, str) and _loopback(own) else endpoints(config)[0]):
+            continue
         try:
             tabs = [t for t in browser_cdp._http(base, '/json/list', timeout=3) if t.get('type') == 'page']
         except (browser_cdp.CdpError, TypeError, AttributeError):

@@ -5973,7 +5973,7 @@ class App:
                 raise ValueError('Only the owner signs in to sites, from the dashboard')
             logins = browser_login.LoginStore(Path(self.config['database']).expanduser().parent)
             if name == 'browser_login_pages':
-                return {'pages': browser_login.pages(self.config, logins)}
+                return {'pages': browser_login.pages(self.config, logins, args.get('account') if isinstance(args.get('account'), str) else None)}
             if name == 'browser_logins':
                 return {'logins': logins.list()}
             if name == 'browser_login_forget':

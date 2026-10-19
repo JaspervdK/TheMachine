@@ -88,6 +88,9 @@ class FillTest(unittest.TestCase):
         self.open('/news')  # not a sign-in page: not offered
         self.assertEqual(browser_login.pages(self.config), [])
         self.open('/login')
+        other = {**self.config, 'accounts': [{'id': 'li-2', 'browser_cdp': 'http://127.0.0.1:%d' % free_port()}]}
+        self.assertEqual(browser_login.pages(other, account='li-2'), [])  # only that account's own browser
+        self.assertEqual(len(browser_login.pages(other)), 1)
         [page] = browser_login.pages(self.config)
         self.assertEqual((page['username'], page['password'], page['code']), (True, True, False))
         self.assertNotIn(SECRET, json.dumps(page))
