@@ -17,7 +17,8 @@ import xml.etree.ElementTree as ET
 
 KINDS = {'rss.item': 'feed'}
 # For `assistant connect rss`: the account it adds and what it asks (see docs/adding-a-source.md).
-SETUP = {'label': 'RSS feed', 'account': {'id': 'feed', 'service': 'rss', 'transport': 'http', 'boundary': 'work', 'poll_seconds': 1800},
+SETUP = {'label': 'RSS feed', 'what': 'Posts from the feeds you follow.',
+         'account': {'id': 'feed', 'service': 'rss', 'transport': 'http', 'boundary': 'work', 'poll_seconds': 1800},
          'ask': [('url', 'Feed URL (RSS or Atom)')]}
 ATOM = '{http://www.w3.org/2005/Atom}'
 

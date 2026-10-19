@@ -22,7 +22,8 @@ from pathlib import Path
 
 KINDS = {'linkedin.message': 'LinkedIn'}
 # For `assistant connect linkedin`: the account it adds (see docs/adding-a-source.md).
-SETUP = {'label': 'LinkedIn', 'account': {'id': 'me-linkedin', 'service': 'linkedin', 'transport': 'linkedin-inbox', 'boundary': 'work', 'poll_seconds': 3600},
+SETUP = {'label': 'LinkedIn', 'what': 'Your LinkedIn messages.',
+         'account': {'id': 'me-linkedin', 'service': 'linkedin', 'transport': 'linkedin-inbox', 'boundary': 'work', 'poll_seconds': 3600},
          'note': 'Sign in to LinkedIn once in the OpenClaw browser first: openclaw browser --browser-profile openclaw open https://www.linkedin.com/login'}
 READER = Path(__file__).resolve().parent.parent / 'integrations/linkedin_inbox.py'
 

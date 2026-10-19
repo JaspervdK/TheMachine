@@ -52,7 +52,8 @@ Declare `SETUP` so the owner can add an account without editing JSON:
 ```python
 SETUP = {'label': 'RSS feed',                          # name in prompts, doctor and next steps
          'account': {'id': 'feed', 'service': 'rss', 'transport': 'http', 'boundary': 'work', 'poll_seconds': 1800},
-         'note': 'Shown before the questions, e.g. where to find a key.',
+         'what': 'Posts from the feeds you follow.',     # one line: what it reads, shown next to the source in setup screens
+         'note': 'Shown before the questions, e.g. where to find a key. Give full https:// links; setup pages make them clickable.',
          'ask': [('url', 'Feed URL (RSS or Atom)')],     # (key, prompt[, default]); defaults can use '{other_key}'
          'detect': {},                                   # key -> command whose output is the default, e.g. ['gh', 'api', 'user', '--jq', '.login']
          'secret': None,                                 # a prompt here asks for a key without echo into the `credential` file (mode 600)

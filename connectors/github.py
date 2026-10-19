@@ -18,7 +18,8 @@ import subprocess
 
 KINDS = {'github.notification': 'GitHub', 'github.ci': 'GitHub CI'}
 # For `assistant connect github`: the account it adds and what it asks (see docs/adding-a-source.md).
-SETUP = {'label': 'GitHub', 'account': {'id': 'github', 'service': 'github', 'transport': 'gh', 'boundary': 'work', 'poll_seconds': 600},
+SETUP = {'label': 'GitHub', 'what': 'Review requests, mentions, assignments and failed CI runs.',
+         'account': {'id': 'github', 'service': 'github', 'transport': 'gh', 'boundary': 'work', 'poll_seconds': 600},
          'note': 'GitHub is read through your logged-in gh CLI (gh auth login), GET requests only.',
          'ask': [('login', 'Your GitHub login')], 'detect': {'login': ['gh', 'api', 'user', '--jq', '.login']}}
 REASONS = {'assign', 'author', 'comment', 'mention', 'review_requested', 'team_mention', 'security_alert', 'manual'}
