@@ -24,6 +24,7 @@ KINDS = {'linkedin.message': 'LinkedIn'}
 # For `assistant connect linkedin`: the account it adds (see docs/adding-a-source.md).
 SETUP = {'label': 'LinkedIn', 'what': 'Your LinkedIn messages.',
          'account': {'id': 'me-linkedin', 'service': 'linkedin', 'transport': 'linkedin-inbox', 'boundary': 'work', 'poll_seconds': 3600},
+         'hints': {'linkedin_signed_out': 'the browser it reads with is not signed in to LinkedIn; sign in there, then connect again'},
          'note': 'Sign in to LinkedIn once in the OpenClaw browser first: openclaw browser --browser-profile openclaw open https://www.linkedin.com/login'}
 READER = Path(__file__).resolve().parent.parent / 'integrations/linkedin_inbox.py'
 
