@@ -16,6 +16,7 @@ import subprocess
 import tarfile
 import tempfile
 from contextlib import closing
+from contextlib import contextmanager
 from pathlib import Path
 
 FORMAT = 1
@@ -80,14 +81,26 @@ def plan(config_path, workspace=None, openclaw_home=None):
             items.append(('secret', path, f'secrets/elsewhere/{path.name}'))
     space = _workspace(workspace)
     if space.is_dir():
-        items += [('file', path, f'workspace/{relative}') for path, relative in _files(space, WORKSPACE_SKIP)]
+        for path, relative in _files(space, WORKSPACE_SKIP):
+            if path.resolve() in hosted or path.name == 'machine-token':
+                continue
+            secret = path.resolve() in keys or path.name in SECRET_NAMES or path.suffix == '.env'
+            items.append(('secret' if secret else 'file', path,
+                          f'{"secrets/" if secret else ""}workspace/{relative}'))
     items += [('file', path, f'connectors/{path.relative_to(APP)}') for path in own_connectors()]
     home = _openclaw_home(openclaw_home)
     if (home / 'openclaw.json').is_file():
         items.append(('secret', home / 'openclaw.json', 'secrets/openclaw/openclaw.json'))
     if (home / 'credentials').is_dir():
         items += [('secret', path, f'secrets/openclaw/credentials/{relative}') for path, relative in _files(home / 'credentials')]
-    return items
+    # A configured credential can be reached through more than one root. Prefer the workspace's
+    # restorable location, but never downgrade a known secret to an ordinary file.
+    unique = {}
+    for kind, path, name in items:
+        previous = unique.get(path.resolve())
+        if previous is None or kind == 'secret' or name.startswith(('workspace/', 'secrets/workspace/')):
+            unique[path.resolve()] = (kind, path, name)
+    return list(unique.values())
 
 
 def own_connectors():
@@ -149,7 +162,7 @@ def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=
     items = [i for i in plan(config_path, workspace, openclaw_home) if secrets or i[0] != 'secret']
     now = now or dt.datetime.now(dt.timezone.utc)
     manifest = {'format': FORMAT, 'created_at': now.isoformat(timespec='seconds'), 'source': source,
-                'data_dir': str(config_path.parent), 'includes_keys': secrets,
+                'data_dir': str(config_path.parent), 'workspace_dir': str(_workspace(workspace)), 'includes_keys': secrets,
                 'files': sorted(name for _, _, name in items), 'telegram': telegram(openclaw_home),
                 'reconnect': reconnect(config, secrets)}
     out_dir = Path(out_dir)
@@ -197,6 +210,7 @@ def readme(manifest):
              'This holds what The Machine knows and how it was set up. It is yours: keep it somewhere safe.', '',
              'To run it on your own computer:',
              '  1. Install The Machine: https://github.com/JeroenCorthout/TheMachine/blob/main/docs/getting-started.md',
+             '     Stop its service before importing: systemctl --user stop personal-assistant',
              '  2. Put it back:  assistant import <this file>',
              '  3. Connect what the import lists, then check with:  assistant doctor', '']
     lines.append('Keys and tokens are included.' if manifest['includes_keys'] else
@@ -233,7 +247,32 @@ def _place(source, target, notes, mode=0o600):
     os.chmod(target, mode)
 
 
+@contextmanager
+def offline_target(config_path):
+    """Share the service's lock before touching any imported files. Never overlay an existing WAL."""
+    import fcntl
+    data = Path(config_path).expanduser().parent
+    data.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (data / 'service.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise MoveError('Stop personal-assistant first: systemctl --user stop personal-assistant. Then import again.') from None
+        try:
+            if any(data.rglob('*-wal')) or any(data.rglob('*-shm')):
+                raise MoveError('The target database is still open (SQLite WAL files exist). Close its readers and stop '
+                                'personal-assistant before importing; do not delete its WAL files.')
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def import_(archive_path, config_path, passphrase=None, workspace=None, openclaw_home=None, force=False, now=None):
+    with offline_target(config_path):
+        return _import(archive_path, config_path, passphrase, workspace, openclaw_home, force, now)
+
+
+def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw_home=None, force=False, now=None):
     """Put an export back on this computer. Returns {'restored': [...], 'reconnect': [...], 'notes': [...]}."""
     archive_path, config_path = Path(archive_path).expanduser(), Path(config_path).expanduser()
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -265,6 +304,17 @@ def import_(archive_path, config_path, passphrase=None, workspace=None, openclaw
             raise MoveError('This archive has no manifest; it is not an export of The Machine') from None
         if manifest.get('format', 0) > FORMAT:
             raise MoveError('This export is newer than this install; update The Machine first')
+        # Validate every database before replacing any live file.
+        for root in (unpacked / 'data', unpacked / 'secrets/data'):
+            for path in root.rglob('*') if root.is_dir() else []:
+                if path.suffix in ('.sqlite', '.db') and path.is_file():
+                    try:
+                        with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as check:
+                            valid = check.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+                    except sqlite3.Error:
+                        valid = False
+                    if not valid:
+                        raise MoveError('An exported database failed its integrity check; nothing was imported.')
         data = config_path.parent
         if force and data.exists() and any(data.iterdir()):
             keep = data.with_name(f'{data.name}.before-import-{now:%Y%m%d-%H%M%S}')
@@ -277,10 +327,13 @@ def import_(archive_path, config_path, passphrase=None, workspace=None, openclaw
                 if path.is_file():
                     target = data / path.relative_to(root)
                     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    shutil.copyfile(path, target)
-                    os.chmod(target, mode)
+                    temporary = target.with_name(target.name + '.import-new')
+                    shutil.copyfile(path, temporary)
+                    os.chmod(temporary, mode)
+                    temporary.replace(target)
                     restored.append(str(target))
         config = _rebase(json.loads((unpacked / 'config/config.json').read_text()), manifest.get('data_dir'), str(data))
+        config = _rebase(config, manifest.get('workspace_dir'), str(_workspace(workspace)))
         for key in HOSTED_KEYS:
             config.pop(key, None)
         for name in HOSTED_ONLY:
@@ -303,11 +356,12 @@ def import_(archive_path, config_path, passphrase=None, workspace=None, openclaw
             handle.write(json.dumps(config, indent=2) + '\n')
         restored.append(str(config_path))
         space = _workspace(workspace)
-        for path in sorted((unpacked / 'workspace').rglob('*')) if (unpacked / 'workspace').is_dir() else []:
-            if path.is_file():
-                target = space / path.relative_to(unpacked / 'workspace')
-                _place(path, target, notes)
-                restored.append(str(target))
+        for folder in ('workspace', 'secrets/workspace'):
+            for path in sorted((unpacked / folder).rglob('*')) if (unpacked / folder).is_dir() else []:
+                if path.is_file():
+                    target = space / path.relative_to(unpacked / folder)
+                    _place(path, target, notes)
+                    restored.append(str(target))
         for path in sorted((unpacked / 'connectors').rglob('*')) if (unpacked / 'connectors').is_dir() else []:
             if path.is_file():
                 target = APP / path.relative_to(unpacked / 'connectors')

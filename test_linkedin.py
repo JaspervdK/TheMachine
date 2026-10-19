@@ -323,7 +323,8 @@ class Tabs(unittest.TestCase):
                 return {'ok': True}
             fakes = {'open_tab': lambda base, url: calls.append(('open', url)) or 'T1',
                      'close_tab': lambda base, target: calls.append(('close', target)),
-                     'tab_ids': lambda base: {'OWNER'}, 'evaluate': evaluate}
+                     'tab_ids': lambda base: {'OWNER'}, 'evaluate': evaluate,
+                     'navigate': lambda base, target, url: calls.append(('navigate', target, url))}
             with tempfile.TemporaryDirectory() as tmp, patch.object(reader, 'CDP', 'http://127.0.0.1:9222'), \
                     patch.multiple(cdp, **fakes), patch.object(reader, 'OPEN_TABS', Path(tmp) / 'tabs'), \
                     patch.object(reader, 'lease', lambda *a, **k: subprocess.CompletedProcess(a, 0, '', '')), \
@@ -331,7 +332,8 @@ class Tabs(unittest.TestCase):
                     patch.object(reader.time, 'sleep', lambda s: None):
                 self.assertEqual(reader.with_tab('https://example.test', lambda t: [reader.evaluate(t, 'f') for _ in range(2)][-1]), {'ok': True})
                 self.assertEqual(reader.evaluate('T1', 'f').get('ok'), True)
-            self.assertEqual(calls[0], ('open', 'https://example.test'), name)
+            self.assertTrue(calls[0][1].startswith('about:blank#the-machine-'), name)
+            self.assertIn(('navigate', 'T1', 'https://example.test'), calls)
             self.assertIn(('close', 'T1'), calls, name)
             with patch.object(reader, 'CDP', 'http://127.0.0.1:9222'), \
                     patch.object(cdp, 'evaluate', side_effect=cdp.CdpError('browser not reachable')), self.assertRaises(reader.Fail):
@@ -343,12 +345,18 @@ class Tabs(unittest.TestCase):
             spec = importlib.util.spec_from_file_location(name, Path(__file__).parent / 'integrations' / f'{name}.py')
             reader = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(reader)
-            tabs, closed = {'OWNER'}, []
+            tabs, closed, urls = {'OWNER'}, [], {'OWNER': 'https://owner.test'}
 
             def oc(*args, timeout=60):
+                if args[:2] == ('--json', 'tabs'):
+                    return json.dumps({'tabs': [{'targetId': t, 'url': urls[t]} for t in tabs]})
+                if args[0] == 'navigate':
+                    urls[args[2]] = args[3]
+                    return ''
                 if args[0] == 'tabs':
                     return ''.join(f'id: {t}\n' for t in sorted(tabs))
                 if args[0] == 'open':
+                    urls['NEW%d' % len(tabs)] = args[-1]
                     tabs.add('NEW%d' % len(tabs))
                     return 'id: NEW%d\n' % (len(tabs) - 1)
                 if args[0] == 'close':
@@ -365,8 +373,11 @@ class Tabs(unittest.TestCase):
                 def slow(*args, timeout=60):  # the tab appears, then the open times out
                     if args[0] == 'open':
                         tabs.add('LATE')
+                        urls['LATE'] = args[-1]
+                        tabs.add('UNRELATED')
+                        urls['UNRELATED'] = 'https://another-reader.test'
                         raise reader.Fail('timed out')
                     return oc(*args, timeout=timeout)
                 with patch.object(reader, 'oc', slow), self.assertRaises(reader.Fail):
                     reader.with_tab('https://example.test', lambda target: None)
-                self.assertEqual(tabs, {'OWNER'}, name)
+                self.assertEqual(tabs, {'OWNER', 'UNRELATED'}, name)

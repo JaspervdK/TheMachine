@@ -1256,6 +1256,8 @@ def org_domain(db, node_id):
 def org_edit(db, node_id, fields, now):
     """The owner's own details for an organisation. They win over what an enrichment service says and survive
     every refresh; an empty field gives that one back to the service."""
+    if not db.in_transaction:
+        db.execute('BEGIN IMMEDIATE')
     domain, fields = org_domain(db, node_id), fields if isinstance(fields, dict) else {}
     row = db.execute('SELECT fields FROM org_edits WHERE domain=?', (domain,)).fetchone()
     kept = json.loads(row['fields']) if row else {}

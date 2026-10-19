@@ -123,12 +123,12 @@ class TrelloTests(unittest.TestCase):
             self.assertNotIn('catchup', self.store.checkpoint(ACCOUNT['id']))
             self.assertEqual(len(self.rows()), 3)
 
-    def test_expired_cursor_restarts_only_bounded_recent_window(self):
+    def test_expired_cursor_restarts_the_same_unread_window(self):
         self.store.commit_page(ACCOUNT['id'], {'catchup': {'since': '2026-01-01T00:00:00+00:00',
                                'until': NOW, 'cursor': 'e' * 24}}, [])
         self.pages = [urllib.error.HTTPError('unused', 400, 'private content', {}, None), [action()]]
         self.sync()
-        self.assertEqual(self.requests[-1][1]['since'], ['2026-10-12T12:00:00+00:00'])
+        self.assertEqual(self.requests[-1][1]['since'], ['2026-01-01T00:00:00+00:00'])
         self.assertEqual(self.requests[-1][1]['before'], [NOW])
         self.assertTrue(self.store.checkpoint(ACCOUNT['id'])['coverage_complete'])
 

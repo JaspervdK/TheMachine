@@ -593,7 +593,7 @@ def cmd_import(config, args):
     print('\nConnect again:')
     for line in result['reconnect']:
         print('  - ' + line)
-    print('\nThen restart the service (systemctl --user restart personal-assistant) and check with: assistant doctor')
+    print('\nThen start the service (systemctl --user start personal-assistant) and check with: assistant doctor')
 
 
 def cmd_raw(config, args):

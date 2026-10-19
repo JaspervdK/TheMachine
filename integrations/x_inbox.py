@@ -451,44 +451,98 @@ def close_tab(target):
     return True
 
 
+def tab_inventory():
+    if CDP:
+        return browser_cdp._http(CDP, '/json/list')
+    result = json.loads(oc('--json', 'tabs', timeout=90))
+    return result.get('tabs', []) if isinstance(result, dict) else result
+
+
+def recover_tab(marker):
+    # Inventory differences also include tabs opened by unrelated concurrent jobs.
+    # Only our persisted unique marker establishes ownership after a lost receipt.
+    for row in tab_inventory():
+        if row.get('url') == marker:
+            return row.get('targetId') or row.get('id')
+    return None
+
+
 def open_tab(label, url):
-    """A tab of our own, remembered until it is closed: tabs left by a run that was stopped (or whose open
-    timed out after the tab appeared) are closed by the next run, never the owner's own tabs."""
-    for target in (OPEN_TABS.read_text().split() if OPEN_TABS.exists() else []):
-        if not close_tab(target) and target not in (tab_ids() or {target}):
-            remember_tab(target, False)  # already gone
-    before = tab_ids()
+    marker = 'about:blank#the-machine-' + uuid.uuid4().hex
+    remember_tab('pending:' + marker, True)
+    target = None
     try:
         if CDP:
-            target = browser_cdp.open_tab(CDP, url)
-            remember_tab(target, True)
-            return target
-        receipt = oc('open', '--label', label, url)
+            target = browser_cdp.open_tab(CDP, marker)
+        else:
+            receipt = oc('open', '--label', label, marker)
+            match = re.search(r'^(?:id|tab):\s*(\S+)', receipt, re.M)
+            target = match[1] if match else recover_tab(marker)
+        if not target:
+            raise Fail('The new browser tab has no verified receipt')
+        remember_tab(target, True)
+        remember_tab('pending:' + marker, False)
+        if CDP:
+            browser_cdp.navigate(CDP, target, url)
+        else:
+            oc('navigate', '--target-id', target, url)
+        return target
     except Exception:
-        after = tab_ids()
-        for target in (after - before) if before is not None and after is not None else ():
+        if target:
             close_tab(target)
+        else:
+            try:
+                target = recover_tab(marker)
+                if target:
+                    close_tab(target)
+                    remember_tab('pending:' + marker, False)
+            except Exception:
+                pass  # retain the exact marker for the next run; never guess ownership
         raise
-    match = re.search(r'^(?:id|tab):\s*(\S+)', receipt, re.M)
-    target = match[1] if match else label
-    remember_tab(target, True)
-    return target
+
+
+def tab_guard():
+    OPEN_TABS.parent.mkdir(parents=True, exist_ok=True)
+    handle = OPEN_TABS.with_suffix('.lock').open('a')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise Fail('This inbox reader already has a browser run in progress') from None
+    return handle
+
+
+def clean_stopped_tabs():
+    for target in (OPEN_TABS.read_text().split() if OPEN_TABS.exists() else []):
+        if target.startswith('pending:'):
+            found = recover_tab(target[len('pending:'):])
+            if not found or close_tab(found):
+                remember_tab(target, False)
+        elif not close_tab(target) and target not in (tab_ids() or {target}):
+            remember_tab(target, False)
 
 
 def with_tab(url, fn, switching=False):
-    claim = lease('claim', exclusive=switching)
-    if claim.returncode == 3:
-        raise Fail('the OpenClaw browser is busy (' + lease('status').stdout.strip() + '); try again later')
-    if claim.returncode:
-        raise Fail('could not claim the browser lease: ' + (claim.stderr or claim.stdout).strip()[:200])
-    target = None
+    guard = tab_guard()
+    target, claimed = None, False
     try:
+        claim = lease('claim', exclusive=switching)
+        if claim.returncode == 3:
+            raise Fail('the OpenClaw browser is busy (' + lease('status').stdout.strip() + '); try again later')
+        if claim.returncode:
+            raise Fail('could not claim the browser lease: ' + (claim.stderr or claim.stdout).strip()[:200])
+        claimed = True
+        clean_stopped_tabs()
         target = open_tab('x-inbox-' + uuid.uuid4().hex[:6], url)
         return fn(target)
     finally:
-        if target:
-            close_tab(target)
-        lease('release')
+        try:
+            if target:
+                close_tab(target)
+            if claimed:
+                lease('release')
+        finally:
+            guard.close()
 
 
 def run(mode, **params):

@@ -496,3 +496,16 @@ Regression coverage: `test_review_integrity.py`, real Chromium delays in `test_r
 **Activation/rollback:** restart only `personal-assistant.service` after committing tested source. Keep the live database, configuration and owner feedback on source rollback. The promise uniqueness migration preserves IDs/notes/card links but is not compatible with old three-column-conflict code: rollback by reverting the other changes while retaining the four-column promise schema and matching INSERT/lookup. Never restore a stale database over new owner input. A private SQLite backup and source archives precede this activation.
 
 The installer enables the bridge’s required conversation hooks through OpenClaw’s own config command; `assistant doctor` checks the grant instead of calling a loaded-but-inert bridge healthy.
+
+## October 19 reliability repairs
+
+Owner-authorized execution stays broad. No new generic approvals were added. These repairs prevent lost writes and invented success, not requested work.
+
+- Organisation edits reserve a write transaction before reading and merging fields; concurrent partial edits retain both changes.
+- WhatsApp saves the pre-send message IDs and dispatch timestamp before the admitted write. Reconciliation only accepts one exact own message newer than that boundary; earlier identical messages and ambiguous/legacy sends remain unconfirmed and are never resent automatically.
+- Inbox readers hold a per-reader/profile lock throughout their tab lifetime. A lost open receipt is reconciled through an exact persisted unique URL marker, not a difference between browser inventories. Unrelated concurrent tabs are never cleanup candidates. The shared browser lease is still required; stopped-run cleanup occurs only after acquiring it.
+- The service acquires its lifetime lock before opening its database, preventing startup from racing offline maintenance.
+
+Tests: `test_oct19_repairs.py`, WhatsApp transport and LinkedIn/X tab fixtures; run the complete Python and Node suites with a disposable HOME. No live owner decisions or messages are needed for these tests.
+
+Customer export/import: configured credentials under the workspace are secret files, omitted without a passphrase and restored/rebased in encrypted exports. Stop `personal-assistant` and close SQLite readers before importing. Import takes the service lock, rejects existing WAL/SHM files without deleting them, validates every database before replacing files, and installs each database atomically. Start the service afterwards. Trello cursor rejection preserves the original unread time window, so catch-up cannot silently jump forward seven days.

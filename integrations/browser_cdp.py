@@ -30,7 +30,7 @@ def tab_ids(base):
 
 
 def open_tab(base, url):
-    tab = _http(base, '/json/new?' + urllib.parse.quote(url, safe=':/?&=%#'), method='PUT')
+    tab = _http(base, '/json/new?' + urllib.parse.quote(url, safe=':/?&=%'), method='PUT')
     if not isinstance(tab, dict) or not tab.get('id'):
         raise CdpError('the browser did not open a tab: ' + str(tab)[:200])
     return tab['id']

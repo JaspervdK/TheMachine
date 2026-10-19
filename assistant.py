@@ -6283,6 +6283,8 @@ class App:
                 db.execute("UPDATE action_jobs SET status='cancelled' WHERE id=?",(job['id'],));return
             # Commit admission before the one write. Later cancellation cannot recall
             # an admitted email, and restart/repeated clicks only reconcile it.
+            if action['kind'] == 'whatsapp':
+                action.setdefault('proof', {})['whatsapp_dispatched_at'] = now()
             db.execute("UPDATE action_jobs SET status='sending',updated_at=?,retry_at=? WHERE id=?",(now(),(dt.datetime.fromisoformat(now())+dt.timedelta(seconds=90)).isoformat(),job['id']))
             if action.get('proof'):db.execute('UPDATE action_jobs SET payload=? WHERE id=?',(encoded(action),job['id']))
         try:result=transport.send(action,job)
@@ -7228,16 +7230,17 @@ def main():
         with urllib.request.urlopen(http_request, timeout=45) as response:
             print(response.read().decode())
         return
-    app = App(config)
     if args.command == 'serve':
         import fcntl
         lock = Path(config['database']).parent / 'service.lock'
         with lock.open('w') as handle:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            app.serve()
+            App(config).serve()
     elif args.command == 'status':
+        app = App(config)
         print(json.dumps(app.store.snapshot(config['accounts']), indent=2))
     else:
+        app = App(config)
         for account in config['accounts']:
             print(account['id'], sync_source(app.store, config, account))
 

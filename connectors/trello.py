@@ -169,7 +169,7 @@ def sync(store, config, account, helpers):
         except helpers.SourceError as error:
             if error.status == 400 and window.get('cursor') and not reset:
                 # A rejected continuation must not strand the source indefinitely.
-                window, reset = fresh(), True
+                window, reset = {k: v for k, v in window.items() if k != 'cursor'}, True
                 items = page(source, window, helpers)
             else:
                 raise

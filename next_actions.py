@@ -901,9 +901,10 @@ class WhatsAppTransport:
         if (status.get('authenticated') is not True or not isinstance(linked, str)
                 or hashlib.sha256(linked.encode()).hexdigest() != self.account(action).get('identity_sha256')):
             raise ValueError('WhatsApp is signed out, or linked to another number. Nothing was sent.')
-        rows = self.read(action, ['messages', 'list', '--chat', action['chat_id'], '--limit', '1']).get('messages')
+        rows = self.read(action, ['messages', 'list', '--chat', action['chat_id'], '--limit', '50']).get('messages')
         if not rows:
             raise ValueError('I couldn’t find that WhatsApp chat. Nothing was sent.')
+        action['proof'] = {'whatsapp_before_ids': [r['MsgID'] for r in rows if r.get('MsgID')]}
 
     def send(self, action, job):
         try:
@@ -929,13 +930,29 @@ class WhatsAppTransport:
         return {}
 
     def reconcile(self, action, job):
-        since = datetime.datetime.fromisoformat(job['created_at']) - datetime.timedelta(minutes=1)
+        proof = action.get('proof') or {}
+        stamp = proof.get('whatsapp_dispatched_at')
+        if not stamp:
+            return {}  # Legacy uncertain sends have no attributable dispatch boundary; never invent a receipt.
         try:
+            since = datetime.datetime.fromisoformat(stamp)
+            if since.tzinfo is None:
+                return {}
             rows = self.read(action, ['messages', 'list', '--chat', action['chat_id'], '--from-me',
                                       '--after', since.isoformat(), '--limit', '50']).get('messages') or []
         except ValueError:
             return {}
-        found = [r for r in rows if isinstance(r, dict) and r.get('FromMe') is True and (r.get('Text') or '').strip() == action['body']]
+        found = []
+        for r in rows:
+            try:
+                occurred = datetime.datetime.fromisoformat(r.get('Timestamp', '').replace('Z', '+00:00'))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if occurred.tzinfo is None:
+                continue
+            if (r.get('FromMe') is True and (r.get('Text') or '').strip() == action['body']
+                    and r.get('MsgID') not in proof.get('whatsapp_before_ids', []) and occurred >= since):
+                found.append(r)
         return {'message_id': 'whatsapp:' + str(found[0]['MsgID'])} if len(found) == 1 and found[0].get('MsgID') else {}
 
 

@@ -146,7 +146,8 @@ class WhatsAppTransportTest(unittest.TestCase):
   with patch.object(n.subprocess,'run',side_effect=subprocess.TimeoutExpired('wacli',150)):self.assertEqual(t.send(self.action,{'id':'J'}),{})
  def test_reconcile_finds_exactly_one_matching_own_message(self):
   t=n.WhatsAppTransport(self.config);job={'id':'J','created_at':'2026-10-19T10:00:00+00:00'}
-  mine={'MsgID':'3EB0AA','FromMe':True,'Text':'Yes, Friday works.'}
+  self.action['proof']={'whatsapp_dispatched_at':'2026-10-19T10:00:00+00:00','whatsapp_before_ids':['OLD']}
+  mine={'MsgID':'3EB0AA','FromMe':True,'Text':'Yes, Friday works.','Timestamp':'2026-10-19T10:00:02Z'}
   for rows,expected in (([mine],{'message_id':'whatsapp:3EB0AA'}),([mine,{**mine,'MsgID':'B'}],{}),([{**mine,'Text':'Other'}],{}),([{**mine,'FromMe':False}],{})):
    with patch.object(n.subprocess,'run',return_value=ok({'messages':rows})) as run:self.assertEqual(t.reconcile(self.action,job),expected)
    self.assertIn('--read-only',run.call_args[0][0]);self.assertIn('--from-me',run.call_args[0][0])
