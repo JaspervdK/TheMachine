@@ -5,7 +5,7 @@ Reads tasks, evidence, sources and review history from the running service,
 can save a preparation for an accepted task, runs a first-run preview review and drafts USER.md
 lines from your own messages (profile, shown before saving). Sets up
 sources (connect) and checks the whole setup (doctor). Owner decisions (accept, snooze,
-done, dismiss, feedback) stay with Telegram and the dashboard; the service
+done, dismiss, feedback) stay with the dashboard and Telegram (optional); the service
 refuses them from here.
 """
 import argparse
@@ -553,6 +553,27 @@ def cmd_doctor(config, args):
     sys.exit(onboarding.print_doctor(results, onboarding.UI(False)))
 
 
+def cmd_telegram(config, args):
+    if args.state == 'status':
+        owner = str(config.get('telegram_owner') or '')
+        on = {'telegram': bool(owner), 'owner': owner or None, 'account': config.get('telegram_account') or ('default' if owner else None)}
+        return out_json(on) if args.json else print(f"Telegram on: cards go to {owner} through the {on['account']} bot." if owner else
+                                                    'Telegram off: cards reach you through the dashboard app (add it to your home screen, turn on notifications).')
+    if args.state == 'on' and not args.owner:
+        raise CliError('give your Telegram user ID: assistant telegram on 123456789')
+    try:
+        notes = onboarding.set_telegram(args.config, args.owner if args.state == 'on' else None, remove_bot=args.remove_bot)
+    except onboarding.SetupError as error:
+        raise CliError(error.message + (f'\n  fix: {error.fix}' if error.fix else '')) from None
+    if args.json:
+        return out_json({'telegram': args.state == 'on', 'notes': notes})
+    print('Telegram on: new cards go to Telegram again, next to the dashboard app.' if args.state == 'on' else
+          'Telegram off: cards, reminders and the weekly recap reach you through the dashboard app.'
+          ' Add it to your home screen and turn on notifications (the bell). Back on any time: assistant telegram on <your Telegram user ID>')
+    for note in notes:
+        print('  ' + note)
+
+
 def _passphrase(confirm):
     import getpass
     if os.environ.get(moving.PASSPHRASE_ENV):
@@ -660,6 +681,10 @@ def parser():
     c.add_argument('source', nargs='?', help='gmail, calendar, slack, crm, whatsapp, android, gateway or a connector plugin')
     c.add_argument('--account', help='account id, to redo one of several or add another')
     add('doctor', 'Check the whole setup; every problem comes with its fix', cmd_doctor)
+    c = add('telegram', 'Telegram is optional: turn card delivery there off or back on (the dashboard app works either way)', cmd_telegram)
+    c.add_argument('state', choices=('status', 'on', 'off'))
+    c.add_argument('owner', nargs='?', help='with on: your Telegram user ID')
+    c.add_argument('--remove-bot', action='store_true', help='with off: also delete the Telegram bot and its token from OpenClaw')
     c = add('export', 'Everything The Machine knows and how it is set up, in one archive to move to another computer', cmd_export)
     c.add_argument('--keys', action='store_true', help='include keys and tokens, encrypted with a passphrase you pick')
     c.add_argument('--out', default='.', help='folder to write the archive to (default: here)')

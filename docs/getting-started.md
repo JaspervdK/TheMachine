@@ -4,7 +4,7 @@ From nothing to your first cards in about 15 minutes. Each step says how to chec
 
 ## Before you start
 
-- [ ] **OpenClaw** 2026.10.2 or later, with the Gateway running and its Telegram channel talking to your bot. Check: your bot answers you in Telegram. No OpenClaw yet? Skip this one: the installer offers to install it and walks you through its setup (step 1).
+- [ ] **OpenClaw** 2026.10.2 or later, with the Gateway running. Telegram is optional: with a bot, check that it answers you in Telegram; without one, cards reach you through the dashboard app (see Phone notifications below). No OpenClaw yet? Skip this one: the installer offers to install it and walks you through its setup (step 1).
 - [ ] **Node.js** 24.16+ (24.x) or 26.1+, and **Python 3.12+**.
 - [ ] **Tailscale** on this machine and your phone, logged in (`sudo tailscale up`), for the dashboard.
 - [ ] Your own user account, not root, with a systemd user session (a normal login; over SSH that works too).
@@ -18,11 +18,11 @@ cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 ```
 
-Without OpenClaw, the installer first offers to install it, then starts OpenClaw's own setup and tells you what to pick there: your model provider, yes to running the Gateway as a service, and Telegram as a channel. For Telegram you make a bot first: message @BotFather, send /newbot, choose a name and paste the token it gives you. Check: your bot answers you in Telegram.
+Without OpenClaw, the installer first offers to install it, then starts OpenClaw's own setup and tells you what to pick there: your model provider, yes to running the Gateway as a service, and, optionally, Telegram as a channel (skip it to use the dashboard app's notifications instead). For Telegram you make a bot first: message @BotFather, send /newbot, choose a name and paste the token it gives you. Check: your bot answers you in Telegram.
 
 The wizard fills in what it can find, so most questions only need Enter:
 
-- **Telegram ID:** taken from OpenClaw (your owner entry or approved senders). If OpenClaw doesn't know you yet, the installer asks you to message your bot, reads your ID from the pairing request and offers to approve it.
+- **Telegram ID (optional):** press Enter to skip Telegram. Otherwise taken from OpenClaw (your owner entry or approved senders). If OpenClaw doesn't know you yet, the installer asks you to message your bot, reads your ID from the pairing request and offers to approve it.
 - **Tailscale login and dashboard host:** from `tailscale status` (on a tagged machine, type the login you use on your phone).
 - **Company:** from your email address; answer "personal" if these are private accounts.
 - **Sources:** suggested from what is installed and linked here (gog, a linked WhatsApp, a paired Android phone).
@@ -88,6 +88,15 @@ When it stops reading, the source says why: `android_offline` (the app is not co
 
 The installer offers to publish the dashboard on your tailnet (`tailscale serve`, at `https://<machine>.<tailnet>.ts.net:8443/`). No domain or certificate to set up, and only your Tailscale login can open it. If Serve is not enabled on your tailnet yet, it prints the link to enable it. On your phone, open the address it prints and add it to your home screen.
 
+### Phone notifications (no Telegram needed)
+
+The dashboard installs as a phone app and notifies you of each card, result, reminder and the weekly recap. With it, Telegram is optional.
+
+- **Android (Chrome):** open the dashboard, tap ⋮ → **Add to Home screen** (or **Install app**). Open The Machine from your home screen and tap the bell, then allow notifications.
+- **iPhone/iPad (iOS 16.4 or newer):** open the dashboard in Safari, tap **Share** → **Add to Home Screen**. Open The Machine from your Home Screen (not a Safari tab: iOS only allows notifications there), tap the bell and allow.
+
+Turn Telegram off or on later with `assistant telegram off` / `assistant telegram on <your Telegram user ID>`.
+
 ## 4. Tell the agent who you are
 
 The installer offers a starter `USER.md` in your OpenClaw workspace with your name, companies and email (added under OpenClaw's template if that is all it has). Reviews and drafts read it every time.
@@ -98,7 +107,7 @@ Then it offers to fill in the rest from what you actually write: your agent read
 
 The installer offers a **preview**: your agent reviews the last 7 days once and shows the cards in the terminal and on the dashboard. Nothing is sent and nothing is done in your accounts.
 
-If the cards look useful, say yes to **turning on reviews and Telegram cards**. Read [Security model](../README.md#security-model) first: **Do it** lets the agent act with your accounts, only after you tap it. You can also do both later with `./install.sh --preview` and `./install.sh --activate`.
+If the cards look useful, say yes to **turning on reviews and card delivery** (Telegram and/or the dashboard app). Read [Security model](../README.md#security-model) first: **Do it** lets the agent act with your accounts, only after you tap it. You can also do both later with `./install.sh --preview` and `./install.sh --activate`.
 
 On a server without a screen, `./install.sh --browser-viewer` gives the assistant a browser you can watch and use from your own (sign in to LinkedIn or X there, or help when a task waits on a sign-in). See [README](../README.md#sources).
 

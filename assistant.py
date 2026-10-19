@@ -4935,6 +4935,11 @@ def node_bin(config):
     return str(sibling) if sibling.exists() else 'node'
 
 
+def telegram_on(config):
+    """Telegram is optional: without an owner ID, cards reach the owner through the dashboard app."""
+    return bool(str(config.get('telegram_owner') or '').strip())
+
+
 def telegram_account(config):
     """The OpenClaw Telegram account (bot) that talks to the owner: config `telegram_account`."""
     return str(config.get('telegram_account') or 'default')
@@ -4948,7 +4953,7 @@ def node_env(config):
     if config.get('openclaw_package_dir'):
         env['OPENCLAW_PACKAGE_DIR'] = str(Path(config['openclaw_package_dir']).expanduser())
     if config.get('telegram_owner'):
-        env['ASSISTANT_TELEGRAM_OWNER'] = str(config['telegram_owner'])
+        env['ASSISTANT_TELEGRAM_OWNER'] = str(config.get('telegram_owner'))
     env['ASSISTANT_TELEGRAM_ACCOUNT'] = telegram_account(config)
     if config.get('dashboard_host'):
         env['PUSH_VAPID_SUBJECT'] = 'https://' + config['dashboard_host'] + config.get('dashboard_path', '/')
@@ -5014,7 +5019,7 @@ def telegram(config, row, action, message_id=None):
         message=('Ready: ' if ready else 'Needs your help: ')+'**'+title+'**'
         message+='\n\n[View '+('result' if ready else 'task')+']('+root+'#result='+row['id']+')'
         return telegram_request(config,{'action':'send','channel':'telegram','accountId':telegram_account(config),
-            'target':config['telegram_owner'],'replyTo':str(row['message_id']),
+            'target':config.get('telegram_owner'),'replyTo':str(row['message_id']),
             'message':message,'presentation':{'blocks':[]},**({'silent':True} if row.get('_silent') else {})})
     body=dict(row)
     if row['status']=='prepared' and row.get('requested_feedback'):
@@ -5031,7 +5036,7 @@ def telegram(config, row, action, message_id=None):
         body['body']=strip_result_links(body['body'])
         if row['status']=='prepared':body['body']+='\n\n[Read result]('+root+'#result='+row['id']+')'
         elif row.get('original_urls'):body['body']+='\n\n[Open original]('+row['original_urls'][0]+')'
-    args = {'action':action,'channel':'telegram','accountId':telegram_account(config),'target':config['telegram_owner'],
+    args = {'action':action,'channel':'telegram','accountId':telegram_account(config),'target':config.get('telegram_owner'),
             'message':('Your update\n\n' if action=='send' and row.get('reminder') and (row['status'] in ('prepared','instructions') or row.get('preparation_status')=='blocked') else 'Reminder\n\n' if action=='send' and row.get('reminder') else '')+card(body),'presentation':controls(row)}
     if message_id:
         args['messageId'] = str(message_id)
@@ -5041,6 +5046,10 @@ def telegram(config, row, action, message_id=None):
 
 
 def telegram_request(config,args):
+    if not telegram_on(config):
+        # Telegram is off: nothing is sent, and a local receipt lets delivery, edits and
+        # result notices proceed, so the dashboard and its push notifications carry the card.
+        return {'messageId': 'web-' + uuid.uuid4().hex[:12]}
     try:
         result = subprocess.run([node_bin(config), str(ROOT/'telegram-message.mjs')],env=node_env(config),
                                 input=encoded(args),capture_output=True,text=True,timeout=60)
@@ -5067,7 +5076,7 @@ def cached_card_ids(config, suggestion_id, since):
         for value, in native.execute("SELECT value_json FROM plugin_state_entries WHERE plugin_id='telegram' "
                                      "AND namespace='telegram.message-cache' AND (instr(value_json,?)>0 OR instr(value_json,?)>0)", (callback,'#result='+suggestion_id)):
             message = json.loads(value).get('sourceMessage', {})
-            if (str(message.get('chat', {}).get('id')) == config['telegram_owner'] and message.get('from', {}).get('is_bot')
+            if (str(message.get('chat', {}).get('id')) == config.get('telegram_owner') and message.get('from', {}).get('is_bot')
                     and message.get('message_id') and (message.get('date') or 0) >= since):
                 found.append(int(message['message_id']))
     return found
@@ -5987,7 +5996,7 @@ class App:
                     ids=[]
                     for value, in rows:
                         message=json.loads(value).get('sourceMessage',{})
-                        if str(message.get('chat',{}).get('id'))==self.config['telegram_owner'] and message.get('message_id'):
+                        if str(message.get('chat',{}).get('id'))==self.config.get('telegram_owner') and message.get('message_id'):
                             ids.append(int(message['message_id']))
                     boundary=str(max(ids)) if ids else None
             except (sqlite3.Error,ValueError,TypeError):
@@ -6025,9 +6034,9 @@ class App:
             if timestamp is None or reply_to is None:
                 try:
                     with sqlite3.connect('file:'+str(Path.home()/'.openclaw/state/openclaw.sqlite')+'?mode=ro',uri=True,timeout=2) as native:
-                        for value, in native.execute("SELECT value_json FROM plugin_state_entries WHERE plugin_id='telegram' AND namespace='telegram.message-cache' AND entry_key LIKE ?",('%:'+self.config['telegram_owner']+':'+str(args['message_id']),)):
+                        for value, in native.execute("SELECT value_json FROM plugin_state_entries WHERE plugin_id='telegram' AND namespace='telegram.message-cache' AND entry_key LIKE ?",('%:'+self.config.get('telegram_owner')+':'+str(args['message_id']),)):
                             message=json.loads(value).get('sourceMessage',{})
-                            if str(message.get('chat',{}).get('id'))==self.config['telegram_owner'] and str(message.get('from',{}).get('id'))==self.config['telegram_owner'] and str(message.get('message_id'))==str(args['message_id']):
+                            if str(message.get('chat',{}).get('id'))==self.config.get('telegram_owner') and str(message.get('from',{}).get('id'))==self.config.get('telegram_owner') and str(message.get('message_id'))==str(args['message_id']):
                                 timestamp=timestamp if timestamp is not None else message.get('date')
                                 reply_to=reply_to or message.get('reply_to_message',{}).get('message_id')
                 except (sqlite3.Error,ValueError,TypeError):
@@ -6140,6 +6149,10 @@ class App:
         stamp=now()
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if not telegram_on(self.config):
+                # No Telegram chat to ask in: the dashboard takes the change request itself.
+                db.execute("UPDATE feedback_prompts SET status='cancelled' WHERE status NOT IN ('sent','cancelled')")
+                return
             db.execute("UPDATE feedback_prompts SET status='cancelled' WHERE status!='sent' AND NOT EXISTS(SELECT 1 FROM suggestions s WHERE s.id=feedback_prompts.suggestion_id AND s.feedback_request_id=feedback_prompts.request_id AND s.feedback_until>? AND s.status NOT IN ('completed','rejected') AND (feedback_prompts.kind='dismiss' OR s.status!='snoozed'))",(stamp,))
             row=db.execute("SELECT * FROM feedback_prompts WHERE status NOT IN ('sent','cancelled') AND (retry_at IS NULL OR retry_at<=?)"+(' AND request_id=?' if request_id else '')+' ORDER BY created_at LIMIT 1', (stamp,request_id) if request_id else (stamp,)).fetchone()
             if not row:return
@@ -6163,7 +6176,7 @@ class App:
         result=None
         try:
             if mode=='native':result=sender(row)
-            else:result=telegram_request(self.config,{'action':'send','channel':'telegram','accountId':telegram_account(self.config),'target':self.config['telegram_owner'],
+            else:result=telegram_request(self.config,{'action':'send','channel':'telegram','accountId':telegram_account(self.config),'target':self.config.get('telegram_owner'),
                 'message':prompt_text(row['title'],plain=True,kind=row.get('kind') or 'change'),'replyTo':row['card_id']})
         except DeliveryNotSent:
             result={'definitely_not_sent':True}
@@ -6215,7 +6228,7 @@ class App:
                 found=set()
                 for value, in native.execute("SELECT value_json FROM plugin_state_entries WHERE plugin_id='telegram' AND namespace='telegram.message-cache'"):
                     msg=json.loads(value).get('sourceMessage',{})
-                    if (str(msg.get('chat',{}).get('id'))!=self.config['telegram_owner'] or not msg.get('from',{}).get('is_bot')
+                    if (str(msg.get('chat',{}).get('id'))!=self.config.get('telegram_owner') or not msg.get('from',{}).get('is_bot')
                         or not msg.get('message_id') or (msg.get('date') or 0)<int(dt.datetime.fromisoformat(row.get('attempted_at') or row['created_at']).timestamp())
                         or str(msg.get('reply_to_message',{}).get('message_id'))!=row['card_id']):continue
                     if msg.get('text') in (prompt_text(row['title'],kind=row.get('kind') or 'change'),prompt_text(row['title'],plain=True,kind=row.get('kind') or 'change')):found.add(str(msg['message_id']))
@@ -6225,7 +6238,7 @@ class App:
 
     def native_change_prompt(self,row):
         request={'receipt_key':hashlib.sha256(row['request_id'].encode()).hexdigest(),'card_id':row['card_id'],'text':prompt_text(row['title'],kind=row.get('kind') or 'change'),
-                 'receipt_dir':str(self.prompt_receipt_dir()),'target':str(self.config['telegram_owner'])}
+                 'receipt_dir':str(self.prompt_receipt_dir()),'target':str(self.config.get('telegram_owner'))}
         try:
             result=subprocess.run([node_bin(self.config),str(ROOT/'change-prompt-run.mjs')],env=node_env(self.config),input=encoded(request),capture_output=True,text=True,timeout=60)
             reply=json.loads(result.stdout)
@@ -6765,6 +6778,19 @@ class App:
             db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,preview) VALUES(?,'starting',?,?,1)", (run_id, started, started))
         return {'run_id': run_id, 'started_at': started, 'waiting': waiting, 'signals': min(waiting, RUN_SIGNAL_BUDGET)}
 
+    def recap_push(self, message, week):
+        """Without Telegram the recap's start goes to the dashboard app as a notification."""
+        with self.store.connect() as db:
+            subscriptions = [dict(r) for r in db.execute('SELECT endpoint,p256dh,auth FROM push_subscriptions')]
+        if subscriptions and self.config.get('dashboard_host'):
+            root = 'https://' + self.config['dashboard_host'] + self.config.get('dashboard_path', '/')
+            try:
+                push_node(self.config, {'action': 'send', 'subscriptions': subscriptions,
+                                        'payload': {'title': 'Your week', 'body': plain(message), 'url': root, 'tag': 'recap-' + week}})
+            except (subprocess.TimeoutExpired, ValueError, KeyError) as error:
+                LOG.warning('push recap error=%s', type(error).__name__)
+        return {'messageId': 'web-recap-' + week}
+
     def recap_step(self, sender=None, current=None):
         """Send the weekly recap once, Fridays from 16:00."""
         settings = self.config.get('weekly_recap') or {}
@@ -6785,8 +6811,10 @@ class App:
         except Exception:
             usage = None
         text = weekly_recap(self.store, self.config, current, usage)
+        if sender is None and not telegram_on(self.config):
+            sender = lambda message: self.recap_push(message, week)
         sender = sender or (lambda message: telegram_request(self.config, {'action': 'send', 'channel': 'telegram', 'accountId': telegram_account(self.config),
-                                                                           'target': self.config['telegram_owner'], 'message': message}))
+                                                                           'target': self.config.get('telegram_owner'), 'message': message}))
         status, message_id, error = 'uncertain', None, None
         try:
             receipt = sender(text)

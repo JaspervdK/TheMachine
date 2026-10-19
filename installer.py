@@ -288,7 +288,7 @@ def offer_openclaw(ui):
                    '  install it from https://nodejs.org or with a version manager (mise use -g node@24), then rerun ./install.sh')
             return
         command = openclaw_install_command(npm, want)
-        ui.say('\nThe Machine runs on OpenClaw: your own agent, with your model, talking to you through your Telegram bot.'
+        ui.say('\nThe Machine runs on OpenClaw: your own agent, with your model, talking to you through its dashboard app and, if you like, a Telegram bot.'
                ' It is not installed here.')
         if not ui.yes(f'Install OpenClaw {want} now? (runs: npm {" ".join(command[1:])})', True):
             return
@@ -309,8 +309,8 @@ def offer_openclaw(ui):
         ui.say('\nOpenClaw is not set up yet. Its own guided setup comes next; this is what The Machine needs from it:\n'
                '  1. Model: pick the provider you use and sign in or paste its key. Reviews and Do it run on it.\n'
                '  2. Gateway: say yes to running it as a service, so it keeps running in the background.\n'
-               '  3. Channels: choose Telegram. Make a bot first: in Telegram, message @BotFather, send /newbot,\n'
-               '     pick a name, and paste the token it gives you. The Machine sends its cards through this bot.\n'
+               '  3. Channels (optional): choose Telegram to get cards there too. Make a bot first: in Telegram, message\n'
+               '     @BotFather, send /newbot, pick a name, and paste the token. Skip it to use the dashboard app\'s notifications.\n'
                '  The rest is up to you. When it finishes, you come back here.')
         if ui.yes('Start OpenClaw\'s setup now?', True):
             run([openclaw, 'onboard', '--install-daemon'], timeout=None, capture_output=False)
@@ -320,9 +320,10 @@ def offer_openclaw(ui):
             ui.say('  OpenClaw is still not set up; run `openclaw onboard --install-daemon`, then rerun ./install.sh')
             return
     if not has_telegram(settings):
-        ui.say('\nOpenClaw has no Telegram bot yet, and The Machine sends its cards through one. To make one: in Telegram,\n'
-               'message @BotFather, send /newbot, pick a name, and copy the token it gives you.')
-        if ui.yes('Connect a Telegram bot to OpenClaw now? (runs: openclaw channels add --channel telegram)', True):
+        ui.say('\nOpenClaw has no Telegram bot. That is optional: cards also reach you through the dashboard app\n'
+               '(add it to your phone\'s home screen, turn on notifications). For Telegram too: in Telegram, message\n'
+               '@BotFather, send /newbot, pick a name, and copy the token it gives you.')
+        if ui.yes('Connect a Telegram bot to OpenClaw now? (runs: openclaw channels add --channel telegram)', False):
             run([openclaw, 'channels', 'add', '--channel', 'telegram'], timeout=None, capture_output=False)
             acted = True
         if not has_telegram(onboarding.openclaw_settings()):
@@ -397,9 +398,11 @@ def answers(interactive, facts):
             values['telegram_owner'] = onboarding.telegram_from_pairing(facts['openclaw'], onboarding.UI()) or ''
         values['telegram_owner'] = ask_until('Your Telegram user ID (the private chat with your OpenClaw bot'
                                              + (', found in OpenClaw)' if values['telegram_owner'] else
-                                                '; your bot\'s pairing reply shows it)'), values['telegram_owner'],
-                                             onboarding.telegram_id, lambda a: f'{a!r} is not a Telegram user ID: that is a number like 123456789')
-        values['telegram_owner'] = onboarding.telegram_id(values['telegram_owner'])
+                                                '; your bot\'s pairing reply shows it. Optional: Enter skips Telegram,'
+                                                ' then cards reach you through the dashboard app)'), values['telegram_owner'],
+                                             lambda a: telegram_off(a) or onboarding.telegram_id(a),
+                                             lambda a: f'{a!r} is not a Telegram user ID: that is a number like 123456789')
+        values['telegram_owner'] = onboarding.telegram_id(values['telegram_owner']) or ''
         values['tailscale_owner'] = ask_until('Your Tailscale login, as on your phone (only it may open the dashboard)'
                                               + ('' if values['tailscale_owner'] else '; this machine is tagged or not logged in, so type it'),
                                               values['tailscale_owner'], lambda a: bool(a.strip()), lambda a: 'needed for the dashboard')
@@ -419,17 +422,25 @@ def answers(interactive, facts):
             values['boundary'] = ask('Company name for these sources, or "personal" (keeps work and private apart)', guess)
     values['boundary'] = onboarding.boundary_label(values['boundary'] or onboarding.company_of(values['email']))
     values['dashboard_host'] = dashboard_address(values['dashboard_host'])
-    values['telegram_owner'] = onboarding.telegram_id(values['telegram_owner']) or values['telegram_owner']
-    missing = [key for key in ('telegram_owner', 'tailscale_owner', 'dashboard_host') if not values[key]]
+    # Telegram is optional: without it, cards reach the owner through the installed dashboard app.
+    values['telegram_owner'] = '' if telegram_off(values['telegram_owner']) else onboarding.telegram_id(values['telegram_owner']) or values['telegram_owner']
+    missing = [key for key in ('tailscale_owner', 'dashboard_host') if not values[key]]
     if missing:
         raise SystemExit('Missing answers: ' + ', '.join(missing) + ' (set ' + ', '.join(ENV[k] for k in missing) + ')')
-    if not re.fullmatch(r'-?\d{3,20}', values['telegram_owner']):
+    if not values['telegram_owner']:
+        say('No Telegram: cards reach you through the dashboard app (add it to your home screen, turn on notifications).'
+            ' Add Telegram later with assistant telegram on <your Telegram user ID>.')
+    elif not re.fullmatch(r'-?\d{3,20}', values['telegram_owner']):
         raise SystemExit('The Telegram owner must be a numeric chat ID, got ' + repr(values['telegram_owner']))
     if unknown(values['connectors']):
         raise SystemExit('Unknown sources: ' + ', '.join(unknown(values['connectors'])))
     if not valid_timezone(values['timezone']):
         raise SystemExit('Unknown time zone ' + repr(values['timezone']) + ' (set ASSISTANT_TIMEZONE, e.g. Europe/Brussels)')
     return values
+
+
+def telegram_off(answer):
+    return str(answer or '').strip().lower() in ('', 'none', 'off', 'no')
 
 
 def split(text):

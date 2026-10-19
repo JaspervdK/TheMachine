@@ -12,7 +12,8 @@ window.applyTheme=pick;pick();sys.addEventListener('change',pick);document.addEv
 <link rel="icon" type="image/png" sizes="32x32" href="brand/favicon-32.png">
 <link rel="icon" type="image/png" sizes="512x512" href="brand/favicon-512.png">
 <link rel="apple-touch-icon" href="brand/favicon-512.png">
-<link rel="manifest" href="manifest.webmanifest">
+<link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
+<meta name="apple-mobile-web-app-title" content="The Machine">
 <style>
 /* Palette: BRANDING.md / palette.json. Dark charcoal surfaces, restrained mint + amber, cream text, lavender secondary. */
 :root{color-scheme:dark;
@@ -857,15 +858,18 @@ await request('api/action',{method:'POST',headers:{'Content-Type':'application/j
 $('#send-dialog').close();toast(sendDraft.kind==='merge'?'Testing and merging the fix…':sendDraft.kind==='finish'?'On it. I’ll report back.':'Sending your approved draft…');await refresh();
 }catch(e){$('#send-error').textContent=e.message;b.disabled=false}};
 function openSnoozeLink(){const link=/^#snooze(-custom)?=([a-f0-9]{16})$/.exec(location.hash);if(link&&state.suggestions){if(state.suggestions.some(s=>s.id===link[2]&&!closed(s))){if($('#snooze-dialog').open)$('#snooze-dialog').close();openSnooze(link[2],!!link[1])}history.replaceState(null,'',location.pathname)}}
-// Phone notifications (installed app). The service sends a push next to each Telegram notification.
+// Phone notifications (installed app). The service sends a push for each card, also when Telegram is off.
 const pushOK='serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;
+// iPhone/iPad: Web Push exists only in the Home Screen app (iOS 16.4+), never in a Safari tab.
+const iosTab=/iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+const iosHint='On iPhone: tap Share, then Add to Home Screen. Open The Machine from your Home Screen and tap the bell (iOS 16.4 or newer).';
 const keyBytes=k=>Uint8Array.from(atob(k.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-k.length%4)%4)),c=>c.charCodeAt(0));
 const pushPost=(action,sub)=>{const j=sub.toJSON();return request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action,args:{endpoint:j.endpoint,keys:j.keys}})})};
-async function showPush(sync=false){const b=$('#push-toggle');if(!pushOK){b.hidden=true;return}b.hidden=false;try{const reg=await navigator.serviceWorker.register('sw.js');const sub=await reg.pushManager.getSubscription();const on=!!sub&&Notification.permission==='granted';
+async function showPush(sync=false){const b=$('#push-toggle');if(!pushOK){b.hidden=!(iosTab&&!navigator.standalone);b.title=iosHint;return}b.hidden=false;try{const reg=await navigator.serviceWorker.register('sw.js');const sub=await reg.pushManager.getSubscription();const on=!!sub&&Notification.permission==='granted';
 if(on&&sync)await pushPost('push_subscribe',sub);b.setAttribute('aria-pressed',String(on));b.title=on?'Phone notifications on':'Turn on phone notifications'}catch{}}
-$('#push-toggle').onclick=async()=>{const b=$('#push-toggle');b.disabled=true;try{const reg=await navigator.serviceWorker.register('sw.js');let sub=await reg.pushManager.getSubscription();
+$('#push-toggle').onclick=async()=>{const b=$('#push-toggle');if(!pushOK){toast(iosHint);return}b.disabled=true;try{const reg=await navigator.serviceWorker.register('sw.js');let sub=await reg.pushManager.getSubscription();
 if(sub&&b.getAttribute('aria-pressed')==='true'){await pushPost('push_unsubscribe',sub);await sub.unsubscribe();toast('Notifications off')}
-else{if(await Notification.requestPermission()!=='granted')throw Error('Notifications are blocked: allow them for this app in Android settings');
+else{if(await Notification.requestPermission()!=='granted')throw Error('Notifications are blocked: allow them for The Machine in your phone\'s settings (Notifications), then tap the bell again');
 const {key}=await request('api/push-key');sub=sub||await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:keyBytes(key)});await pushPost('push_subscribe',sub);toast('Notifications on')}}
 catch(e){toast(e.message,true)}finally{b.disabled=false;showPush()}};
 showPush(true);
@@ -1005,7 +1009,7 @@ $('#snooze-save').onclick=()=>saveSnooze();
 const since=()=>{const d=state.started_at?new Date(state.started_at):null;if(!d||isNaN(d))return [];const sameYear=d.getFullYear()===new Date().getFullYear(),day=Math.max(1,Math.floor((Date.now()-d)/864e5)+1);return [`Professionally nosy since ${d.toLocaleDateString(undefined,sameYear?{month:'long',day:'numeric'}:{month:'long',day:'numeric',year:'numeric'})}.`,...(day>1?[`Day ${day} of reading everything. Still not bored.`]:[])]};
 window.newTagline=()=>{const now=$('#tagline').textContent,rest=[...t,...since()].filter(x=>x!==now);$('#tagline').textContent=rest[Math.floor(Math.random()*rest.length)]};newTagline()}
 let toastTimer,manualBusy=false;
-function toast(text,error=false,undoId=null){const t=$('#toast');t.innerHTML=esc(text)+(undoId?` <button data-undo="${undoId}">Undo</button>`:'');t.classList.toggle('error',error);t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),undoId?15000:2500)}
+function toast(text,error=false,undoId=null){const t=$('#toast');t.innerHTML=esc(text)+(undoId?` <button data-undo="${undoId}">Undo</button>`:'');t.classList.toggle('error',error);t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),undoId?15000:text.length>90?9000:2500)}
 async function manualRefresh(){if(manualBusy)return;manualBusy=true;newTagline();document.querySelectorAll('.refresh-tap').forEach(e=>e.classList.add('busy'));const ok=await refresh();document.querySelectorAll('.refresh-tap').forEach(e=>e.classList.remove('busy'));manualBusy=false;toast(ok?'Up to date':'Couldn’t refresh. Try again in a moment.',!ok)}
 document.querySelectorAll('.refresh-tap').forEach(e=>{e.addEventListener('click',manualRefresh);e.addEventListener('keydown',k=>{if(k.key==='Enter'||k.key===' '){k.preventDefault();manualRefresh()}})});
 $('#toast').onclick=async e=>{const b=e.target.closest('[data-undo]');if(!b)return;b.disabled=true;try{await saveDecision(b.dataset.undo,'undo')}catch(e){toast(e.message,true)}};
