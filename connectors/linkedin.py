@@ -33,7 +33,7 @@ class Source:
     def __init__(self, config, account, helpers):
         self.config, self.account, self.helpers = config, account, helpers
 
-    def run(self, command, timeout=240):
+    def run(self, command, timeout=480):
         SourceError = self.helpers.SourceError
         if command[:1] not in (['sync'], ['verify']):
             raise SourceError('unsupported_linkedin_method')
@@ -49,6 +49,8 @@ class Source:
                 raise SourceError('linkedin_browser_busy', retry_after=600)
             if 'signed out' in err:
                 raise SourceError('linkedin_signed_out', retry_after=3600)
+            if 'in time' in err:
+                raise SourceError('linkedin_read_timeout', retry_after=900)
             raise SourceError('linkedin_read_failed', retry_after=900)
         try:
             return json.loads(result.stdout)

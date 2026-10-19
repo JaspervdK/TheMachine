@@ -44,7 +44,7 @@ class Source:
         try:
             done = subprocess.run([self.config.get('x_inbox', str(READER)), 'sync', '--handle', account['handle'],
                                    '--primary', account.get('primary', account['handle']), '--since', str(int(since_ms)),
-                                   '--state', json.dumps(state)], capture_output=True, text=True, timeout=240)
+                                   '--state', json.dumps(state)], capture_output=True, text=True, timeout=480)
         except subprocess.TimeoutExpired:
             raise SourceError('x_read_timeout', retry_after=900) from None
         except OSError as error:
@@ -57,6 +57,8 @@ class Source:
                 raise SourceError('x_signed_out', retry_after=3600)
             if 'rate limit' in err:
                 raise SourceError('x_rate_limited', retry_after=1800)
+            if 'in time' in err:
+                raise SourceError('x_read_timeout', retry_after=900)
             raise SourceError('x_read_failed', retry_after=900)
         try:
             data = json.loads(done.stdout)

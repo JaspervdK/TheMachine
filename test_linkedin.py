@@ -72,6 +72,7 @@ class LinkedInSource(unittest.TestCase):
         self.assertEqual(json.loads(command[command.index('--state') + 1]), {'cursor': 'C1'})
         for stderr, code, wait in (('the OpenClaw browser is busy (x)', 'linkedin_browser_busy', 600),
                                    ('LinkedIn is signed out in the OpenClaw browser', 'linkedin_signed_out', 3600),
+                                   ('the browser did not answer in time; try again', 'linkedin_read_timeout', 900),
                                    ('LinkedIn lookup failed: boom', 'linkedin_read_failed', 900)):
             with patch.object(a.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', 'linkedin-inbox: ' + stderr)):
                 with self.assertRaises(a.SourceError) as caught:

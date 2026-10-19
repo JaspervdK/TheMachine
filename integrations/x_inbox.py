@@ -351,7 +351,7 @@ class Fail(Exception):
     pass
 
 
-def oc(*args, timeout=60):
+def oc(*args, timeout=120):
     r = subprocess.run(['openclaw', 'browser', '--browser-profile', PROFILE, *args], capture_output=True, text=True, timeout=timeout)
     if r.returncode:
         raise Fail('browser command failed: ' + (r.stderr or r.stdout).strip()[:300])
@@ -402,7 +402,7 @@ OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / '
 
 def tab_ids():
     try:
-        return set(re.findall(r'^\s*id:\s*(\S+)', oc('tabs', timeout=30), re.M))
+        return set(re.findall(r'^\s*id:\s*(\S+)', oc('tabs', timeout=90), re.M))
     except Exception:
         return None
 
@@ -416,7 +416,7 @@ def remember_tab(target, opened):
 
 def close_tab(target):
     try:
-        oc('close', target, timeout=30)
+        oc('close', target, timeout=90)
     except Exception as e:  # never leave our tab behind silently
         print('warning: could not close tab ' + target + ': ' + str(e), file=sys.stderr)
         return False

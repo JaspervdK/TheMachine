@@ -90,10 +90,12 @@ async () => {
       // One bounded page per invocation, with durable cursors supplied by SQLite.
       // Do not advance the conversation page until all its message pages commit.
       const out = [], progress={...(P.state?.progress||{})};
+      // Bounded in time as well as pages: slow LinkedIn answers end the page early, never the whole read.
+      const started=Date.now(), late=()=>Date.now()-started>30000;
       let budget=0, pending=false;
       for (const c of convs.filter(c => (c.lastActivityAt || 0) >= P.since && !c.categories.includes('SPAM'))) {
         if (progress[c.urn]?.done) continue;
-        while (budget<5) {
+        while (budget<5 && !(budget && late())) {
           const previous=progress[c.urn]?.cursor;
           const mj = await gql(P.ids.message_pages,'(conversationUrn:'+enc(c.urn)+',count:20'+(previous?',prevCursor:'+enc(previous):'')+')'); absorb(mj);budget++;
           const page=root(mj).messengerMessagesByConversation;
@@ -107,7 +109,7 @@ async () => {
           if(done)break;
         }
         if (!progress[c.urn]?.done) {pending=true;break;}
-        if(budget>=5){pending=convs.some(c=>(c.lastActivityAt||0)>=P.since&&!c.categories.includes('SPAM')&&!progress[c.urn]?.done);break;}
+        if(budget>=5 || late()){pending=convs.some(c=>(c.lastActivityAt||0)>=P.since&&!c.categories.includes('SPAM')&&!progress[c.urn]?.done);break;}
       }
       const cursor=root(conversationPage).messengerConversationsByCategory.metadata.nextCursor;
       const reachedFloor=convs.some(c=>(c.lastActivityAt||0)<P.since);
@@ -224,7 +226,7 @@ class Fail(Exception):
     pass
 
 
-def oc(*args, timeout=60):
+def oc(*args, timeout=120):
     r = subprocess.run(['openclaw', 'browser', '--browser-profile', PROFILE, *args],
                        capture_output=True, text=True, timeout=timeout)
     if r.returncode:
@@ -232,7 +234,7 @@ def oc(*args, timeout=60):
     return r.stdout
 
 
-def evaluate(label, js, timeout_ms=45000):
+def evaluate(label, js, timeout_ms=90000):
     out = oc('evaluate', '--target-id', label, '--timeout-ms', str(timeout_ms), '--fn', js,
              timeout=timeout_ms // 1000 + 30)
     start = out.find('{') if out.lstrip().startswith('{') else out.find('\n{') + 1
@@ -252,7 +254,7 @@ OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / '
 
 def tab_ids():
     try:
-        return set(re.findall(r'^\s*id:\s*(\S+)', oc('tabs', timeout=30), re.M))
+        return set(re.findall(r'^\s*id:\s*(\S+)', oc('tabs', timeout=90), re.M))
     except Exception:
         return None
 
@@ -266,7 +268,7 @@ def remember_tab(target, opened):
 
 def close_tab(target):
     try:
-        oc('close', target, timeout=30)
+        oc('close', target, timeout=90)
     except Exception as e:  # never leave our tab behind silently
         print('warning: could not close tab ' + target + ': ' + str(e), file=sys.stderr)
         return False
