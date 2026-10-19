@@ -37,6 +37,26 @@ class InstallerTest(unittest.TestCase):
             self.assertTrue(installer.install_plugin({'openclaw': 'openclaw'}))
         self.assertEqual(calls.count(['plugins', 'enable']), 2)
 
+    def test_an_unchanged_bridge_is_not_reinstalled_or_reloaded(self):
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command[1:3])
+            return subprocess.CompletedProcess(command, 0, '', '')
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(installer, 'run', side_effect=run), \
+                mock.patch.object(installer, 'say'):
+            stamp = Path(tmp) / 'plugin-installed'
+            facts = {'openclaw': 'openclaw', 'openclaw_version': '2026.10.2'}
+            self.assertTrue(installer.install_plugin(facts, stamp=stamp))
+            self.assertIn(['plugins', 'reload'], calls)
+            calls.clear()
+            self.assertTrue(installer.install_plugin(facts, stamp=stamp))  # an update that did not touch it
+            self.assertEqual(calls, [])
+            self.assertTrue(installer.install_plugin({**facts, 'openclaw_version': '2026.11.1'}, stamp=stamp))
+            self.assertIn(['plugins', 'reload'], calls)  # a new OpenClaw gets it again
+            calls.clear()
+            self.assertTrue(installer.install_plugin(facts, reload=False, stamp=stamp))
+            self.assertNotIn(['plugins', 'reload'], calls)
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='machine-install-'))
         self.addCleanup(shutil.rmtree, self.tmp, True)

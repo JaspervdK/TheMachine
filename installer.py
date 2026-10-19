@@ -22,6 +22,7 @@ install/enable/uninstall`, approving your own Telegram pairing request if you sa
 OpenClaw's own setup commands when it offers them and you say yes.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -664,10 +665,27 @@ def warn_path(paths):
             f'  or add it: echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.profile (then open a new terminal)')
 
 
-def install_plugin(facts, reload=True):
+def plugin_fingerprint(facts):
+    """What the bridge in OpenClaw is made of: its files, where they are and the OpenClaw that runs them."""
+    digest = hashlib.sha256()
+    root = ROOT / 'openclaw-plugin'
+    for path in sorted(p for p in root.rglob('*') if p.is_file() and 'node_modules' not in p.parts):
+        digest.update(str(path.relative_to(root)).encode() + b'\0' + path.read_bytes() + b'\0')
+    digest.update(f"{root}\0{facts.get('openclaw')}\0{facts.get('openclaw_version')}".encode())
+    return digest.hexdigest()
+
+
+def install_plugin(facts, reload=True, stamp=None):
+    """Link, enable and reload the bridge, unless this exact bridge is already in. Every reload replaces the plugin
+    inside a running Gateway, which is slow on a small server and can leave the model runtime unpublished (every
+    model call then fails until the Gateway restarts): an update that did not touch the bridge should not do it."""
     openclaw = facts.get('openclaw')
     if not openclaw:
         return False
+    fingerprint = plugin_fingerprint(facts)
+    if stamp and reload and stamp.exists() and stamp.read_text().strip() == fingerprint:
+        say(f'OpenClaw plugin {PLUGIN_ID}: unchanged, left as it is')
+        return True
     plugin = str(ROOT / 'openclaw-plugin')
     say('Installing the local bridge and accepting its declared OpenClaw capabilities (see README Security model).')
     result = run([openclaw, 'plugins', 'install', '--link', '--force', '--accept-capabilities', plugin], timeout=300, capture_output=False)
@@ -694,6 +712,9 @@ def install_plugin(facts, reload=True):
         if result.returncode != 0:
             say('  plugin reload failed: ' + (result.stderr or result.stdout).strip()[:300])
             return False
+    if stamp and reload:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(fingerprint + '\n')
     say(f'OpenClaw plugin {PLUGIN_ID}: linked and enabled'
         + ('' if reload else ' (not reloaded: --no-start)'))
     return True
@@ -886,7 +907,7 @@ def main(argv=None):
         return 1
     setup_secrets(config, facts, paths)
     install_cli(paths)
-    plugin_ok = args.skip_plugin or install_plugin(facts, reload=not args.no_start)
+    plugin_ok = args.skip_plugin or install_plugin(facts, reload=not args.no_start, stamp=paths.data / 'plugin-installed')
     if not plugin_ok:
         return 1
     if args.activate:
