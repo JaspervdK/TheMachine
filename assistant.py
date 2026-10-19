@@ -5689,6 +5689,16 @@ class App:
                                             'https://www.googleapis.com/auth/gmail.readonly').get('data', '')
         return base64.urlsafe_b64decode(data + '=' * (-len(data) % 4)), node.get('mimeType', 'application/octet-stream'), node.get('filename') or 'image'
 
+    def started_at(self):
+        """When this Machine started: `started_at` in the config (a hosted machine's signup), else its first own activity."""
+        given = str(self.config.get('started_at') or '')
+        if given:
+            return given
+        with self.store.connect() as db:
+            row = db.execute("SELECT MIN(t) FROM (SELECT MIN(started_at) t FROM analyses UNION ALL SELECT MIN(created_at) FROM suggestions"
+                             " UNION ALL SELECT MIN(at) FROM sync_activity)").fetchone()
+        return row[0] if row and row[0] else None
+
     def action(self, name, args, owner_dashboard=False):
         accounts = [a['id'] for a in self.config['accounts']]
         selected = args.get('account_ids', [])
@@ -5717,6 +5727,7 @@ class App:
             for connector in result['connectors']:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
             result['model_usage'] = getattr(self, 'model_usage', None)
+            result['started_at'] = self.started_at()
             # Read only the existing heartbeat's runtime facts, never conversation
             # content or scheduler configuration. Missing evidence stays unknown.
             try:
