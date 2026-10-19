@@ -79,7 +79,7 @@ Choose the useful NEXT ACTION on the finished result, not more preparation for i
 
 ### Email
 
-`{kind:email,label:Send,account_id:<task Gmail account ID>,to:[<verified addresses>],subject:<exact subject>,body:<full email>}`
+`{kind:email,label:Send,account_id:<Gmail account ID of the task's company>,to:[<verified addresses>],subject:<exact subject>,body:<full email>}`
 
 - Any ready email, including replies, goes in next_actions as its exact structured email so the owner gets Send; never leave it only in the text because of formatting.
 - When the owner's note asks you to send it ("send it", "reply to them"), add send_now:true to the prepare call: the service then sends that draft right away through the same Send route, with their signature and attachments.

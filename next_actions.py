@@ -273,10 +273,16 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
             raise ValueError('Unsupported email fields')
         if not isinstance(value.get('signature', True), bool):
             raise ValueError('signature is true (default: the Gmail signature is added) or false')
+        # Any of the owner's Gmail accounts for the same company (or the same address) as the task's signals: a task
+        # that came from a calendar or Slack still sends from that company's mailbox.
+        task_accounts = [a for a in config['accounts'] if a['id'] in allowed_accounts]
+        boundaries = {a.get('boundary') for a in task_accounts if a.get('boundary')}
+        emails = {str(a.get('email') or '').lower() for a in task_accounts if a.get('email')}
         account = next((a for a in config['accounts'] if a['id'] == value.get('account_id')
-                        and a.get('service', 'gmail') == 'gmail' and a.get('transport') == 'gog'), None)
-        if not account or account['id'] not in allowed_accounts:
-            raise ValueError('Use the Gmail account belonging to this task, not another account')
+                        and a.get('service', 'gmail') == 'gmail' and a.get('transport') in ('gog', 'broker')), None)
+        if not account or (account['id'] not in allowed_accounts and account.get('boundary') not in boundaries
+                           and str(account.get('email') or '').lower() not in emails):
+            raise ValueError('Use a Gmail account of this task’s company')
         result = {'kind': 'email', 'account_id': account['id'], 'from': account['email']}
         if value.get('label'):
             if value['label']!='Send' and not value['label'].startswith('Send '):raise ValueError('Email button labels must say Send, such as Send reply')

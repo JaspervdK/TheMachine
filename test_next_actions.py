@@ -139,6 +139,13 @@ class NextActions(unittest.TestCase):
         self.app().action_step(self.transport(preflight=deny,send=lambda *_:self.fail('Unapproved permission')))
         self.assertEqual(self.action_job()['status'],'blocked')
 
+    def test_a_calendar_task_sends_from_its_companys_gmail_but_not_another_companys(self):
+        config={'accounts':[{'id':'cal','service':'calendar','email':'owner@acme.test','boundary':'work:Acme'},
+                            {'id':'acme-mail','service':'gmail','email':'owner@acme.test','boundary':'work:Acme','transport':'broker'},
+                            {'id':'side-mail','service':'gmail','email':'me@side.test','boundary':'work:Side','transport':'gog'}]}
+        self.assertEqual(n.validate(self.draft(account_id='acme-mail'),config,['cal'])['from'],'owner@acme.test')
+        with self.assertRaises(ValueError):n.validate(self.draft(account_id='side-mail'),config,['cal'])
+
     def test_account_isolation_header_injection_arbitrary_actions_rejected(self):
         for invalid in [self.draft(account_id='personal'),self.draft(subject='Hi\nBcc: thief@example.com'),
                         self.draft(to=['"Bob" <b@example.com>']),self.draft(attach=['/private']),{'kind':'command','cmd':'do anything'}]:
