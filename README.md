@@ -87,7 +87,7 @@ Python's standard library and SQLite are enough: no database server, queue, web 
   - `wacli` for WhatsApp; a Maton connection for Slack (allowed to post as you, to send Slack messages); a Salesflare API key.
   - The `gh` CLI logged in as you for GitHub; a restricted read-only key (or a Maton connection) for Stripe.
   - For LinkedIn and X: your accounts signed in to the OpenClaw browser (profile `openclaw`). To use another browser profile set `LINKEDIN_INBOX_BROWSER_PROFILE` / `X_INBOX_BROWSER_PROFILE`; to read through a browser's DevTools address directly instead of OpenClaw's browser commands (faster and steadier on a small, busy server) set `LINKEDIN_INBOX_BROWSER_CDP` / `X_INBOX_BROWSER_CDP`, e.g. `http://127.0.0.1:9222`. When a read finds the browser signed out, the Connections tab says "Signed out of LinkedIn" with what to do (on a hosted install: a Sign in again link to the server's browser).
-  - The OpenClaw Android app paired as a node for phone notifications.
+  - The OpenClaw Android app paired as a node for phone notifications ([pairing it, also from outside your network](docs/getting-started.md#pairing-your-android-phone)).
 
 ## Install
 

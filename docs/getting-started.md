@@ -8,7 +8,7 @@ From nothing to your first cards in about 15 minutes. Each step says how to chec
 - [ ] **Node.js** 24.16+ (24.x) or 26.1+, and **Python 3.12+**.
 - [ ] **Tailscale** on this machine and your phone, logged in (`sudo tailscale up`), for the dashboard.
 - [ ] Your own user account, not root, with a systemd user session (a normal login; over SSH that works too).
-- [ ] Per source you want: `gog` for Gmail and Calendar, `wacli` for WhatsApp, the OpenClaw Android app paired as a node for phone notifications, a [Maton](https://maton.ai) Slack connection, a Salesflare API key, `gh` for GitHub. You can add any of them later.
+- [ ] Per source you want: `gog` for Gmail and Calendar, `wacli` for WhatsApp, the OpenClaw Android app paired as a node for phone notifications ([how](#pairing-your-android-phone)), a [Maton](https://maton.ai) Slack connection, a Salesflare API key, `gh` for GitHub. You can add any of them later.
 
 ## 1. Install
 
@@ -45,6 +45,44 @@ Right after the service starts, the installer walks through each source:
 Every source is read once before it is saved, so a wrong key or account shows up immediately, with what to do about it. Afterwards you see the first sync per source: how many signals came in and from how far back.
 
 Skipped one? `assistant connect gmail` (or `slack`, `crm`, `whatsapp`, `android`, `github`, …) does the same any time. `assistant connect` on its own lists what is still missing.
+
+### Pairing your Android phone
+
+The Android source reads your phone's notifications through the OpenClaw Android app, paired with your Gateway as a node. The Gateway stays on loopback; the phone reaches it over `wss://` (OpenClaw refuses plain `ws://` outside your LAN):
+
+1. Install OpenClaw on the phone from [Google Play](https://play.google.com/store/apps/details?id=ai.openclaw.app).
+2. Give the phone a `wss://` way in. Pick one:
+   - **Tailscale:** both on your tailnet, then `openclaw config set gateway.tailscale.mode serve` and restart the Gateway. `openclaw qr` then advertises that address.
+   - **Your own reverse proxy with TLS** (Caddy, nginx), for a phone that is not on your tailnet. Forward only WebSocket upgrades on a long random path to the Gateway, let the proxy set `X-Forwarded-For` to the phone's address, and trust only that proxy:
+     ```bash
+     openclaw config set gateway.trustedProxies '["127.0.0.1","::1"]' --strict-json
+     ```
+     Without it the Gateway refuses proxied clients (`proxy_attribution_required`). With it, a phone coming through the proxy is never taken for a local client, which OpenClaw would approve without asking. A Caddy example:
+     ```
+     gateway.example.com {
+     	@phone {
+     		path /node-<long random string>
+     		header Connection *Upgrade*
+     		header Upgrade websocket
+     	}
+     	handle @phone {
+     		rewrite * /
+     		reverse_proxy 127.0.0.1:18789
+     	}
+     	handle {
+     		respond 404
+     	}
+     }
+     ```
+3. Make a setup code and scan it in the app (add a Gateway, scan the QR, or paste the code). It is single use, works for 10 minutes and, with `--limited`, gives the phone no admin access to your Gateway:
+   ```bash
+   openclaw qr --limited --url wss://gateway.example.com/node-<long random string>   # or without --url for Tailscale
+   ```
+4. The official app is usually approved by the code itself. If it still waits, approve only your phone's request (platform `android`): `openclaw devices list`, `openclaw devices approve <requestId>`, then the same with `openclaw nodes list` and `openclaw nodes approve <requestId>` if a node request follows.
+5. On the phone, allow notification access when the app asks. In the app's settings, turn on **Forward Notification Events**: the source reads that live feed, with a direct read every 10 minutes to catch gaps.
+6. `assistant connect android` picks the paired phone. Check: `openclaw nodes list` shows it connected, and the dashboard's Sources show Android.
+
+When it stops reading, the source says why: `android_offline` (the app is not connected; Android may have stopped it to save battery), `android_notifications_unavailable` (notification access was taken away), `android_feed_unavailable` (Forward Notification Events is off, or the bridge plugin is not loaded), `android_identity_mismatch` (the phone was unpaired: pair it again and run `assistant connect android`). WhatsApp, Telegram, Signal and Discord notifications never come through: OpenClaw leaves them out.
 
 ## 3. Open the dashboard
 
