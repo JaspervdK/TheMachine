@@ -92,6 +92,12 @@ class XSource(unittest.TestCase):
             x.sync(self.store, {}, ACCOUNT, H, src)
         self.assertEqual(len(src.calls), 2)
 
+    def test_an_account_with_its_own_browser_profile_reads_there(self):
+        ok = subprocess.CompletedProcess([], 0, json.dumps(page([mention()])), '')
+        with patch.object(a.subprocess, 'run', return_value=ok) as run:
+            x.Source({}, {**ACCOUNT, 'browser_profile': 'machine-2'}, H).page(5, {})
+        self.assertEqual(run.call_args.kwargs['env']['X_INBOX_BROWSER_PROFILE'], 'machine-2')
+
     def test_reader_maps_errors_and_reads_only(self):
         source = x.Source({'x_inbox': '/bin/x-inbox-test'}, ACCOUNT, H)
         ok = subprocess.CompletedProcess([], 0, json.dumps(page([mention()])), '')

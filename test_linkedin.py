@@ -249,6 +249,21 @@ class Transport(unittest.TestCase):
         with patch.object(n.subprocess, 'run', return_value=wrong), self.assertRaises(ValueError):
             t.preflight(self.action)
 
+    def test_an_account_with_its_own_browser_profile_reads_and_sends_there(self):
+        ok = subprocess.CompletedProcess([], 0, json.dumps({'messages': [], 'state': {}, 'more': False}), '')
+        with patch.object(a.subprocess, 'run', return_value=ok) as run:
+            li.Source({}, ACCOUNT, H).page(5, {})
+        self.assertIsNone(run.call_args.kwargs['env'])  # no profile of its own: the reader's default
+        second = {**ACCOUNT, 'id': 'li-2', 'browser_profile': 'machine-2', 'browser_cdp': 'http://127.0.0.1:9304'}
+        with patch.object(a.subprocess, 'run', return_value=ok) as run:
+            li.Source({}, second, H).page(5, {})
+        self.assertEqual(run.call_args.kwargs['env']['LINKEDIN_INBOX_BROWSER_PROFILE'], 'machine-2')
+        t = n.LinkedInTransport({'accounts': [ACCOUNT, second], 'linkedin_inbox': '/bin/linkedin-inbox-test'})
+        with patch.object(n.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', '')) as run:
+            t.reconcile({**self.action, 'account_id': 'li-2'}, {'id': 'J1'})
+        self.assertEqual(run.call_args.kwargs['env']['LINKEDIN_INBOX_BROWSER_PROFILE'], 'machine-2')
+        self.assertEqual(run.call_args.kwargs['env']['LINKEDIN_INBOX_BROWSER_CDP'], 'http://127.0.0.1:9304')
+
     def test_default_reader_is_the_bundled_one(self):
         self.assertEqual(n.LinkedInTransport({'accounts': [ACCOUNT]}).cli(self.action), str(n.LINKEDIN_INBOX))
         self.assertTrue(n.LINKEDIN_INBOX.exists())

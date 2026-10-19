@@ -266,7 +266,8 @@ def lease(action):
     return subprocess.run(args, capture_output=True, text=True, timeout=30)
 
 
-OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'the-machine' / 'linkedin-inbox-tabs'
+# per browser profile: each holds its own tabs (a second account reads in a browser of its own)
+OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'the-machine' / ('linkedin-inbox-tabs' + ('' if PROFILE == 'openclaw' else '-' + PROFILE))
 
 
 def tab_ids():

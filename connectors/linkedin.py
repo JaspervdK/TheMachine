@@ -8,6 +8,10 @@ leaving the browser, and nothing marked as read. Sign in to LinkedIn once in tha
     {"id": "me-linkedin", "service": "linkedin", "transport": "linkedin-inbox", "boundary": "work:Acme",
      "poll_seconds": 3600}
 
+A second LinkedIn account needs a browser profile of its own (a browser holds one LinkedIn sign-in):
+give that account "browser_profile": "<OpenClaw profile>" (and "browser_cdp": "<its DevTools address>" when
+read directly); without them the reader uses LINKEDIN_INBOX_BROWSER_PROFILE / _CDP, else "openclaw".
+
 LinkedIn has no API for this, so reads stay rare and in waking hours. Optional: "active_hours":
 [7, 22] (local time, the default) and config "linkedin_inbox" for the path to the reader. Replies
 go out only as an owner-approved `linkedin` next action (next_actions.LinkedInTransport).
@@ -15,6 +19,7 @@ go out only as an owner-approved `linkedin` next action (next_actions.LinkedInTr
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import subprocess
 import urllib.parse
@@ -26,6 +31,8 @@ SETUP = {'label': 'LinkedIn', 'what': 'Your LinkedIn messages.',
          'account': {'id': 'me-linkedin', 'service': 'linkedin', 'transport': 'linkedin-inbox', 'boundary': 'work', 'poll_seconds': 3600},
          # Read through the shared browser: a hosted install links to that browser on this site to sign in again.
          'browser': 'linkedin',
+         # an account's own browser (a second account of the site): its fields, read into the reader's environment
+         'browser_env': {'browser_profile': 'LINKEDIN_INBOX_BROWSER_PROFILE', 'browser_cdp': 'LINKEDIN_INBOX_BROWSER_CDP'},
          'hints': {'linkedin_signed_out': 'the browser it reads with is not signed in to LinkedIn; sign in there, then connect again'},
          'note': 'Sign in to LinkedIn once in the OpenClaw browser first: openclaw browser --browser-profile openclaw open https://www.linkedin.com/login'}
 READER = Path(__file__).resolve().parent.parent / 'integrations/linkedin_inbox.py'
@@ -40,7 +47,8 @@ class Source:
         if command[:1] not in (['sync'], ['verify']):
             raise SourceError('unsupported_linkedin_method')
         try:
-            result = subprocess.run([self.config.get('linkedin_inbox', str(READER)), *command], capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run([self.config.get('linkedin_inbox', str(READER)), *command], capture_output=True, text=True, timeout=timeout,
+                                    env=browser_env(self.account))
         except subprocess.TimeoutExpired:
             raise SourceError('linkedin_read_timeout', retry_after=900) from None
         except OSError as error:
@@ -64,6 +72,12 @@ class Source:
         if not isinstance(data.get('messages'), list) or not isinstance(data.get('state'), dict):
             raise self.helpers.SourceError('linkedin_invalid_page')
         return data
+
+
+def browser_env(account):
+    """The reader runs in this account's own browser, when it has one."""
+    own = {var: account[field] for field, var in SETUP['browser_env'].items() if account.get(field)}
+    return {**os.environ, **own} if own else None
 
 
 def thread_url(conversation):

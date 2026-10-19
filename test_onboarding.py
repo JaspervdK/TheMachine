@@ -113,6 +113,24 @@ class OnboardingTest(unittest.TestCase):
              mock.patch.object(onboarding, 'step_plugin', side_effect=lambda config, account, ui: None), self.assertRaises(onboarding.SetupError):
             onboarding.connect(self.path, 'x', FakeUI(answers=['personal']), 'other-x', restart=False)
 
+    def test_a_second_browser_account_keeps_the_browser_profile_it_was_signed_in_with(self):
+        self.config()
+        def plugin(config, account, ui):
+            account.setdefault('handle', 'alex_example')
+        with mock.patch.object(onboarding, 'check', return_value=None), mock.patch.object(onboarding, 'step_plugin', side_effect=plugin), \
+             mock.patch.dict(os.environ, {'X_INBOX_BROWSER_PROFILE': 'machine'}):
+            onboarding.connect(self.path, 'x', FakeUI(answers=['personal']), restart=False)
+        with mock.patch.object(onboarding, 'check', return_value=None), mock.patch.object(onboarding, 'step_plugin', side_effect=plugin), \
+             mock.patch.dict(os.environ, {'X_INBOX_BROWSER_PROFILE': 'machine-2', 'X_INBOX_BROWSER_CDP': 'http://127.0.0.1:9304'}):
+            onboarding.connect(self.path, 'x', FakeUI(answers=['personal']), 'second-x', restart=False)
+        with mock.patch.object(onboarding, 'check', return_value=None), mock.patch.object(onboarding, 'step_plugin', side_effect=plugin), \
+             mock.patch.dict(os.environ, {'X_INBOX_BROWSER_PROFILE': 'machine'}):
+            onboarding.connect(self.path, 'x', FakeUI(), 'second-x', restart=False)  # connecting it again keeps its own
+        accounts = json.loads(self.path.read_text())['accounts']
+        self.assertEqual([a.get('browser_profile') for a in accounts], ['machine', 'machine-2'])
+        self.assertEqual([a.get('browser_cdp') for a in accounts], [None, 'http://127.0.0.1:9304'])
+        self.assertNotEqual(accounts[0]['id'], accounts[1]['id'])
+
     def test_plugin_setup_without_a_read_check_is_not_reported_verified(self):
         from types import SimpleNamespace
         with mock.patch.object(onboarding.assistant(), 'load_connector', return_value=SimpleNamespace()):

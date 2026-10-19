@@ -43,7 +43,7 @@ PLACEHOLDERS = {'email': 'alex@example.com', 'connection_id': '00000000-0000-000
 # Per-account identity: never copied when a new account starts from one you already have.
 IDENTITY = {'id', 'email', 'owner_emails', 'display_name', 'connection_id', 'team_id', 'user_id', 'slack_host', 'node_id',
             'identity_sha256', 'store', 'calendar_id', 'handle', 'login', 'url', 'workspace_id', 'stripe_account',
-            'exclude', 'excluded_terms', 'scope'}
+            'exclude', 'excluded_terms', 'scope', 'browser_profile', 'browser_cdp'}
 # The source is set up but can't serve right now (shared browser in use, rate limit): saved anyway, and the
 # collector's own retry reads it, instead of failing setup over a moment's contention.
 BUSY = ('x_browser_busy', 'linkedin_browser_busy', 'x_rate_limited')
@@ -1080,6 +1080,9 @@ def connect(config_path, name, ui, account_id=None, restart=True):
     account = json.loads(json.dumps(account)) if existing else new_account(config, service, account_id, ui)
     if not existing:
         ui.say(f'  saving it as {account["id"]} in {account.get("boundary")}')
+    own = {field: os.environ[var] for field, var in (setup_of(service).get('browser_env') or {}).items() if os.environ.get(var)}
+    if own and not any(account.get(field) for field in own):
+        account.update(own)  # it reads in the browser it was signed in with, also once others are added
     STEPS.get(service, step_plugin)(config, account, ui)
     error = check(config, account)
     if error and error.startswith(BUSY):

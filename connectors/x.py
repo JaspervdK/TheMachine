@@ -3,8 +3,9 @@
 Read-only through integrations/x_inbox.py, which makes the same requests x.com does from a tab
 of the signed-in OpenClaw browser (not X's developer API): no API key, no cookies leaving the
 browser, and nothing marked as seen or read. Sign in to X once in that browser (`openclaw browser --browser-profile openclaw
-open https://x.com/login`); add more accounts with X's own account switcher. One config account
-per X account:
+open https://x.com/login`); add more accounts with X's own account switcher, or give an account a
+browser of its own with "browser_profile": "<OpenClaw profile>" and, read directly, "browser_cdp": "<its DevTools
+address>" (else X_INBOX_BROWSER_PROFILE / _CDP, else "openclaw"). One config account per X account:
 
     {"id": "me-x", "service": "x", "transport": "x-inbox", "boundary": "work:Acme",
      "handle": "yourhandle", "primary": "yourhandle", "poll_seconds": 3600}
@@ -20,6 +21,7 @@ Encrypted X Chat isn't read. Replies and DMs go out only as an owner-approved `x
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import subprocess
 import urllib.parse
@@ -31,10 +33,18 @@ SETUP = {'label': 'X', 'what': 'Your mentions and direct messages on X.',
          'account': {'id': 'me-x', 'service': 'x', 'transport': 'x-inbox', 'boundary': 'work', 'poll_seconds': 3600},
          # Read through the shared browser: a hosted install links to that browser on this site to sign in again.
          'browser': 'x',
+         # an account's own browser (a second account of the site): its fields, read into the reader's environment
+         'browser_env': {'browser_profile': 'X_INBOX_BROWSER_PROFILE', 'browser_cdp': 'X_INBOX_BROWSER_CDP'},
          'hints': {'x_signed_out': 'the browser it reads with is not signed in to X; sign in there, then connect again'},
          'note': 'Sign in to X once in the OpenClaw browser first: openclaw browser --browser-profile openclaw open https://x.com/login',
          'ask': [('handle', 'Your X handle, without @'), ('primary', 'Handle the browser is normally signed in to', '{handle}')]}
 READER = Path(__file__).resolve().parent.parent / 'integrations/x_inbox.py'
+
+
+def browser_env(account):
+    """The reader runs in this account's own browser, when it has one."""
+    own = {var: account[field] for field, var in SETUP['browser_env'].items() if account.get(field)}
+    return {**os.environ, **own} if own else None
 
 
 class Source:
@@ -46,7 +56,8 @@ class Source:
         try:
             done = subprocess.run([self.config.get('x_inbox', str(READER)), 'sync', '--handle', account['handle'],
                                    '--primary', account.get('primary', account['handle']), '--since', str(int(since_ms)),
-                                   '--state', json.dumps(state)], capture_output=True, text=True, timeout=480)
+                                   '--state', json.dumps(state)], capture_output=True, text=True, timeout=480,
+                                  env=browser_env(account))
         except subprocess.TimeoutExpired:
             raise SourceError('x_read_timeout', retry_after=900) from None
         except OSError as error:

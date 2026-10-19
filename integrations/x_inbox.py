@@ -421,7 +421,8 @@ def one_at_a_time(wait=180):
             time.sleep(2)
 
 
-OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'the-machine' / 'x-inbox-tabs'
+# per browser profile: each holds its own tabs (a second account reads in a browser of its own)
+OPEN_TABS = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'the-machine' / ('x-inbox-tabs' + ('' if PROFILE == 'openclaw' else '-' + PROFILE))
 
 
 def tab_ids():

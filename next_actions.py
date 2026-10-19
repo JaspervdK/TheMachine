@@ -693,6 +693,13 @@ class LinkedInBusy(Exception):
     """The shared browser is busy: try again shortly; nothing was sent."""
 
 
+def browser_env(config, action, prefix):
+    """A LinkedIn or X send goes out from the browser its account reads with, when it has its own."""
+    account = next((a for a in config.get('accounts', []) if a.get('id') == action.get('account_id')), {})
+    own = {f'{prefix}_{key.upper()}': account[key] for key in ('browser_profile', 'browser_cdp') if account.get(key)}
+    return {**os.environ, **own} if own else None
+
+
 class LinkedInTransport:
     """Sends one owner-approved LinkedIn message through integrations/linkedin_inbox.py (config
     "linkedin_inbox" overrides the path). The job id is the idempotency token: the reader logs the
@@ -708,7 +715,8 @@ class LinkedInTransport:
         return ['--conversation', action['conversation_id']] if action.get('conversation_id') else ['--profile', action['profile']]
 
     def run(self, action, args, timeout=240):
-        result = subprocess.run([self.cli(action), *args], capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run([self.cli(action), *args], capture_output=True, text=True, timeout=timeout,
+                                env=browser_env(self.config, action, 'LINKEDIN_INBOX'))
         if result.returncode == 2 and 'busy' in result.stderr.lower():
             raise LinkedInBusy()
         return result
@@ -778,7 +786,8 @@ class XTransport:
                 *(['--long'] if action.get('reply_to') and account.get('long_posts') else [])]
 
     def run(self, action, args, timeout=300):
-        result = subprocess.run([self.cli(action), *args], capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run([self.cli(action), *args], capture_output=True, text=True, timeout=timeout,
+                                env=browser_env(self.config, action, 'X_INBOX'))
         if result.returncode == 2 and 'busy' in result.stderr.lower():
             raise XBusy()
         return result
