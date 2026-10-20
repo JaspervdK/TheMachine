@@ -41,7 +41,7 @@ try{
  assert.equal(await page.locator('#settings-more .alpha').textContent(),'alpha');
  assert.equal(await page.locator('#settings-more a').count(),0);  // a button, not an inline link
  assert.equal(await page.locator('#settings-cloud').textContent(),'Start a Fleet');
- assert.equal(await page.locator('#settings-cloud').getAttribute('href'),'https://app.themachine.computer/');
+ assert.equal(await page.locator('#settings-cloud').getAttribute('href'),'https://app.themachine.computer/start');  // a Fleet or Relay for Friends, kept through sign-in
  assert.equal(await page.locator('#settings-cloud').getAttribute('target'),'_blank');
  {const r=await page.evaluate(()=>{const t=document.querySelector('#settings-more').getBoundingClientRect(),b=document.querySelector('#settings-cloud').getBoundingClientRect();return b.top>=t.bottom-1});assert.equal(r,true)}  // below the text on a phone
  // section notes sit under their titles, not off to the right

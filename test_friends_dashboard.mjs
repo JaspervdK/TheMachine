@@ -19,12 +19,12 @@ const view={on:true,kinds:{relationships:'who knows someone',meeting:'meeting co
    members:[{member_id:'fp_lou',name:'Lou',rules:rules()}]}],
  friends:{id:FR,username:'sam',in:[{id:'frq_1',name:'Max (@max)',at:'2026-10-20T10:00:00Z'}],out:[{id:'frq_2',username:'someone',at:'2026-10-20T10:00:00Z'}],blocked:[]},
  waiting:[],asked:[{id:'x1',fleet:FR,name:'Lou',kind:'availability',question:'When are you busy, 2026-10-21?',status:'answered',busy:[['2026-10-21T09:00Z','2026-10-21T10:30Z']]}],log:[],notices:[]};
-const calls=[];
+const calls=[];let shown=view;
 const server=createServer(async(req,res)=>{res.setHeader('Content-Type','application/json');
  if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(req.url==='/api/status'){res.end(JSON.stringify({suggestions:[],connectors:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],fleet:{on:true,waiting:0}}));return}
  if(req.url==='/api/action'){let body='';for await(const b of req)body+=b;calls.push(JSON.parse(body));res.end('{"ok":true}');return}
- if(req.url.startsWith('/api/fleet')){res.end(JSON.stringify(view));return}
+ if(req.url.startsWith('/api/fleet')){res.end(JSON.stringify(shown));return}
  res.statusCode=404;res.end('{}')});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
@@ -55,5 +55,18 @@ try{
   assert.ok(fits,`${scheme} ${width}px scrolls sideways`);
   assert.deepEqual(errors,[]);
  }
+ // A self-hosted Machine without Relay for Friends: no friends group, a link to start it (on the cloud's /start)
+ shown={...view,fleets:[view.fleets[0]],friends:{relay_needed:true},asked:[]};
+ {const page=await (await browser.newContext({viewport:{width:390,height:900}})).newPage();
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto('http://127.0.0.1:'+server.address().port);
+  await page.locator('nav [data-tab="fleet"]').click();await page.locator('#fleet-friends').waitFor();
+  const friends=page.locator('#fleet-friends'),link=friends.locator('a',{hasText:'Start Relay for Friends'});
+  assert.match(await friends.innerText(),/reaches friends through the hosted relay/);
+  assert.equal(await link.getAttribute('href'),'https://app.themachine.computer/start');
+  assert.equal(await link.getAttribute('target'),'_blank');
+  assert.equal(await friends.locator('.friend-add-form').count(),0);
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  assert.deepEqual(errors,[])}
  console.log('friends dashboard: ok');
 }finally{await browser.close();server.close()}
