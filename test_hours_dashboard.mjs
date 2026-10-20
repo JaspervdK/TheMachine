@@ -36,12 +36,12 @@ try{
  assert.equal(await page.locator('#settings #theme-toggle').isVisible(),true);
  assert.equal(await page.locator('#settings-fleet').isHidden(),true);  // no Fleet here
  assert.match(await page.locator('#settings-more').textContent(),/assistant telegram/);
- // self-hosted, not paired: a way to start a Fleet in the cloud, marked alpha
- assert.match(await page.locator('#settings-more').textContent(),/Start a Fleet in the cloud/);
+ // self-hosted, not paired: a way onto The Machine Network (Friends, free) or a Fleet, marked alpha
+ assert.match(await page.locator('#settings-more').textContent(),/The Machine Network/);
  assert.equal(await page.locator('#settings-more .alpha').textContent(),'alpha');
  assert.equal(await page.locator('#settings-more a').count(),0);  // a button, not an inline link
- assert.equal(await page.locator('#settings-cloud').textContent(),'Start a Fleet');
- assert.equal(await page.locator('#settings-cloud').getAttribute('href'),'https://app.themachine.computer/start');  // a Fleet or Relay for Friends, kept through sign-in
+ assert.equal(await page.locator('#settings-cloud').textContent(),'Join the Network');
+ assert.equal(await page.locator('#settings-cloud').getAttribute('href'),'https://app.themachine.computer/start');  // the Network or a Fleet, kept through sign-in
  assert.equal(await page.locator('#settings-cloud').getAttribute('target'),'_blank');
  {const r=await page.evaluate(()=>{const t=document.querySelector('#settings-more').getBoundingClientRect(),b=document.querySelector('#settings-cloud').getBoundingClientRect();return b.top>=t.bottom-1});assert.equal(r,true)}  // below the text on a phone
  // section notes sit under their titles, not off to the right

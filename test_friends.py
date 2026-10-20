@@ -77,15 +77,6 @@ class Friends(unittest.TestCase):
             urllib.request.urlopen = original
         self.assertEqual(sent[0].get('X-machine-friends'), '1')
 
-    def test_without_relay_for_friends_the_view_says_so_and_nothing_else(self):
-        self.relay.directory['fleets'] = [f for f in self.relay.directory['fleets'] if f['kind'] != 'friends']
-        self.relay.directory['friends_relay'] = 'needed'  # a self-hosted Machine whose owner has no Relay for Friends
-        self.fleet.directory(refresh=True)
-        self.assertEqual(self.fleet.view()['friends'], {'relay_needed': True})
-        del self.relay.directory['friends_relay']
-        self.fleet.directory(refresh=True)
-        self.assertIsNone(self.fleet.view()['friends'])
-
     def test_friends_are_their_own_group_apart_from_the_fleet(self):
         view = self.fleet.view()
         kinds = {f['id']: f['kind'] for f in view['fleets']}

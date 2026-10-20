@@ -110,9 +110,7 @@ class Friends:
         ref = self.friends_ref()
         found = self.fleets().get(ref) if ref else None
         if not found:
-            # A self-hosted Machine without Relay for Friends gets no friends group: the relay says so, the tab links to it
-            seen = self.meta('directory')
-            return {'relay_needed': True} if isinstance(seen, dict) and seen.get('friends_relay') == 'needed' else None
+            return None
         from fleet import clean
         requests = found.get('requests') if isinstance(found.get('requests'), dict) else {}
         return {'id': ref, 'username': clean(found.get('username'), 40),
