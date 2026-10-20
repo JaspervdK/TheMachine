@@ -560,3 +560,18 @@ Customer export/import: configured credentials under the workspace are secret fi
 Saved browser sign-ins now serialize across separate dashboard requests; a disconnected browser after Submit is reported as unconfirmed, not signed in. Slack rate-limit records identify the read method without retaining response content. Browser-source failures distinguish unavailable web-client queries, HTTP rejection and browser transport failures using fixed labels only. These changes preserve polling/checkpoints and broad owner-authorized execution; they add no approval step. Two concurrent collectors may still share Slack's upstream quota.
 
 Activation: commit tested code, then restart only the Assistant service. Roll back source by reverting this repair, leaving the live database, saved sign-ins, decisions, checkpoints and delivery receipts intact. Private operation evidence belongs in the workspace report, not this public README.
+
+
+## October 20 follow-up: receipt and refresh recovery
+
+Fleet answers and notices are acknowledged only after their local save commits. The relay retains an unacknowledged answer for up to three days; its receipt identifies the exact answer stage, so an old acknowledgment cannot consume a newer update. Old app/server pairs remain compatible. Do not clear checkpoints or replay a possibly completed external action to “fix” a timeout.
+
+Fleet refreshes leave unchanged forms in place, preserve typed drafts when data changes, and ignore superseded responses. Telegram draft limits count emoji, escaped punctuation and the owner's feedback together; a trimmed draft opens the full review rather than offering direct Send.
+
+Tests: `test_fleet_receipts.py`, `test_fleet_refresh_dashboard.mjs` (delayed real Chromium responses), and `test_next_actions.CardDraft`. Run `scripts/test.py` in the OSS version, or the private Python/Node suites with a disposable HOME. These tests do not send real business messages or make owner decisions.
+
+These repairs add no new owner-approval restrictions. Explicit owner instructions remain authority to carry out the requested task; proactive preparation still does not authorize unrelated consequential actions.
+
+Activation: commit and test first, restart only the Assistant service locally, and use the maintained hosted app updater for hosted instances. Roll back source, preserving the database and its new receipt records, owner decisions, sign-ins and checkpoints. An older relay without acknowledgments keeps its previous delivery behavior; upgrade the relay and app together for durable receipt recovery.
+
+Uncertain Fleet/Friends questions retain a committed operation ID before sending. The updated relay returns the original question IDs on retry and rejects changed proposals under the same identity. Old relays ignore the new field; they must be updated for this guarantee. Request hashes/IDs follow the existing 30-day question-metadata retention.

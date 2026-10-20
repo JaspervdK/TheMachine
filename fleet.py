@@ -1456,13 +1456,26 @@ class Fleet(fleet_requests.Requests, friends.Friends):
             raise ValueError('Your Fleet does not ask that')
         if not self.teammates(fleet):
             raise ValueError('Nobody in your Fleet to ask yet')
-        sent = self.relay.call('POST', '/ask', {'fleet': fleet, 'kind': kind, 'question': question, **({'to': to} if to else {})})
+        proposal = {'fleet': fleet, 'kind': kind, 'question': question, **({'to': to} if to else {})}
+        pending_key = 'pending_ask:' + hashlib.sha256(json.dumps([proposal, context], sort_keys=True).encode()).hexdigest()
+        # Commit the operation identity before the remote write. A lost response or
+        # local save reuses it, so the relay returns the original question IDs.
         with self.connect() as db:
+            row = db.execute('SELECT value FROM fleet_meta WHERE key=?', (pending_key,)).fetchone()
+            request_id = json.loads(row[0]) if row else secrets.token_hex(16)
+            if not row:
+                db.execute('INSERT INTO fleet_meta(key,value) VALUES(?,?)', (pending_key, json.dumps(request_id)))
+        sent = self.relay.call('POST', '/ask', {**proposal, 'request_id': request_id})
+        with self.connect() as db:
+            created = False
             for member_id, ask_id in sent.get('ids', {}).items():
                 teammate = self.member(fleet, member_id) or {}
                 db.execute('INSERT OR IGNORE INTO fleet_out(id,fleet,member_id,name,kind,question,context,status,at) VALUES(?,?,?,?,?,?,?,?,?)',
                            (ask_id, fleet, member_id, clean(label(teammate), 120) or 'A teammate', kind, json.dumps(question), context, 'asked', now()))
-            self.log(db, 'out', fleet, None, 'your Fleet', kind, question_text(kind, question), f"asked {len(sent.get('ids', {}))}")
+                created = created or db.execute('SELECT changes()').fetchone()[0] > 0
+            db.execute('DELETE FROM fleet_meta WHERE key=?', (pending_key,))
+            if created:
+                self.log(db, 'out', fleet, None, 'your Fleet', kind, question_text(kind, question), f"asked {len(sent.get('ids', {}))}")
         return sent
 
     def ask_free(self, text, fleet):
@@ -1476,10 +1489,14 @@ class Fleet(fleet_requests.Requests, friends.Friends):
                         fleet=fleet)
 
     def take_answer(self, item):
+        receipt = item.get('receipt')
         with self.connect() as db:
+            if receipt and db.execute('SELECT 1 FROM fleet_meta WHERE key=? AND value=?',
+                                      ('answer_receipt:' + str(item.get('id')), json.dumps(receipt))).fetchone():
+                return True
             row = db.execute('SELECT * FROM fleet_out WHERE id=?', (str(item.get('id')),)).fetchone()
             if not row:
-                return
+                return False
             status = item.get('status') if item.get('status') in ('answered', 'declined', 'waiting', 'expired') else 'declined'
             answer = clean_answer(row['kind'], item.get('answer')) if status == 'answered' else None
             if status == 'answered' and answer is None:
@@ -1491,6 +1508,9 @@ class Fleet(fleet_requests.Requests, friends.Friends):
                          ('answered: ' + answer_text(row['kind'], answer)) if answer is not None else status)
         if row['kind'] in fleet_requests.KINDS:
             self.request_answered(row, status, answer)
+        if receipt:
+            self.set_meta('answer_receipt:' + str(item.get('id')), receipt)
+        return True
 
     # -- meetings
     def meetings_on(self):
@@ -1782,19 +1802,26 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         with self.connect() as db:  # a question still to tell the owner about: come back sooner
             if wait and self.untold(db):
                 wait = min(wait, NOTIFY_SETTLE)
-        found = self.relay.call('GET', f'/inbox?wait={int(wait)}&notices=1', timeout=wait + 15)
+        found = self.relay.call('GET', f'/inbox?wait={int(wait)}&notices=1&ack=1', timeout=wait + 15)
         for ask in found.get('asks', []):
             try:
                 self.take_ask(ask)
             except (ValueError, KeyError, TypeError) as error:
                 LOG.error('fleet ask error=%s', type(error).__name__)
+        acknowledged = {'answers': [], 'notices': []}
         for item in found.get('answers', []):
-            self.take_answer(item)
+            saved = self.take_answer(item)
+            if saved and item.get('receipt'):
+                acknowledged['answers'].append({'id': item['id'], 'receipt': item['receipt']})
         for item in found.get('notices', []) or []:
             try:
-                self.take_notice(item)
+                saved = self.take_notice(item)
+                if saved is not None and item.get('id') and item.get('version'):
+                    acknowledged['notices'].append({'id': item['id'], 'version': item['version']})
             except (ValueError, KeyError, TypeError) as error:
                 LOG.error('fleet notice error=%s', type(error).__name__)
+        if any(acknowledged.values()) and found.get('ack'):
+            self.relay.call('POST', '/ack', acknowledged)
         with self.connect() as db:
             expired = db.execute("SELECT id,telegram_message_id FROM fleet_in WHERE status='waiting' AND at<?",
                                  ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=APPROVAL_DAYS)).isoformat(timespec='seconds'),)).fetchall()

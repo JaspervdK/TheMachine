@@ -534,6 +534,21 @@ class CardDraft(unittest.TestCase):
         self.assertEqual(self.buttons(payload)[0],('Send',f'assistant:{self.sid}:send_{revision}'))
         self.assertNotIn('card_send',self.row())
 
+    def test_multibyte_and_markdown_heavy_drafts_do_not_overflow_the_card(self):
+        for text in ('😀' * 2300, '*_' * 1150):
+            revision = self.ready(body=text)['revision']
+            payload = self.send()
+            self.assertLess(len(payload['message'].encode('utf-16-le')) // 2, 4096)
+            self.assertEqual(self.buttons(payload)[0], ('Send', f'assistant:{self.sid}:send_{revision}'))
+            self.assertNotIn('card_send', self.row())
+
+    def test_long_feedback_shares_the_draft_budget(self):
+        self.ready(body='*_' * 1150)
+        row = {**self.row(), 'requested_feedback': '*_' * 250}
+        with patch.object(a, 'telegram_request', side_effect=lambda config, args: args):
+            payload = a.telegram(self.CONFIG, row, 'send')
+        self.assertLess(len(payload['message'].encode('utf-16-le')) // 2, 4096)
+
     def test_a_recipient_still_to_choose_keeps_the_review(self):
         revision=self.ready()['revision'];row=self.row()
         row['next_actions']=[{**row['next_actions'][0],'to':[],'to_options':['a@example.com','b@example.com']}]  # set by the service

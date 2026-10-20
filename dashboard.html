@@ -1204,13 +1204,13 @@ function fleetNote(s){if(closed(s))return fleetHandoff(s);const h=s.fleet_holder
  if(s.fleet_split)out+=`<p class="note fleet">Follow-ups split in your Fleet: ${esc(s.fleet_split)}</p>`;return out+fleetHandoff(s)}
 function fleetAskRow(n){if(!state?.fleet?.on||!['person','org'].includes(n.kind))return'';const about=n.kind==='org'?n.id.replace(/^org:/,''):/^email:/.test(n.id)?n.id.slice(6):n.name;
  return `<div class="fleet-ask"><button class="ghost" data-fleet-ask="${esc(about)}">Ask the Fleet who knows ${esc(n.kind==='org'?about:n.name)}</button></div>`}
-let fleetData=null,fleetShown=Promise.resolve();
+let fleetData=null,fleetShown=Promise.resolve(),fleetViewVersion=0;
 // #fleet=<question> from a phone notification or Telegram: the Fleet tab at that question; &choice= asks to confirm it.
 function openFleetLink(){if(/^#fleet-brief=fl_[0-9a-f]{16}$/.test(location.hash))history.replaceState(null,'','#fleet');const m=/^#fleet(?:=((?:q|fn)_[a-f0-9]{16})(?:&choice=(once|decline))?)?$/.exec(location.hash);if(!m||!state.fleet?.on)return;
  history.replaceState(null,'',location.pathname+location.search);const card=/^q_/.test(m[1]||'');document.querySelector(`nav [data-tab="${card?'inbox':'fleet'}"]`).click();
  (card?fleetSync(true):fleetShown).then(()=>{const c=m[1]&&document.getElementById('fleet-'+m[1]);if(!c)return;c.scrollIntoView({block:'center',behavior:'smooth'});c.classList.remove('flash');void c.offsetWidth;c.classList.add('flash');
   const w=m[2]&&fleetData?.waiting.find(x=>x.id===m[1]);if(w&&confirm(`${m[2]==='once'?'Answer once':'Decline'}? ${w.name} asks: ${w.question}`))c.querySelector(`[data-choice-f="${m[2]}"]`)?.click()})}
-async function fleetView(refresh=false){const view=$('#fleet-view'),before=fleetSig();try{fleetData=await request('api/fleet'+(refresh?'?refresh=1':''));fleetAt=Date.now();if(state&&fleetSig()!==before)render()}catch(e){view.innerHTML=`<p class="error">${esc(e.message)}</p>`;return}
+async function fleetView(refresh=false){const view=$('#fleet-view'),before=fleetSig(),version=++fleetViewVersion;try{const next=await request('api/fleet'+(refresh?'?refresh=1':''));if(version!==fleetViewVersion)return;fleetData=next;fleetAt=Date.now();if(state&&fleetSig()!==before)render()}catch(e){if(version===fleetViewVersion){view._fleetHTML=null;view.innerHTML=`<p class="error">${esc(e.message)}</p>`}return}
  const f=fleetData;if(!f.on){view.innerHTML='<p class="muted">This Machine is not in a Fleet.</p>';return}
  // Several Work Fleets: each its own section, with its own people, rules and Ask; questions go to one Fleet at a time.
  const works=f.fleets.filter(x=>x.kind==='work'),family=f.fleets.find(x=>x.kind==='family'),several=works.length>1;
@@ -1237,7 +1237,12 @@ async function fleetView(refresh=false){const view=$('#fleet-view'),before=fleet
  if(family)html+=head(family)+'<p class="muted">A Family Fleet links your Machines. Its questions (who’s free, household admin, trips) are coming later.</p>';
  html+=friendsSection(f,notices);
  html+=`<div class="section-head"><h2>Log</h2><p>Every question asked or answered, both ways.</p></div><ul class="fleet-log list">${f.log.map(l=>`<li><small class="mono">${esc(new Date(l.at).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}))}</small> ${l.direction==='in'?'From':'To'} ${esc(l.name||'')}: ${esc(l.what)} · <span class="muted">${esc(l.outcome)}</span></li>`).join('')||'<li class="muted">Nothing yet.</li>'}</ul>`;
- view.innerHTML=html}
+ // Leave unchanged forms in place: a completed background request must not swallow a click.
+ if(view._fleetHTML===html)return;
+ const drafts=[...view.querySelectorAll('form')].map(form=>({key:form.className+'|'+(form.dataset.fleet||''),values:[...form.elements].filter(e=>e.name&&['INPUT','TEXTAREA'].includes(e.tagName)).map(e=>[e.name,e.value])}));
+ view.innerHTML=html;view._fleetHTML=html;
+ for(const draft of drafts){const form=[...view.querySelectorAll('form')].find(f=>f.className+'|'+(f.dataset.fleet||'')===draft.key);if(form)for(const [name,value]of draft.values){const input=form.elements.namedItem(name);if(input&&'value'in input)input.value=value}}
+}
 // Friends (friends.py): add by username, requests both ways, your friends with the Machine they answer with, asking them,
 // and your rules per friend (the same rule component as teammates). Friends see nothing of your Fleets.
 const friendBtn=(label,attrs,cls='ghost',confirmText='')=>`<button type="button" class="${cls}" ${attrs}${confirmText?` data-confirm-text="${esc(confirmText)}"`:''}>${esc(label)}</button>`;

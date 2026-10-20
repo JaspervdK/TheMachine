@@ -5252,11 +5252,23 @@ def card_draft(row):
     if a.get('snooze_days'):
         tail.append(f"After sending, the thread leaves your inbox for {a['snooze_days']} day{'s' if a['snooze_days'] > 1 else ''}.")
     # Telegram takes 4096 characters; the title, summary, links and status share them.
-    room = max(400, min(2500, 3300 - len(row.get('title') or '') - len(row.get('body') or '') - len(''.join(head + tail))))
+    # Count the escaped representation conservatively in UTF-16 units too:
+    # emoji and Markdown punctuation can double the old character estimate.
+    units = lambda text: len(escape(text).encode('utf-16-le')) // 2
+    room = max(0, min(2500, 3200 - units(row.get('title') or '') - units(row.get('body') or '')
+                      - units(row.get('source_line') or '') - units((row.get('requested_feedback') or '')[:500])
+                      - units('\n'.join(head + tail))))
     body = a['body'].strip()
-    full = len(body) <= room
+    full = units(body) <= room
     if not full:
-        body = body[:room].rstrip() + '…'
+        used, kept = 0, []
+        for char in body:
+            weight = units(char)
+            if used + weight > room:
+                break
+            kept.append(char)
+            used += weight
+        body = ''.join(kept).rstrip() + '…'
         tail.append('Full draft in the dashboard.')
     text = '**Draft**\n' + '\n'.join(escape(line) for line in head) + '\n\n' + escape(body) + ('\n\n' + '\n'.join(escape(line) for line in tail) if tail else '')
     return {'action': a, 'text': text, 'full': full}
