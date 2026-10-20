@@ -19,7 +19,13 @@ answered by plain database reads in this module: never by a model, a tool, the b
 any rule. Everything is off by default: a first question from a teammate waits for the owner (Allow once, Always,
 Decline, Never), and rules are set per teammate and per kind, only from the owner's own dashboard. Answers that come
 back are checked against the same fixed form before anything shows them or hands them to a preparation. Only people
-seen in the owner's work accounts are ever mentioned. Both directions are logged for the owner (fleet_log)."""
+seen in the owner's work accounts are ever mentioned. Both directions are logged for the owner (fleet_log).
+
+The relay also tells the owner what happens in their Fleet (notices): someone asks the Fleet for a server (with the
+exact amount, or "free, because this Fleet is comped"), joined, had a server started, or left. This Machine shows them
+in its Fleet tab, on the phone and in Telegram. A seat request has Confirm and Decline; a tap is only relayed (with
+the terms that message showed), and the control plane checks and executes it: a tap on an old message, or on terms
+that changed since, does nothing and says why."""
 from __future__ import annotations
 
 import datetime as dt
@@ -47,11 +53,15 @@ CREATE TABLE IF NOT EXISTS fleet_log(id INTEGER PRIMARY KEY,at TEXT NOT NULL,dir
 CREATE TABLE IF NOT EXISTS fleet_claims(suggestion_id TEXT PRIMARY KEY,key TEXT NOT NULL,holder_id TEXT,holder_name TEXT,
   mine INTEGER NOT NULL DEFAULT 0,checked_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS fleet_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS fleet_notices(id TEXT PRIMARY KEY,fleet TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,
+  version INTEGER NOT NULL,view TEXT NOT NULL,at TEXT NOT NULL,received_at TEXT NOT NULL,notified_at TEXT,
+  telegram_message_id TEXT,telegram_key TEXT,decided_at TEXT,reason TEXT);
 '''
 FLEET_NAMES = {'work': 'Work Fleet', 'family': 'Family Fleet'}
 ASKS = {'work': ('relationships', 'meeting'), 'family': ()}       # what each Fleet asks (the relay says the same)
 RULE_KINDS = {'work': ('relationships', 'meeting', 'handling'), 'family': ()}
-KIND_LABEL = {'relationships': 'who knows someone', 'meeting': 'meeting context', 'handling': 'who handles shared emails'}
+KIND_LABEL = {'relationships': 'who knows someone', 'meeting': 'meeting context', 'handling': 'who handles shared emails',
+              'seat': 'a server in your Fleet'}
 RULES = ('ask', 'always', 'never')
 CLOSENESS = ('close', 'regular', 'occasional', 'faint')
 OPEN_CARD = ('pending', 'accepted', 'prepared', 'instructions', 'snoozed')
@@ -65,6 +75,8 @@ MEETING_DAYS, APPROVAL_DAYS = 7, 3
 # A waiting question tells the owner once: after it settled for NOTIFY_SETTLE seconds, so questions that
 # arrive together share one phone notification and one Telegram message, and never later than NOTIFY_MAX.
 NOTIFY_SETTLE, NOTIFY_MAX, NOTIFY_ROWS = 15, 60, 5
+NOTICE_KINDS = ('seat_request', 'joined', 'server_started', 'left', 'seat_confirmed', 'seat_declined')
+NOTICE_DAYS = 30
 DECIDED = {'once': 'Answered once', 'always': 'Answered, and always from now on', 'decline': 'Declined', 'never': 'Declined, and never from now on'}
 
 
@@ -373,6 +385,47 @@ def telegram_message(rows, root):
     return {'text': head + '\n\n' + '\n\n'.join(lines), 'buttons': buttons}
 
 
+def notice_clean(view):
+    """A notice from the relay, in the fixed form this Machine shows: plain text only, the two seat choices only."""
+    if not isinstance(view, dict) or not re.fullmatch(r'fn_[a-f0-9]{16}', str(view.get('id') or '')) or view.get('kind') not in NOTICE_KINDS:
+        return None
+    buttons = [{'choice': b['choice'], 'label': clean(b.get('label'), 40)} for b in view.get('buttons') or []
+               if isinstance(b, dict) and b.get('choice') in ('confirm', 'decline')] if view['kind'] == 'seat_request' else []
+    url = str(view.get('url') or '')
+    try:
+        version = int(view.get('version') or 1)
+    except (TypeError, ValueError):
+        return None
+    return {'id': view['id'], 'kind': view['kind'], 'fleet': view.get('fleet') if view.get('fleet') in FLEET_NAMES else 'work',
+            'fleet_name': clean(view.get('fleet_name'), 80), 'status': clean(view.get('status'), 20) or 'open',
+            'version': version, 'at': clean(view.get('at'), 40) or now(),
+            'text': clean(view.get('text'), 300), 'detail': clean(view.get('detail'), 600), 'outcome': clean(view.get('outcome'), 200),
+            'key': clean(view.get('key'), 40), 'buttons': buttons, 'url': url if url.startswith('https://') else ''}
+
+
+def notice_push(view, root):
+    """The phone notification for a notice: its line, opening the Fleet tab at it."""
+    title = {'seat_request': 'Your Fleet asks you', 'seat_confirmed': 'Your server was confirmed',
+             'seat_declined': 'Your server was not confirmed'}.get(view['kind'], 'Your Fleet')
+    return {'title': title, 'body': view['text'], 'url': (root + '#fleet=' + view['id']) if root else view['url'],
+            'tag': 'fleet-' + view['id']}
+
+
+def notice_message(view, root):
+    """The Telegram message for a notice. A seat request waiting for the owner: its line, the fine print, Confirm
+    (with the amount) and Decline; once settled, its outcome. Anything else: its line and Open."""
+    text = view['text'] + (f"\n\n{view['detail']}" if view['detail'] and (view['buttons'] or view['kind'] != 'seat_request') else '')
+    if view['outcome']:
+        text += f"\n\n→ {view['outcome']}"
+    buttons = []
+    if view['buttons']:
+        buttons.append([{'text': b['label'], 'value': f"assistant:fleetn:{view['id']}:{b['choice']}"} for b in view['buttons']])
+    url = (root + '#fleet=' + view['id']) if root else view['url']
+    if url:
+        buttons.append([{'text': 'Open', 'url': url}])
+    return {'text': text, 'buttons': buttons}
+
+
 def answer_text(kind, answer):
     """One plain line of an answer: for the dashboard, the log and preparations."""
     if not answer:
@@ -409,6 +462,9 @@ class Fleet:
         # Set by the app: notify(rows) tells the owner about waiting questions and returns the Telegram message id
         # (or None); retell(message_id) brings that Telegram message up to date after a decision elsewhere.
         self.notify = self.retell = None
+        # notify_notice(view) tells the owner about a notice (phone, Telegram) and returns the Telegram message id;
+        # retell_notice(message_id, message) brings that message up to date.
+        self.notify_notice = self.retell_notice = None
         with self.connect() as db:
             ensure(db)
 
@@ -542,6 +598,113 @@ class Fleet:
         with self.connect() as db:
             rows = db.execute('SELECT * FROM fleet_in WHERE telegram_message_id=? ORDER BY at,id', (str(message_id),)).fetchall()
         return telegram_message(rows, dashboard_root(self.config)) if rows else None
+
+    # -- notices: what happens in the owner's Fleet (a seat request, joined, a server started, left)
+    def take_notice(self, raw):
+        """A notice, new or changed. New: kept, and told once (notice_round). Changed (decided elsewhere, withdrawn,
+        new terms): its Telegram message is brought up to date with the terms it now shows."""
+        view = notice_clean(raw)
+        if not view:
+            return None
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM fleet_notices WHERE id=?', (view['id'],)).fetchone()
+            if row and row['version'] >= view['version']:
+                return row['status']
+            if row:
+                db.execute('UPDATE fleet_notices SET status=?,version=?,view=? WHERE id=?', (view['status'], view['version'], json.dumps(view), view['id']))
+            else:
+                db.execute('INSERT INTO fleet_notices(id,fleet,kind,status,version,view,at,received_at) VALUES(?,?,?,?,?,?,?,?)',
+                           (view['id'], view['fleet'], view['kind'], view['status'], view['version'], json.dumps(view), view['at'], now()))
+        if row and row['telegram_message_id']:
+            self.retell_notice_now(row['telegram_message_id'])
+        return view['status']
+
+    def notice(self, nid):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM fleet_notices WHERE id=?', (str(nid),)).fetchone()
+        return row
+
+    def notice_telegram(self, row):
+        """The Telegram message for a notice row, and the terms (key) it shows."""
+        view = json.loads(row['view'])
+        return notice_message(view, dashboard_root(self.config)), view.get('key') or ''
+
+    def retell_notice_now(self, message_id):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM fleet_notices WHERE telegram_message_id=?', (str(message_id),)).fetchone()
+        if not row or not self.retell_notice:
+            return
+        message, key = self.notice_telegram(row)
+        with self.connect() as db:
+            db.execute('UPDATE fleet_notices SET telegram_key=? WHERE id=?', (key, row['id']))
+        self.retell_notice(message_id, message)
+
+    def notice_round(self):
+        """Tell the owner about new notices: once each (its Telegram message is later edited, never sent again). A
+        request settled before it was told, or an old notice, only shows in the Fleet tab."""
+        if not self.notify_notice:
+            return []
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).isoformat(timespec='seconds')
+        with self.connect() as db:
+            rows = db.execute('SELECT * FROM fleet_notices WHERE notified_at IS NULL ORDER BY at,id LIMIT 5').fetchall()
+            db.executemany('UPDATE fleet_notices SET notified_at=? WHERE id=?', [(now(), r['id']) for r in rows])  # marked first
+        told = []
+        for row in rows:
+            view = json.loads(row['view'])
+            if row['status'] != 'open' if view['kind'] == 'seat_request' else row['at'] < old:
+                continue
+            message, key = self.notice_telegram(row)
+            try:
+                message_id = self.notify_notice(view, message)
+            except Exception as error:
+                LOG.warning('fleet notice notify error=%s', type(error).__name__)
+                message_id = None
+            if message_id:
+                with self.connect() as db:
+                    db.execute('UPDATE fleet_notices SET telegram_message_id=?,telegram_key=? WHERE id=?', (str(message_id), key, row['id']))
+            told.append(row['id'])
+        return told
+
+    def decide_notice(self, nid, choice, key, via='dashboard'):
+        """The owner's Confirm or Decline on a seat request, relayed as is. The control plane decides whether it still
+        holds: it may come back stale (already settled, withdrawn, no longer the owner) or changed (new terms), and then
+        nothing was done. Returns {status, reason, notice}."""
+        if choice not in ('confirm', 'decline'):
+            raise ValueError('Choose confirm or decline')
+        row = self.notice(nid)
+        if not row or row['kind'] != 'seat_request':
+            raise ValueError('No such request')
+        found = self.relay.call('POST', '/decide', {'id': row['id'], 'choice': choice, 'key': key or '', 'via': via}, timeout=40)
+        view = notice_clean(found.get('notice')) or json.loads(row['view'])
+        status = found.get('status') if found.get('status') in ('confirmed', 'declined', 'stale', 'changed') else 'stale'
+        reason = clean(found.get('reason'), 300)
+        with self.connect() as db:
+            db.execute('UPDATE fleet_notices SET status=?,version=MAX(version,?),view=?,decided_at=?,reason=? WHERE id=?',
+                       (view['status'], view['version'], json.dumps(view), now() if status in ('confirmed', 'declined') else None, reason, row['id']))
+            name = view['text'].split(' wants ')[0]
+            self.log(db, 'in', view['fleet'], None, name, 'seat', view['text'],
+                     {'confirmed': f'confirmed ({via})', 'declined': f'declined ({via})'}.get(status, 'nothing done: ' + reason))
+        if via != 'telegram' and row['telegram_message_id']:
+            self.retell_notice_now(row['telegram_message_id'])
+        return {'status': status, 'reason': reason, 'notice': view}
+
+    def decide_notice_from_telegram(self, nid, choice, message_id):
+        """A tap on the Telegram message this Machine sent for that request, and only that message. It confirms the
+        terms that message showed; the reply is the message as it is now, and why nothing happened if nothing did."""
+        row = self.notice(nid)
+        if not row or not message_id or str(row['telegram_message_id'] or '') != str(message_id):
+            raise ValueError('That Telegram message is not the one sent for this request')
+        try:
+            result = self.decide_notice(nid, choice, row['telegram_key'], via='telegram')
+        except ValueError as error:
+            result = {'status': 'stale', 'reason': clean(str(error), 300) + ' Nothing was done.', 'notice': json.loads(row['view'])}
+        except (Off, OSError):
+            result = {'status': 'stale', 'reason': 'Your Machine could not reach the Fleet relay just now, so nothing was done. Tap again in a minute.',
+                      'notice': json.loads(row['view'])}
+        message, key = self.notice_telegram(self.notice(nid))
+        with self.connect() as db:
+            db.execute('UPDATE fleet_notices SET telegram_key=? WHERE id=?', (key, nid))
+        return {'status': result['status'], 'reason': result['reason'], 'message': message}
 
     def notify_round(self, clock=None):
         """Tell the owner about questions waiting for them: once each, together when they arrived together."""
@@ -728,7 +891,7 @@ class Fleet:
         with self.connect() as db:  # a question still to tell the owner about: come back sooner
             if wait and db.execute("SELECT 1 FROM fleet_in WHERE status='waiting' AND notified_at IS NULL").fetchone():
                 wait = min(wait, NOTIFY_SETTLE)
-        found = self.relay.call('GET', f'/inbox?wait={int(wait)}', timeout=wait + 15)
+        found = self.relay.call('GET', f'/inbox?wait={int(wait)}&notices=1', timeout=wait + 15)
         for ask in found.get('asks', []):
             try:
                 self.take_ask(ask)
@@ -736,6 +899,11 @@ class Fleet:
                 LOG.error('fleet ask error=%s', type(error).__name__)
         for item in found.get('answers', []):
             self.take_answer(item)
+        for item in found.get('notices', []) or []:
+            try:
+                self.take_notice(item)
+            except (ValueError, KeyError, TypeError) as error:
+                LOG.error('fleet notice error=%s', type(error).__name__)
         with self.connect() as db:
             expired = db.execute("SELECT id,telegram_message_id FROM fleet_in WHERE status='waiting' AND at<?",
                                  ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=APPROVAL_DAYS)).isoformat(timespec='seconds'),)).fetchall()
@@ -745,6 +913,10 @@ class Fleet:
             if self.retell:
                 self.retell(message_id)
         self.notify_round()
+        self.notice_round()
+        with self.connect() as db:
+            db.execute('DELETE FROM fleet_notices WHERE received_at<?',
+                       ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NOTICE_DAYS)).isoformat(timespec='seconds'),))
         stamp = time.monotonic()
         if stamp - self.last['claims'] > CLAIMS_EVERY or not wait:
             self.last['claims'] = stamp
@@ -780,18 +952,21 @@ class Fleet:
                       'answer': answer_text(r['kind'], json.loads(r['answer'])) if r['answer'] else None}
                      for r in db.execute("SELECT * FROM fleet_out WHERE context IS NULL OR context NOT LIKE 'card:%' ORDER BY at DESC LIMIT 60")]
             log = [dict(r) for r in db.execute('SELECT at,direction,fleet,name,kind,what,outcome FROM fleet_log ORDER BY id DESC LIMIT 100')]
+            notices = [{**json.loads(r['view']), 'reason': r['reason'] or ''}
+                       for r in db.execute('SELECT * FROM fleet_notices ORDER BY at DESC LIMIT 30')]
         out = []
         for kind, found in fleets.items():
             out.append({'kind': kind, 'label': FLEET_NAMES.get(kind, kind), 'name': found.get('name'), 'asks': list(ASKS.get(kind, ())),
                         'members': [{'member_id': m['member_id'], 'name': m['name'], 'machine': m.get('machine'),
                                      'rules': {k: rules.get((kind, m['member_id'], k), {'rule': 'ask', 'details': False}) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(kind)]})
-        return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log,
+        return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
                 'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL}
 
     def summary(self):
         with self.connect() as db:
             waiting = db.execute("SELECT COUNT(*) FROM fleet_in WHERE status='waiting'").fetchone()[0]
+            waiting += db.execute("SELECT COUNT(*) FROM fleet_notices WHERE kind='seat_request' AND status='open'").fetchone()[0]
         return {'on': True, 'waiting': waiting}
 
     def annotate(self, db, suggestions):

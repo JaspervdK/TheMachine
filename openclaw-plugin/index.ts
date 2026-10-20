@@ -15,7 +15,7 @@ const taskActions=(item:any)=>{
  const emailReady=choices.some((a:any)=>['email','email_demo','linkedin','slack','x','whatsapp','merge','finish'].includes(a.kind));
  return choices.filter((a:any)=>a.kind!=='prepare'||(!emailReady&&!/^Draft (shorter|longer|another|alternative|follow-up)\b/i.test(a.label||'')));
 };
-const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'fleet_decide']);
+const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'fleet_decide', 'fleet_notice_decide']);
 // The service lays out its Fleet question message; callbacks get the same wire format as card buttons.
 const fleetButtons=(rows:any[])=>rows.map(row=>row.map((b:any)=>b.url?{text:b.text,url:b.url}:{text:b.text,callback_data:buildCallback(b.value)}));
 const TOOL_ACTIONS = ['status', 'events', 'begin_analysis', 'analysis_page', 'finish_analysis', 'suggest', 'prepare', 'preparation_blocked', 'preparation_history', 'remember_fact', 'looks_handled', 'promise', 'related', 'graph', 'profile_evidence', 'save_profile'];
@@ -197,6 +197,23 @@ export default definePluginEntry({
             return { handled: true };
           }
           if (result?.message) await ctx.respond.editMessage({ text: result.message.text, buttons: fleetButtons(result.message.buttons) });
+          return { handled: true };
+        }
+        // A member asks the owner's Fleet for a server. The tap is relayed with the terms that message showed; the control
+        // plane executes it or says why not (already settled, withdrawn, terms changed), and the message shows it as it is now.
+        const noticeTap = /^assistant:fleetn:(fn_[a-f0-9]{16}):(confirm|decline)$/.exec(ctx.callback.data);
+        if (noticeTap) {
+          let result;
+          try { result = await call('fleet_notice_decide', { id: noticeTap[1], choice: noticeTap[2], source: 'telegram',
+            message_id: String(ctx.callback.messageId), decision_id: `telegram:${ctx.callbackId}` }); }
+          catch (error:any) {
+            if (error.status !== 400) throw error;
+            await ctx.respond.clearButtons();
+            await ctx.respond.reply({ text: 'This message is not the one sent for that request, so nothing was done. Please use the dashboard.' });
+            return { handled: true };
+          }
+          if (result?.message) await ctx.respond.editMessage({ text: result.message.text, buttons: fleetButtons(result.message.buttons) });
+          if (result?.reason) await ctx.respond.reply({ text: result.reason });
           return { handled: true };
         }
         const match = /^assistant:([a-f0-9]{16}):(accept|reject|snooze|other|complete|undo|unmerge|retry|back|snooze_(?:2h|tomorrow|3d|1w)|dismiss_(?:irrelevant|handled|wrong|other|none)|(?:send|confirm|next)_[a-f0-9]{12}|confirm_[a-f0-9]{12}_[0-5])$/.exec(ctx.callback.data);

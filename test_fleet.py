@@ -311,6 +311,92 @@ class Fleet(unittest.TestCase):
         self.assertEqual(retold, ['77'])
         self.assertNotIn('Answer once', json.dumps(self.fleet.telegram_view('77')))
 
+    def seat(self, nid, version=1, status='open', key='k1', text='Ann wants a Standard server in Acme: €30/month, new total €60/month.'):
+        buttons = [{'choice': 'confirm', 'label': 'Confirm · €30/month'}, {'choice': 'decline', 'label': 'Decline'}] if status == 'open' else []
+        return {'id': nid, 'kind': 'seat_request', 'fleet': 'work', 'fleet_name': 'Acme', 'status': status, 'version': version,
+                'at': NOW.isoformat(), 'url': 'https://cp.example/account#fleet', 'text': text, 'detail': 'Plus VAT where it applies.',
+                'buttons': buttons, 'outcome': '' if status == 'open' else 'Confirmed on your Account page: their server is starting.', 'key': key}
+
+    def test_fleet_notices_reach_the_owner_and_a_seat_tap_is_only_relayed_on_the_terms_it_showed(self):
+        from unittest.mock import patch
+        nid, joined = 'fn_' + 'a' * 16, 'fn_' + 'b' * 16
+        told, retold = [], []
+        self.fleet.notify_notice = lambda view, message: told.append((view, message)) or '501'
+        self.fleet.retell_notice = lambda message_id, message: retold.append((message_id, message))
+        self.relay.inbox = {'asks': [], 'answers': [], 'notices': [
+            self.seat(nid), {'id': joined, 'kind': 'joined', 'fleet': 'work', 'fleet_name': 'Acme', 'status': 'info', 'version': 1,
+                             'at': NOW.isoformat(), 'url': 'https://cp.example/account#fleet', 'text': 'Ann joined Acme.', 'buttons': [
+                                 {'choice': 'confirm', 'label': 'sneaky'}]},
+            {'id': 'fn_bad', 'kind': 'seat_request', 'version': 1}, {'id': 'fn_' + 'c' * 16, 'kind': 'run_this', 'version': 1}]}
+        self.fleet.step(wait=0)
+        self.assertIn('/inbox?wait=0&notices=1', [p for _, p, _ in self.relay.calls])
+        self.assertEqual([v['id'] for v, _ in told], [nid, joined])  # the malformed and unknown ones are dropped
+        message = told[0][1]
+        self.assertEqual(message['text'].split('\n')[0], 'Ann wants a Standard server in Acme: €30/month, new total €60/month.')
+        self.assertEqual([[b['text'] for b in row] for row in message['buttons']], [['Confirm · €30/month', 'Decline'], ['Open']])
+        self.assertEqual(message['buttons'][0][0]['value'], f'assistant:fleetn:{nid}:confirm')
+        self.assertTrue(all(len('tgcb1:xxxxx:' + b['value']) <= 64 for row in message['buttons'] for b in row if b.get('value')))
+        self.assertEqual([[b['text'] for b in row] for row in told[1][1]['buttons']], [['Open']])  # info: Open only, never a choice
+        self.assertEqual(self.fleet.summary()['waiting'], 1)
+        self.assertEqual(self.fleet.notice_round(), [])  # once each
+        app = object.__new__(a.App)
+        app.store, app.config, app.fleet = self.store, CONFIG, self.fleet
+        tap = lambda choice, message='501': app.action('fleet_notice_decide', {'id': nid, 'choice': choice, 'source': 'telegram', 'message_id': message})
+        with self.assertRaisesRegex(ValueError, 'not the one sent'):
+            tap('confirm', '12')
+        with self.assertRaisesRegex(ValueError, 'dashboard'):
+            app.action('fleet_notice_decide', {'id': nid, 'choice': 'confirm', 'message_id': '501'})  # an agent, not a tap
+        self.assertEqual(self.relay.sent('/decide'), [])
+        # The terms changed on the control plane before the tap: nothing done, the message shows the new terms.
+        newer = self.seat(nid, 2, key='k2', text='Ann wants a Standard server in Acme: free, because this Fleet is comped.')
+        self.relay.call = (lambda old: lambda method, path, body=None, timeout=40: (
+            self.relay.calls.append((method, path, body)) or answers.pop(0)) if path == '/decide' else old(method, path, body, timeout))(self.relay.call)
+        answers = [{'status': 'changed', 'reason': 'The terms changed since that message: it is now free. Nothing was done.', 'notice': newer}]
+        result = tap('confirm')
+        self.assertEqual(self.relay.sent('/decide')[-1], {'id': nid, 'choice': 'confirm', 'key': 'k1', 'via': 'telegram'})
+        self.assertEqual(result['status'], 'changed')
+        self.assertIn('Nothing was done', result['reason'])
+        self.assertIn('free, because this Fleet is comped', result['message']['text'])
+        answers = [{'status': 'confirmed', 'reason': '', 'notice': self.seat(nid, 3, status='confirmed', key='k2')}]
+        self.assertEqual(tap('confirm')['status'], 'confirmed')
+        self.assertEqual(self.relay.sent('/decide')[-1]['key'], 'k2')  # the terms the edited message showed
+        self.assertEqual(self.fleet.summary()['waiting'], 0)
+        # A late or repeated tap: the control plane says it is settled; the reply says so and nothing more happens.
+        answers = [{'status': 'stale', 'reason': 'Already settled: Confirmed in Telegram. Nothing more was done.', 'notice': self.seat(nid, 3, status='confirmed')}]
+        late = tap('decline')
+        self.assertEqual((late['status'], late['message']['buttons']), ('stale', [[{'text': 'Open', 'url': 'https://cp.example/account#fleet'}]]))
+        self.assertIn('Already settled', late['reason'])
+        # The relay refusing (another Machine, not the owner's): nothing done, and why.
+        answers = []
+        with patch.object(self.relay, 'call', side_effect=ValueError('This Machine does not answer for you in that Fleet.')):
+            refused = tap('confirm')
+        self.assertEqual(refused['status'], 'stale')
+        self.assertIn('does not answer for you', refused['reason'])
+        # Settled elsewhere (the Account page): the Telegram message is brought up to date, its buttons gone.
+        other = 'fn_' + 'd' * 16
+        self.fleet.take_notice(self.seat(other))
+        self.fleet.notice_round()
+        self.fleet.take_notice(self.seat(other, 2, status='confirmed'))
+        self.assertEqual(retold[-1][0], '501')
+        self.assertEqual([[b['text'] for b in row] for row in retold[-1][1]['buttons']], [['Open']])
+        self.fleet.take_notice(self.seat(other, 1))  # an older version changes nothing
+        self.assertEqual(self.fleet.notice(other)['status'], 'confirmed')
+        # On the dashboard: the card's key, via dashboard.
+        third = 'fn_' + 'e' * 16
+        self.fleet.take_notice(self.seat(third, key='k9'))
+        answers = [{'status': 'declined', 'reason': '', 'notice': self.seat(third, 2, status='declined')}]
+        self.assertEqual(app.action('fleet_notice_decide', {'id': third, 'choice': 'decline', 'key': 'k9'}, owner_dashboard=True)['status'], 'declined')
+        self.assertEqual(self.relay.sent('/decide')[-1], {'id': third, 'choice': 'decline', 'key': 'k9', 'via': 'dashboard'})
+        self.assertEqual({n['id'] for n in self.fleet.view()['notices']}, {nid, joined, other, third})
+        # What reaches the phone: the line, opening the Fleet tab at it.
+        with self.store.connect() as db:
+            db.execute("INSERT INTO push_subscriptions(endpoint,p256dh,auth,created_at) VALUES('https://push.example/1','k','a',?)", (NOW.isoformat(),))
+        pushed = []
+        config = {**CONFIG, 'dashboard_host': 'machine.example', 'dashboard_path': '/'}
+        a.fleet_notice_push(self.store, config, told[0][0], sender=lambda request: pushed.append(request['payload']) or {'results': []})
+        self.assertEqual(pushed[0]['body'], 'Ann wants a Standard server in Acme: €30/month, new total €60/month.')
+        self.assertEqual(pushed[0]['url'], 'https://machine.example/#fleet=' + nid)
+
     def test_off_and_not_configured(self):
         self.assertIsNone(fleet.settings({}))
         self.assertIsNone(fleet.settings({'fleet': {'url': 'http://evil.example'}}))

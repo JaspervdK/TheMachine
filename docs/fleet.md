@@ -56,6 +56,21 @@ itself:
   own chat. Never is only on the dashboard. A prompt in an email can't change who gets told what.
 - **A log** in the Fleet tab shows every question asked or answered, both ways.
 
+## What happens in your Fleet
+
+If you own a Fleet, your Machine also tells you what happens in it: someone asks the Fleet for a server, someone
+joined, a member's server started, someone left or was removed. They show in the Fleet tab, as a phone notification and,
+with Telegram connected, as a Telegram message. Most only have **Open**.
+
+A member asking for a server waits for you. The message says what it costs, for example "Ann wants a Standard server in
+Acme: €30/month, new total €60/month." with **Confirm · €30/month** and **Decline**; in a Fleet that is free for now it
+says "free, because this Fleet is comped" with **Start it · free**. A tap is your confirmation of exactly what that
+message showed, and it only counts for you as the Fleet's owner, while the request is still open, on those terms. A
+tap on an old message, a request the member withdrew, someone who left, or terms that changed since (the Fleet got
+comped, another seat changed the total) does nothing and says why; with new terms, the message updates to them and you
+tap again. Only taps in your own Telegram chat count. A decision made elsewhere (your account page, or the Fleet tab)
+brings the Telegram message up to date.
+
 ## Safe by construction
 
 - A teammate's question never reaches a model, a tool, the browser or Do it. It is parsed into a fixed form (an

@@ -158,6 +158,22 @@ const handled=await beforeDispatch({content:'I fixed it already',timestamp:17916
  await handler(fleetCtx(`assistant:fleet:${q}:always`,'999'));assert.equal(calls.pop()[1].message_id,'999');assert.equal(edits.length,before);  // refused: buttons cleared, nothing decided
  const stranger=fleetCtx(`assistant:fleet:${q}:once`);stranger.senderId='someone-else';await handler(stranger);assert.equal(calls.length,0);
  globalThis.fixtureCall=saved;}
+// A member asks the Fleet for a server: Confirm relays the tap with its message id; a stale tap says why; only the owner's chat.
+{const saved=globalThis.fixtureCall,calls=[];const n='fn_'+'d'.repeat(16);let status='confirmed';
+ globalThis.fixtureCall=async(action,args)=>{calls.push([action,args]);if(args.message_id!=='654'){throw Object.assign(new Error('That Telegram message is not the one sent for this request'),{status:400});}
+  return {status,reason:status==='stale'?'Already settled: Confirmed in Telegram: their server is starting. Nothing more was done.':'',
+   message:{text:'Ann wants a Standard server in Acme: €30/month, new total €60/month.\n\n→ Confirmed in Telegram: their server is starting.',buttons:[[{text:'Open',url:'https://machine.example.ts.net/assistant/#fleet='+n}]]}};};
+ const tap=(data,message='654')=>({...ctx('accept',message),callback:{data,chatId:'1000001',messageId:message}});
+ const before=edits.length,said=replies.length;await handler(tap(`assistant:fleetn:${n}:confirm`));
+ assert.deepEqual(calls.pop(),['fleet_notice_decide',{id:n,choice:'confirm',source:'telegram',message_id:'654',decision_id:'telegram:unique'}]);
+ assert.match(edits.pop().text,/Confirmed in Telegram/);assert.equal(edits.length,before);assert.equal(replies.length,said);
+ status='stale';await handler(tap(`assistant:fleetn:${n}:confirm`));calls.pop();edits.pop();assert.match(replies.pop().text,/^Already settled/);
+ await handler(tap(`assistant:fleetn:${n}:decline`,'999'));assert.equal(calls.pop()[1].message_id,'999');assert.equal(edits.length,before);
+ assert.match(replies.pop().text,/nothing was done/);  // not the message sent for it: buttons cleared, nothing decided
+ await handler(tap(`assistant:fleetn:${n}:approve`));await handler(tap(`assistant:fleetn:fn_x:confirm`));assert.equal(calls.length,0);
+ const stranger=tap(`assistant:fleetn:${n}:confirm`);stranger.senderId='someone-else';await handler(stranger);
+ const group=tap(`assistant:fleetn:${n}:confirm`);group.callback.chatId='-100200';await handler(group);assert.equal(calls.length,0);
+ globalThis.fixtureCall=saved;}
 console.log('Telegram handler: snooze menu, typed callback sizes, old recorded cards, completion and ownership passed.');
 
 await rm(fixtureDir,{recursive:true,force:true});
