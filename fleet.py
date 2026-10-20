@@ -1910,7 +1910,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
             return
         try:
             found = (self.relay.call('POST', '/delivery', {'ids': ids}, timeout=30) or {}).get('delivery', {})
-        except ValueError as error:  # an older Network without delivery state: nothing shown
+        except (ValueError, Off, OSError) as error:  # an older Network without delivery state (404/405): nothing shown, never "off"
             LOG.info('network delivery unavailable error=%s', type(error).__name__)
             return
         self.set_meta('network_delivery', {i: bool(v.get('delivered')) for i, v in found.items() if isinstance(v, dict)})

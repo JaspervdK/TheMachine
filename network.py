@@ -50,6 +50,16 @@ def _later(seconds):
 
 
 def ensure(db):
+    """The tables in their own shape: one of the same name in another shape (from before, or another feature's) is
+    moved aside as <name>_old, never dropped."""
+    for statement in SCHEMA.split(';'):
+        if 'CREATE TABLE' not in statement:
+            continue
+        name = statement.split('EXISTS', 1)[1].split('(', 1)[0].strip()
+        wanted = {c.strip().split()[0] for c in statement.split('(', 1)[1].rsplit(')', 1)[0].split(',') if c.strip() and not c.strip()[0].isdigit()}
+        found = {r[1] for r in db.execute(f'PRAGMA table_info({name})')}
+        if found and not wanted <= found:
+            db.execute(f'ALTER TABLE {name} RENAME TO {name}_old')
     db.executescript(SCHEMA)
 
 
@@ -130,7 +140,7 @@ class Sealing:
             self.inner.call('POST', '/keys', self.public, timeout=30)
             if not self.fleet.meta('network_published_at'):
                 self.fleet.set_meta('network_published_at', now())
-        except (ValueError, OSError) as error:
+        except Exception as error:  # an older Network without keys (404/405) or away: plaintext as before, never "off"
             LOG.info('network keys not published yet error=%s', type(error).__name__)
 
     def _group(self, ref):

@@ -23,7 +23,7 @@ NAMES = {'me1': 'Owner', 'pat1': 'Pat'}
 class FakeNetwork:
     """The relay's mailbox for two members: it stores what it's given and can't open sealed bodies."""
     def __init__(self):
-        self.keys, self.asks, self.down, self.hide_keys = {}, {}, False, set()
+        self.keys, self.asks, self.down, self.hide_keys, self.old = {}, {}, False, set(), False
 
     def directory(self, me):
         return {'fleets': [{'id': 'fl_' + '1' * 16, 'kind': 'work', 'name': 'Acme', 'asks': ['relationships', 'meeting'], 'members': [
@@ -40,6 +40,8 @@ class FakeRelay:
         if self.net.down:
             raise fleet.Unavailable('away')
         route = path.split('?')[0]
+        if self.net.old and route in ('/keys', '/delivery'):  # a Network from before: no such route
+            raise fleet.Off()
         if route == '/directory':
             return self.net.directory(self.me)
         if route == '/keys':
@@ -242,6 +244,32 @@ class Machines(unittest.TestCase):
         self.pat.step(wait=0)
         self.me.delivery_round()
         self.assertTrue(self.net.asks[sent['ids']['pat1']]['status'] != 'queued')
+
+
+class OlderNetwork(Machines):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.net = FakeNetwork()
+        self.net.old = True
+        self.me, self.pat = self.machine('me1'), self.machine('pat1')
+        for box in (self.me, self.pat, self.me):
+            box.directory(refresh=True)
+
+    def test_no_keys_or_delivery_routes_is_plaintext_as_before_never_off(self):
+        self.assertEqual(self.net.keys, {})
+        sent = self.me.ask('relationships', {'about': 'client.example'})
+        self.assertEqual(self.net.asks[sent['ids']['pat1']]['question'], {'about': 'client.example'})
+        self.me.step(wait=0)  # includes the delivery round: a 404 there is not "off"
+        self.pat.step(wait=0)
+        with self.pat.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM fleet_in').fetchone()[0], 1)
+        self.me.delivery_round()
+        self.assertEqual(self.me.meta('network_delivery'), None)
+
+    # the end-to-end tests of Machines don't apply to an older Network
+    test_sealed_question_and_answer_end_to_end = test_key_change_is_warned_and_pinned = test_no_downgrade_when_keys_disappear = None
+    test_tampered_or_plaintext_from_a_sealing_machine_is_dropped = test_outbox_keeps_answers_while_the_network_is_away_and_never_acts_twice = None
+    test_not_delivered_yet_is_shown = test_plaintext_to_and_from_a_machine_without_keys = None
 
 
 class Failover(unittest.TestCase):
