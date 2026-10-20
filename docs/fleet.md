@@ -15,6 +15,11 @@ Fleet tab shows each Work Fleet as its own section. Asking from a Fleet's sectio
 who knows" from the Graph tab asks each of your Work Fleets, one at a time. Leaving one Fleet leaves the others as they
 are.
 
+What a Fleet needs from you (a teammate's question or request, a meeting's follow-ups to split, a server to confirm)
+shows as a card under **Suggestions**, tagged Fleet and Work, with the same buttons as your other cards; the
+Suggestions badge counts them. The Fleet tab keeps the people, the rules, the team brief, your own questions with
+their answers, and the log.
+
 ## What a Work Fleet does
 
 1. **Who knows someone at X?** Ask from the **Fleet** tab, or with **Ask the Fleet** on a person or organisation in
@@ -35,7 +40,7 @@ Besides questions, a Work Fleet carries three kinds of requests. Each has its ow
 default, Always accept, Never), and nothing happens on your side until you accept one.
 
 4. **Warm intros.** When "who knows someone at X?" finds a teammate who does, **Ask <teammate> for an intro** (with a
-   line why, if you like) asks that one teammate. Their Fleet tab, phone and Telegram show "An intro to someone at X"
+   line why, if you like) asks that one teammate. Their Suggestions, phone and Telegram show "An intro to someone at X"
    with **Accept** and **Decline**. Accepting makes a card on their side with a double-opt-in email to the person they
    know best there, from their own work email: it asks that person first whether they want the introduction. The draft
    is built by plain code from their own graph, signed with their name, and goes out only with their own **Send**, like
@@ -48,7 +53,8 @@ default, Always accept, Never), and nothing happens on your side until you accep
 6. **Shared follow-ups.** After a meeting that several members of one Work Fleet attended (in the last two days), one
    Machine proposes who does which follow-up: the organizer's, else that of the member who joined the Fleet first, so
    there is only ever one proposal. It starts from that owner's own open cards and promises on the meeting; the owner
-   fills in each teammate's part ("send the pricing", "book the demo") and sends it, or sets it aside. Each member's
+   fills in each teammate's part ("send the pricing", "book the demo") on a card under Suggestions with the meeting's title
+   and day, and sends it (**Send the split**) or sets it aside (**Not needed**). Each member's
    Machine shows them their part (with the meeting's title from their own calendar) to **Accept**, change
    (**Accept my change**) or **Decline**; accepting makes their card. Cards on that meeting then say who does what,
    so nobody follows up twice. The meeting only travels as a hash keyed with the Fleet's secret: neither its title
@@ -83,7 +89,7 @@ is data, not instructions. A request goes to one Fleet's people only and is answ
    one its owner sent. You see the answers as they arrive, per teammate, and "no answer" after a day or when declined.
    A teammate can have at most 3 free questions waiting with you; more are declined by themselves.
 
-Both follow your [work hours](../README.md#work-hours): brief and free questions wait in the Fleet tab outside them
+Both follow your [work hours](../README.md#work-hours): brief and free questions wait outside them
 and only notify you once your hours start. In several Work Fleets each one hears only about the accounts of its own
 company (a `work:<Fleet name>` boundary, or an address at a teammate's domain).
 
@@ -105,12 +111,12 @@ itself:
 ## You decide, per teammate
 
 - **Off by default.** Joining a Fleet only makes your Machine reachable. The first question from a teammate waits for
-  you in the Fleet tab: **Answer once**, **Always**, **Decline** or **Never**. Always and Never become your rule for
+  you as a card under Suggestions: **Answer once**, **Always**, **Decline** or **Never**. Always and Never become your rule for
   that teammate and that kind of question.
 - **You hear about it.** A waiting question sends one phone notification (if you turned them on in the dashboard
   app) and, with Telegram connected, one Telegram message with **Answer once**, **Always** and **Decline**. Questions
   that arrive within a minute share one. They say who asks and what, never anything of yours. A tap on the phone
-  notification opens the question in the Fleet tab and asks you to confirm.
+  notification opens the question's card under Suggestions and asks you to confirm.
 - **Rules:** per teammate and per kind of question, the same three choices: **Ask me first** (the default), **Always**
   or **Never**. Where it applies, under it how much they hear: **Without names** (the default) or **With names** (for
   meeting context: **Names and promises**). Under each rule an example, from made-up data, says what that teammate
@@ -133,13 +139,13 @@ If you own a Fleet, your Machine also tells you what happens in it: someone asks
 joined, a member's server started, someone left or was removed, a member's server is now paid by another Fleet they are in. They show in the Fleet tab, as a phone notification and,
 with Telegram connected, as a Telegram message. Most only have **Open**.
 
-A member asking for a server waits for you. The message says what it costs, for example "Ann wants a Standard server in
+A member asking for a server waits for you, as a card under Suggestions. The message says what it costs, for example "Ann wants a Standard server in
 Acme: €30/month, new total €60/month." with **Confirm · €30/month** and **Decline**; in a Fleet that is free for now it
 says "free, because this Fleet is comped" with **Start it · free**. A tap is your confirmation of exactly what that
 message showed, and it only counts for you as the Fleet's owner, while the request is still open, on those terms. A
 tap on an old message, a request the member withdrew, someone who left, or terms that changed since (the Fleet got
 comped, another seat changed the total) does nothing and says why; with new terms, the message updates to them and you
-tap again. Only taps in your own Telegram chat count. A decision made elsewhere (your account page, or the Fleet tab)
+tap again. Only taps in your own Telegram chat count. A decision made elsewhere (your account page, or the dashboard)
 brings the Telegram message up to date.
 
 ## Safe by construction

@@ -259,6 +259,17 @@ blockquote{margin:10px 0 0;padding:6px 12px;border-left:2px solid var(--lavender
 details.tech{margin:6px 0 0;font-size:.82rem}details.tech>summary{cursor:pointer;color:var(--muted)}
 .conn-more{margin-top:auto;padding-top:6px}
 .conn-more details p{margin:4px 0;font-size:.85rem}
+/* Fleet cards (under Suggestions): the follow-up split as a 2-column grid, stacked on a phone. */
+.fleet-card h3 small{font-weight:400;font-size:.85rem;margin-left:6px;white-space:nowrap}
+.fleet-card .fleet-from{margin:0 0 10px;color:var(--muted);font-size:.9rem}.fleet-card blockquote{margin:0 0 12px}
+.fleet-card .fleet-field{display:flex;flex-direction:column;gap:6px;margin:12px 0 0}.fleet-card .fleet-field input,.fleet-card .fleet-field textarea{width:100%;min-width:0}
+.split-why{margin:0 0 14px;font-size:.88rem;color:var(--muted)}.split-why summary{cursor:pointer;width:max-content}.split-why[open] summary{margin-bottom:4px}
+.split-parts{display:grid;gap:10px}.split-part{display:grid;grid-template-columns:minmax(120px,200px) 1fr;align-items:center;gap:12px;margin:0}
+.split-who{font-weight:600;color:var(--text);overflow-wrap:anywhere}.split-who small{display:block;font-weight:400;font-size:.78rem}
+.split-part input{width:100%;min-width:0}
+.fleet-settings{display:grid;gap:14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:16px 20px}.fleet-settings>p{margin:0}
+.fleet-option{display:flex;align-items:flex-start;gap:10px;margin:0}.fleet-option input{margin-top:4px}.fleet-option small{display:block}
+@media (max-width:620px){.split-part{grid-template-columns:1fr;gap:4px}}
 .list{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow);overflow:hidden}
 .list>div{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:12px 16px;border-top:1px solid var(--border)}
 .list>div:first-child{border-top:0}
@@ -901,10 +912,11 @@ setInterval(async()=>{if(document.hidden||!state||!((state.review_live?.runs||[]
 if(!running&&reviewWasLive){reviewWasLive=false;refresh();return}reviewWasLive=!!running;state.review_live=live;renderReviewLive()}catch(e){}},5000);
 function render(){renderNeedsYou();
 const finishedOpen=$('#finished-list')?.open||false,laterOpen=$('#later-list')?.open||false,promisesOpen=$('#promises-list')?.open||false;
-const drafts=Object.fromEntries([...document.querySelectorAll('#suggestions textarea')].filter(t=>t.value).map(t=>[t.id,t.value]));
+const drafts=Object.fromEntries([...document.querySelectorAll('#suggestions textarea,#suggestions .fleet-card input[id]')].filter(t=>t.value).map(t=>[t.id,t.value]));
 const shown=state.suggestions.filter(s=>scopeFilter==='all'||s.scope===scopeFilter);
 const dueKey=s=>s.due||'9999',outstanding=shown.filter(s=>!closed(s)&&s.status!=='snoozed').sort((a,b)=>dueKey(a)<dueKey(b)?-1:dueKey(a)>dueKey(b)?1:(b.weight||0)-(a.weight||0)),later=shown.filter(s=>s.status==='snoozed'),finished=shown.filter(closed);
-const needs=outstanding.filter(needsDecision),preparing=outstanding.filter(s=>!needsDecision(s)&&s.status!=='prepared'),ready=outstanding.filter(s=>!needsDecision(s)&&s.status==='prepared');
+const fleetCards=scopeFilter==='personal'?[]:fleetCardsOf(fleetData);
+const needs=[...fleetCards,...outstanding.filter(needsDecision)],preparing=outstanding.filter(s=>!needsDecision(s)&&s.status!=='prepared'),ready=outstanding.filter(s=>!needsDecision(s)&&s.status==='prepared');
 // Open cards: by deadline, then by who they're about (the people closest to you, and paying customers, first).
 // Later: in the order they come back, with a heading per day. Done: the last 7 days.
 later.sort((a,b)=>(a.snoozed_until||'').localeCompare(b.snoozed_until||''));
@@ -914,11 +926,12 @@ const backDay=s=>{const d=new Date(s.snoozed_until),t=new Date();t.setDate(t.get
 const laterCards=items=>items.map((s,i)=>(i===0||backDay(s)!==backDay(items[i-1])?`<h3 class="day-head">${esc(backDay(s))}</h3>`:'')+suggestionCard(s,'Later')).join('');
 $('#suggestion-summary').innerHTML=`<div class="summary-row"><div class="scope-filter" role="group" aria-label="Show">${[['all','All'],['work','Work'],['personal','Personal']].map(([v,t])=>`<button type="button" data-scope="${v}" aria-pressed="${scopeFilter===v}">${t}</button>`).join('')}</div></div>`;
 $('#suggestion-stats').innerHTML=`<div class="stats">${[[ready,'Ready','mint','ready'],[needs,'To decide','amber','needs'],[preparing,'Preparing','lavender','preparing'],[later,'Later','lavender','later']].map(([items,title,t,key])=>`<button type="button" class="stat t-${t}${items.length?'':' zero'}" data-fold-tile="${key}" aria-expanded="${!!items.length&&(key==='later'?laterOpen:!folded.has(key))}" aria-label="${items.length} ${title}${items.length?', tap to show or hide':''}" ${items.length?'':'disabled'}><b>${items.length}</b><span>${title}</span></button>`).join('')}</div>`;
-$('#badge-inbox').textContent=outstanding.length||'';$('#tab-fleet').hidden=!state.fleet?.on;$('#badge-fleet').textContent=state.fleet?.waiting||'';
-$('#suggestions').innerHTML=(outstanding.length?'':firstLookEmpty(firstLookInfo(state.review_live||{}))||`<div class="empty all-clear"><button class="poke" type="button" aria-label="Poke the robot" title="Poke me"><img class="sleepy" src="brand/${pokeAwake?'wave':'sleepy'}.webp" alt="The Machine resting"></button><div><strong>All clear.</strong><span class="poke-line">${esc(pokeLine||'I’ll add something when it’s useful.')}</span></div>${pokes>=PLAY_AFTER?PLAY_BUTTON:''}</div>`)+[[ready,'Ready for you','ready'],[needs,'Needs your decision','needs'],[preparing,'Preparing','preparing']].filter(([items])=>items.length).map(([items,title,key])=>`<div class="section-head" id="section-${key}" data-fold="${key}" role="button" tabindex="0" aria-expanded="${!folded.has(key)}"><h2>${title}</h2><span class="count">${items.length}</span></div>${folded.has(key)?'':items.map(s=>suggestionCard(s,title)).join('')}`).join('')
+$('#badge-inbox').textContent=(outstanding.length+(fleetData?fleetCards.length:scopeFilter==='personal'?0:state.fleet?.waiting||0))||'';$('#tab-fleet').hidden=!state.fleet?.on;$('#badge-fleet').textContent='';
+$('#suggestions').innerHTML=(outstanding.length||fleetCards.length?'':firstLookEmpty(firstLookInfo(state.review_live||{}))||`<div class="empty all-clear"><button class="poke" type="button" aria-label="Poke the robot" title="Poke me"><img class="sleepy" src="brand/${pokeAwake?'wave':'sleepy'}.webp" alt="The Machine resting"></button><div><strong>All clear.</strong><span class="poke-line">${esc(pokeLine||'I’ll add something when it’s useful.')}</span></div>${pokes>=PLAY_AFTER?PLAY_BUTTON:''}</div>`)+[[ready,'Ready for you','ready'],[needs,'Needs your decision','needs'],[preparing,'Preparing','preparing']].filter(([items])=>items.length).map(([items,title,key])=>`<div class="section-head" id="section-${key}" data-fold="${key}" role="button" tabindex="0" aria-expanded="${!folded.has(key)}"><h2>${title}</h2><span class="count">${items.length}</span></div>${folded.has(key)?'':items.map(s=>typeof s==='string'?s:suggestionCard(s,title)).join('')}`).join('')
 // Snoozed cards are out of the way by choice: folded by default, open state kept across refreshes.
 +(later.length?`<details id="later-list" ${laterOpen?'open':''}><summary><span>Coming back later</span><span class="count">${later.length}</span></summary>${laterCards(later)}</details>`:'')+promisesList(promisesOpen)+`<details id="finished-list" ${finishedOpen?'open':''}><summary><span>Done / dismissed this week</span><span class="count">${recent.length}</span></summary>${recent.map(suggestionCard).join('')||'<p class="muted">Nothing finished or dismissed this week.</p>'}${older?`<p class="muted">${older} older ${older===1?'item is':'items are'} under Feedback.</p>`:''}</details>`;
 for(const[id,v]of Object.entries(drafts)){const t=document.getElementById(id);if(t){t.value=v;t.classList.add('filled')}}
+fleetSync();
 const choiceTone={accept:'mint',complete:'mint',reject:'muted',snooze:'lavender',other:'amber',reopen:'lavender',undo:'lavender',retry:'lavender'};
 {const q=state.quality;const pct=v=>v==null?'–':`${v}%`;const was=(v,prev)=>prev==null||v==null?'':`<small>${v>prev?'up':v<prev?'down':'same'} from ${prev}%</small>`;
 $('#quality').innerHTML=!q||!q.cards?'<div class="muted">No cards in the last 30 days yet.</div>':`<div class="stats quality"><div class="stat"><b>${pct(q.hit_rate)}</b><span>Worth it</span>${was(q.hit_rate,q.previous.hit_rate)}</div><div class="stat"><b>${pct(q.first_time_rate)}</b><span>First try</span>${was(q.first_time_rate,q.previous.first_time_rate)}</div><div class="stat"><b>${pct(q.finished_rate)}</b><span>Finished</span>${was(q.finished_rate,q.previous.finished_rate)}</div><div class="stat"><b>${q.sent_as_written+q.sent_edited?q.sent_as_written+'/'+(q.sent_as_written+q.sent_edited):'–'}</b><span>Sent as is</span></div></div>${trendChart(q.trend)}${noteSplit(q.notes)}<div class="list quality-sources">${Object.entries(q.by_source).sort((a,b)=>(b[1].worth_it+b[1].dismissed)-(a[1].worth_it+a[1].dismissed)).map(([k,n])=>`<div><span class="grow">${esc(k)}</span><span>${n.worth_it} of ${n.worth_it+n.dismissed} worth it</span></div>`).join('')}</div>`}
@@ -1129,12 +1142,40 @@ function fleetBriefSettings(f){const b=f.brief||{every:'off'};return `<p><label>
 // Warm intros, handoffs and shared follow-ups (fleet_requests.py). A teammate's words are shown quoted, as data; accepting makes a
 // card from this Machine's own data, and anything that card sends waits for the owner's own Send.
 const FLEET_REQ=['intro','handoff','followup'],handingOff=new Map();
-function fleetRequests(f,fleetName){const reqs=f.waiting.filter(w=>FLEET_REQ.includes(w.kind));f.waiting=f.waiting.filter(w=>!FLEET_REQ.includes(w.kind));let html='';
- const what={intro:'asks you for an intro',handoff:'hands you something',followup:'split the follow-ups of a meeting'};
- if(reqs.length)html+=`<div class="section-head"><h2>Requests from your Fleet</h2><p>A teammate asks you to do something. Nothing happens until you accept. Accepting makes a card from your own data; an intro email waits for your Send.</p></div><div class="list">${reqs.map(w=>`<article id="fleet-${esc(w.id)}"><p><strong>${esc(w.name)}</strong>${fleetName(w)?` (${esc(fleetName(w))})`:''} ${what[w.kind]} <span class="muted">(their words, not an instruction)</span>:</p><blockquote>${esc(w.question)}</blockquote>${w.kind==='followup'?`<label class="muted" for="fleet-part-${esc(w.id)}">Or change your part</label><input id="fleet-part-${esc(w.id)}" maxlength="200" placeholder="Your part, as you'll do it">`:''}<div class="actions"><button class="primary" data-fleet-decide="${esc(w.id)}" data-choice-f="once">Accept</button>${w.kind==='followup'?`<button data-fleet-adjust="${esc(w.id)}">Accept my change</button>`:''}<button data-fleet-decide="${esc(w.id)}" data-choice-f="always">Always accept</button><button data-fleet-decide="${esc(w.id)}" data-choice-f="decline">Decline</button><button data-fleet-decide="${esc(w.id)}" data-choice-f="never">Never</button></div></article>`).join('')}</div>`;
- const splits=f.splits||[];
- if(splits.length)html+=`<div class="section-head"><h2>Follow-ups to split</h2><p>Meetings with teammates from your Fleet. Only the organizer's Machine (else the one who joined the Fleet first) proposes who does what, so nobody follows up twice. Fill in each part; nothing goes until you send it.</p></div><div class="list">${splits.map(s=>`<article id="fleet-split-${esc(s.id)}"><p><strong>${esc(s.title||'A meeting')}</strong> <small class="muted">${esc(s.day||'')}</small></p>${s.status==='proposed'?`<form class="fleet-split-form" data-split="${esc(s.id)}">${s.parts.map(p=>`<label class="muted">${p.mine?'You':esc(p.name)}<input name="${esc(p.member_id)}" maxlength="200" value="${esc(p.what||'')}" placeholder="${p.mine?'Your follow-up':'Their follow-up (leave empty for none)'}"></label>`).join('')}<div class="actions"><button class="primary">Send the split</button><button type="button" data-split-dismiss="${esc(s.id)}">Not needed</button></div></form>`:`<p>${s.parts.filter(p=>p.what).map(p=>`${p.mine?'You':esc(p.name)}: ${esc(p.what)}${p.stage?` <span class="muted">(${esc(p.stage)})</span>`:''}`).join(' · ')}</p>`}</article>`).join('')}</div>`;
- return html}
+// Fleet items that need you are cards under Suggestions (tagged Fleet, Work), built from api/fleet: a teammate's
+// question or request (their words, shown quoted, never acted on), a meeting's follow-ups to split, and confirmations
+// the relay asks for. The Fleet tab keeps people, rules, briefs, your own asks and the log.
+const splitDay=v=>{const d=new Date(String(v).length<=10?v+'T12:00':v);if(isNaN(d))return String(v);const p=Object.fromEntries(new Intl.DateTimeFormat([],{weekday:'short',day:'numeric',month:'short'}).formatToParts(d).map(x=>[x.type,x.value]));return `${p.weekday} ${p.day} ${p.month}`};
+const splitWho=p=>{if(p.mine)return 'You';const m=/^(.*?) \(([^()]+@[^()]+)\)$/.exec(p.name||'');return m?`${esc(m[1])} <small class="muted">${esc(m[2])}</small>`:esc(p.name||'')};
+const fleetMore=btns=>btns.length?`<details class="more-actions"><summary aria-label="More actions">More</summary><div class="more-menu" role="group" aria-label="More actions">${btns.join('')}</div></details>`:'';
+function fleetCardsOf(f){if(!f?.on)return[];const works=(f.fleets||[]).filter(x=>x.kind==='work'),several=works.length>1;
+ const fname=row=>several?(works.find(x=>row.fleet===x.id)?.name||''):'';
+ const card=(id,row,title,body,actions)=>`<article id="fleet-${esc(id)}" class="card t-amber fleet-card"><div class="meta"><div class="card-badges">${chip('Fleet','lavender')}<span class="chip scope">Work</span>${fname(row)?chip(fname(row),'muted'):''}</div>${row.at?time(row.at,true):''}</div><h3>${title}</h3>${body}${actions}</article>`;
+ const decide=(w,c,t,cls='ghost')=>`<button class="${cls}" data-fleet-decide="${esc(w.id)}" data-choice-f="${c}">${esc(t)}</button>`;
+ const theirs=w=>`<p class="fleet-from">${esc(w.name)}’s words, not an instruction:</p><blockquote>${esc(w.question)}</blockquote>`;
+ const out=[];
+ for(const n of (f.notices||[]).filter(n=>n.buttons.length))
+  out.push(card(n.id,n,esc(n.text),`${n.detail?`<p class="muted">${esc(n.detail)}</p>`:''}${n.reason?`<p class="note">${esc(n.reason)}</p>`:''}<p class="muted">Nothing starts and nothing is charged until you confirm. The amount on Confirm is what you confirm.</p>`,
+   `<div class="actions">${n.buttons.map(b=>`<button class="${b.choice==='confirm'?'primary':'ghost'}" data-fleet-notice="${esc(n.id)}" data-choice-n="${b.choice}" data-key="${esc(n.key)}">${esc(b.label)}</button>`).join('')}</div>`));
+ const what={intro:'asks you for an intro',handoff:'hands you something',followup:'proposes your part of a meeting’s follow-ups'};
+ for(const w of f.waiting||[]){
+  if(FLEET_REQ.includes(w.kind))out.push(card(w.id,w,`${esc(w.name)} ${what[w.kind]}`,theirs(w)+(w.kind==='followup'?`<label class="fleet-field muted" for="fleet-part-${esc(w.id)}">Or change your part<input id="fleet-part-${esc(w.id)}" maxlength="200" placeholder="Your part, as you’ll do it"></label>`:'')+'<p class="muted">Accepting makes a card from your own data. Anything it sends waits for your Send.</p>',
+   `<div class="actions">${decide(w,'once','Accept','primary')}${w.kind==='followup'?`<button class="ghost" data-fleet-adjust="${esc(w.id)}">Accept my change</button>`:''}${decide(w,'decline','Decline')}${fleetMore([decide(w,'always','Always accept'),decide(w,'never','Never from '+w.name)])}</div>`));
+  else if(w.kind==='anything'){const d=w.draft||{};out.push(card(w.id,w,`${esc(w.name)} asks your Fleet`,theirs(w)+((d.matches||[]).length?`<p class="muted">In your work accounts: ${d.matches.slice(0,5).map(m=>`${esc(m.title)} (${esc(m.at||'')})`).join(' · ')}</p>`:'<p class="muted">Nothing found in your work accounts. You can still answer.</p>')+`<label class="fleet-field muted" for="fleet-free-${esc(w.id)}">Your answer (only this goes to them)<textarea id="fleet-free-${esc(w.id)}" maxlength="600">${esc(d.text||'')}</textarea></label>`,
+   `<div class="actions"><button class="primary" data-fleet-send="${esc(w.id)}">Send answer</button>${decide(w,'decline','Decline')}${fleetMore([decide(w,'never','Never from '+w.name)])}</div>`))}
+  else out.push(card(w.id,w,`${esc(w.name)} asks: ${esc(w.question)}`,`${w.draft?.preview?`<p class="muted">Would share: ${esc(w.draft.preview)}</p>`:''}<p class="muted">Nothing is shared until you choose. Always and Never become your rule for ${esc(w.name)} and this kind of question.</p>`,
+   `<div class="actions">${decide(w,'once','Answer once','primary')}${decide(w,'decline','Decline')}${fleetMore([decide(w,'always','Always'),decide(w,'never','Never')])}</div>`))}
+ for(const sp of (f.splits||[]).filter(x=>x.status==='proposed'))
+  out.push(card('split-'+sp.id,{...sp,at:null},`${esc(sp.title||'A meeting')} <small class="muted">${esc(splitDay(sp.day||''))}</small>`,
+   `<p class="fleet-from">Follow-ups of a meeting with Fleet teammates. Split who does what; nothing goes until you send it.</p><details class="split-why"><summary>Why you?</summary>Only the organizer’s Machine proposes the split (if the organizer isn’t in your Fleet, the Machine that joined the Fleet first), so nobody follows up twice.</details>`,
+   `<form class="fleet-split-form" data-split="${esc(sp.id)}"><div class="split-parts">${sp.parts.map(p=>`<label class="split-part"><span class="split-who">${splitWho(p)}</span><input id="split-${esc(sp.id)}-${esc(p.member_id)}" name="${esc(p.member_id)}" maxlength="200" value="${esc(p.what||'')}" placeholder="${p.mine?'Your follow-up':'Their follow-up (leave empty for none)'}"></label>`).join('')}</div><div class="actions"><button class="primary">Send the split</button><button type="button" class="ghost" data-split-dismiss="${esc(sp.id)}">Not needed</button></div></form>`));
+ return out}
+const fleetSig=()=>JSON.stringify(fleetCardsOf(fleetData));
+// Suggestions load the Fleet's open items in the background (at most every 20 seconds) and re-render when they change.
+let fleetAt=0,fleetLoading=null;
+function fleetSync(force){if(!state?.fleet?.on)return Promise.resolve();if(fleetLoading)return fleetLoading;if(!force&&Date.now()-fleetAt<20000)return Promise.resolve();
+ const before=fleetSig();fleetLoading=request('api/fleet').then(d=>{fleetData=d;fleetAt=Date.now();if(fleetSig()!==before)render()}).catch(()=>{fleetAt=Date.now()}).finally(()=>{fleetLoading=null});return fleetLoading}
+const fleetOn=(type,fn)=>{for(const el of [$('#fleet-view'),$('#suggestions')])el.addEventListener(type,fn)};
 function fleetIntroOffers(f,work,inFleet){const offers=(f.intro_offers||[]).filter(o=>inFleet(o,work));
  return offers.length?`<div class="list">${offers.map(o=>`<article><p><strong>${esc(o.name)}</strong> knows someone at ${esc(o.about)}.</p><form class="fleet-ask fleet-intro-form" data-fleet="${esc(o.fleet)}" data-member="${esc(o.member_id)}" data-about="${esc(o.about)}"><input name="note" maxlength="300" placeholder="Why, in a line (optional; they see it)" aria-label="Why"><button class="primary">Ask ${esc(o.name)} for an intro</button></form></article>`).join('')}</div>`:''}
 function fleetHandoff(s){if(closed(s)||!state?.fleet?.on||s.scope!=='work')return'';
@@ -1152,10 +1193,10 @@ function fleetAskRow(n){if(!state?.fleet?.on||!['person','org'].includes(n.kind)
 let fleetData=null,fleetShown=Promise.resolve();
 // #fleet=<question> from a phone notification or Telegram: the Fleet tab at that question; &choice= asks to confirm it.
 function openFleetLink(){if(/^#fleet-brief=fl_[0-9a-f]{16}$/.test(location.hash))history.replaceState(null,'','#fleet');const m=/^#fleet(?:=((?:q|fn)_[a-f0-9]{16})(?:&choice=(once|decline))?)?$/.exec(location.hash);if(!m||!state.fleet?.on)return;
- history.replaceState(null,'',location.pathname+location.search);document.querySelector('nav [data-tab="fleet"]').click();
- fleetShown.then(()=>{const c=m[1]&&document.getElementById('fleet-'+m[1]);if(!c)return;c.scrollIntoView({block:'center',behavior:'smooth'});c.classList.remove('flash');void c.offsetWidth;c.classList.add('flash');
-  const w=m[2]&&fleetData.waiting.find(x=>x.id===m[1]);if(w&&confirm(`${m[2]==='once'?'Answer once':'Decline'}? ${w.name} asks: ${w.question}`))c.querySelector(`[data-choice-f="${m[2]}"]`)?.click()})}
-async function fleetView(refresh=false){const view=$('#fleet-view');try{fleetData=await request('api/fleet'+(refresh?'?refresh=1':''))}catch(e){view.innerHTML=`<p class="error">${esc(e.message)}</p>`;return}
+ history.replaceState(null,'',location.pathname+location.search);const card=/^q_/.test(m[1]||'');document.querySelector(`nav [data-tab="${card?'inbox':'fleet'}"]`).click();
+ (card?fleetSync(true):fleetShown).then(()=>{const c=m[1]&&document.getElementById('fleet-'+m[1]);if(!c)return;c.scrollIntoView({block:'center',behavior:'smooth'});c.classList.remove('flash');void c.offsetWidth;c.classList.add('flash');
+  const w=m[2]&&fleetData?.waiting.find(x=>x.id===m[1]);if(w&&confirm(`${m[2]==='once'?'Answer once':'Decline'}? ${w.name} asks: ${w.question}`))c.querySelector(`[data-choice-f="${m[2]}"]`)?.click()})}
+async function fleetView(refresh=false){const view=$('#fleet-view'),before=fleetSig();try{fleetData=await request('api/fleet'+(refresh?'?refresh=1':''));fleetAt=Date.now();if(state&&fleetSig()!==before)render()}catch(e){view.innerHTML=`<p class="error">${esc(e.message)}</p>`;return}
  const f=fleetData;if(!f.on){view.innerHTML='<p class="muted">This Machine is not in a Fleet.</p>';return}
  // Several Work Fleets: each its own section, with its own people, rules and Ask; questions go to one Fleet at a time.
  const works=f.fleets.filter(x=>x.kind==='work'),family=f.fleets.find(x=>x.kind==='family'),several=works.length>1;
@@ -1164,9 +1205,9 @@ async function fleetView(refresh=false){const view=$('#fleet-view');try{fleetDat
  const who=x=>(x.people||[]).length?`<ul class="fleet-people">${x.people.map(p=>`<li><strong>${esc(p.name)}</strong>${p.me?' <span class="muted">(you, this Machine)</span>':''}${p.role==='owner'?' <span class="muted">· owner</span>':''}<br><small class="muted">${esc(p.answers_with||'')}${p.email?' · '+esc(p.email):''}</small></li>`).join('')}</ul>`:'';
  const head=x=>`<div class="section-head"><h2>Your ${esc(x.label)}: ${esc(x.name)}</h2>${x.members.length?'':'<p>Nobody else yet. Invite teammates from your account page.</p>'}</div>${who(x)}`;
  let html=f.off?'<p class="note">The Fleet relay is off for now. Nothing is asked or answered.</p>':'';
+ {const todo=fleetCardsOf(f).length;if(todo)html+=`<p class="note fleet-todo">${todo===1?'One Fleet item waits':todo+' Fleet items wait'} for you under Suggestions. <button type="button" class="link" data-tab-go="inbox">Show</button></p>`}
  const notices=f.notices||[],asking=notices.filter(n=>n.buttons.length),told=notices.filter(n=>!n.buttons.length);
  const noticeCard=n=>`<article id="fleet-${esc(n.id)}"><p>${esc(n.text)}</p>${n.detail?`<p class="muted">${esc(n.detail)}</p>`:''}${n.outcome?`<p class="muted">→ ${esc(n.outcome)}</p>`:''}${n.reason?`<p class="note">${esc(n.reason)}</p>`:''}${n.buttons.length?`<div class="actions">${n.buttons.map(b=>`<button${b.choice==='confirm'?' class="primary"':''} data-fleet-notice="${esc(n.id)}" data-choice-n="${b.choice}" data-key="${esc(n.key)}">${esc(b.label)}</button>`).join('')}</div>`:''}<p><small class="mono">${esc(new Date(n.at).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}))}</small></p></article>`;
- if(asking.length)html+=`<div class="section-head"><h2>Your Fleet asks you</h2><p>Nothing starts and nothing is charged until you confirm. The amount on Confirm is what you confirm.</p></div><div class="list">${asking.map(noticeCard).join('')}</div>`;
  if(several)html+=`<p class="muted">Your Work Fleets: ${works.map(x=>`<a href="#fleet-${esc(x.id)}">${esc(x.name)}</a>`).join(' · ')}</p>`;
  for(const work of works){const asked=f.asked.filter(a=>inFleet(a,work));
   html+=`<div id="fleet-${esc(work.id)}">`+head(work)+`<form class="fleet-ask fleet-ask-form" data-fleet="${esc(work.id)}"><input name="about" maxlength="120" placeholder="A company, domain, email address or name" aria-label="Who knows someone at"><button class="primary">Ask ${several?esc(work.name):'the Fleet'}</button></form><p class="muted">Their Machines answer with how well they know someone there and when they were last in touch. Names only when they allow it.</p>`;
@@ -1175,26 +1216,24 @@ async function fleetView(refresh=false){const view=$('#fleet-view');try{fleetDat
   if(work.members.length)html+=fleetBrief(f,work)+fleetFree(f,work,several);
   if(work.members.length)html+=fleetRules(work,f,several);
   html+='</div>'}
- html+=fleetRequests(f,fleetName);
- if(f.waiting.length)html+=`<div class="section-head"><h2>Questions waiting for you</h2><p>Nothing is shared until you choose. Always and Never become your rule for that teammate and kind of question.</p></div><div class="list">${f.waiting.map(w=>w.kind==='anything'?fleetFreeCard(w,fleetName(w)):`<article id="fleet-${esc(w.id)}"><p><strong>${esc(w.name)}</strong>${fleetName(w)?` (${esc(fleetName(w))})`:''} asks: ${esc(w.question)}</p>${w.draft?.preview?`<p class="muted">Would share: ${esc(w.draft.preview)}</p>`:''}<div class="actions"><button class="primary" data-fleet-decide="${esc(w.id)}" data-choice-f="once">Answer once</button><button data-fleet-decide="${esc(w.id)}" data-choice-f="always">Always</button><button data-fleet-decide="${esc(w.id)}" data-choice-f="decline">Decline</button><button data-fleet-decide="${esc(w.id)}" data-choice-f="never">Never</button></div></article>`).join('')}</div>`;
- if(works.some(x=>x.members.length))html+=`<p><label><input type="checkbox" id="fleet-meetings"${f.ask_meetings?' checked':''}> Ask my Work ${several?'Fleets':'Fleet'} about the outside people in my meetings this week (they see those email addresses)</label></p>`;
- if(works.some(x=>x.members.length))html+=fleetBriefSettings(f);
+ if(works.some(x=>x.members.length))html+=`<div class="section-head"><h2>Fleet settings</h2></div><div class="fleet-settings"><label class="fleet-option"><input type="checkbox" id="fleet-meetings"${f.ask_meetings?' checked':''}><span>Ask my Work ${several?'Fleets':'Fleet'} about the outside people in my meetings this week<small class="muted">They see those email addresses.</small></span></label>${fleetBriefSettings(f)}</div>`;
  if(told.length)html+=`<div class="section-head"><h2>Lately in your Fleet</h2><p>Who joined, asked for a server, had one started, or left.</p></div><div class="list">${told.map(noticeCard).join('')}</div>`;
  if(family)html+=head(family)+'<p class="muted">A Family Fleet links your Machines. Its questions (who’s free, household admin, trips) are coming later.</p>';
  html+=`<div class="section-head"><h2>Log</h2><p>Every question asked or answered, both ways.</p></div><ul class="fleet-log list">${f.log.map(l=>`<li><small class="mono">${esc(new Date(l.at).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}))}</small> ${l.direction==='in'?'From':'To'} ${esc(l.name||'')}: ${esc(l.what)} · <span class="muted">${esc(l.outcome)}</span></li>`).join('')||'<li class="muted">Nothing yet.</li>'}</ul>`;
  view.innerHTML=html}
-$('#fleet-view').addEventListener('submit',async e=>{if(!e.target.classList.contains('fleet-ask-form'))return;e.preventDefault();const about=e.target.elements.about.value.trim();if(!about)return;
+fleetOn('submit',async e=>{if(!e.target.classList.contains('fleet-ask-form'))return;e.preventDefault();const about=e.target.elements.about.value.trim();if(!about)return;
  try{await fleetPost('fleet_ask',{kind:'relationships',question:{about},fleet:e.target.dataset.fleet});e.target.reset();toast('Asked your Fleet.');await fleetView()}catch(err){toast(err.message,true)}});
-$('#fleet-view').addEventListener('submit',async e=>{if(!e.target.classList.contains('fleet-free-form'))return;e.preventDefault();const text=e.target.elements.text.value.trim();if(!text)return;
+fleetOn('submit',async e=>{if(!e.target.classList.contains('fleet-free-form'))return;e.preventDefault();const text=e.target.elements.text.value.trim();if(!text)return;
  try{await fleetPost('fleet_free',{text,fleet:e.target.dataset.fleet});e.target.reset();toast('Asked your Fleet. Answers show here as they come.');await fleetView()}catch(err){toast(err.message,true)}});
-$('#fleet-view').addEventListener('click',async e=>{const b=e.target.closest('[data-fleet-send]');if(!b)return;const text=document.getElementById('fleet-free-'+b.dataset.fleetSend)?.value.trim();if(!text){toast('Write an answer first, or decline.',true);return}b.disabled=true;
+fleetOn('click',async e=>{const b=e.target.closest('[data-fleet-send]');if(!b)return;const text=document.getElementById('fleet-free-'+b.dataset.fleetSend)?.value.trim();if(!text){toast('Write an answer first, or decline.',true);return}b.disabled=true;
  try{await fleetPost('fleet_decide',{id:b.dataset.fleetSend,choice:'once',text});toast('Sent.');await fleetView();await refresh()}catch(err){b.disabled=false;toast(err.message,true)}});
-$('#fleet-view').addEventListener('click',async e=>{const b=e.target.closest('[data-fleet-notice]');if(!b)return;b.disabled=true;
+$('#fleet-view').addEventListener('click',e=>{if(e.target.closest('[data-tab-go]'))document.querySelector('nav [data-tab="inbox"]').click()});
+fleetOn('click',async e=>{const b=e.target.closest('[data-fleet-notice]');if(!b)return;b.disabled=true;
  try{const r=await fleetPost('fleet_notice_decide',{id:b.dataset.fleetNotice,choice:b.dataset.choiceN,key:b.dataset.key});
   toast(r.status==='confirmed'?'Confirmed. Their server is starting.':r.status==='declined'?'Declined. Nothing was started or charged.':r.reason,r.status==='stale'||r.status==='changed');await fleetView();await refresh()}catch(err){b.disabled=false;toast(err.message,true)}});
-$('#fleet-view').addEventListener('click',async e=>{const b=e.target.closest('[data-fleet-decide]');if(!b)return;b.disabled=true;
+fleetOn('click',async e=>{const b=e.target.closest('[data-fleet-decide]');if(!b)return;b.disabled=true;
  try{const r=await fleetPost('fleet_decide',{id:b.dataset.fleetDecide,choice:b.dataset.choiceF});toast(r.status==='answered'?'Answered.':'Declined.');await fleetView();await refresh()}catch(err){b.disabled=false;toast(err.message,true)}});
-$('#fleet-view').addEventListener('change',async e=>{const t=e.target;try{
+fleetOn('change',async e=>{const t=e.target;try{
  const b=t.closest('.fleet-rule');let res;
  if(t.dataset.fleetRule)res=await fleetPost('fleet_rule',{fleet:t.dataset.fleet,member_id:t.dataset.fleetRule,kind:t.dataset.kind,rule:t.value});
  else if(t.dataset.fleetDetails)res=await fleetPost('fleet_rule',{fleet:t.dataset.fleet,member_id:t.dataset.fleetDetails,kind:t.dataset.kind,details:t.value==='1'});
@@ -1203,11 +1242,11 @@ $('#fleet-view').addEventListener('change',async e=>{const t=e.target;try{
   if(sc){b.querySelector('.fleet-scope-now').textContent=fleetScopeText(sc)?' ('+fleetScopeText(sc)+')':'';if(t.dataset.scope&&t.type!=='checkbox')t.value=sc[t.dataset.scope].join(', ')}}toast('Saved.')}catch(err){toast(err.message,true);await fleetView()}});
 // Answers to your free questions show as they arrive, while the Fleet tab is open and you aren't typing in it.
 setInterval(()=>{if(!$('#fleet').hidden&&!$('#fleet-view').contains(document.activeElement)&&(fleetData?.free||[]).some(q=>q.answers.some(x=>x.state==='waiting')))fleetView()},30000);
-$('#fleet-view').addEventListener('submit',async e=>{const t=e.target;if(t.classList.contains('fleet-intro-form')){e.preventDefault();
+fleetOn('submit',async e=>{const t=e.target;if(t.classList.contains('fleet-intro-form')){e.preventDefault();
   try{await fleetPost('fleet_intro',{fleet:t.dataset.fleet,member_id:t.dataset.member,about:t.dataset.about,note:t.elements.note.value.trim()});toast('Asked. This tab shows how it goes.');await fleetView()}catch(err){toast(err.message,true)}}
  else if(t.classList.contains('fleet-split-form')){e.preventDefault();const items={};for(const i of t.querySelectorAll('input'))items[i.name]=i.value.trim();
   try{await fleetPost('fleet_split',{id:t.dataset.split,items});toast('Sent. Each teammate sees their part.');await fleetView();await refresh()}catch(err){toast(err.message,true)}}});
-$('#fleet-view').addEventListener('click',async e=>{const b=e.target.closest('[data-fleet-adjust],[data-split-dismiss]');if(!b)return;b.disabled=true;
+fleetOn('click',async e=>{const b=e.target.closest('[data-fleet-adjust],[data-split-dismiss]');if(!b)return;b.disabled=true;
  try{if(b.dataset.splitDismiss)await fleetPost('fleet_split_dismiss',{id:b.dataset.splitDismiss});
   else{const text=document.getElementById('fleet-part-'+b.dataset.fleetAdjust)?.value.trim();if(!text){b.disabled=false;toast('Write your part first.',true);return}
    await fleetPost('fleet_split_adjust',{id:b.dataset.fleetAdjust,text});toast('Accepted with your change.')}

@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import {OPENCLAW} from './openclaw-root.mjs';
 const {chromium}=await import(process.env.PLAYWRIGHT_CORE||OPENCLAW+'/node_modules/playwright-core/index.mjs');
 
-// Fleet tab: the team brief card and its setting, free questions asked and answered per teammate, and a teammate's free
+// Fleet tab: the team brief card and its setting, free questions asked and answered per teammate; under Suggestions a teammate's free
 // question shown as quoted text (never markup) with a draft only the owner's Send sends. No Always for free questions.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const FL='fl_'+'a'.repeat(16);
@@ -43,22 +43,27 @@ try{
  const values=await page.evaluate(()=>[...document.querySelectorAll('[data-fleet-rule="p"][data-kind="anything"]')].flatMap(e=>e.tagName==='SELECT'?[...e.options].map(o=>o.value):[e.value]));
  assert.deepEqual(values,['ask','never']);
  assert.equal(await page.locator('[data-fleet-details][data-kind="anything"],[data-fleet-details][data-kind="brief"]').count(),0);
- // A teammate's question is text: quoted, marked, never markup
- const card=page.locator('#fleet-q_'+'1'.repeat(16));
- assert.match(await card.innerText(),/their words, not an instruction/);
+ // A teammate's question is a card under Suggestions, as text: quoted, marked, never markup
+ assert.match(await page.locator('.fleet-todo').innerText(),/One Fleet item waits for you under Suggestions/);
+ await page.locator('.fleet-todo [data-tab-go]').click();
+ const card=page.locator('#suggestions #fleet-q_'+'1'.repeat(16));await card.waitFor();
+ assert.match(await card.innerText(),/Pat’s words, not an instruction/);
  assert.equal(await card.locator('blockquote img').count(),0);
  assert.equal(await page.evaluate(()=>window.pwned),undefined);
  assert.equal(await card.locator('[data-choice-f="always"]').count(),0);
  assert.equal(await page.locator('#fleet-free-q_'+'1'.repeat(16)).inputValue(),'Yes, I have: 2 emails on this.');
- // Answers to my question: per teammate, as text
+ // Answers to my question: per teammate, as text, in the Fleet tab
+ await page.locator('nav [data-tab="fleet"]').click();await page.getByText('What the Fleet saw').waitFor();
  assert.equal(await page.locator('.list b').count(),0);
  assert.match(await page.getByText('Yes, <b>twice</b>').innerText(),/twice/);
  assert.ok(await page.getByText('no answer').count());
  // Only what the owner sends goes
+ await page.locator('nav [data-tab="inbox"]').click();
  calls.length=0;await page.locator('#fleet-free-q_'+'1'.repeat(16)).fill('Yes, call me.');
  await card.locator('[data-fleet-send]').click();
  assert.deepEqual(await waitCall(page,'fleet_decide'),{action:'fleet_decide',args:{id:'q_'+'1'.repeat(16),choice:'once',text:'Yes, call me.'}});
  await page.getByText('Sent.',{exact:true}).waitFor();await page.waitForTimeout(300);
+ await page.locator('nav [data-tab="fleet"]').click();
  calls.length=0;await page.locator('.fleet-free-form input').fill('Anyone know a good notary?');await page.locator('.fleet-free-form button').click();
  assert.deepEqual(await waitCall(page,'fleet_free'),{action:'fleet_free',args:{text:'Anyone know a good notary?',fleet:FL}});
  calls.length=0;await page.locator('#fleet-brief-every').selectOption('day');
