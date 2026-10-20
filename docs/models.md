@@ -1,6 +1,6 @@
 # Bring your own model
 
-The Machine contains no model and no model settings. Everything that needs a model goes through your own OpenClaw agent: reviews, Do it preparations and the native Change prompt. Pick and configure the model in OpenClaw, and The Machine uses it.
+The Machine contains no model and no model settings. Everything that needs a model goes through your own OpenClaw agent: reviews, Do it preparations and profile/role drafting (the native Telegram Change prompt is transport work, not a reasoning call). Pick and configure the model in OpenClaw, and The Machine uses it.
 
 ## Which agent and model it uses
 
@@ -11,62 +11,15 @@ Reviews and preparations run as isolated sessions of your **main** OpenClaw agen
 
 They resolve their model the same way your chats do: `agents.defaults.model.primary`, then `agents.defaults.model.fallbacks` in order (or a per-agent `agents.entries.main.model`). See OpenClaw's [Models](https://docs.openclaw.ai/concepts/models) and [Model providers](https://docs.openclaw.ai/concepts/model-providers) docs.
 
-```json5
-// ~/.openclaw/openclaw.json
-{
-  agents: {
-    defaults: {
-      model: {
-        primary: "openai/gpt-6.1-sol",
-        fallbacks: ["anthropic/claude-sonnet-5-5", "ollama/gemma4"],
-      },
-    },
-  },
-}
-```
+Inspect the current model with `openclaw models status`, and available configured models with `openclaw models list`. To choose another, use `openclaw models set <model-id-or-alias>` with a value that installation actually lists. Inspect fallback commands with `openclaw models fallbacks --help`; keep existing fallbacks unless you intend to change them. Do not copy a model name from an old screenshot or assume a model available on one machine is available on another.
 
-Check what you have with `openclaw models list` and `openclaw models status`. No restart of The Machine is needed after a model change.
-
-Or set them from the command line, from any model `openclaw models list` shows (a ChatGPT sign-in, API-key providers and your own providers alike):
-
-```bash
-openclaw models set openai/gpt-6.1-sol                        # main model
-openclaw models fallbacks clear                               # then the fallbacks, in the order they are tried
-openclaw models fallbacks add anthropic/claude-sonnet-5-5
-openclaw models fallbacks add my-azure/gpt-6.1-sol
-openclaw models fallbacks list
-```
+The Assistant has no separate model switch. A change applies to new OpenClaw turns; it does not change an already-running turn. No Assistant-service restart is needed just to choose a model.
 
 ## A provider of your own
 
-Any endpoint that speaks one of OpenClaw's APIs can be a provider: an Azure OpenAI deployment, a company API gateway, LiteLLM, vLLM. Add it under `models.providers` with its base URL, API type (`openai-responses`, `openai-completions`, `azure-openai-responses`, `anthropic-messages`, `ollama`, ...) and model ids. Keep the key out of the config: put it in a file only you can read (`chmod 600`) and point a file secret at it.
+Configure a custom provider in OpenClaw, not in the Assistant. OpenClaw supports local and hosted providers, including suitable Azure deployments, API gateways, Ollama and compatible local servers. API type, deployment name, authentication headers and secret format depend on that provider and your OpenClaw version. Use that version's provider documentation and `openclaw models --help` rather than treating a generic JSON example as a working configuration. Keep credentials in OpenClaw's supported protected secret/auth stores, never in a public repository.
 
-```json5
-// ~/.openclaw/openclaw.json
-{
-  secrets: {
-    providers: {
-      my_azure_key: { source: "file", path: "/home/you/.openclaw/secrets/my-azure.key", mode: "singleValue" },
-    },
-  },
-  models: {
-    providers: {
-      "my-azure": {
-        baseUrl: "https://example.openai.azure.com/openai/v1",  // on Azure: the /openai/v1 address
-        api: "openai-responses",
-        apiKey: { source: "file", provider: "my_azure_key", id: "value" },
-        // Sent as "Authorization: Bearer <key>" by default. For a gateway that wants the key in another header
-        // (Azure's "api-key", or Azure API Management's bare "Authorization"), turn that off and name the header:
-        // authHeader: false,
-        // headers: { "api-key": { source: "file", provider: "my_azure_key", id: "value" } },
-        models: [{ id: "gpt-6.1-sol", name: "gpt-6.1-sol" }],  // on Azure: the deployment name
-      },
-    },
-  },
-}
-```
-
-Its models are then `my-azure/<id>`, usable as main model or fallback; `openclaw models list` shows them. Check the address, key and model id with one small request of your own before relying on it. If nothing sets `agents.defaults.model.primary`, OpenClaw may start using the new provider's model by default: set your main model explicitly.
+After setup, verify the provider in `openclaw models status` and test one small owner-requested task before relying on it for unattended work. Set the intended main model explicitly, and retain intentional account boundaries and fallbacks.
 
 ## What the model has to be good at
 
@@ -82,15 +35,15 @@ In practice: use a current frontier model with strong tool use as the primary. S
 
 Any OpenClaw provider works, including Ollama, LM Studio, vLLM or LiteLLM in front of your own GPUs. Points to check:
 
-- **Context window:** at least 128K tokens is comfortable for reviews. With less, lower the claim size by having fewer signals wait (`review_worker.min_signals`) or by excluding noisy sources (see Configuration in the README).
+- **Context window:** at least 128K tokens is comfortable for reviews. With less, filter noisy sources and check actual context usage. `review_worker.min_signals` changes when a review starts, not its claim limit; it does not reduce the up-to-120 batch cap.
 - **Tool calling:** the model must support function/tool calls through your provider. Test with one Do it on a simple card before turning on prepare-ahead.
-- **Speed:** a preparation may make dozens of calls. Runs are cut off after about 20 minutes; a slow local model may hit that on bigger tasks.
+- **Speed:** a preparation may make dozens of calls. The default runtime allowance is 25 minutes plus ten minutes of outage grace; a slow local model may hit that on bigger tasks.
 
 A mixed setup works well: a frontier model as `primary`, a local model as the last fallback, so reviews keep going during a provider outage.
 
 ## Privacy and cost
 
-- Collected content stays in your SQLite database, but reviews and preparations send the signals they read to your model provider. With a local model, nothing leaves your machine.
+- Collected content stays in your SQLite database, but reviews and preparations send the signals they read to your model provider. A local reasoning model keeps inference local, but connected services, chosen enrichment, Fleet/Friends summaries and Telegram/push delivery still use the network.
 - Each review reads up to 120 signals; each Do it reads the card's full evidence. The Friday recap reports the week's token usage, so you can see what a setup costs before committing to it.
 - If your provider reports usage limits (a ChatGPT sign-in has a 5-hour and a weekly window, depending on the plan), **Settings → Model** shows the model in use, how much of each window is used and when it resets. It asks OpenClaw's running Gateway (`usage.status`) every five minutes and a minute after a review run ends, and keeps only the percentages and reset times; reading it never costs model usage. `openclaw status --usage` shows the same. When a review run stops on the limit, Connections says so next to the run, with when it lifts.
 - ChatGPT plans can come with **usage limit resets**, which start the limits over. OpenClaw does not report them, so The Machine asks the Codex CLI's own app-server (`codex app-server`, no model call) when the Codex CLI on this computer is signed in to the same ChatGPT account (same email and plan). Then Settings shows how many you have and **Use a reset**, after a confirm. Otherwise it shows **Open ChatGPT to use a reset**, which opens ChatGPT's Codex usage page. Set `"codex": false` in config.json to never ask the Codex CLI, or `"codex": "/path/to/codex"` for another binary.

@@ -239,3 +239,7 @@ to their fixed form, and never given to your AI, its tools or Do it.
 
 Friends are free between hosted Machines. For a self-hosted Machine they are included in the relay fee, at no extra
 charge.
+
+## Delivery and retry
+
+Current Machines save returned answers locally before acknowledging the exact answer receipt/version to the relay. They commit a request identity before asking a question; retrying the same identity and exact question returns the original result instead of asking twice. Older app/relay pairs retain their older delivery behaviour. Questions expire after at most three days; answers are retained until acknowledged or for at most three days, and question metadata for thirty days. Relay processing is not end-to-end encryption between Machines.

@@ -2,8 +2,7 @@
 
 ## Supported release
 
-Security fixes target the latest `main` revision and its pinned OpenClaw 2026.10.5 dependency.
-Older snapshots and other OpenClaw builds are not covered by the compatibility tests.
+Security fixes target the latest `main` revision. CI checks OpenClaw 2026.10.5 and a current release; future releases and older snapshots are not automatically certified by those tests.
 This is an early release for one owner on a trusted machine, not a public multi-user service.
 
 ## Reporting a vulnerability
@@ -25,10 +24,8 @@ Never include actual tokens, messages or a production database.
 - **Do it grants broad account and machine access for the accepted task.** The plugin's
   guards are not a sandbox. Source messages are untrusted and may contain prompt injection.
   Read the README's security model before activating reviews or delivery.
-- Emails, Slack and LinkedIn messages, and X replies and messages are sent only after the owner
-  approves that exact draft (Send now), and a send with an unclear outcome is checked, never
-  repeated. Connectors only read.
-- Fresh installs collect configured sources with reviews and delivery disabled.
+- Messages use exact owner-approved Send actions; complete Telegram drafts can be sent directly from their card. Explicit owner requests use `send_now` where supported. WhatsApp retains a card confirmation. Unknown sends are reconciled, never blindly repeated. Collectors read by default; configured CRM joins are an opt-in exception.
+- Fresh installs collect configured sources with recurring reviews and delivery disabled. One read-only first-look preview may run after setup; it sends no cards or external actions.
   `./install.sh --activate` explicitly enables both after setup.
 - The dashboard's sign-in dialog fills sites in the assistant's browser on the owner's behalf and can save
   those passwords encrypted in the data folder. They never go to the model or the logs, but the key sits next

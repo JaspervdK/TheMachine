@@ -1,0 +1,147 @@
+# Operations
+
+[Documentation index](../README.md). Run commands from the checkout, as its owning user. Historical repair/test receipts are in [History](history.md), not instructions to replay.
+
+## Install
+
+```bash
+./install.sh                      # interactive install, or upgrade
+./install.sh --non-interactive    # same, answers from environment variables (below)
+./install.sh --no-start           # write files/link plugin; do not start service or reload plugin
+./install.sh --preview            # existing install: one review of the last 7 days, shown only (assistant preview)
+./install.sh --activate           # existing install: enable AI reviews and Telegram delivery
+./install.sh --skip-plugin        # leave the OpenClaw plugin alone
+./install.sh --uninstall          # remove service, plugin and CLI link; keep your data
+./install.sh --uninstall --purge  # also delete ~/.local/share/personal-assistant
+```
+
+What it does, in order:
+
+1. **OpenClaw** (in a terminal): when the `openclaw` CLI is missing, it offers to install it (`npm install -g openclaw@<tested version>`, into `~/.local` when npm's global folder isn't yours; never sudo; Node.js comes first, and it says where to get it). When OpenClaw was never set up, it says what The Machine needs from it (a model, the Gateway as a service, a Telegram bot from @BotFather) and starts OpenClaw's own `openclaw onboard --install-daemon`; with no Telegram bot yet, `openclaw channels add --channel telegram`. Each step asks first. An OpenClaw that is set up with a bot gets no questions.
+2. **Prerequisites:** Python, Node and the `openclaw` CLI are required, with fix hints. Run it as your own user, not root. A new install also needs `tailscale` (the dashboard only opens for your Tailscale login), unless you pass the login and host yourself. `gog`, `caddy` and `wacli` are optional per feature. `systemctl` is required to start the managed service; use `--no-start` for manual setup.
+3. **Config:** if `~/.local/share/personal-assistant/config.json` doesn't exist, a short wizard (your name, Telegram chat ID (optional, Enter skips), Tailscale login, dashboard host, time zone, which sources, and for mail and chat your email and company, or "personal") builds it from `config.example.json`. A wrong answer is asked again with what is wrong, and Ctrl+C writes nothing. The company defaults to the one in your email address; "personal" keeps everything personal (`personal:me`). When you talk to a named OpenClaw Telegram account (bot), it is saved as `telegram_account`. The Gateway source is only added when the Gateway runs as a systemd user unit. An existing config is kept as is: only missing top-level keys get their defaults (never the example's owner, Telegram, Tailscale or host; the time zone is this machine's), and install paths (`app_dir`, `openclaw`, `node`, `openclaw_package_dir`) are refreshed.
+4. **Secrets:** creates `api-token`, `owner-token` and the Web Push key `vapid.json` when absent, mode 600 in a 700 directory. Existing secrets are never replaced.
+5. **CLI:** links `~/.local/bin/assistant` to `cli.py`, and says how to add `~/.local/bin` to your PATH when it isn't.
+6. **Plugin:** `openclaw plugins install --link --force --accept-capabilities openclaw-plugin/`, `openclaw plugins enable personal-assistant-bridge`, then a reload. Running the installer accepts the local bridge's OpenClaw capability consent: it registers the assistant tool, owner Telegram commands and event hooks described in the security model. The plugin reads `AGENTS.md` and `PREPARATION.md` from `app_dir` (this checkout), so edits there apply to the next turn.
+7. **Service:** writes `~/.config/systemd/user/personal-assistant.service` with this checkout's paths, then `daemon-reload`, `enable` and `restart`. Without lingering it says how to keep the service running after you log out (`sudo loginctl enable-linger $USER`); without a systemd user session (`sudo su`, a container) it says how to get one or run `python3 assistant.py serve` yourself.
+8. **Health:** waits for `http://127.0.0.1:<port>/health`. Plugin install/enable/reload failures, systemd failures and an unanswered health check return a nonzero exit code; rerun after resolving the reported step.
+9. **Guided setup** (in a terminal, once healthy): connects each source that isn't set up yet (as `assistant connect`, below), restarts the service once and shows the first sync per source; offers `tailscale serve` for the dashboard (and says what is in the way: Serve not enabled on the tailnet yet, or your user not allowed) and a starter `USER.md` when missing or still OpenClaw's template; then `assistant profile` (below) when `USER.md` doesn't say how you write yet; then a preview and, after it, turning on reviews and Telegram. Every question can be answered no. It ends with what is left, if anything.
+
+`--non-interactive` reads: `ASSISTANT_OWNER_NAME`, `ASSISTANT_TELEGRAM_OWNER` (empty: no Telegram), `ASSISTANT_TAILSCALE_OWNER` (required), `ASSISTANT_DASHBOARD_HOST` (required), `ASSISTANT_TIMEZONE`, `ASSISTANT_CONNECTORS` (comma list of `gmail,calendar,slack,crm,android,whatsapp,gateway`, or `none`; default: what is installed or linked here), `ASSISTANT_EMAIL`, `ASSISTANT_GOG_CLIENT`, `ASSISTANT_BOUNDARY` (a company name, `work:<Company>` or `personal`; default: the company in your email address), `ASSISTANT_ANDROID_NODE_ID`, `ASSISTANT_WHATSAPP_STORE`. Tailscale login and host default to what `tailscale status` reports, the Telegram ID to the one OpenClaw already trusts (`commands.ownerAllowFrom`, the Telegram `allowFrom`, or approved pairing senders), the email to the first Google account gog knows. A tagged machine has no Tailscale login of its own, so set `ASSISTANT_TAILSCALE_OWNER` to the login you use on your phone. Non-interactive installs skip the guided setup; run `assistant connect` afterwards.
+
+**Connecting a source:** `assistant connect <source>` (the installer runs the same steps). It asks only what it can't find, writes the account to `config.json` (keeping `config.json.bak`) and keys to their credential files (mode 600, typed without echo, never printed), reads the source once as the service would, and saves nothing if that read fails; it says what to fix instead. Then it restarts the service, only if that service reads this config, and shows the first sync.
+
+It fits setups that aren't the example:
+
+- **Several accounts per source** (two companies, a partner's calendar): `assistant connect gmail` asks whether to redo one or add another. A new account starts from the one you already have (same gog client, Maton key, Salesflare server, poll and active hours), never from its identity. It asks which boundary it belongs to (companies and people first, ones that source doesn't cover yet before ones it does) and follows your id naming (`globex-gmail` if yours look like `acme-gmail`).
+- **Keys you already saved** are offered by name (`MATON_WORK_KEY in maton.env`), so Stripe can use the Maton key Slack uses. A shared key file keeps its other lines: only the one `NAME=value` line changes, and a new key for one source never replaces a key another source still uses.
+- **Credential files anywhere** (outside the checkout, or systemd `LoadCredential`): paths in `credentials` are used as they are; doctor checks that the key name is in the file.
+- **Calendars:** after sign-in it lists the calendars the account can see, so you can read a shared one (`calendar_id`).
+- **Salesflare on another server** (staging, self-hosted): when the key is rejected it asks for the API address and derives the app address.
+- **Your own dashboard domain** (Caddy, another proxy): `dashboard_host` counts when it answers, so nothing offers `tailscale serve` on top.
+- **Another Gateway unit name:** the Gateway source finds it with `systemctl --user list-unit-files`.
+- **Only personal accounts:** answer "personal" for the company; plugin sources ask too (`work:<Company>` or `personal:<name>`; only `work:` counts as work).
+- **Several OpenClaw Telegram bots:** cards go out through `telegram_account` (default `default`); doctor says when you are approved on another one.
+- `assistant connect` on its own also lists what this machine has that no source reads yet: another Google account in gog, a `gh` login, a paired phone, a linked wacli store.
+
+- **Gmail and Calendar:** picks your gog OAuth client, or asks for a downloaded *Desktop app* client JSON (`gog auth setup` explains how to make one). Stores the gog file-keyring password in the `gog-password` credential: your `GOG_KEYRING_PASSWORD` when set, the password of the keyring you already have (never a new one over it), or for a new keyring one you type or a generated one. Signs in with `gog auth add --readonly` for Gmail and Calendar (browserless with `--manual` over SSH). Sending approved emails later needs `gmail.send`, and thread snoozes `gmail.modify`; connecting never asks for more than read access.
+- **Slack:** your Maton API key (or one you saved before); the Slack connection is found in Maton with it (you pick one if there are several), and `team_id`, `user_id`, `email` and `slack_host` come from Slack itself.
+- **Salesflare (`crm`):** an API key (or one you saved before); `user_id`, `team_id` and `email` come from `/me`.
+- **WhatsApp:** the wacli store; offers `wacli auth` (QR code) when it isn't linked, then records `identity_sha256` from `wacli auth status`. It then offers to keep the store synced with a user service (`the-machine-wacli-<account>.service`, `wacli sync --follow`), unless another wacli already holds the store.
+- **Android:** picks your paired Android node from `openclaw nodes list`, then asks per connected source with a phone app whether to skip that app's notifications (default no).
+- **Plugins:** each connector declares what it asks in `SETUP` (see [Adding a source](../docs/adding-a-source.md)).
+- **Telegram ID by hand:** message your bot; with DM pairing its reply shows your user ID. Approve yourself with `openclaw pairing approve telegram <code>`.
+- **Dashboard by hand:** `tailscale serve --bg --https=8443 --set-path / http://127.0.0.1:8787`, then open `https://<machine>.<tailnet>.ts.net:8443/`. Its own port makes it its own origin, so the dashboard installs as a phone app next to OpenClaw's web app on :443 (two apps on one origin claim each other's pages). A custom domain is optional: `deploy/Caddyfile` and `deploy/caddy-machine.service`.
+- **Preview and activation:** `./install.sh --preview` (or `assistant preview`) runs one regular review of the last 7 days and prints its cards, with progress while the agent works (usually a few minutes). The cards are real and stay on the dashboard, but they are never sent to Telegram, not even after activation, and nothing is prepared ahead; reviews and delivery stay off. `./install.sh --activate` turns them on.
+- **First look:** you don't have to ask for that preview. With reviews still off, once OpenClaw has a model and a source has sent its first signals, the service starts one preview of the last 7 days by itself, as soon as the first import has settled (no new signals for 3 minutes). It is the same read-only preview: its cards show on the dashboard (with "Reviewing your last 7 days: 12 of 40 signals" while it runs), nothing is sent, nothing is prepared and nothing is done in your accounts; turning reviews on stays your choice. It runs once (a failed one is tried again after 30 minutes, three times at most), never after a preview of your own or once reviews were on; `review_worker.first_look: false` turns it off.
+- To start with one source, set `ASSISTANT_CONNECTORS=gateway ./install.sh` (Gateway failures only), or choose just `gmail` in the wizard.
+- Restart after config edits: `systemctl --user restart personal-assistant.service`.
+
+### Your own instructions, USER.md and overlays
+
+`AGENTS.md` (reviews) and `PREPARATION.md` (Do it runs) are neutral templates about *how* the assistant works. Put *who you are* in `USER.md` in your OpenClaw workspace: your name, companies and their accounts, important people, tone of voice for emails, which tools you use and standing preferences. Review and preparation turns get it in their context.
+
+You don't have to write it all yourself. `assistant profile` has your agent read your own recent messages once (sent email counting double, and your own Slack, WhatsApp, LinkedIn and X messages; without quoted history, media placeholders, reactions, automated mail or more than two copies of one template), plus who you work with most and which senders you never answer. In one isolated turn (`agent:main:assistant-review-profile-<run>`, no messages, no file changes) it drafts your role, languages, your voice per channel (email reads nothing like WhatsApp: length, tone, greeting and sign-off for each), a few phrases that sound like you, what matters and what to leave alone. Right after, a second turn reads the first and latest messages with up to 15 of your closest people and, where they show it, notes in the graph what each is to you ("cofounder", "accountant", "customer at Globex"); the terminal lists them, and you can change them in the dashboard's Graph tab. `assistant roles` runs only that second step. You see the draft in the terminal; only on yes does it go into `USER.md`, as its own `## Observed from my messages` section. It replaces the empty starter lines it covers and leaves everything you wrote alone. Run it again later and it replaces only that section. Delete the section's marker line once you've edited it, and later runs leave it alone too. Confidential matters (deals, fundraising, legal, health, money, family) stay out. OpenClaw chat sessions load the first 4,000 characters of `USER.md`, so the draft is written for the room your file has left; what still doesn't fit is left out, least useful first, and listed (`--all` keeps it anyway).
+
+If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION.md` (keep `PREPARATION.md` under 30,000 characters; the plugin truncates beyond that, and a test checks it).
+
+## Operations
+
+- **Service:** `systemctl --user status personal-assistant.service`; logs with `journalctl --user -u personal-assistant.service -n 50 --no-pager`. Enable lingering (`loginctl enable-linger $USER`) to start at boot.
+- **Plugin:** after editing `openclaw-plugin/`, run `openclaw plugins reload personal-assistant-bridge --wait`; no Gateway restart needed.
+- **One collector only:** don't run `assistant.py sync-once` while the service runs. Stop the service before manual syncs or migrations and resume from the existing checkpoints. Never reset a checkpoint to get past throttling.
+- **Google sign-in expired:** a Gmail or Calendar source whose stored sign-in Google revoked shows `google_signin_expired_run_gog_auth_add` and retries hourly. Run `gog auth add <email> --client <client>` again; the next retry picks it up.
+- **Backups:** use SQLite's backup API (`sqlite3 events.sqlite ".backup copy.sqlite"`); never copy the live file without its WAL.
+- **Rollback:** disable a source by removing its account from `config.json`; disable reviews with `review_worker.enabled: false`; stop delivery with `delivery_enabled: false`; disable the plugin with `openclaw plugins disable personal-assistant-bridge`. Keep the database.
+
+### Moving to another computer
+
+`assistant export` writes one archive with the databases (signals, suggestions, people and organisations with your own edits, promises), `config.json`, connectors you built yourself, your OpenClaw workspace files (`AGENTS.md`, `USER.md`, memory) and who may talk to your Telegram bot. Databases are copied with SQLite's backup API, so the service can keep running. Keys and tokens stay out unless you pass `--keys`. Without them the archive is a plain `.zip`, which Windows, macOS and Linux open without extra tools. With `--keys` the whole archive is a `.tar.gz.enc`, encrypted with a passphrase you pick (AES-256, the passphrase stretched with PBKDF2 through `openssl`), and only that passphrase opens it; a zip that Windows opens on its own could only use weak encryption, so keys never go in one. OpenClaw's own chat history and model sign-in stay behind.
+
+On the other computer, install The Machine first, then `assistant import the-machine-export-<date>.zip` (or `.tar.gz.enc`; it asks the passphrase; older `.tar.gz` exports import too). It refuses to overwrite a setup that already has sources unless you pass `--force`, which keeps a copy of the current data folder first. A file you already have there (say `USER.md`) is kept, with the imported one next to it as `.from-export`. It ends with what to connect again: your model, Google (a hosted server's Google access does not move along), and without `--keys` every source's key and the Telegram bot token. Restart the service and check with `assistant doctor`.
+
+The hosted version has the same export on its Account page.
+
+### Catch-up and search guarantees
+
+- **GitHub:** at most five 50-item pages per run, with a frozen `since`/`before` window and a persisted next page. The completed checkpoint advances only after that window drains; events and paging state commit together. New arrivals go into the next window. Previous-page fingerprints are checked before and after a continuation; shifted pages replay that window instead of skipping older items. The five-page work budget remains, with extra read-only anchor checks.
+- **Stripe:** at most ten 100-item pages per run. The fixed time window and `starting_after` cursor survive restarts and failed reads. The next window overlaps the completed second (`created[gte]`); event IDs deduplicate replays.
+- **X mentions:** at most four pages per read. An unfinished `mention_catchup` retains the bottom cursor and original floor, without advancing the completed post ID. Catch-up resumes at the configured X polling interval, not an increased rate.
+- **Coverage:** all three connectors retain incomplete coverage in their checkpoint while more pages wait. A successful bounded read is not a claim of complete catch-up; inspect Sync details.
+- **X account switching:** the existing browser lease reserves selection, work and restoration atomically, including primary-account reads and sends. No real-Chrome focus or desktop input. Other jobs wait until cleanup releases the lease. Inventory and public-reply previews/verifications remain shared and never switch accounts.
+- **Semantic freshness:** seed/candidate vectors must match their event version, model and dimensions. Changed seeds refresh on demand; stale candidates wait for backfill. Slow old requests cannot overwrite newer vectors, and an in-flight changed/deleted seed is not used. Keyword fallback and account isolation remain.
+
+These are collection/retrieval fixes, not additional approval requirements. Normal owner-authorized work keeps its existing permissions. Regression tests use disposable databases/leases and the actual X reader JavaScript with synthetic responses; no real sends or browser connections.
+
+**Downgrading:** do not run older collectors while `catchup` or `page.mention_catchup` is nonempty: old readers ignore that continuation. Keep the service stopped or hold the affected source until cursor-aware code is restored. Preserve the live database, receipts and owner choices; never reset a checkpoint or restore a backup over newer decisions.
+
+## Known limitations
+
+- **Change prompt and OpenClaw versions.** The native Telegram reply prompt (`openclaw-plugin/change-prompt.ts`) uses the Telegram extension API and a bridge for three client helpers. It resolves them from the installed build's export table, without a version pin or hardcoded content hashes, so it avoids a hardcoded build hash; compatibility still needs checking after updates. CI loads the real transport modules of 2026.10.5 and of the latest release. If a release removes or renames a helper, Change falls back to a plain prompt before sending (replies still work); an uncertain send never triggers that fallback. The Gateway SDK entry points used elsewhere (`plugin-sdk/gateway-runtime`, `system-event-runtime`, `plugin-entry`) are public but experimental; check them when upgrading OpenClaw.
+- **Telegram or the dashboard app** for delivery (no email or SMS); the dashboard needs Tailscale (or your own reverse proxy that sets the same identity headers).
+- **Gmail and Calendar need `gog`** or a token broker you run, Slack needs Maton; Google setup invokes gog OAuth, or uses the configured broker. The app does not run a separate Google token issuer.
+- **Not realtime.** Sources poll (five minutes by default; Slack can take hours on a large workspace), and reviews batch signals.
+- **Android and WhatsApp are best effort**: notifications cleared during a gap are lost; WhatsApp depends on `wacli` staying synced.
+- One owner per app installation. Fleet/Friends connects separate installations; it does not make one local database multi-user.
+
+## Tests
+
+```bash
+python3 scripts/test.py
+```
+
+The runner returns nonzero if any suite fails and isolates HOME/config from your live installation. The tests are offline: they use temporary databases, a temporary OpenClaw workspace (`test-env.mjs`) and stubs for the Gateway, `openclaw` and `systemctl`. `test_installer.py` runs the installer against a temporary `HOME`. `test_ux_dashboard.mjs` drives the dashboard in Chromium through the `playwright-core` that ships with OpenClaw and `/usr/bin/chromium`; point `PLAYWRIGHT_CORE` and `CHROMIUM_PATH` elsewhere if yours differ. The Node tests that load the plugin need the `openclaw` package (`OPENCLAW_PACKAGE_DIR`). `test_openclaw_compat.mjs` also loads the real SDK and installs the plugin into a disposable OpenClaw home, with no Gateway or messages.
+
+## Update and rollback
+
+1. Inspect local changes and the intended source revision. Keep custom connectors and owner overlays; never reset a dirty checkout to update it.
+2. Save a consistent SQLite backup with the backup API, plus private config/source backups. These are recovery evidence, not a reason to overwrite newer decisions.
+3. Run the relevant failure-path tests with `python3 scripts/test.py`, commit the reviewed changes, then install/update through `./install.sh`.
+4. Check `assistant doctor`, service health, recent source syncs and review/delivery receipts. For plugin changes use `openclaw plugins reload personal-assistant-bridge --wait`; if busy, wait instead of forcing a restart.
+5. To roll back, use a reviewed revert commit and the same installer route. Keep the live database, receipts, checkpoints, prompts and newer owner input. Schema compatibility must be checked per migration; some old code cannot read a newer schema. If a send is admitted or uncertain, reconcile it before replaying anything.
+
+A running service after a reboot is not enough: verify the checkpoint resumed, missed events arrived and no duplicate message/action was made. Do not create real purchases or messages merely to test recovery.
+
+## Disable one feature
+
+| Feature | Supported change |
+|---|---|
+| One source | Remove its account from `config.json`, restart the service; retain its data/checkpoint |
+| Recurring reviews | `review_worker.enabled: false`, restart |
+| Proactive notifications | `delivery_enabled: false`, restart; inspect retained queued sends before enabling again |
+| Prepare ahead | `prepare_ahead: false`, restart |
+| Entire service | `systemctl --user stop personal-assistant.service` (disable too only if it must stay off at boot) |
+| Bridge | `openclaw plugins disable personal-assistant-bridge`; existing runs may still need reconciliation |
+
+Do not edit worker start lines or discard jobs to pause work. There is no documented global preparation-pause setting: stop the service only after inspecting active/admitted work. Source rollback never resets pairing, browser profiles, OAuth or unrelated schedules.
+
+## Verification checklist
+
+- [ ] Health and owner-authenticated dashboard answer on the intended origin.
+- [ ] One collector only; systemd unit and user lingering match the intended boot behavior.
+- [ ] Account identity, last success, failure/retry and incomplete catch-up agree.
+- [ ] Signal page and checkpoint commit together; changed versions remain reviewable.
+- [ ] A review saves its actual assessed IDs, not unseen/set-aside content.
+- [ ] Genuine owner interaction produces one delivery and persists feedback across restart.
+- [ ] Resumed writes inspect retained call details and source receipts before repeating.
+- [ ] Export/import is checked on a disposable destination, never by overwriting live data.

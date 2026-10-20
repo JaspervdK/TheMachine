@@ -1,6 +1,6 @@
 # Adding a source
 
-A source (connector) reads one account of one service and stores what it finds as **events**. Reviews then decide what deserves a card. A connector never interprets, guesses or writes: no AI, no replies, no marking as read.
+A source (connector) reads one account of one service and stores what it finds as **events**. Reviews then decide what deserves a card. A new connector must not add AI interpretation or unrequested writes: no replies or marking as read. The existing opt-in Salesflare account-join exception is not permission to add writes to another source.
 
 There are two ways to add one:
 
@@ -67,7 +67,7 @@ SETUP = {'label': 'RSS feed',                          # name in prompts, doctor
 
 ## 3. Events
 
-Each event is a dict with exactly these fields:
+Use this common event shape; optional metadata is source-specific. Check parsing/validation in the store rather than assuming every provider payload already has this shape:
 
 | Field | Meaning |
 |---|---|
@@ -88,7 +88,7 @@ When an item changes, send it again with the same `source_id`: the service store
 
 - Put your cursor in `state`: a page token, a `since` time, an ETag. It's JSON, read back with `store.checkpoint(account_id)`.
 - For a long backlog, commit page by page, each with the cursor of the next page.
-- When the source rejects an expired cursor, drop it and reread a bounded recent window (`config.get('bootstrap_days', 7)`).
+- When the provider explicitly rejects an expired cursor, record that expiry and replay the supported bounded window (`config.get('bootstrap_days', 7)`) with deduplication. Do not clear a valid retained continuation because a request timed out or was rate limited; disclose any unrecoverable coverage gap.
 - On the first run, read only that recent window, not years of history.
 
 ## 5. Dashboard and noise rules
@@ -107,7 +107,7 @@ Test with saved fixtures, not live accounts. [`test_connectors.py`](../test_conn
 - that `304 Not Modified` keeps the checkpoint,
 - that errors raise `SourceError` with a safe label.
 
-Then run `assistant connect <service>`: it adds the account, restarts the service and shows the first read. Check it later with `assistant sources`, `assistant doctor` or on the dashboard.
+After fixture tests, the owner can run `assistant connect <service>`: setup verifies the account, restarts the service and shows its first read. A busy source remains explicitly unverified until that read succeeds. Check it later with `assistant sources`, `assistant doctor` or on the dashboard.
 
 ## Checklist
 

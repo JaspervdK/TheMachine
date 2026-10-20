@@ -1,6 +1,6 @@
 # Getting started
 
-From nothing to your first cards in about 15 minutes. Each step says how to check it worked.
+From installation to your first cards. Setup time depends on account sign-in, source catch-up and the model; each step says how to check it worked.
 
 ## Before you start
 
@@ -13,7 +13,7 @@ From nothing to your first cards in about 15 minutes. Each step says how to chec
 ## 1. Install
 
 ```bash
-git clone https://github.com/JeroenCorthout/TheMachine.git ~/.openclaw/workspace/tools/personal-assistant
+git clone https://github.com/Salesflare/TheMachine.git ~/.openclaw/workspace/tools/personal-assistant
 cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 ```
@@ -42,7 +42,7 @@ Right after the service starts, the installer walks through each source:
 | Gateway log | Finds the Gateway's systemd unit. |
 | Plugins | `github`, `stripe`, `x`, `linkedin`, `trello`, `rss`: not part of the installer; `assistant connect github` (and so on) asks for the few fields each needs. |
 
-Every source is read once before it is saved, so a wrong key or account shows up immediately, with what to do about it. Afterwards you see the first sync per source: how many signals came in and from how far back.
+Setup verifies a supported read before reporting the account connected. A busy/rate-limited browser source can be saved for its first sync, explicitly unverified; saved configuration is not proof a read succeeded. Afterwards you see the first sync per source: how many signals came in and from how far back.
 
 Skipped one? `assistant connect gmail` (or `slack`, `crm`, `whatsapp`, `android`, `github`, …) does the same any time. `assistant connect` on its own lists what is still missing.
 
@@ -107,7 +107,7 @@ Then it offers to fill in the rest from what you actually write: your agent read
 
 The installer offers a **preview**: your agent reviews the last 7 days once and shows the cards in the terminal and on the dashboard. Nothing is sent and nothing is done in your accounts. Skip it and the service starts that same preview by itself (the *first look*) once a model and a source are connected and the first import has settled; the dashboard shows how far it is.
 
-If the cards look useful, say yes to **turning on reviews and card delivery** (Telegram and/or the dashboard app). Read [Security model](../README.md#security-model) first: **Do it** lets the agent act with your accounts, only after you tap it. You can also do both later with `./install.sh --preview` and `./install.sh --activate`.
+If the cards look useful, say yes to **turning on reviews and card delivery** (Telegram and/or the dashboard app). Read [Security model](../README.md#security-model) first: **Do it** authorizes the offered task; prepare-ahead may start read-only preparation before a tap, but stops before its consequential final step. You can also do both later with `./install.sh --preview` and `./install.sh --activate`.
 
 On a server without a screen, `./install.sh --browser-viewer` gives the assistant a browser you can watch and use from your own (sign in to LinkedIn or X there, or help when a task waits on a sign-in). On a desktop you are not always at, the dashboard can show its screen live instead (`browser_vnc`), so you can take over from your phone. See [README](../README.md#sources).
 
@@ -124,7 +124,7 @@ One pass over the service, the OpenClaw bridge, your Telegram approval, every so
 - Add or redo a source: `assistant connect <source>`. With one already there it asks whether to redo it or add another (a second company, a partner's calendar); the new one reuses your client, keys and settings and follows your naming. `assistant connect` on its own also shows accounts this machine has that nothing reads yet.
 - Sending approved emails needs `gmail.send` on top of read-only access; add it with gog when you want it. Connecting never asks for more than read access.
 - Company facts next to each organisation (industry, size, location): add a key for an enrichment service you use (Apollo, People Data Labs, Hunter or any that looks companies up by domain). Only domains are sent. When a look-up gets a company wrong, Edit on its page fixes the details or clears them. See [Organisation data](../README.md#organisation-data-optional-enrichment).
-- Upgrade: `git pull && ./install.sh`. Your config, data and secrets are kept.
+- Upgrade: inspect local changes, then `git pull --ff-only` and `./install.sh`. Preserve custom work; see [Operations](operations.md#update-and-rollback). Your config, data and secrets are kept.
 - Backups: on your own computer nothing backs up by itself. A nightly encrypted [restic](https://restic.net) backup of your home folder is enough: it holds `~/.openclaw` (workspace, memory, settings) and The Machine's data. Leave out what an install makes again (`~/.npm`, `~/.cache`, `~/.local/lib`, `~/.openclaw/npm`, `node_modules`, model files such as `*.gguf`), and keep the repository password somewhere else. `assistant export --keys` makes a one-file copy too.
 
 ## Moving from hosted to your own computer
@@ -133,9 +133,9 @@ Everything moves in one file: what The Machine knows, your settings, connectors 
 
 1. On the hosted Account page, click **Export everything**. Pick a passphrase if your keys should come along: then the whole file is encrypted with it. Without one, keys stay behind and you connect those sources again. Download the file; it is deleted from your server after 24 hours.
 2. On your own computer, follow steps 1 above to install The Machine.
-3. Stop the target service first: `systemctl --user stop personal-assistant`. Close other database readers, then
+3. Stop the target service first: `systemctl --user stop personal-assistant.service`. Close other database readers, then
    put it back: `assistant import the-machine-export-<date>.zip` (for `.tar.gz.enc` it asks the passphrase).
 4. Connect what the import lists. Always: your model, and Google (hosted Google access works through the hosting and does not move along: `assistant connect gmail --account <id>` and the same for `calendar`). Without a passphrase also every source's key and your Telegram bot token.
-5. `systemctl --user start personal-assistant`, then `assistant doctor`.
+5. `systemctl --user start personal-assistant.service`, then `assistant doctor`.
 
 The same works between two of your own computers: `assistant export --keys` on the old one.
