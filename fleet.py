@@ -11,6 +11,9 @@ relay, and picks up what waits for it with a long poll. A Work Fleet asks three 
 - meeting: what a teammate knows about the outside people in a meeting: closeness, last contact and open promises
   (counts; the promises themselves with details). Asked by itself only when the owner turned that on.
 - handling: who is on an email several teammates got. A hash of the Fleet's secret and the Message-ID, never the email.
+- brief: "what the Fleet saw", daily or weekly. Each teammate's Machine answers with aggregate facts only (companies
+  with counts and last-touch dates, which went quiet, hashes of unanswered and answered inbound emails, hashes of
+  meetings with outside people); the asking Machine assembles the brief by plain code (brief_facts, assemble_brief).
 
 A Family Fleet links Machines but asks nothing yet: its questions are designed, not built.
 
@@ -57,13 +60,28 @@ CREATE TABLE IF NOT EXISTS fleet_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS fleet_notices(id TEXT PRIMARY KEY,fleet TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,
   version INTEGER NOT NULL,view TEXT NOT NULL,at TEXT NOT NULL,received_at TEXT NOT NULL,notified_at TEXT,
   telegram_message_id TEXT,telegram_key TEXT,decided_at TEXT,reason TEXT);
+CREATE TABLE IF NOT EXISTS fleet_briefs(fleet TEXT NOT NULL,period TEXT NOT NULL,every TEXT NOT NULL,view TEXT NOT NULL,answers INTEGER NOT NULL,
+  built_at TEXT NOT NULL,told_at TEXT,telegram_message_id TEXT,PRIMARY KEY(fleet,period));
 '''
 FLEET_NAMES = {'work': 'Work Fleet', 'family': 'Family Fleet'}
 ASKS = {'work': ('relationships', 'meeting'), 'family': ()}       # what each Fleet asks (the relay says the same)
 RULE_KINDS = {'work': ('relationships', 'meeting', 'handling'), 'family': ()}
 KIND_LABEL = {'relationships': 'who knows someone', 'meeting': 'meeting context', 'handling': 'who handles shared emails',
               'seat': 'a server in your Fleet'}
+# Added kinds (append-only): the team brief.
+ASKS['work'] += ('brief',)
+RULE_KINDS['work'] += ('brief',)
+KIND_LABEL.update(brief='brief facts')
 RULES = ('ask', 'always', 'never')
+# The rules a kind takes, when not all three.
+KIND_RULES = {}
+NO_DETAILS = ('handling', 'brief')  # kinds without a "how much they hear" choice
+BRIEF_BYTES = 30000  # under the relay's MAX_BRIEF
+BRIEF_EVERY = ('off', 'day', 'week')
+BRIEF_SETTLE = 7200      # seconds after asking: the brief is told then, or once everyone answered, within work hours
+BRIEF_REBUILD = 1800     # an assembled brief is rebuilt at most this often while nothing new came in
+UNANSWERED_DAYS = 14     # inbound emails this recent count for "nobody answered"
+HASH = re.compile(r'[0-9a-f]{64}')
 CLOSENESS = ('close', 'regular', 'occasional', 'faint')
 OPEN_CARD = ('pending', 'accepted', 'prepared', 'instructions', 'snoozed')
 TAKEN = ('accepted', 'prepared', 'instructions', 'completed')
@@ -151,14 +169,24 @@ def ensure(db):
             db.execute('ALTER TABLE fleet_in ADD COLUMN ' + column)
     if 'fleet' not in {r[1] for r in db.execute('PRAGMA table_info(fleet_claims)')}:  # added 2026-10-20: several Work Fleets
         db.execute('ALTER TABLE fleet_claims ADD COLUMN fleet TEXT')
+    if 'draft' not in {r[1] for r in db.execute('PRAGMA table_info(fleet_in)')}:  # added 2026-10-20: a brief's preview
+        db.execute('ALTER TABLE fleet_in ADD COLUMN draft TEXT')
 
 
 def clean(text, chars):
     return ' '.join(str(text or '').split())[:chars]
 
 
+def _get(row, key):
+    return row[key] if key in row.keys() else None
+
+
 def month(value):
     return str(value or '')[:7] if MONTH.match(str(value or '')[:7]) else None
+
+
+def day(value):
+    return str(value or '')[:10] if DAY.fullmatch(str(value or '')[:10]) else None
 
 
 class Relay:
@@ -298,6 +326,111 @@ def meeting(db, emails, accounts, details):
     return {'knows': bool(found), 'people': found}
 
 
+def _outside(domain, internal):
+    """A company domain that is neither a free-mail provider nor the owner's or a teammate's own."""
+    return bool(domain) and domain not in graph.FREEMAIL and not any(domain == d or domain.endswith('.' + d) for d in internal)
+
+
+def _org_name(db, domain):
+    row = db.execute("SELECT name FROM graph_nodes WHERE id=?", ('org:' + domain,)).fetchone()
+    return clean(row['name'], 80) if row and row['name'] else domain
+
+
+def _hash(secret, *parts):
+    return hashlib.sha256('\n'.join((secret, *parts)).encode()).hexdigest()
+
+
+def brief_facts(db, accounts, since, secret, internal, today=None):
+    """What this Machine adds to a teammate's brief: aggregate facts from the given (work) accounts only. Company
+    names and domains, counts and dates, and hashes keyed by the Fleet's secret (an email's like a claim's, a meeting's
+    of its calendar id), never a message, a subject, a person, an address or a calendar title.
+    - touched: companies in contact since `since`, with how many signals and the last day;
+    - quiet: companies of people the graph says went quiet (silent much longer than usual), with the last day;
+    - unanswered: inbound emails of the last UNANSWERED_DAYS with no reply in their thread yet; replied: those answered;
+    - meetings: meetings with outside people from `since` to a week ahead."""
+    today = today or dt.datetime.now(dt.timezone.utc).date()
+    out = {'touched': [], 'quiet': [], 'unanswered': [], 'replied': [], 'meetings': []}
+    if not accounts:
+        return out
+    marks = ','.join('?' * len(accounts))
+    nodes = {}
+
+    def domains(node_id):
+        if node_id not in nodes:
+            row = db.execute("SELECT * FROM graph_nodes WHERE id=? AND kind='person'", (node_id,)).fetchone()
+            nodes[node_id] = sorted({e.rsplit('@', 1)[1] for e in _emails(row) if not graph.bulk(e)} if row else set())
+        return [d for d in nodes[node_id] if _outside(d, internal)]
+    touched = {}
+    for node_id, event_id, at in db.execute(f"SELECT g.node_id,e.id,e.occurred_at FROM graph_events g JOIN events e ON e.id=g.event_id JOIN graph_nodes n ON n.id=g.node_id "
+                                            f"WHERE e.deleted=0 AND e.occurred_at>=? AND e.account_id IN ({marks}) AND n.kind='person'",
+                                            (since, *accounts)):
+        for domain in domains(node_id)[:1]:
+            seen = touched.setdefault(domain, {'events': set(), 'last': ''})
+            seen['events'].add(event_id)
+            seen['last'] = max(seen['last'], str(at)[:10])
+    for domain, seen in sorted(touched.items(), key=lambda kv: (-len(kv[1]['events']), kv[0]))[:40]:
+        out['touched'].append({'org': _org_name(db, domain), 'domain': domain, 'count': len(seen['events']), 'last': day(seen['last'])})
+    quiet = {}
+    for row in db.execute("SELECT * FROM graph_nodes WHERE kind='person' AND quiet=1 ORDER BY strength DESC LIMIT 200"):
+        last = _work_last(db, row['id'], accounts)
+        for domain in domains(row['id'])[:1]:
+            if last and domain not in touched:
+                quiet[domain] = max(quiet.get(domain, ''), str(last)[:10])
+    out['quiet'] = [{'org': _org_name(db, d), 'domain': d, 'last': day(last)} for d, last in list(quiet.items())[:20]]
+    start = (today - dt.timedelta(days=UNANSWERED_DAYS)).isoformat()
+    later = ("SELECT 1 FROM events r WHERE r.account_id=e.account_id AND r.kind='gmail.message' AND r.deleted=0 AND r.occurred_at>e.occurred_at "
+             "AND instr(r.metadata,'\"SENT\"')>0 AND json_extract(r.metadata,'$.thread_id')=json_extract(e.metadata,'$.thread_id')")
+    for row in db.execute(f"SELECT e.occurred_at,e.metadata,EXISTS({later}) answered FROM events e WHERE e.kind='gmail.message' AND e.deleted=0 "
+                          f"AND e.occurred_at>=? AND e.account_id IN ({marks}) AND instr(e.metadata,'\"SENT\"')=0 ORDER BY e.occurred_at DESC",
+                          (start, *accounts)):
+        m = json.loads(row['metadata'] or '{}')
+        sender = (graph.addresses(m.get('from')) or [('', '')])[0][1]
+        message_id = str(m.get('message-id') or '').strip().strip('<>').lower()
+        if (not message_id or not sender or graph.bulk(sender) or graph.BULK_LABELS & set(m.get('labels') or ())
+                or not _outside(sender.rsplit('@', 1)[1], internal)):
+            continue
+        key = _hash(secret, message_id)
+        if row['answered']:
+            if len(out['replied']) < 60:
+                out['replied'].append(key)
+        elif len(out['unanswered']) < 25:
+            domain = sender.rsplit('@', 1)[1]
+            out['unanswered'].append({'org': _org_name(db, domain), 'domain': domain, 'key': key, 'at': day(row['occurred_at'])})
+    ahead = (today + dt.timedelta(days=7)).isoformat()
+    for row in db.execute(f"SELECT source_id,metadata FROM events WHERE kind='calendar.event' AND deleted=0 AND account_id IN ({marks}) "
+                          "AND occurred_at>=? AND occurred_at<=? ORDER BY occurred_at", (*accounts, since, ahead + 'T23:59:59')):
+        m = json.loads(row['metadata'] or '{}')
+        if m.get('status') == 'cancelled':
+            continue
+        start_at = m.get('start') if isinstance(m.get('start'), dict) else {}
+        found = sorted({str(a.get('email') or '').lower().rsplit('@', 1)[-1] for a in m.get('attendees') or [] if isinstance(a, dict)
+                        and not a.get('self') and not a.get('resource') and EMAIL.fullmatch(str(a.get('email') or '').lower())
+                        and not graph.bulk(str(a.get('email')).lower())})
+        found = [d for d in found if _outside(d, internal)]
+        when = day(start_at.get('dateTime') or start_at.get('date'))
+        if found and when and len(out['meetings']) < 30:
+            out['meetings'].append({'org': _org_name(db, found[0]), 'domain': found[0], 'day': when, 'key': _hash(secret, 'meeting', str(row['source_id']))})
+    return fit_brief(out)
+
+
+def fit_brief(facts, limit=None):
+    """The facts, trimmed from the end of the longest list until they fit what the relay carries for a brief."""
+    limit = limit or BRIEF_BYTES
+    while len(json.dumps(facts, separators=(',', ':')).encode()) > limit:
+        longest = max(facts, key=lambda k: len(facts[k]))
+        if not facts[longest]:
+            break
+        facts[longest].pop()
+    return facts
+
+
+def brief_preview(facts):
+    """One line for the owner's approval card: how much a brief answer would share, in counts."""
+    return (f"{len(facts['touched'])} companies you were in touch with, {len(facts['quiet'])} that went quiet, "
+            f"{len(facts['unanswered'])} unanswered emails (as hashes), {len(facts['meetings'])} meetings with outside people. "
+            'Company names, counts and dates only.')
+
+
 def parse_question(kind, question):
     """A teammate's question in its fixed form, else None. Nothing else of it is ever read."""
     if not isinstance(question, dict):
@@ -312,7 +445,36 @@ def parse_question(kind, question):
         kept = sorted({e.strip().lower() for e in emails if isinstance(e, str) and EMAIL.fullmatch(e.strip().lower())})[:20]
         when = question.get('when')
         return {'emails': kept, **({'when': when[:10]} if isinstance(when, str) and DAY.match(when[:10]) else {})} if kept else None
+    if kind == 'brief':
+        since = day(question.get('since'))
+        return {'period': question['period'], 'since': since} if question.get('period') in ('day', 'week') and since else None
     return None
+
+
+def _brief_items(items, fields, limit):
+    """A list from a teammate's brief answer, each item kept to its fixed fields and shapes."""
+    shapes = {'org': lambda v: clean(v, 80) or None, 'domain': lambda v: v if isinstance(v, str) and DOMAIN.fullmatch(v) else None,
+              'count': lambda v: v if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 10000 else None,
+              'last': day, 'at': day, 'day': day, 'key': lambda v: v if isinstance(v, str) and HASH.fullmatch(v) else None}
+    out = []
+    for item in (items if isinstance(items, list) else [])[:limit]:
+        if isinstance(item, dict):
+            kept = {f: shapes[f](item.get(f)) for f in fields}
+            if all(v is not None for v in kept.values()):
+                out.append(kept)
+    return out
+
+
+def clean_brief(answer):
+    """A teammate's brief facts, kept to the fields brief_facts sends: anything else (text, names, addresses) is dropped."""
+    if not isinstance(answer, dict):
+        return None
+    replied = answer.get('replied') if isinstance(answer.get('replied'), list) else []
+    return {'touched': _brief_items(answer.get('touched'), ('org', 'domain', 'count', 'last'), 40),
+            'quiet': _brief_items(answer.get('quiet'), ('org', 'domain', 'last'), 20),
+            'unanswered': _brief_items(answer.get('unanswered'), ('org', 'domain', 'key', 'at'), 25),
+            'replied': [k for k in replied[:60] if isinstance(k, str) and HASH.fullmatch(k)],
+            'meetings': _brief_items(answer.get('meetings'), ('org', 'domain', 'day', 'key'), 30)}
 
 
 def clean_answer(kind, answer):
@@ -350,6 +512,8 @@ def clean_answer(kind, answer):
                     item.setdefault('promises', {})[side] = kept
             people.append(item)
         return {'knows': bool(people), 'people': people}
+    if kind == 'brief':
+        return clean_brief(answer)
     return None
 
 
@@ -359,6 +523,8 @@ def question_text(kind, question):
     if kind == 'meeting':
         return ('What do you know about ' + ', '.join(question.get('emails', [])) + '?'
                 + (f" (a meeting on {question['when']})" if question.get('when') else ''))
+    if kind == 'brief':
+        return 'Your brief facts for ' + ('the week' if question.get('period') == 'week' else 'the day') + f" (since {question.get('since', '?')})"
     return kind
 
 
@@ -467,6 +633,9 @@ def answer_text(kind, answer):
     """One plain line of an answer: for the dashboard, the log and preparations."""
     if not answer:
         return 'no answer'
+    if kind == 'brief':
+        return (f"{len(answer.get('touched', []))} companies, {len(answer.get('quiet', []))} quiet, "
+                f"{len(answer.get('unanswered', []))} unanswered, {len(answer.get('meetings', []))} meetings")
     if kind == 'relationships':
         if not answer.get('knows'):
             return 'doesn’t know anyone there' + (f" ({answer['note']})" if answer.get('note') else '')
@@ -487,6 +656,92 @@ def answer_text(kind, answer):
     return '; '.join(lines) if lines else 'doesn’t know them'
 
 
+def assemble_brief(own, answers, claimed=()):
+    """"What the Fleet saw", by plain code from cleaned facts: this Machine's own (as "You") and each teammate's that
+    answered [(name, facts)]. Nothing here reaches a model.
+    - quiet: companies someone says went quiet that nobody was in touch with in the period;
+    - several: companies two or more of you were in touch with;
+    - unanswered: inbound emails nobody answered: not answered by anyone who got them, and not claimed in the Fleet;
+    - meetings: the same meeting on several calendars, or several of you meeting one company."""
+    everyone = [('You', own)] + list(answers)
+    orgs, touched = {}, {}
+    for name, facts in everyone:
+        for t in facts['touched']:
+            orgs.setdefault(t['domain'], t['org'])
+            entry = touched.setdefault(t['domain'], {'who': {}, 'last': ''})
+            entry['who'][name] = entry['who'].get(name, 0) + t['count']
+            entry['last'] = max(entry['last'], t['last'])
+    quiet = {}
+    for name, facts in everyone:
+        for q in facts['quiet']:
+            if q['domain'] in touched:
+                continue
+            orgs.setdefault(q['domain'], q['org'])
+            entry = quiet.setdefault(q['domain'], {'who': [], 'last': ''})
+            entry['who'].append(name)
+            entry['last'] = max(entry['last'], q['last'])
+    replied = {k for _, facts in everyone for k in facts['replied']} | set(claimed)
+    open_ = {}
+    for name, facts in everyone:
+        for u in facts['unanswered']:
+            if u['key'] in replied:
+                continue
+            orgs.setdefault(u['domain'], u['org'])
+            entry = open_.setdefault(u['domain'], {'keys': set(), 'who': [], 'since': u['at']})
+            entry['keys'].add(u['key'])
+            entry['since'] = min(entry['since'], u['at'])
+            if name not in entry['who']:
+                entry['who'].append(name)
+    by_key, by_domain = {}, {}
+    for name, facts in everyone:
+        for m in facts['meetings']:
+            orgs.setdefault(m['domain'], m['org'])
+            same = by_key.setdefault(m['key'], {'domain': m['domain'], 'day': m['day'], 'who': []})
+            if name not in same['who']:
+                same['who'].append(name)
+            by_domain.setdefault(m['domain'], {}).setdefault(name, set()).add(m['day'])
+    meetings = [{'org': orgs[s['domain']], 'domain': s['domain'], 'day': s['day'], 'who': s['who'], 'same': True}
+                for s in by_key.values() if len(s['who']) > 1]
+    covered = {m['domain'] for m in meetings}
+    meetings += [{'org': orgs[d], 'domain': d, 'day': min(min(days) for days in who.values()), 'who': sorted(who), 'same': False}
+                 for d, who in by_domain.items() if len(who) > 1 and d not in covered]
+    return {'quiet': [{'org': orgs[d], 'domain': d, 'last': e['last'], 'who': e['who']}
+                      for d, e in sorted(quiet.items(), key=lambda kv: kv[1]['last'])][:10],
+            'several': [{'org': orgs[d], 'domain': d, 'last': e['last'], 'who': [{'name': n, 'count': c} for n, c in e['who'].items()]}
+                        for d, e in sorted(touched.items(), key=lambda kv: (-len(kv[1]['who']), -sum(kv[1]['who'].values())))
+                        if len(e['who']) > 1][:10],
+            'unanswered': [{'org': orgs[d], 'domain': d, 'count': len(e['keys']), 'since': e['since'], 'who': e['who']}
+                           for d, e in sorted(open_.items(), key=lambda kv: kv[1]['since'])][:10],
+            'meetings': sorted(meetings, key=lambda m: m['day'])[:10],
+            'from': [name for name, _ in answers]}
+
+
+def brief_text(view):
+    """The brief as plain lines, for the Fleet tab and the Telegram message."""
+    who = lambda names: ', '.join(names)
+    company = lambda x: x['org'] if x['org'] == x['domain'] else f"{x['org']} ({x['domain']})"
+    head = ('Your Fleet this week' if view.get('every') == 'week' else 'Your Fleet today') + (f" · {view['fleet_name']}" if view.get('fleet_name') else '')
+    lines = [head]
+    if view.get('quiet'):
+        lines += ['', 'Went quiet:'] + [f"- {company(x)}: last touch {x['last']} ({who(x['who'])})" for x in view['quiet']]
+    if view.get('several'):
+        lines += ['', 'Several of you were in touch:'] + [
+            f"- {company(x)}: " + ', '.join(f"{w['name']} {w['count']}" for w in x['who']) + f", last {x['last']}" for x in view['several']]
+    if view.get('unanswered'):
+        lines += ['', 'Nobody answered yet:'] + [
+            f"- {company(x)}: {x['count']} email{'s' if x['count'] > 1 else ''} since {x['since']} (to {who(x['who'])})" for x in view['unanswered']]
+    if view.get('meetings'):
+        lines += ['', 'Meetings you share:'] + [
+            f"- {company(x)} on {x['day']}: {who(x['who'])}" + ('' if x['same'] else ' (separate meetings)') for x in view['meetings']]
+    if len(lines) == 1:
+        lines.append('Nothing that needs the team.')
+    told = view.get('from') or []
+    lines += ['', ('From ' + who(['you'] + told) + '.') if told else 'Only from your own Machine so far.']
+    if view.get('missing'):
+        lines.append('Still to answer: ' + who(view['missing']) + '.')
+    return '\n'.join(lines)
+
+
 # ---------------------------------------------------------------- the Fleet on this Machine
 
 class Fleet:
@@ -502,6 +757,14 @@ class Fleet:
         # notify_notice(view) tells the owner about a notice (phone, Telegram) and returns the Telegram message id;
         # retell_notice(message_id, message) brings that message up to date.
         self.notify_notice = self.retell_notice = None
+        # The owner's hours (set by the app from work_hours): local_now() -> aware datetime, work_day(local) and
+        # in_hours(local) -> bool, morning() -> 'HH:MM'. Briefs are asked and told, and brief questions
+        # notify, only within them. search(accounts, query, limit) -> [(event_id, similarity)]: the app's own search.
+        self.hours = {}
+        self.search = None
+        # notify_brief(text, url) tells the owner their brief is ready (phone, Telegram) and returns the Telegram id.
+        self.last['briefs'] = 0.0
+        self.notify_brief = None
         with self.connect() as db:
             ensure(db)
 
@@ -575,7 +838,38 @@ class Fleet:
 
     def rule(self, db, fleet, member_id, kind):
         row = db.execute('SELECT rule,details FROM fleet_rules WHERE fleet=? AND member_id=? AND kind=?', (fleet, member_id, kind)).fetchone()
-        return (row['rule'], bool(row['details'])) if row else ('ask', False)
+        found = (row['rule'], bool(row['details'])) if row else ('ask', False)
+        return ('ask', found[1]) if found[0] not in KIND_RULES.get(kind, RULES) else found
+
+    # -- the owner's hours
+    def local_now(self):
+        return self.hours['local_now']() if self.hours.get('local_now') else dt.datetime.now().astimezone()
+
+    def working(self, local=None):
+        """Within the owner's work days and hours: when briefs are asked and told, and brief questions notify."""
+        local = local or self.local_now()
+        return (self.hours.get('work_day', lambda _: local.isoweekday() < 6)(local)
+                and self.hours.get('in_hours', lambda _: True)(local))
+
+    def fleet_accounts(self, fleet):
+        """The work accounts a Fleet may hear about. In one Work Fleet: all of them. In several: only the accounts of
+        that Fleet's company (a work: boundary named like the Fleet, or an address at a teammate's domain), so one
+        Fleet never hears about another's customers; none match, nothing is shared."""
+        work = work_accounts(self.config)
+        if len(self.work_fleets()) <= 1:
+            return work
+        found = self.fleets().get(self.ref(fleet)) or {}
+        name = str(found.get('name') or '').strip().casefold()
+        domains = {e.rsplit('@', 1)[1] for m in self.teammates(fleet) for e in m.get('emails', []) if '@' in e} - graph.FREEMAIL
+        return [a['id'] for a in self.config.get('accounts', []) if a['id'] in work and (
+            (name and str(a.get('boundary') or '').casefold() == 'work:' + name)
+            or str(a.get('email') or '').lower().rsplit('@', 1)[-1] in domains)]
+
+    def internal(self, fleet):
+        """The owner's and this Fleet's own domains: never a company in a brief."""
+        mine = {e.rsplit('@', 1)[1] for e in self.my_emails() if '@' in e}
+        team = {e.rsplit('@', 1)[1] for m in self.teammates(fleet) for e in m.get('emails', []) if '@' in e}
+        return (mine | team) - graph.FREEMAIL
 
     def log(self, db, direction, fleet, member_id, name, kind, what, outcome):
         db.execute('INSERT INTO fleet_log(at,direction,fleet,member_id,name,kind,what,outcome) VALUES(?,?,?,?,?,?,?,?)',
@@ -583,8 +877,11 @@ class Fleet:
         db.execute('DELETE FROM fleet_log WHERE id NOT IN (SELECT id FROM fleet_log ORDER BY id DESC LIMIT 2000)')
 
     # -- questions from teammates
-    def compute(self, db, kind, question, details):
+    def compute(self, db, kind, question, details, fleet=None):
         accounts = work_accounts(self.config)
+        if kind == 'brief':
+            secret = (self.fleets().get(self.ref(fleet or 'work')) or {}).get('secret') or ''
+            return brief_facts(db, self.fleet_accounts(fleet or 'work'), question['since'], secret, self.internal(fleet or 'work'))
         if kind == 'relationships':
             return relationships(db, question['about'], accounts, details)
         return meeting(db, question['emails'], accounts, details)
@@ -606,12 +903,16 @@ class Fleet:
                     status, body = 'declined', None
                     self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question), 'declined (your rule)')
                 elif rule == 'always':
-                    body = self.compute(db, kind, question, details)
+                    body = self.compute(db, kind, question, details, fleet)
                     status = 'answered'
                     self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question), 'answered: ' + answer_text(kind, body))
                 else:
-                    db.execute('INSERT OR IGNORE INTO fleet_in(id,fleet,member_id,name,kind,question,status,at) VALUES(?,?,?,?,?,?,?,?)',
-                               (ask['id'], fleet, teammate['member_id'], name, kind, json.dumps(question), 'waiting', now()))
+                    draft = None
+                    if kind == 'brief':  # what an answer would share, in counts, for the approval card
+                        draft = {'preview': brief_preview(self.compute(db, kind, question, details, fleet))}
+                    db.execute('INSERT OR IGNORE INTO fleet_in(id,fleet,member_id,name,kind,question,status,at,draft) VALUES(?,?,?,?,?,?,?,?,?)',
+                               (ask['id'], fleet, teammate['member_id'], name, kind, json.dumps(question), 'waiting', now(),
+                                json.dumps(draft) if draft else None))
                     self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question), 'waiting for you')
                     status, body = 'waiting', None
         self.relay.call('POST', '/answer', {'id': ask['id'], 'status': status, **({'answer': body} if body is not None else {})})
@@ -626,13 +927,13 @@ class Fleet:
             if not row:
                 raise ValueError('That question was answered or has expired')
             question = json.loads(row['question'])
+            answer = None
             if choice in ('always', 'never'):
                 _, details = self.rule(db, row['fleet'], row['member_id'], row['kind'])
                 db.execute('INSERT OR REPLACE INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
                            (row['fleet'], row['member_id'], row['kind'], choice, int(details), now()))
-            answer = None
-            if choice in ('once', 'always'):
-                answer = self.compute(db, row['kind'], question, self.rule(db, row['fleet'], row['member_id'], row['kind'])[1])
+            if choice in ('once', 'always') and answer is None:
+                answer = self.compute(db, row['kind'], question, self.rule(db, row['fleet'], row['member_id'], row['kind'])[1], row['fleet'])
             status = 'answered' if answer is not None else 'declined'
         self.relay.call('POST', '/answer', {'id': row['id'], 'status': status, **({'answer': answer} if answer is not None else {})})
         with self.connect() as db:
@@ -778,7 +1079,7 @@ class Fleet:
             return []
         stamp = clock or dt.datetime.now(dt.timezone.utc)
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM fleet_in WHERE status='waiting' AND notified_at IS NULL ORDER BY at,id").fetchall()
+            rows = self.untold(db)
         if not rows:
             return []
         age = lambda row: (stamp - dt.datetime.fromisoformat(row['at'])).total_seconds()
@@ -797,6 +1098,12 @@ class Fleet:
                 db.executemany('UPDATE fleet_in SET telegram_message_id=? WHERE id=?', [(str(message_id), r['id']) for r in rows])
         return [r['id'] for r in rows]
 
+    def untold(self, db):
+        """Waiting questions the owner wasn't told about yet, and may be now: brief questions wait for their
+        work hours (they show in the Fleet tab meanwhile)."""
+        rows = db.execute("SELECT * FROM fleet_in WHERE status='waiting' AND notified_at IS NULL ORDER BY at,id").fetchall()
+        return rows if self.working() else [r for r in rows if r['kind'] != 'brief']
+
     def set_rule(self, fleet, member_id, kind, rule=None, details=None):
         fleet = self.ref(fleet)
         if kind not in RULE_KINDS.get(self.kind_of(fleet), ()):
@@ -806,8 +1113,8 @@ class Fleet:
         with self.connect() as db:
             current, current_details = self.rule(db, fleet, member_id, kind)
             rule = current if rule is None else rule
-            if rule not in RULES:
-                raise ValueError('A rule is ask, always or never')
+            if rule not in KIND_RULES.get(kind, RULES):
+                raise ValueError('A rule is ' + ' or '.join(KIND_RULES.get(kind, RULES)))
             details = current_details if details is None else bool(details)
             db.execute('INSERT OR REPLACE INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
                        (fleet, member_id, kind, rule, int(details), now()))
@@ -898,6 +1205,129 @@ class Fleet:
             asked += 1
         return asked
 
+    # -- the team brief: "what the Fleet saw"
+    def brief_settings(self):
+        found = self.meta('brief') or {}
+        return {'every': found.get('every') if found.get('every') in BRIEF_EVERY else 'off', 'tell': bool(found.get('tell'))}
+
+    def set_brief(self, every=None, tell=None):
+        found = self.brief_settings()
+        if every is not None:
+            if every not in BRIEF_EVERY:
+                raise ValueError('A brief is off, daily (day) or weekly (week)')
+            found['every'] = every
+        if tell is not None:
+            found['tell'] = bool(tell)
+        self.set_meta('brief', found)
+        return found
+
+    def brief_period(self, local, every):
+        """(period key, since): today since yesterday, or this ISO week since a week ago."""
+        if every == 'week':
+            return local.strftime('%G-W%V'), (local.date() - dt.timedelta(days=7)).isoformat()
+        return local.date().isoformat(), (local.date() - dt.timedelta(days=1)).isoformat()
+
+    def brief_round(self):
+        """Once a day (or week), on a work day from the owner's morning time and within their hours: ask each Work Fleet
+        for its brief facts, assemble the brief as answers come in, and tell the owner once it settled."""
+        settings = self.brief_settings()
+        if settings['every'] == 'off':
+            return 0
+        local = self.local_now()
+        period, since = self.brief_period(local, settings['every'])
+        morning = self.hours['morning']() if self.hours.get('morning') else '09:00'
+        asked = 0
+        for ref in self.work_fleets():
+            if not self.teammates(ref):
+                continue
+            with self.connect() as db:
+                row = db.execute('SELECT * FROM fleet_briefs WHERE fleet=? AND period=?', (ref, period)).fetchone()
+            if not row:
+                if not self.working(local) or local.strftime('%H:%M') < morning:
+                    continue
+                try:
+                    self.ask('brief', {'period': settings['every'], 'since': since}, context='brief:' + period, fleet=ref)
+                    asked += 1
+                except ValueError as error:  # over the relay's limit, or nobody to ask: the brief is yours alone
+                    LOG.warning('fleet brief ask error=%s', clean(str(error), 80))
+                self.build_brief(ref, period, settings['every'], since)
+            else:
+                count = self._brief_answers(ref, period)
+                stale = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(row['built_at'])).total_seconds() > BRIEF_REBUILD
+                if count != row['answers'] or (stale and not row['told_at']):
+                    self.build_brief(ref, period, row['every'], json.loads(row['view']).get('since') or since)
+            self.tell_brief(ref, period, settings['tell'], local)
+        with self.connect() as db:
+            db.execute('DELETE FROM fleet_briefs WHERE built_at<?', ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NOTICE_DAYS)).isoformat(timespec='seconds'),))
+        return asked
+
+    def _brief_answers(self, fleet, period):
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM fleet_out WHERE fleet=? AND context=? AND status IN ('answered','declined','expired')",
+                              (fleet, 'brief:' + period)).fetchone()[0]
+
+    def build_brief(self, fleet, period, every, since):
+        """The brief, assembled by plain code from this Machine's own facts and its teammates' cleaned answers. Unanswered
+        emails are checked against the Fleet's claims: one someone took on is not "nobody answered"."""
+        with self.connect() as db:
+            own = self.compute(db, 'brief', {'since': since}, False, fleet)
+            rows = db.execute('SELECT * FROM fleet_out WHERE fleet=? AND context=? ORDER BY at,id', (fleet, 'brief:' + period)).fetchall()
+        answers = [(r['name'], clean_brief(json.loads(r['answer']))) for r in rows if r['status'] == 'answered' and r['answer']]
+        keys = sorted({u['key'] for _, facts in [('You', own)] + answers for u in facts['unanswered']})
+        claimed = set()
+        if keys:
+            try:
+                claimed = set((self.relay.call('POST', '/claims', {'fleet': fleet, 'keys': keys[:200]}) or {}).get('claims', {}))
+            except (ValueError, OSError) as error:
+                LOG.warning('fleet brief claims error=%s', type(error).__name__)
+        view = assemble_brief(own, answers, claimed)
+        view.update(period=period, every=every, since=since, fleet=fleet, fleet_name=clean((self.fleets().get(fleet) or {}).get('name'), 80),
+                    asked=len(rows), missing=[r['name'] for r in rows if r['status'] in ('asked', 'waiting')],
+                    declined=[r['name'] for r in rows if r['status'] in ('declined', 'expired')])
+        with self.connect() as db:
+            db.execute('INSERT INTO fleet_briefs(fleet,period,every,view,answers,built_at) VALUES(?,?,?,?,?,?) '
+                       'ON CONFLICT(fleet,period) DO UPDATE SET view=excluded.view,answers=excluded.answers,built_at=excluded.built_at',
+                       (fleet, period, every, json.dumps(view), self._brief_answers(fleet, period), now()))
+        return view
+
+    def tell_brief(self, fleet, period, tell, local):
+        """Once per brief, within the owner's hours, once everyone answered or BRIEF_SETTLE after asking."""
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM fleet_briefs WHERE fleet=? AND period=?', (fleet, period)).fetchone()
+            if not row or row['told_at']:
+                return None
+            view = json.loads(row['view'])
+            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(row['built_at'])).total_seconds()
+            first = db.execute('SELECT MIN(at) FROM fleet_out WHERE fleet=? AND context=?', (fleet, 'brief:' + period)).fetchone()[0]
+            waited = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(first)).total_seconds() if first else age
+            if (view['missing'] and waited < BRIEF_SETTLE) or not self.working(local):
+                return None
+            db.execute('UPDATE fleet_briefs SET told_at=? WHERE fleet=? AND period=?', (now(), fleet, period))  # marked first
+        if not tell or not self.notify_brief:
+            return None
+        root = dashboard_root(self.config)
+        try:
+            message_id = self.notify_brief(brief_text(view), (root + '#fleet-brief=' + fleet) if root else '')
+        except Exception as error:
+            LOG.warning('fleet brief notify error=%s', type(error).__name__)
+            message_id = None
+        if message_id:
+            with self.connect() as db:
+                db.execute('UPDATE fleet_briefs SET telegram_message_id=? WHERE fleet=? AND period=?', (str(message_id), fleet, period))
+        return message_id
+
+    def briefs(self):
+        """The latest brief of each Work Fleet, for the Fleet tab."""
+        with self.connect() as db:
+            rows = db.execute('SELECT * FROM fleet_briefs WHERE built_at>? ORDER BY built_at DESC',
+                              ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=8)).isoformat(timespec='seconds'),)).fetchall()
+        out = {}
+        for row in rows:
+            if row['fleet'] not in out:
+                view = json.loads(row['view'])
+                out[row['fleet']] = {**view, 'text': brief_text(view), 'built_at': row['built_at']}
+        return out
+
     # -- handling (claims)
     def claim_key(self, db, card, secret, team):
         ids = json.loads(card['event_ids'] or '[]')
@@ -979,7 +1409,7 @@ class Fleet:
         import time
         self.directory()
         with self.connect() as db:  # a question still to tell the owner about: come back sooner
-            if wait and db.execute("SELECT 1 FROM fleet_in WHERE status='waiting' AND notified_at IS NULL").fetchone():
+            if wait and self.untold(db):
                 wait = min(wait, NOTIFY_SETTLE)
         found = self.relay.call('GET', f'/inbox?wait={int(wait)}&notices=1', timeout=wait + 15)
         for ask in found.get('asks', []):
@@ -1014,6 +1444,9 @@ class Fleet:
         if stamp - self.last['meetings'] > MEETINGS_EVERY or not wait:
             self.last['meetings'] = stamp
             self.meeting_round()
+        if stamp - self.last['briefs'] > 60 or not wait:
+            self.last['briefs'] = stamp
+            self.brief_round()
         return found
 
     def run(self, stop):
@@ -1040,12 +1473,14 @@ class Fleet:
         fleets = self.fleets()
         with self.connect() as db:
             rules = {(r['fleet'], r['member_id'], r['kind']): {'rule': r['rule'], 'details': bool(r['details'])} for r in db.execute('SELECT * FROM fleet_rules')}
-            waiting = [{**dict(r), 'question': question_text(r['kind'], json.loads(r['question']))}
+            waiting = [{**{k: v for k, v in dict(r).items() if k != 'draft'}, 'question': question_text(r['kind'], json.loads(r['question'])),
+                        **({'draft': json.loads(r['draft'])} if _get(r, 'draft') else {})}
                        for r in db.execute("SELECT * FROM fleet_in WHERE status='waiting' ORDER BY at DESC LIMIT 50")]
             asked = [{**{k: r[k] for k in ('id', 'fleet', 'member_id', 'name', 'kind', 'context', 'status', 'at', 'answered_at')},
                       'question': question_text(r['kind'], json.loads(r['question'])),
                       'answer': answer_text(r['kind'], json.loads(r['answer'])) if r['answer'] else None}
-                     for r in db.execute("SELECT * FROM fleet_out WHERE context IS NULL OR context NOT LIKE 'card:%' ORDER BY at DESC LIMIT 60")]
+                     for r in db.execute("SELECT * FROM fleet_out WHERE (context IS NULL OR (context NOT LIKE 'card:%' AND context NOT LIKE 'brief:%')) "
+                                         "ORDER BY at DESC LIMIT 60")]
             log = [dict(r) for r in db.execute('SELECT at,direction,fleet,name,kind,what,outcome FROM fleet_log ORDER BY id DESC LIMIT 100')]
             notices = [{**json.loads(r['view']), 'reason': r['reason'] or ''}
                        for r in db.execute('SELECT * FROM fleet_notices ORDER BY at DESC LIMIT 30')]
@@ -1055,10 +1490,12 @@ class Fleet:
             out.append({'id': ref, 'kind': kind, 'label': FLEET_NAMES.get(kind, kind), 'name': found.get('name'), 'asks': list(ASKS.get(kind, ())),
                         'people': [person(m) for m in found.get('members', [])],
                         'members': [{'member_id': m['member_id'], 'name': label(m), 'machine': m.get('machine'),
-                                     'rules': {k: rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False}) for k in RULE_KINDS.get(kind, ())}}
+                                     'rules': {k: (lambda r: r if r['rule'] in KIND_RULES.get(k, RULES) else {**r, 'rule': 'ask'})(
+                                         rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False})) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(ref)]})
         return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
-                'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL}
+                'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'briefs': self.briefs(), 'brief': self.brief_settings(),
+                'kind_rules': {k: list(KIND_RULES.get(k, RULES)) for k in KIND_LABEL}, 'no_details': list(NO_DETAILS)}
 
     def summary(self):
         with self.connect() as db:

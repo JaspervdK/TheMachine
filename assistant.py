@@ -334,7 +334,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours'}
+OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_brief'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -6118,6 +6118,10 @@ class App:
             self.fleet.notify_notice = self.fleet_notify_notice
             self.fleet.retell_notice = lambda message_id, message: threading.Thread(
                 target=self.fleet_retell, args=(message_id, message), daemon=True).start()
+            # Briefs keep to the owner's hours.
+            self.fleet.hours = {'local_now': lambda: dt.datetime.now(local_tz()), 'work_day': is_work_day, 'in_hours': in_hours,
+                                'morning': lambda: WORK_HOURS['morning']}
+            self.fleet.notify_brief = self.fleet_notify_brief
 
     def gmail_message(self, account_id, message_id):
         account = next(a for a in self.config['accounts'] if a['id'] == account_id)
@@ -6717,6 +6721,20 @@ class App:
         message_id = str(result.get('messageId') or '')
         return message_id if re.fullmatch(r'\d+', message_id) else None
 
+    def fleet_notify_brief(self, text, url):
+        """The team brief is ready: a phone notification, and the brief itself in Telegram when Telegram is on (with
+        Open only). Returns the Telegram message id."""
+        with self.store.connect() as db:
+            subscriptions = [dict(r) for r in db.execute('SELECT endpoint,p256dh,auth FROM push_subscriptions')]
+        if subscriptions and self.config.get('dashboard_host'):
+            push_send(self.store, self.config, subscriptions, {'title': 'What your Fleet saw', 'body': text.split('\n', 2)[-1][:200],
+                                                               'url': url, 'tag': 'fleet-brief'}, 'fleet-brief')
+        if not telegram_on(self.config):
+            return None
+        result = fleet_telegram(self.config, {'text': text, 'buttons': [[{'text': 'Open the Fleet tab', 'url': url}]] if url else []})
+        message_id = str(result.get('messageId') or '')
+        return message_id if re.fullmatch(r'\d+', message_id) else None
+
     def fleet_retell(self, message_id, message=None):
         try:
             message = message or self.fleet.telegram_view(message_id)
@@ -6746,6 +6764,8 @@ class App:
             return self.fleet.ask(kind, question, fleet=args.get('fleet') or 'work')
         if name == 'fleet_decide':
             return self.fleet.decide(args.get('id'), args.get('choice'))
+        if name == 'fleet_brief':
+            return self.fleet.set_brief(args.get('every'), args.get('tell'))
         if name == 'fleet_rule':
             return self.fleet.set_rule(args.get('fleet') or 'work', str(args.get('member_id') or ''), args.get('kind'),
                                        args.get('rule'), args.get('details'))
@@ -8074,7 +8094,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')
