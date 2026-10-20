@@ -1,3 +1,4 @@
+import base64
 import datetime as dt
 import http.server
 import json
@@ -45,6 +46,14 @@ class BrowserWaitTest(unittest.TestCase):
         self.assertEqual(assistant.browser_link({'browser_url': browser_viewer.VIEWER_URL}), browser_viewer.VIEWER_URL)
         self.assertIsNone(assistant.browser_link({'browser_url': 'javascript:alert(1)'}))
         self.assertIsNone(assistant.browser_link({}))
+
+    def test_a_desktop_view_links_to_the_dashboards_own_viewer(self):
+        config = {'browser_vnc': '/run/user/1000/view/vnc.sock', 'dashboard_host': 'machine.example', 'dashboard_path': '/'}
+        self.assertEqual(assistant.browser_link(config), 'https://machine.example/browser/vnc.html?' + browser_viewer.VIEW_QUERY + '&path=browser/websockify')
+        self.assertEqual(assistant.browser_link({**config, 'browser_url': 'https://cp.example/open?to=browser'}), 'https://cp.example/open?to=browser')
+        self.assertIsNone(assistant.browser_link({'browser_vnc': '/x.sock'}))  # no dashboard address for Telegram
+        self.assertTrue(browser_viewer.view_link('/assistant/').startswith('/assistant/browser/vnc.html?'))
+        self.assertTrue(browser_viewer.view_link('/assistant/').endswith('&path=assistant/browser/websockify'))
 
     def test_telegram_card_says_so_and_gets_a_button_only_for_a_https_viewer(self):
         row = {'id': 'abc', 'status': 'accepted', 'title': 'Reply', 'body': 'Body', 'preparation_status': 'running',
@@ -128,6 +137,61 @@ class InstallerTest(unittest.TestCase):
                 self.assertEqual(installer.browser_viewer_setup(paths, install=lambda say: None), 1)
             config = json.loads(paths.config.read_text())
             self.assertEqual((config['browser_url'], config['browser_cdp_url']), (browser_viewer.VIEWER_URL, 'http://127.0.0.1:9222'))
+
+
+class DesktopViewTest(unittest.TestCase):
+    def test_the_vnc_server_is_on_this_machine_only(self):
+        self.assertEqual(browser_viewer.vnc_target('unix:/run/user/1/v.sock'), (browser_viewer.socket.AF_UNIX, '/run/user/1/v.sock'))
+        self.assertEqual(browser_viewer.vnc_target('127.0.0.1:5900'), (browser_viewer.socket.AF_INET, ('127.0.0.1', 5900)))
+        for bad in ('192.0.2.1:5900', '0.0.0.0:5900', 'example.com:5900', 'relative.sock', ''):
+            with self.assertRaises(ValueError):
+                browser_viewer.vnc_target(bad)
+
+    def test_viewer_files_stay_inside_the_viewer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'app').mkdir()
+            Path(tmp, 'app/ui.js').write_text('x')
+            Path(tmp, '.git').mkdir()
+            Path(tmp, '.git/config').write_text('x')
+            self.assertEqual(browser_viewer.view_file(tmp, 'app/ui.js'), Path(tmp, 'app/ui.js'))
+            for bad in ('../secret', 'app/../../x', '.git/config', '', 'app', '%2e%2e/x'):
+                self.assertIsNone(browser_viewer.view_file(tmp, bad), bad)
+
+    def test_bridge_carries_vnc_both_ways(self):
+        import io
+        import socket
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp, 'vnc.sock'))
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(path)
+            server.listen(1)
+            got = []
+
+            def vnc():
+                conn, _ = server.accept()
+                conn.sendall(b'RFB 003.008\n')
+                got.append(conn.recv(100))
+                conn.close()
+            threading.Thread(target=vnc, daemon=True).start()
+            mask = b'\x01\x02\x03\x04'
+            payload = b'RFB 003.008\n'
+            client = bytes([0x82, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            ours, theirs = socket.socketpair()
+            headers = {'Sec-WebSocket-Key': base64.b64encode(b'the sample nonce').decode(),  # RFC 6455's example
+                       'Sec-WebSocket-Protocol': 'binary'}
+            worker = threading.Thread(target=browser_viewer.bridge, args=(io.BytesIO(client), ours, path, headers), daemon=True)
+            worker.start()
+            theirs.settimeout(5)
+            data = b''
+            while b'RFB' not in data:
+                data += theirs.recv(1000)
+            self.assertIn(b'101 Switching Protocols', data)
+            self.assertIn(b's3pPLMBiTxaQ9kYGzzhZRbK+xOo=', data)  # RFC 6455's own example
+            self.assertIn(b'Sec-WebSocket-Protocol: binary', data)
+            self.assertIn(browser_viewer.ws_frame(b'RFB 003.008\n'), data)
+            worker.join(5)
+            self.assertEqual(got, [payload])
+            server.close()
 
 
 if __name__ == '__main__':

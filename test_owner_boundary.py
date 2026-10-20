@@ -1,3 +1,4 @@
+import base64
 import http.client
 import importlib.util
 import json
@@ -119,6 +120,24 @@ class OwnerBoundary(unittest.TestCase):
             owner={'Host':'machine.example:8443','Tailscale-User-Login':'owner@example.com'}
             status,body=get(url,owner);self.assertEqual(status,200);self.assertEqual(json.loads(body)['text'],'Exact private draft')
             self.assertEqual(get('/api/result?id='+self.sid+'&file=secret.txt',owner)[0],404)
+
+    def test_browser_view_is_owner_only_and_its_websocket_only_from_the_dashboard(self):
+        web = Path(self.temp.name, 'web'); web.mkdir(); (web / 'vnc.html').write_text('<html>viewer</html>')
+        self.app.config.update(browser_vnc=str(Path(self.temp.name, 'none.sock')), browser_novnc=str(web))
+        port = self.serve()
+        def get(path, headers):
+            conn = http.client.HTTPConnection('127.0.0.1', port)
+            conn.request('GET', path, headers=headers); r = conn.getresponse(); body = r.read(); conn.close(); return r.status, body
+        owner = {'Host': 'machine.example:8443', 'Tailscale-User-Login': 'owner@example.com'}
+        self.assertEqual(get('/browser/vnc.html', owner), (200, b'<html>viewer</html>'))
+        self.assertEqual(get('/browser/vnc.html', {'Host': 'machine.example:8443', 'Tailscale-User-Login': 'other@example.com'})[0], 403)
+        self.assertEqual(get('/browser/vnc.html', {'Authorization': 'Bearer ' + TOKEN})[0], 403)
+        upgrade = {**owner, 'Upgrade': 'websocket', 'Connection': 'Upgrade', 'Sec-WebSocket-Key': base64.b64encode(b'the sample nonce').decode(), 'Sec-WebSocket-Version': '13'}
+        self.assertEqual(get('/browser/websockify', {**upgrade, 'Origin': 'https://evil.example'})[0], 403)
+        self.assertEqual(get('/browser/websockify', upgrade)[0], 403)  # no Origin at all
+        self.assertEqual(get('/browser/websockify', {**upgrade, 'Origin': 'https://machine.example:8443'})[0], 502)  # owner, but no screen here
+        self.app.config.pop('browser_vnc')
+        self.assertEqual(get('/browser/vnc.html', owner)[0], 404)
 
     def test_caddy_forwarded_peer_is_identified_by_tailscale_whois(self):
         port=self.serve()

@@ -4710,9 +4710,14 @@ def same_site(a, b):
 
 def browser_link(config):
     """Where the owner sees the assistant's browser: `browser_url` (a hosted machine's viewer behind its sign-in, or
-    the local noVNC viewer of browser_viewer.py). None: the dashboard brings the tab to the front instead."""
+    the local noVNC viewer of browser_viewer.py), else with `browser_vnc` the dashboard's own live view of this
+    computer's screen. None: the dashboard only brings the tab to the front; it does that with a link too."""
     url = str(config.get('browser_url') or '')
-    return url if urllib.parse.urlsplit(url).scheme in ('http', 'https') else None
+    if urllib.parse.urlsplit(url).scheme in ('http', 'https'):
+        return url
+    if config.get('browser_vnc') and config.get('dashboard_host'):
+        return 'https://' + str(config['dashboard_host']) + browser_viewer.view_link(config.get('dashboard_path', '/'))
+    return None
 
 
 def preparation_steps(job_id, agent_db=None, limit=4):
@@ -7470,7 +7475,9 @@ class App:
                 if not self.owner():
                     self.output(403, {'error': 'Use the owner-authenticated Tailscale dashboard'})
                     return
-                if path.path == '/':
+                if path.path.startswith('/browser/') and app.config.get('browser_vnc'):
+                    self.browser_view(path.path[len('/browser/'):])
+                elif path.path == '/':
                     csrf = hmac.new(app.token.encode(), app.config['tailscale_owner'].encode(), hashlib.sha256).hexdigest()
                     self.output(200, (ROOT / 'dashboard.html').read_text().replace('__CSRF__', csrf).replace('__BASE__', dashboard_base(app.config, self.headers.get('Host', ''))), 'text/html')
                 elif path.path == '/manifest.webmanifest':
@@ -7591,6 +7598,43 @@ class App:
                         self.output(404,{'error':'This result is not available'})
                 else:
                     self.output(404, {'error': 'Not found'})
+
+            def browser_view(self, rest):
+                """This computer's screen in noVNC (`browser_vnc`): the viewer's files, and its websocket to the VNC
+                server. Only the owner, only from the dashboard's own page (a websocket ignores CORS, so another
+                site could otherwise use the owner's tailnet identity)."""
+                if self.headers.get('Upgrade', '').lower() != 'websocket':
+                    found = browser_viewer.view_file(app.config.get('browser_novnc') or browser_viewer.WEB, rest)
+                    if not found:
+                        self.output(404, {'error': 'Not found'})
+                        return
+                    data = found.read_bytes()
+                    self.send_response(200)
+                    self.send_header('Content-Type', browser_viewer.file_type(found))
+                    self.send_header('Content-Length', str(len(data)))
+                    self.send_header('Cache-Control', 'no-cache')
+                    self.send_header('X-Content-Type-Options', 'nosniff')
+                    self.send_header('Referrer-Policy', 'no-referrer')
+                    self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data:; frame-ancestors 'self'")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(data)
+                    except (BrokenPipeError, ConnectionResetError):
+                        self.close_connection = True
+                    return
+                self.close_connection = True
+                if (self.headers.get('Origin') != 'https://' + self.headers.get('Host', '') or self.headers.get('Sec-WebSocket-Version') != '13'
+                        or not self.headers.get('Sec-WebSocket-Key')):
+                    self.output(403, {'error': 'The browser view opens from the dashboard'})
+                    return
+                try:
+                    browser_viewer.bridge(self.rfile, self.connection, app.config['browser_vnc'], self.headers)
+                except (OSError, ValueError) as error:
+                    print(f'browser view: {type(error).__name__}', file=sys.stderr, flush=True)
+                    try:
+                        self.output(502, {'error': 'The screen is not reachable'})
+                    except OSError:
+                        pass
 
             def do_POST(self):
                 internal = self.internal()
