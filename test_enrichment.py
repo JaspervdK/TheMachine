@@ -81,9 +81,10 @@ class Enrichment(unittest.TestCase):
         self.build()
         now = tg.NOW.isoformat()
         self.assertEqual(enrichment.step(self.store.connect, self.config, now), 1)
-        self.assertEqual(sorted(p for p, _ in Service.seen), ['/enrich/companies?domain=globex.com', '/enrich/companies?domain=initech.example'])  # never free mail
-        self.assertEqual(enrichment.step(self.store.connect, self.config, now), 0)  # both done until they're due again
-        self.assertEqual(len(Service.seen), 2)
+        # Never free mail, and not Kim, who only wrote in: cold outreach is not worth a look-up.
+        self.assertEqual(sorted(p for p, _ in Service.seen), ['/enrich/companies?domain=globex.com'])
+        self.assertEqual(enrichment.step(self.store.connect, self.config, now), 0)  # done until it's due again
+        self.assertEqual(len(Service.seen), 1)
         with self.store.connect() as db:
             self.assertEqual(enrichment.status(db, self.config)['found'], 1)
             db.execute('DELETE FROM org_profiles')
@@ -103,6 +104,28 @@ class Enrichment(unittest.TestCase):
         self.assertEqual(self.app.action('enrich', {})['service'], '127.0.0.1')
         with self.assertRaisesRegex(ValueError, 'Give a domain'):
             self.app.action('enrich', {'domain': 'not a domain'})
+
+    def test_look_ups_go_to_people_the_owner_deals_with_not_cold_outreach_or_bulk(self):
+        meeting = {'account_id': 'work', 'source_id': 'meet-hooli', 'kind': 'calendar.event', 'occurred_at': tg.at(4), 'title': 'Call', 'body': '',
+                   'deleted': False, 'metadata': {'attendees': [{'email': 'sam@acme.com', 'self': True}, {'email': 'gav@hooli.example'}]}}
+        cold = [tg.mail(d, f'Rep {n} <rep{n}@leadgen.example>', 'sam@acme.com') for n in range(4) for d in (1, 2, 3, 5, 8)]  # strong, one way
+        self.add(*cold, meeting,
+                 tg.mail(9, 'Lee <lee@globex.com>', 'sam@acme.com'), tg.mail(8, 'Sam <sam@acme.com>', 'Lee <lee@globex.com>', ('SENT',)),  # a reply
+                 tg.mail(3, 'Sam <sam@acme.com>', 'Ola <ola@prospect.example>', ('SENT',)),  # the owner wrote, no answer yet
+                 tg.mail(2, 'Deals <deals@news.shop.example>', 'sam@acme.com'), tg.mail(1, 'Sam <sam@acme.com>', 'Deals <deals@news.shop.example>', ('SENT',)),
+                 tg.mail(2, 'Bo <bo@yahoo.co.uk>', 'sam@acme.com'), tg.mail(1, 'Sam <sam@acme.com>', 'Bo <bo@yahoo.co.uk>', ('SENT',)))
+        self.build()
+        with self.store.connect() as db:
+            strongest = db.execute("SELECT json_extract(info,'$.domain') FROM graph_nodes WHERE kind='org' ORDER BY strength DESC LIMIT 1").fetchone()[0]
+            self.assertEqual(strongest, 'leadgen.example')  # what "strongest first" used to spend the day's look-ups on
+            picked = enrichment.due(db, tg.NOW.isoformat(), 10)
+        # Both ways and meetings first, then someone the owner wrote to; never one-way inbound, a campaign sender or free mail.
+        self.assertEqual(picked[2:], ['prospect.example'])
+        self.assertEqual(sorted(picked[:2]), ['globex.com', 'hooli.example'])
+        with self.store.connect() as db:
+            self.assertEqual(enrichment.due(db, tg.NOW.isoformat(), 1), picked[:1])
+        self.assertEqual(enrichment.worth('acme-partner.example', [{'identifiers': ['email:noreply@acme-partner.example'], 'wrote': 2, 'heard': 3}]), 0)
+        self.assertEqual(enrichment.worth('gmail.com', [{'wrote': 2, 'heard': 3}]), 0)
 
     def test_the_owner_edits_an_organisation_and_drops_a_wrong_match(self):
         self.add(tg.mail(3, 'Lee <lee@globex.com>', 'sam@acme.com'), tg.mail(2, 'Sam <sam@acme.com>', 'Lee <lee@globex.com>', ('SENT',)))

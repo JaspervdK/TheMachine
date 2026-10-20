@@ -4,9 +4,10 @@ Works with any service that answers GET <url with the domain> with JSON about th
 (apollo, peopledatalabs, hunter) or your own url template with {domain} and {key}, and headers that can
 use {key} too. The key is read from a file or an environment variable, never stored in the config.
 Only organisation domains from the graph are sent (never free-mail or the owner's own domains), a few
-at a time, each looked up again after REFRESH_DAYS. What comes back is normalised to a small profile
-(industry, size, location, founded, about, links) that the graph, reviews and preparations show next
-to the organisation; it describes the company, never what it is to the owner."""
+at a time, each looked up again after REFRESH_DAYS: first those of people the owner writes with both ways or
+meets, never those only cold outreach, newsletters or no-reply senders come from (see due). What comes back is
+normalised to a small profile (industry, size, location, founded, about, links) that the graph, reviews and
+preparations show next to the organisation; it describes the company, never what it is to the owner."""
 from __future__ import annotations
 
 import datetime as dt
@@ -137,15 +138,64 @@ def fetch(cfg, domain, timeout=15):
         raise EnrichmentError('the answer was not JSON') from None
 
 
+# Free mail beyond the graph's own list (any country's Yahoo, Outlook, ...): a person's address there says nothing
+# about a company. And sender subdomains that only send campaigns (news.brand.com, email.brand.com).
+FREEMAIL = re.compile(r'^(?:[\w-]+\.)*(?:g(?:oogle)?mail|hotmail|outlook|live|msn|yahoo|ymail|rocketmail|icloud|aol|proton(?:mail)?|'
+                      r'gmx|yandex|mail|zoho|fastmail|tutanota|tuta|qq|163|126|naver|libero|wanadoo|laposte|t-online|seznam|'
+                      r'telenet|skynet|proximus|scarlet|pandora|ziggo|kpnmail|xs4all|btinternet|comcast|sbcglobal|bigpond)'
+                      r'\.(?:[a-z]{2,3}|co\.[a-z]{2}|com\.[a-z]{2})$')
+MARKETING = re.compile(r'^(?:e|em|email|emails|mail|mailer|mailing|news|newsletter|newsletters|marketing|mkt|campaign|campaigns|'
+                       r'info|updates?|notifications?|notify|alerts?|bounces?|reply|send|sender|go|t|click|links?|crm|hs|hubspot|'
+                       r'mc|mg|sg|smtp|out|outbound|engage|promo|offers?|deals)\d*\.[\w-]+\.[a-z.]{2,8}$')
+
+
+def worth(domain, people):
+    """How much a look-up is worth for one organisation, from what the graph says about its people: 0 for free mail,
+    a sender subdomain, or people who only ever wrote in (cold outreach) or were only copied. Someone the owner
+    writes with both ways or meets counts most, someone the owner only wrote to a little."""
+    import graph
+    if not domain or domain in graph.FREEMAIL or FREEMAIL.match(domain) or MARKETING.match(domain):
+        return 0
+    score = 0
+    for info in people:
+        addresses = [i.split(':', 1)[1] for i in info.get('identifiers') or [] if str(i).startswith('email:') and str(i).endswith('@' + domain)]
+        if addresses and all(graph.bulk(a) for a in addresses):
+            continue  # no-reply, newsletters, notifications
+        wrote, heard, met = (int(info.get(k) or 0) for k in ('wrote', 'heard', 'met'))
+        if met or (wrote and heard):
+            score += 3
+        elif wrote:
+            score += 1
+    return score
+
+
 def due(db, now, limit):
-    """Organisation domains from the graph, strongest first, that were never looked up or are due again."""
+    """Organisation domains from the graph that were never looked up or are due again, those worth it most first
+    (people the owner writes with both ways or meets, then the strongest); never ones only cold outreach, bulk
+    senders or free mail come from. A paying customer is always worth it."""
     current = dt.datetime.fromisoformat(now)
     fresh = (current - dt.timedelta(days=REFRESH_DAYS)).isoformat()
     retry = (current - dt.timedelta(hours=RETRY_HOURS)).isoformat()
-    rows = db.execute("SELECT json_extract(n.info,'$.domain') domain FROM graph_nodes n LEFT JOIN org_profiles p ON p.domain=json_extract(n.info,'$.domain') "
-                      "WHERE n.kind='org' AND (p.domain IS NULL OR (p.status NOT IN ('error','wrong') AND p.fetched_at<?) OR (p.status='error' AND p.fetched_at<?)) "
-                      'ORDER BY n.strength DESC LIMIT ?', (fresh, retry, limit)).fetchall()
-    return [r[0] for r in rows if r[0]]
+    rows = db.execute("SELECT n.id,json_extract(n.info,'$.domain') domain,n.strength,json_extract(n.info,'$.paying') paying FROM graph_nodes n "
+                      "LEFT JOIN org_profiles p ON p.domain=json_extract(n.info,'$.domain') "
+                      "WHERE n.kind='org' AND (p.domain IS NULL OR (p.status NOT IN ('error','wrong') AND p.fetched_at<?) OR (p.status='error' AND p.fetched_at<?))",
+                      (fresh, retry)).fetchall()
+    if not rows or limit <= 0:
+        return []
+    people = {}
+    for org, info in db.execute("SELECT l.b,n.info FROM graph_links l JOIN graph_nodes n ON n.id=l.a WHERE l.kind='member' AND n.kind='person'"):
+        try:
+            people.setdefault(org, []).append(json.loads(info or '{}'))
+        except ValueError:
+            continue
+    ranked = []
+    for org, domain, strength, paying in rows:
+        score = worth(domain, people.get(org, []))
+        if paying and domain and not FREEMAIL.match(domain):
+            score += 3
+        if score:
+            ranked.append((-score, -(strength or 0), domain))
+    return [domain for _, _, domain in sorted(ranked)[:limit]]
 
 
 def save(db, domain, status, profile, now):

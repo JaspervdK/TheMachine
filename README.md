@@ -397,7 +397,7 @@ Off unless you set it up. With a key for an enrichment service, The Machine look
 
 Check it with `assistant enrich globex.com` (looks one up now) and `assistant enrich` (service and counts).
 
-**What is sent.** Only organisation domains from the graph, never free-mail domains, your own domains, names, addresses or messages. Strongest first, five per pass every ten minutes and at most 50 a day (`per_day`), each looked up again after 90 days. After an error (rejected key, rate limit, unreachable) it waits an hour, and that domain a day; errors never contain the url or the key. Lookups count against your plan with that service.
+**What is sent.** Only organisation domains from the graph, never free-mail domains, your own domains, names, addresses or messages. Only organisations whose people you deal with: first those you write with both ways or meet, then those you wrote to; never one where people only wrote in (cold outreach) or were only copied, newsletter and no-reply senders, or campaign sender domains (news., email., e. and the like); a paying customer always. Five per pass every ten minutes and at most 50 a day (`per_day`), each looked up again after 90 days. After an error (rejected key, rate limit, unreachable) it waits an hour, and that domain a day; errors never contain the url or the key. Lookups count against your plan with that service.
 
 **Where it shows.** The Graph tab (industry in the organisation list; a summary, the description and links on its page), `graph` results (`about`, `profile`), preparation context ("at Globex (customer; Manufacturing, 51-200 people, Springfield, founded 1989)") and the roles run. Profiles are kept in `org_profiles`.
 
