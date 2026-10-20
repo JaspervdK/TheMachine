@@ -555,6 +555,7 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .fleet-scope{flex:1 1 100%;font-size:.85rem;min-width:0}.fleet-scope summary{cursor:pointer;color:var(--muted);width:max-content;max-width:100%}.fleet-scope label{display:grid;gap:3px;margin:8px 0 2px;max-width:420px}.fleet-scope input:not([type=checkbox]){font:inherit;min-width:0}.fleet-scope label.fleet-scope-work{display:flex;gap:6px;align-items:center}.fleet-preview{flex:1 1 100%;margin:0;font-size:.82rem;line-height:1.4}.fleet-rules-head{margin:22px 0 10px}.fleet-rules-head h3{margin:0}.fleet-rules-head p{margin:3px 0 0;font-size:.88rem}.fleet-ex-row{flex:1 1 100%;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.82rem}.fleet-ex{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 10px;border:1px solid var(--border-strong);border-radius:999px;background:var(--tile)}.fleet-ex button{border:0;background:none;padding:0 6px;min-height:0;font-size:1rem;line-height:1;color:var(--muted);cursor:pointer}.fleet-ex button:hover{color:var(--text)}.fleet-ex-add summary{cursor:pointer;color:var(--muted)}.fleet-ex-pick{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}.fleet-ex-pick select{font:inherit;max-width:100%}
 @media(max-width:600px){.fleet-mate{padding:6px 12px 2px}.fleet-rule{grid-template-columns:minmax(0,1fr)}.fleet-rule-kind{padding-top:0;font-weight:600}.seg{display:flex;width:100%}.seg label{flex:1 1 0}.seg span{text-align:center;padding:7px 4px;white-space:normal}}
 #needs-you{margin:0 0 16px;padding:12px 16px;border-radius:14px;border:1px solid #eca45b55;background:#eca45b14}#needs-you>strong{display:block;color:var(--orange);font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px}#needs-you ul{list-style:none;margin:0;padding:0}#needs-you li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0}#needs-you li+li{border-top:1px solid var(--border)}#needs-you li>span{min-width:0}#needs-you code{white-space:nowrap}#needs-you .head-link{flex:0 0 auto;background:none;font:inherit;font-size:.85rem;cursor:pointer}
+.net-switches{display:flex;flex-wrap:wrap;gap:8px 18px;margin:0 0 10px}.net-switch{display:inline-flex;gap:8px;align-items:center}.net-reasons{margin:0 0 8px;padding-left:18px}.net-reasons li{margin:2px 0}
 .fleet-people{list-style:none;padding:0;margin:0 0 12px;display:grid;gap:8px}.fleet-people li{line-height:1.35}.fleet-people small{overflow-wrap:anywhere}
 /* Fleet tab: a pill row picks one view (each Fleet, Friends, Sharing, Activity); each view is a few calm boxes. */
 .fleet-tabs{display:flex;gap:6px;overflow-x:auto;margin:4px 0 18px;padding:2px;scrollbar-width:none}.fleet-tabs::-webkit-scrollbar{display:none}
@@ -1208,7 +1209,30 @@ function fleetCardsOf(f){if(!f?.on)return[];const works=(f.fleets||[]).filter(x=
   out.push(card('split-'+sp.id,{...sp,at:null},`${esc(sp.title||'A meeting')} <small class="muted">${esc(splitDay(sp.day||''))}</small>`,
    `<p class="fleet-from">Follow-ups of a meeting with Fleet teammates. Split who does what; nothing goes until you send it.</p><details class="split-why"><summary>Why you?</summary>Only the organizer’s Machine proposes the split (if the organizer isn’t in your Fleet, the Machine that joined the Fleet first), so nobody follows up twice.</details>`,
    `<form class="fleet-split-form" data-split="${esc(sp.id)}"><div class="split-parts">${sp.parts.map(p=>`<label class="split-part"><span class="split-who">${splitWho(p)}</span><input id="split-${esc(sp.id)}-${esc(p.member_id)}" name="${esc(p.member_id)}" maxlength="200" value="${esc(p.what||'')}" placeholder="${p.mine?'Your follow-up':'Their follow-up (leave empty for none)'}"></label>`).join('')}</div><div class="actions"><button class="primary">Send the split</button><button type="button" class="ghost" data-split-dismiss="${esc(sp.id)}">Not needed</button></div></form>`));
+ out.push(...networkCards(f));
  return out}
+// Finding people you know on the Network (discovery.py): a permission card once, then a card per person only with a concrete reason
+const netBtn=(label,d,email='',rel='',cls='ghost',confirmText='')=>`<button type="button" class="${cls}" data-net-do="${d}"${email?` data-net-email="${esc(email)}"`:''}${rel?` data-net-rel="${rel}"`:''}${confirmText?` data-confirm-text="${esc(confirmText)}"`:''}>${esc(label)}</button>`;
+const netDay=at=>{const d=new Date(at);return isNaN(d)?'':d.toLocaleDateString([],{weekday:'short',day:'numeric',month:'short'})};
+const netReason=r=>r.kind==='card'?`Open: ${esc(r.title)}`:r.kind==='meeting'?`You meet ${esc(netDay(r.at))}${r.title?` · ${esc(r.title)}`:''}`:'';
+function networkCards(f){const net=f.network;if(!net||!f.friends?.id)return[];const out=[];
+ const card=(id,title,body,actions)=>`<article id="net-${esc(id)}" class="card t-amber fleet-card net-card"><div class="meta"><div class="card-badges">${chip('Network','lavender')}</div></div><h3>${title}</h3>${body}${actions}</article>`;
+ if(net.find==null&&!net.asked)out.push(card('ask','Find people you know on the Network?',`<p class="muted">Your Machine checks your contacts privately. The Network only learns who matched, and only people who chose to be found.</p>`,
+  `<div class="actions">${netBtn('Turn on','find_on','','','primary')}${netBtn('Not now','asked')}</div>`));
+ for(const p of (net.people||[]).filter(p=>p.status==='new'&&p.reasons.length)){
+  const who=p.hint==='colleague'?'Same work domain as you.':'Friend or family? You choose.';
+  out.push(card(p.username,`${esc(p.name)} is on the Network`,`<ul class="net-reasons">${p.reasons.slice(0,2).map(r=>`<li>${netReason(r)}</li>`).join('')}</ul><p class="muted">${who}${p.role?` You call them ${esc(p.role)}.`:''} Connecting sends a friend request; nothing is shared until they accept, then only what your rules allow.</p>`,
+   `<div class="actions">${p.hint==='colleague'?netBtn('Connect','connect',p.email,'colleague','primary'):netBtn('Friend','connect',p.email,'friend','primary')+netBtn('Family','connect',p.email,'family')}${netBtn('Not now','later',p.email)}${fleetMore([netBtn('Never suggest '+p.name,'never',p.email)])}</div>`))}
+ return out}
+function networkSection(f){const net=f.network;if(!net||!f.friends?.id)return'';
+ const sw=(on,label,doOn,doOff)=>`<label class="net-switch"><input type="checkbox" data-net-toggle="${on?doOff:doOn}"${on?' checked':''}> ${esc(label)}</label>`;
+ const rest=(net.people||[]).filter(p=>p.status==='new'&&!p.reasons.length||p.status==='later'),waiting=(net.people||[]).filter(p=>p.status==='requested');
+ let h=`<div id="fleet-network"><div class="section-head"><h2>Network</h2><p>Find people you already know. Contacts never leave your Machine unblinded.</p></div><div class="net-switches">${sw(!!net.find,'Find people I know','find_on','find_off')}${sw(!!net.discoverable,'Let people who have my email find me','discoverable_on','discoverable_off')}</div>`;
+ if(net.find&&net.last)h+=`<p class="muted">Last checked ${esc(netDay(net.last))}. Checks again weekly.</p>`;
+ if(rest.length)h+=`<h3>People you know here</h3><ul class="fleet-people">${rest.map(p=>`<li><strong>${esc(p.name)}</strong> <small class="muted">@${esc(p.username)}</small><span class="actions">${p.hint==='colleague'?netBtn('Connect','connect',p.email,'colleague'):netBtn('Friend','connect',p.email,'friend')+netBtn('Family','connect',p.email,'family')}${netBtn('Never','never',p.email)}</span></li>`).join('')}</ul>`;
+ if(waiting.length)h+=`<p class="muted">Waiting for ${waiting.map(p=>esc(p.name)).join(', ')} to accept.</p>`;
+ h+=`<p>${netBtn('Leave the Network','leave','','','ghost','Leave the Network? Every friendship ends and nobody can find you. Your Fleets stay.')}</p></div>`;
+ return h}
 const fleetSig=()=>JSON.stringify(fleetCardsOf(fleetData));
 // Suggestions load the Fleet's open items in the background (at most every 20 seconds) and re-render when they change.
 let fleetAt=0,fleetLoading=null;
@@ -1266,6 +1290,7 @@ async function fleetView(refresh=false,cached=false){const view=$('#fleet-view')
   panes.push({id:'fleet-'+work.id,label:work.name,html:h+'</div>'})}
  const fr=f.friends,friendsHtml=friendsSection(f,notices);
  if(friendsHtml)panes.push({id:'friends',label:'Friends',badge:(fr?.in||[]).length,html:friendsHtml});
+ {const net=networkSection(f);if(net)panes.push({id:'network',label:'Network',html:net})}
  if(family)panes.push({id:'family',label:family.name||'Family',html:head(family)+box('Coming later','','<p class="muted">A Family Fleet links your Machines. Its questions (who’s free, household admin, trips) are coming later.</p>')});
  // Sharing: every rule in one place. What the three choices mean, once, at the top; per kind a plain question and an example.
  const friendsToo=!!fr&&(f.fleets.find(x=>x.id===fr.id)?.members||[]).length,rulesOf=works.filter(x=>x.members.length);
@@ -1321,6 +1346,11 @@ fleetOn('submit',async e=>{const t=e.target;if(t.classList.contains('friend-add-
   try{await fleetPost('fleet_friend',{do:'add',username});t.reset();toast('Request sent. It waits until they accept.');await fleetView()}catch(err){toast(err.message,true)}}
  else if(t.classList.contains('friend-avail-form')){e.preventDefault();
   try{await fleetPost('fleet_availability',{member_id:t.elements.member.value,start:t.elements.start.value,days:Number(t.elements.days.value)});toast('Asked. Their busy times show here.');await fleetView()}catch(err){toast(err.message,true)}}});
+fleetOn('click',async e=>{const b=e.target.closest('[data-net-do]');if(!b)return;if(b.dataset.confirmText&&!confirm(b.dataset.confirmText))return;b.disabled=true;
+ try{await fleetPost('fleet_network',{do:b.dataset.netDo,email:b.dataset.netEmail||'',relation:b.dataset.netRel||''});
+  toast({find_on:'On. Your Machine checks your contacts privately.',asked:'Okay. Turn it on any time in the Fleet tab.',connect:'Request sent. It waits until they accept.',later:'Hidden for now.',never:'Won’t suggest them again.',leave:'You left the Network.'}[b.dataset.netDo]||'Done.');await fleetView();await refresh()}catch(err){b.disabled=false;toast(err.message,true)}});
+fleetOn('change',async e=>{const t=e.target.closest('[data-net-toggle]');if(!t)return;t.disabled=true;
+ try{await fleetPost('fleet_network',{do:t.dataset.netToggle});await fleetView()}catch(err){t.checked=!t.checked;toast(err.message,true)}finally{t.disabled=false}});
 fleetOn('submit',async e=>{if(!e.target.classList.contains('fleet-free-form'))return;e.preventDefault();const text=e.target.elements.text.value.trim();if(!text)return;
  try{await fleetPost('fleet_free',{text,fleet:e.target.dataset.fleet});e.target.reset();toast('Asked your Fleet. Answers show here as they come.');await fleetView()}catch(err){toast(err.message,true)}});
 fleetOn('click',async e=>{const b=e.target.closest('[data-fleet-send]');if(!b)return;const text=document.getElementById('fleet-free-'+b.dataset.fleetSend)?.value.trim();if(!text){toast('Write an answer first, or decline.',true);return}b.disabled=true;
