@@ -46,7 +46,7 @@ def free_port():
         return s.getsockname()[1]
 
 
-CHROME = shutil.which('chromium') or shutil.which('google-chrome-stable') or shutil.which('chromium-browser')
+CHROME = os.environ.get('CHROMIUM_PATH') or shutil.which('chromium') or shutil.which('google-chrome-stable') or shutil.which('chromium-browser')
 
 
 @unittest.skipUnless(CHROME, 'needs Chrome or Chromium')
