@@ -19,7 +19,7 @@ are.
 
 1. **Who knows someone at X?** Ask from the **Fleet** tab, or with **Ask the Fleet** on a person or organisation in
    the Graph. Each teammate's Machine answers from its own graph: "knows 2 people, closest: regular, last contact
-   2026-09". Names only when that teammate allows details.
+   2026-09". Names only when that teammate set With names for you.
 2. **Meeting prep.** If you turn it on, your Machine asks your Work Fleet about the outside people in your meetings this
    week: how close each teammate is, their last contact and open promises. The answers show on the meeting's card
    ("From your Fleet: …") and go into its preparation.
@@ -34,7 +34,7 @@ renewals, trips, birthdays, errands, care for parents) are designed and come lat
 A Machine never hands out an email, a message, a calendar entry or a file. It answers with a short summary it builds
 itself:
 
-| Question | Always | Only with Details on |
+| Question | Without names (the default) | With names, also |
 |---|---|---|
 | Who knows someone at X | knows or not, closeness, last contact month, how many people | up to 5 names with their closeness and last contact |
 | Meeting context | per attendee: closeness, last contact month, how many open promises each way | the name and up to 3 open promises per side |
@@ -54,7 +54,7 @@ itself:
   that arrive within a minute share one. They say who asks and what, never anything of yours. A tap on the phone
   notification opens the question in the Fleet tab and asks you to confirm.
 - **Rules:** per teammate and per kind (who knows someone, meeting context, who handles shared emails): Ask me first,
-  Always answer or Never, plus Details. Shared-email claims are Off until you choose Share.
+  Always answer or Never, and under it how much they hear: **Without names** (the default) or **With names** (for meeting context: **Names and promises**). Shared-email claims are Off until you choose Share.
 - **Only from your dashboard.** Rules and approvals can't be changed by Telegram, the command line, the API token or the
   assistant. The one exception: the buttons on the Telegram message sent for that very question, tapped by you in your
   own chat. Never is only on the dashboard. A prompt in an email can't change who gets told what.
