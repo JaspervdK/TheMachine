@@ -499,6 +499,7 @@ PREVIEW_DAYS = 7  # what `assistant preview` reviews on a new install
 GRAPH_CHECK_SECONDS = 60  # how often the graph worker looks for new organisation profiles
 # The first look (App.first_look): starts once no new signal came in for this long, tried at most this often, this far apart
 FIRST_LOOK_SETTLE_SECONDS, FIRST_LOOK_TRIES, FIRST_LOOK_RETRY_SECONDS = 180, 3, 1800
+PREPARATION_INTERRUPTED_TRIES = 4  # starts of one card's preparation that a Gateway restart may cut off before it counts
 SYSTEM_SERVICES = {'gateway'}  # The Machine's own logs: not a source of the owner's
 
 
@@ -7431,6 +7432,13 @@ class App:
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
             elif status in ('ok','error','aborted','timed_out','lost'):  # lost: the Gateway refused this run id for good
                 error={'ok':'run_ended_without_preparation','timed_out':'ai_run_timed_out'}.get(status,'ai_run_failed')
+                if status in ('aborted','lost') and current['attempts']<PREPARATION_INTERRUPTED_TRIES:
+                    # Stopped from outside (a Gateway restart or reload: this app stops only runs no longer
+                    # wanted), not by how it went: try again in the same session without using up the retry.
+                    db.execute("UPDATE preparations SET job_id=?,status='queued',error=?,retry_at=?,updated_at=?,started_at=NULL WHERE job_id=?",
+                               (uuid.uuid4().hex,'ai_run_interrupted',(dt.datetime.fromisoformat(now())+dt.timedelta(seconds=60)).isoformat(),now(),job['job_id']))
+                    db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
+                    return
                 if not current['auto_retries']:
                     # Continue the retained session once. Its durable tool history must be read
                     # before further writes, including calls whose result was lost.
@@ -7749,7 +7757,9 @@ class App:
         if settings.get('enabled') or settings.get('first_look') is False:
             return None
         runs = db.execute('SELECT status,auto,finished_at FROM review_runs ORDER BY started_at').fetchall()
-        if any(not r['auto'] or r['status'] == 'ok' for r in runs) or len(runs) >= FIRST_LOOK_TRIES:
+        # A run stopped from outside (a Gateway restart) is not a try, up to twice as many runs in all
+        tries = sum(r['status'] not in ('aborted', 'lost') for r in runs)
+        if any(not r['auto'] or r['status'] == 'ok' for r in runs) or tries >= FIRST_LOOK_TRIES or len(runs) >= 2 * FIRST_LOOK_TRIES:
             return None  # reviewed before, or the owner ran their own preview; or tried enough
         if any(r['status'] in ('starting', 'running', 'recovering') for r in runs):
             return None

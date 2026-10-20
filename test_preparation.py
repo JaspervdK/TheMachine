@@ -62,8 +62,25 @@ class Preparation(unittest.TestCase):
         first=self.q('SELECT job_id FROM preparations WHERE suggestion_id=?',sid)['job_id']
         self.app.preparation_step(lambda r:{'status':'lost'})
         row=self.q('SELECT job_id,status,error,auto_retries FROM preparations WHERE suggestion_id=?',sid)
-        self.assertEqual((row['status'],row['error'],row['auto_retries']),('queued','ai_run_failed',1))
+        self.assertEqual((row['status'],row['error'],row['auto_retries']),('queued','ai_run_interrupted',0))  # lost to a restart: not a try
         self.assertNotEqual(row['job_id'],first)
+
+    def test_a_run_a_gateway_restart_cuts_off_is_started_again_without_using_up_the_retry(self):
+        sid=self.ahead()['id']
+        session=self.q('SELECT session_job_id FROM preparations WHERE suggestion_id=?',sid)['session_job_id']
+        later=lambda:patch.object(a,'now',return_value=(a.dt.datetime.now(a.dt.timezone.utc)+a.dt.timedelta(minutes=2+len(seen))).isoformat())
+        seen=[]
+        for n in range(a.PREPARATION_INTERRUPTED_TRIES-1):
+            with later():self.app.preparation_step(lambda r:seen.append(r) or {'status':'admitted' if r['action']=='start' else 'pending'})
+            with later():self.app.preparation_step(lambda r:seen.append(r) or {'status':'aborted'})
+            with self.store.connect() as db:db.execute("UPDATE preparation_runs SET finished_at=? WHERE finished_at IS NULL",(a.now(),))
+            row=self.q('SELECT status,error,auto_retries FROM preparations WHERE suggestion_id=?',sid)
+            self.assertEqual((row['status'],row['error'],row['auto_retries']),('queued','ai_run_interrupted',0))
+        self.assertEqual({r['session_job_id'] for r in seen},{session})  # always the same session, with its earlier work
+        with later():self.app.preparation_step(lambda r:{'status':'admitted' if r['action']=='start' else 'pending'})
+        with later():self.app.preparation_step(lambda r:{'status':'aborted'})
+        row=self.q('SELECT status,error,auto_retries FROM preparations WHERE suggestion_id=?',sid)
+        self.assertEqual((row['status'],row['error'],row['auto_retries']),('queued','ai_run_failed',1))  # then the usual one retry
 
     def test_prepared_ahead_task_stops_at_the_last_step_and_confirm_runs_only_that_step(self):
         sid=self.ahead()['id']

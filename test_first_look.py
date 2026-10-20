@@ -73,6 +73,17 @@ class FirstLook(unittest.TestCase):
         self.assertIsNone(self.state(500))
         self.assertEqual(len(self.runs()), a.FIRST_LOOK_TRIES)
 
+    def test_a_first_look_a_gateway_restart_cut_off_is_not_a_try(self):
+        self.store.commit_page('work', {}, [signal('m1')])
+        for attempt in range(2 * a.FIRST_LOOK_TRIES):
+            with self.later(5 + attempt * 40):
+                self.assertEqual(self.app.review_step(Runner('admitted')), 'admitted')
+            with self.later(5 + attempt * 40), self.store.connect() as db:
+                db.execute("UPDATE review_runs SET status=?,finished_at=? WHERE finished_at IS NULL", ('aborted' if attempt < 4 else 'error', a.now()))
+            if attempt < 2 * a.FIRST_LOOK_TRIES - 1:
+                self.assertEqual(self.state(6 + attempt * 40)['why'], 'retry')
+        self.assertIsNone(self.state(500))  # and never more than twice as many runs in all
+
     def test_never_after_the_owners_own_preview_after_reviews_were_on_or_when_turned_off(self):
         self.store.commit_page('work', {}, [signal('m1')])
         self.app.config['review_worker']['first_look'] = False
