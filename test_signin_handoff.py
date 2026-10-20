@@ -187,6 +187,92 @@ class SigninHandoff(unittest.TestCase):
         self.assertFalse(a.same_site('', 'example.com'))
 
 
+class PerTaskSite(unittest.TestCase):
+    """Two tasks blocked on different sites (one card's Sign in once offered the other task's site). Each task's dialog,
+    Open the browser and carrying on follow the site its own run left off at."""
+
+    job, steps, block, row = SigninHandoff.job, SigninHandoff.steps, SigninHandoff.block, SigninHandoff.row
+
+    def add_task(self, key, calls, reason):
+        sid = self.store.suggest(key, 'Task ' + key, 'I can do it.', [1])['id']
+        with self.store.connect() as db:
+            db.execute("UPDATE deliveries SET status='sent',message_id='200' WHERE suggestion_id=?", (sid,))
+        self.store.decide(sid, 'accept', '', 'click-' + key, 'telegram')
+        self.app.preparation_step(lambda req: {'status': 'admitted'})
+        with self.store.connect() as db:
+            job = db.execute('SELECT job_id FROM preparations WHERE suggestion_id=?', (sid,)).fetchone()[0]
+            for i, (tool, params) in enumerate(calls):
+                db.execute('INSERT INTO preparation_calls(job_id,call_id,tool,params,started_at) VALUES(?,?,?,?,?)',
+                           (job, 'n' + str(i), tool, json.dumps(params), a.dt.datetime(2026, 10, 20, 8, 30, i, tzinfo=a.dt.timezone.utc).isoformat()))
+        self.store.preparation_blocked(sid, job, reason)
+        return sid, job
+
+    def setUp(self):
+        SigninHandoff.setUp(self)
+        self.block('Wise is signed out; sign in on the Wise login tab, then tap Continue.')
+        with self.store.connect() as db:
+            db.execute("UPDATE preparation_calls SET params=replace(params,'www.example.com','wise.com')")
+        # The second task's latest run only reused a tab an earlier run of its session opened.
+        self.other, job = self.add_task('profit', [('browser', {'action': 'focus', 'targetId': 'profit-tab'}),
+                                                   ('exec', {'command': 'release lease'})],
+                                        'Enter your six-digit authenticator code in the ProfitWell tab, then tap Continue.')
+        with self.store.connect() as db:
+            db.execute("INSERT INTO preparation_runs(job_id,suggestion_id,session_job_id,status,started_at) VALUES('old',?,'sess','lost','2026-10-20T08:09:00+00:00')", (self.other,))
+            db.execute("UPDATE preparation_runs SET session_job_id='sess',started_at='2026-10-20T08:30:00+00:00' WHERE job_id=?", (job,))
+            for i, params in enumerate([{'action': 'open', 'targetUrl': 'https://wise.com/login', 'label': 'unrelated-tab'},
+                                        {'action': 'open', 'targetUrl': 'https://app.profit.example/login', 'label': 'profit-tab'},
+                                        {'action': 'navigate', 'targetUrl': 'https://wise.com/home', 'targetId': 'unrelated-tab'}]):
+                db.execute('INSERT INTO preparation_calls(job_id,call_id,tool,params,started_at) VALUES(?,?,?,?,?)',
+                           ('old', str(i), 'browser', json.dumps(params), '2026-10-20T08:10:0%d+00:00' % i))
+        self.forms = [{'host': 'wise.com', 'id': '0:w'}, {'host': 'app.profit.example', 'id': '0:p'}]
+
+    def pages(self, sid):
+        with patch.object(a.browser_login, 'pages', return_value=self.forms):
+            return self.app.action('browser_login_pages', {'suggestion_id': sid}, owner_dashboard=True)
+
+    def test_each_task_finds_its_own_site_from_its_own_runs(self):
+        self.assertEqual(self.app.signin_page(self.other), 'https://app.profit.example/login')
+        self.assertEqual(self.app.signin_page(self.sid), 'https://wise.com/login')
+
+    def test_the_dialog_offers_only_the_tasks_own_sign_in(self):
+        self.assertEqual(self.pages(self.other), {'pages': [self.forms[1]], 'task_site': 'app.profit.example'})
+        self.assertEqual(self.pages(self.sid), {'pages': [self.forms[0]], 'task_site': 'wise.com'})
+
+    def test_an_unknown_site_offers_nothing_rather_than_another_tasks(self):
+        with self.store.connect() as db:
+            db.execute("DELETE FROM preparation_calls WHERE job_id='old'")
+        self.assertIsNone(self.app.signin_page(self.other))
+        self.assertEqual(self.pages(self.other), {'pages': [], 'task_site': None})
+        with patch.object(a.browser_viewer, 'focus') as focus:
+            self.assertEqual(self.app.action('browser_focus', {'suggestion_id': self.other}, owner_dashboard=True), {'shown': False, 'unknown': True})
+        focus.assert_not_called()
+        with self.store.connect() as db:
+            row = dict(db.execute('SELECT * FROM suggestions WHERE id=?', (self.other,)).fetchone())
+            self.assertIsNone(self.store.suggestion_result(row, db)['preparation_browser']['page'])
+
+    def test_open_the_browser_brings_the_tasks_own_tab(self):
+        with patch.object(a.browser_viewer, 'focus', return_value='x') as focus:
+            self.app.action('browser_focus', {'suggestion_id': self.other, 'page': 'https://wise.com/home'}, owner_dashboard=True)
+        self.assertEqual(focus.call_args[0][0], 'https://app.profit.example/login')
+
+    def test_signing_in_to_one_site_never_carries_on_the_other_task(self):
+        with patch.object(a.browser_login, 'fill', return_value={'result': 'done', 'page': None}):
+            done = self.app.action('browser_login_fill', {'page': '0:w', 'host': 'wise.com', 'password': SECRET,
+                                                          'suggestion_id': self.other}, owner_dashboard=True)
+        self.assertEqual(done['resumed'], [self.sid])
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM preparations WHERE suggestion_id=?', (self.other,)).fetchone()[0], 'blocked')
+
+    def test_the_watcher_is_keyed_per_site(self):
+        looks = [self.forms, [self.forms[1]]]  # the Wise form goes, the other stays
+        with patch.object(a.browser_login, 'pages', side_effect=lambda config: looks.pop(0) if looks else [self.forms[1]]):
+            for _ in range(3):
+                self.app.watch_sign_ins(every=0)
+        with self.store.connect() as db:
+            states = dict(db.execute('SELECT suggestion_id,status FROM preparations').fetchall())
+        self.assertEqual((states[self.sid], states[self.other]), ('queued', 'blocked'))
+
+
 class DashboardWiring(unittest.TestCase):
     def test_the_card_and_the_telegram_link_open_the_dialog_for_the_task(self):
         html = Path(__file__).with_name('dashboard.html').read_text()

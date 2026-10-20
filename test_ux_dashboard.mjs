@@ -131,7 +131,8 @@ suggestions[1].preparation_browser.link='https://manage.example/open?to=browser'
 assert.equal(await running.getByRole('link',{name:'Open the browser'}).getAttribute('href'),'https://manage.example/open?to=browser');
 // Waiting on a sign-in: Sign in opens the dialog for this task, so signing in there carries it on.
 Object.assign(suggestions[1].preparation_browser,{sign_in:true,link:null});await page.evaluate(()=>refresh());
-const signin=running.getByRole('button',{name:'Sign in',exact:true});assert.equal(await signin.getAttribute('data-task'),ids[1]);assert.equal(await signin.getAttribute('data-page'),'https://www.linkedin.com/feed/');delete suggestions[1].preparation_browser;
+const signin=running.getByRole('button',{name:'Sign in',exact:true});assert.equal(await signin.getAttribute('data-task'),ids[1]);assert.equal(await signin.getAttribute('data-page'),'https://www.linkedin.com/feed/');
+await running.getByRole('button',{name:'Open the browser'}).click();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('browser'));assert.deepEqual(posts.at(-1),{suggestion_id:ids[1]});delete suggestions[1].preparation_browser;
 const first=await running.locator('.elapsed').textContent();await page.waitForTimeout(2100);assert.notEqual(await running.locator('.elapsed').textContent(),first);
 await page.screenshot({path:'/tmp/261012-preparing-progress.png'});
 await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();const send=page.locator('#send-dialog');await send.waitFor({state:'visible'});

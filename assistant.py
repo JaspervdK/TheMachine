@@ -4644,17 +4644,48 @@ def browser_wait(db, job_id, status, at=None, reason=None):
     since = streak[-1]['started_at']
     if status != 'blocked' and (at or dt.datetime.now(dt.timezone.utc)) - dt.datetime.fromisoformat(since) < dt.timedelta(seconds=BROWSER_WAIT):
         return None
-    page = None
-    for call in calls:
+    return {'since': since, 'page': run_page(db, job_id, calls), 'sign_in': bool(sign_in)}
+
+
+def run_page(db, job_id, calls):
+    """The address of the tab a run left off in, from its own steps: the last address opened in the tab its last browser
+    step used (OpenClaw's targetId, the tab's label), else the last one it opened. A run that only reused a tab an earlier
+    run of the same task opened (a retry, or after a Change) looks in those runs, in that tab only. None when unknown:
+    never another task's tab."""
+    def params(call):
         try:
-            params = json.loads(call['params']) if call['tool'] == 'browser' else {}
+            found = json.loads(call['params']) if call['tool'] == 'browser' else {}
         except ValueError:
-            continue
-        found = isinstance(params, dict) and (params.get('url') or params.get('targetUrl'))
-        if isinstance(found, str) and urllib.parse.urlsplit(found).scheme in ('http', 'https'):
-            page = found
-            break
-    return {'since': since, 'page': page, 'sign_in': bool(sign_in)}
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    def address(call, tab):
+        given = params(call)
+        found = given.get('url') or given.get('targetUrl')
+        if not isinstance(found, str) or urllib.parse.urlsplit(found).scheme not in ('http', 'https'):
+            return None
+        return found if tab is None or tab in (given.get('targetId'), given.get('label')) else None
+
+    tab = next((params(c).get('targetId') or params(c).get('label') for c in calls if c['tool'] == 'browser'), None)
+    tab = tab if isinstance(tab, str) and tab else None
+    for call in calls:
+        found = address(call, tab)
+        if found:
+            return found
+    if tab is None:  # without its tab's name, an earlier run's address could be any tab
+        return next((a for a in (address(c, None) for c in calls) if a), None)
+    try:
+        session = db.execute('SELECT session_job_id FROM preparation_runs WHERE job_id=?', (job_id,)).fetchone()
+        earlier = db.execute('SELECT job_id FROM preparation_runs WHERE session_job_id=? AND job_id!=? ORDER BY started_at DESC LIMIT 10',
+                             (session[0], job_id)).fetchall() if session else []
+        for run in earlier:
+            for call in db.execute("SELECT tool,params FROM preparation_calls WHERE job_id=? AND tool='browser' ORDER BY started_at DESC,rowid DESC LIMIT 200", (run[0],)):
+                found = address(call, tab)
+                if found:
+                    return found
+    except sqlite3.OperationalError:
+        pass
+    return None
 
 
 def signin_handoff(reason):
@@ -6179,6 +6210,10 @@ class App:
             if not owner_dashboard:
                 raise ValueError('Only the owner brings the browser to the front, from the dashboard')
             page = args.get('page') if isinstance(args.get('page'), str) else None
+            if isinstance(args.get('suggestion_id'), str):  # a task's own tab, never another task's
+                page = self.signin_page(args['suggestion_id'])
+                if not page:
+                    return {'shown': False, 'unknown': True}
             shown = browser_viewer.focus(page, self.config.get('browser_cdp_url') or browser_viewer.CDP_URL)
             return {'shown': shown is not None}
         if name in ('browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget'):
@@ -6188,7 +6223,13 @@ class App:
                 raise ValueError('Only the owner signs in to sites, from the dashboard')
             logins = browser_login.LoginStore(Path(self.config['database']).expanduser().parent)
             if name == 'browser_login_pages':
-                return {'pages': browser_login.pages(self.config, logins, args.get('account') if isinstance(args.get('account'), str) else None)}
+                found = browser_login.pages(self.config, logins, args.get('account') if isinstance(args.get('account'), str) else None)
+                if isinstance(args.get('suggestion_id'), str):
+                    # For a task, only the sign-in on the site its own run left off at; unknown: none, never a guess.
+                    page = self.signin_page(args['suggestion_id'])
+                    found = [p for p in found if page and same_site(p['host'], page)]
+                    return {'pages': found, 'task_site': browser_login.site(urllib.parse.urlsplit(page).hostname) if page else None}
+                return {'pages': found}
             if name == 'browser_logins':
                 return {'logins': logins.list()}
             if name == 'browser_login_forget':
@@ -6945,12 +6986,17 @@ class App:
                     found.append((job['suggestion_id'], job['job_id'], waiting.get('page')))
         return found
 
+    def signin_page(self, suggestion_id):
+        """The address a task's blocked sign-in waits on, from its own run steps (run_page), or None."""
+        return next((page for task, job, page in self.signin_waits() if task == suggestion_id), None)
+
     def resume_signed_in(self, host=None, suggestion_id=None, source='signed_in'):
         """Carries on the tasks blocked on a sign-in that is now done: the one named, and those waiting on `host`'s site.
         The same as tapping Continue; nothing here signs in or touches the site. Returns the resumed task ids."""
         resumed = []
         for task, job, page in self.signin_waits():
-            if task != suggestion_id and not (host and page and same_site(host, page)):
+            # Keyed on each task's own site: a sign-in elsewhere never carries a task on, named or not.
+            if not (bool(page) and same_site(host, page) if host else task == suggestion_id):
                 continue
             try:
                 self.store.decide(task, 'retry', '', 'signed-in:' + job, source)
