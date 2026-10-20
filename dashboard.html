@@ -1211,7 +1211,7 @@ function openFleetLink(){if(/^#fleet-brief=fl_[0-9a-f]{16}$/.test(location.hash)
  (card?fleetSync(true):fleetShown).then(()=>{const c=m[1]&&document.getElementById('fleet-'+m[1]);if(!c)return;c.scrollIntoView({block:'center',behavior:'smooth'});c.classList.remove('flash');void c.offsetWidth;c.classList.add('flash');
   const w=m[2]&&fleetData?.waiting.find(x=>x.id===m[1]);if(w&&confirm(`${m[2]==='once'?'Answer once':'Decline'}? ${w.name} asks: ${w.question}`))c.querySelector(`[data-choice-f="${m[2]}"]`)?.click()})}
 async function fleetView(refresh=false){const view=$('#fleet-view'),before=fleetSig(),version=++fleetViewVersion;try{const next=await request('api/fleet'+(refresh?'?refresh=1':''));if(version!==fleetViewVersion)return;fleetData=next;fleetAt=Date.now();if(state&&fleetSig()!==before)render()}catch(e){if(version===fleetViewVersion){view._fleetHTML=null;view.innerHTML=`<p class="error">${esc(e.message)}</p>`}return}
- const f=fleetData;if(!f.on){view.innerHTML='<p class="muted">This Machine is not in a Fleet.</p>';return}
+ const f=fleetData;if(!f.on){view._fleetHTML=null;view.innerHTML='<p class="muted">This Machine is not in a Fleet.</p>';return}
  // Several Work Fleets: each its own section, with its own people, rules and Ask; questions go to one Fleet at a time.
  const works=f.fleets.filter(x=>x.kind==='work'),family=f.fleets.find(x=>x.kind==='family'),several=works.length>1;
  const inFleet=(row,x)=>row.fleet===x.id||(!several&&row.fleet===x.kind),fleetName=row=>several?(works.find(x=>inFleet(row,x))?.name||''):'';
