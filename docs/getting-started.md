@@ -18,7 +18,7 @@ cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 ```
 
-Without OpenClaw, the installer first offers to install it, then starts OpenClaw's own setup and tells you what to pick there: your model provider, yes to running the Gateway as a service, and, optionally, Telegram as a channel (skip it to use the dashboard app's notifications instead). For Telegram you make a bot first: message @BotFather, send /newbot, choose a name and paste the token it gives you. Check: your bot answers you in Telegram.
+Without OpenClaw, the installer first offers to install it, then starts OpenClaw's own setup and tells you what to pick there: your model provider, yes to running the Gateway as a service, and, optionally, Telegram as a channel (skip it to use the dashboard app's notifications instead). For Telegram you make a bot first: message @BotFather, send /newbot, choose a name, then find a free username ending in "bot", and paste the token it gives you. Check: your bot answers you in Telegram.
 
 The wizard fills in what it can find, so most questions only need Enter:
 

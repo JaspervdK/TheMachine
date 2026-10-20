@@ -310,7 +310,7 @@ def offer_openclaw(ui):
                '  1. Model: pick the provider you use and sign in or paste its key. Reviews and Do it run on it.\n'
                '  2. Gateway: say yes to running it as a service, so it keeps running in the background.\n'
                '  3. Channels (optional): choose Telegram to get cards there too. Make a bot first: in Telegram, message\n'
-               '     @BotFather, send /newbot, pick a name, and paste the token. Skip it to use the dashboard app\'s notifications.\n'
+               '     @BotFather, send /newbot, pick a name and a free username ending in "bot", and paste the token. Skip it to use the dashboard app\'s notifications.\n'
                '  The rest is up to you. When it finishes, you come back here.')
         if ui.yes('Start OpenClaw\'s setup now?', True):
             run([openclaw, 'onboard', '--install-daemon'], timeout=None, capture_output=False)
@@ -322,7 +322,7 @@ def offer_openclaw(ui):
     if not has_telegram(settings):
         ui.say('\nOpenClaw has no Telegram bot. That is optional: cards also reach you through the dashboard app\n'
                '(add it to your phone\'s home screen, turn on notifications). For Telegram too: in Telegram, message\n'
-               '@BotFather, send /newbot, pick a name, and copy the token it gives you.')
+               '@BotFather, send /newbot, pick a name and a free username ending in "bot", and copy the token it gives you.')
         if ui.yes('Connect a Telegram bot to OpenClaw now? (runs: openclaw channels add --channel telegram)', False):
             run([openclaw, 'channels', 'add', '--channel', 'telegram'], timeout=None, capture_output=False)
             acted = True
