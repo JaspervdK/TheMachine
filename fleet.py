@@ -1,10 +1,10 @@
 """The Fleet: your Machine and the Machines of the people you work or live with help each other (docs/fleet.md).
 
-A hosted Machine whose owner is in a Fleet has `fleet` in its config ({"url": ...}, the relay on the control plane) and
-a `fleet` credential (the app's own token). A self-hosted Machine sets `fleet_relay_url` (the relay service's address)
-and pairs once with a code from its owner's account there (`cli.py fleet-pair`): that stores its own token as the
-`fleet` credential. Without that credential the Fleet stays off. Machines never call each other: this module asks and answers through the
-relay, and picks up what waits for it with a long poll. A Work Fleet asks three things:
+A hosted Machine whose owner is in a Fleet has `fleet` in its config ({"url": ...}) and a `fleet` credential (the app's
+own token). A self-hosted Machine pairs once with a code from its owner's account (`cli.py fleet-pair`): that stores
+its own token as the `fleet` credential, for the relay built in here (RELAY). Without that credential the Fleet stays
+off. Machines never call each other: this module asks and answers through the relay, and picks up what waits for it
+with a long poll. A Work Fleet asks three things:
 
 - relationships: "who knows someone at acme.com?" Answered from the graph with closeness, last contact (a month) and
   a count; names only when the owner allows details for that teammate.
@@ -30,8 +30,7 @@ seen in the owner's work accounts are ever mentioned. Both directions are logged
 The relay also tells the owner what happens in their Fleet (notices): someone asks the Fleet for a server (with the
 exact amount, or "free, because this Fleet is comped"), joined, had a server started, or left. This Machine shows them
 in its Fleet tab, on the phone and in Telegram. A seat request has Confirm and Decline; a tap is only relayed (with
-the terms that message showed), and the control plane checks and executes it: a tap on an old message, or on terms
-that changed since, does nothing and says why."""
+the terms that message showed); a tap on an old message, or on terms that changed since, does nothing and says why."""
 from __future__ import annotations
 
 import collections
@@ -84,7 +83,7 @@ RULES = ('ask', 'always', 'never')
 # The rules a kind takes, when not all three: a free question is never answered without the owner.
 KIND_RULES = {'anything': ('ask', 'never')}
 NO_DETAILS = ('handling', 'brief', 'anything')  # kinds without a "how much they hear" choice
-BRIEF_BYTES = 30000  # under the relay's MAX_BRIEF
+BRIEF_BYTES = 30000  # under what the relay carries for a brief
 BRIEF_EVERY = ('off', 'day', 'week')
 BRIEF_SETTLE = 7200      # seconds after asking: the brief is told then, or once everyone answered, within work hours
 BRIEF_REBUILD = 1800     # an assembled brief is rebuilt at most this often while nothing new came in
@@ -121,8 +120,7 @@ class Off(Exception):
 
 
 class Unavailable(ValueError):
-    """The relay is away for a moment: its proxy said 502, 503 or 504 (the control plane restarting for an update cuts
-    every long poll at once). A ValueError like any refusal, so a caller that shows the reason still does; the loop
+    """The relay is away for a moment: it said 502, 503 or 504 (a restart cuts every long poll at once). A ValueError like any refusal, so a caller that shows the reason still does; the loop
     just asks again in a few seconds instead of backing off and logging an error."""
 
 
@@ -132,17 +130,20 @@ def where(error):
     return ' < '.join(f'{f.name}:{f.lineno}' for f in reversed(frames[-3:])) or '?'
 
 
+RELAY = 'https://relay.themachine.computer'  # The Fleet's relay
+
+
 def reachable(url):
     return str(url or '').startswith(('https://', 'http://127.0.0.1'))
 
 
 def settings(config):
-    """The relay to use: the hosted setup's `fleet`, else a self-hosted Machine's `fleet_relay_url`."""
+    """The relay to use: the hosted setup's `fleet`, else RELAY once this Machine is paired (an older
+    `fleet_relay_url` in the config is not needed and is ignored)."""
     found = config.get('fleet')
-    if isinstance(found, dict) and reachable(found.get('url')):
-        return found
-    base = str(config.get('fleet_relay_url') or '').rstrip('/')
-    return {'url': base + '/api/fleet'} if reachable(base) else None
+    if isinstance(found, dict):
+        return found if reachable(found.get('url')) else None
+    return {'url': RELAY + '/api/fleet'} if (config.get('credentials') or {}).get('fleet') else None
 
 
 def account_emails(config):
@@ -152,11 +153,9 @@ def account_emails(config):
                    if a.get('id') in work and '@' in str(a.get('email') or '')})
 
 
-def pair(base, code, label, emails, timeout=30):
+def pair(code, label, emails, timeout=30):
     """A self-hosted Machine trades the pairing code from its owner's account for its own relay token: {token, label}."""
-    if not reachable(base):
-        raise ValueError('fleet_relay_url must be an https:// address')
-    request = urllib.request.Request(base.rstrip('/') + '/api/fleet/pair', method='POST', headers={'Content-Type': 'application/json'},
+    request = urllib.request.Request(RELAY + '/api/fleet/pair', method='POST', headers={'Content-Type': 'application/json'},
                                      data=json.dumps({'code': code, 'label': label, 'emails': emails}).encode())
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -222,7 +221,7 @@ def day(value):
 
 
 class Relay:
-    """The control plane's relay, with the app's own token."""
+    """The Fleet relay, with this Machine's token."""
     def __init__(self, url, token):
         self.url, self.token = url.rstrip('/'), token
 
@@ -1262,7 +1261,7 @@ class Fleet(fleet_requests.Requests):
         return told
 
     def decide_notice(self, nid, choice, key, via='dashboard'):
-        """The owner's Confirm or Decline on a seat request, relayed as is. The control plane decides whether it still
+        """The owner's Confirm or Decline on a seat request, relayed as is. The relay decides whether it still
         holds: it may come back stale (already settled, withdrawn, no longer the owner) or changed (new terms), and then
         nothing was done. Returns {status, reason, notice}."""
         if choice not in ('confirm', 'decline'):

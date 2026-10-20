@@ -170,7 +170,6 @@ Each person answers with one Machine per Fleet, so teammates never get two answe
 (say a hosted one and one at home), you pick which one answers in your account. Removing someone from a Fleet takes
 effect at once, and how often a Machine can ask is limited.
 
-
 ## A self-hosted Machine in a Fleet
 
 A Machine you run yourself can be your Machine in a Fleet, next to teammates on hosted Machines. It needs an account

@@ -61,12 +61,12 @@ class CliTests(unittest.TestCase):
  def test_fleet_pair_keeps_its_token_private_and_points_the_config_at_it(self):
   import os,tempfile
   with tempfile.TemporaryDirectory() as d:
-   path=Path(d)/'config.json';path.write_text(json.dumps({'database':str(Path(d)/'events.sqlite'),'accounts':[{'id':'work','email':'me@acme.example','boundary':'work:Acme'}],'credentials':{}}))
+   path=Path(d)/'config.json';path.write_text(json.dumps({'database':str(Path(d)/'events.sqlite'),'accounts':[{'id':'work','email':'me@acme.example','boundary':'work:Acme'}],'credentials':{},'fleet_relay_url':'https://old.example'}))
    with patch.object(cli.assistant.fleet,'pair',return_value={'token':'fd_secret','label':'Laptop'}) as pair,contextlib.redirect_stdout(io.StringIO()) as out:
-    cli.main(['--config',str(path),'fleet-pair','ABCD-EFGH','--label','Laptop','--relay','https://relay.example'])
-   pair.assert_called_once_with('https://relay.example','ABCD-EFGH','Laptop',['me@acme.example'])
+    cli.main(['--config',str(path),'fleet-pair','ABCD-EFGH','--label','Laptop','--relay','https://ignored.example'])
+   pair.assert_called_once_with('ABCD-EFGH','Laptop',['me@acme.example'])
    saved=json.loads(path.read_text());token=Path(saved['credentials']['fleet'])
-   self.assertEqual((saved['fleet_relay_url'],token.read_text().strip(),oct(token.stat().st_mode&0o777)),('https://relay.example','fd_secret','0o600'))
+   self.assertEqual(('fleet_relay_url' in saved,token.read_text().strip(),oct(token.stat().st_mode&0o777)),(False,'fd_secret','0o600'))
    self.assertNotIn('fd_secret',out.getvalue())
    with self.assertRaises(SystemExit):cli.main(['--config',str(Path(d)/'none.json'),'fleet-pair','X'])
 

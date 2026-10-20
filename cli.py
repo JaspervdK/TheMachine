@@ -645,17 +645,14 @@ def cmd_import(config, args):
 
 
 def cmd_fleet_pair(config, args):
-    base = (args.relay or config.get('fleet_relay_url') or '').rstrip('/')
-    if not assistant.fleet.reachable(base):
-        raise CliError('pass --relay with your Fleet relay\'s https:// address (it is shown with your pairing code)')
     try:
-        found = assistant.fleet.pair(base, args.code, args.label or os.uname().nodename, assistant.fleet.account_emails(config))
+        found = assistant.fleet.pair(args.code, args.label or os.uname().nodename, assistant.fleet.account_emails(config))
     except (ValueError, OSError) as error:
         raise CliError(f'pairing failed: {error}') from None
     path = Path(config.get('database') or assistant.DEFAULT_CONFIG).expanduser().parent / 'fleet-token'
     onboarding.write_private(path, found['token'] + '\n')
     saved = onboarding.load(args.config)
-    saved['fleet_relay_url'] = base
+    saved.pop('fleet_relay_url', None)  # from before the relay was built in
     saved.setdefault('credentials', {})['fleet'] = str(path)
     onboarding.save(args.config, saved)
     if args.json:
@@ -747,10 +744,10 @@ def parser():
     c = add('import', 'Put an export back on this computer (a fresh install)', cmd_import)
     c.add_argument('archive', help='the .tar.gz or .tar.gz.enc file')
     c.add_argument('--force', action='store_true', help='replace a setup that already has sources (a copy of it is kept)')
-    c = add('fleet-pair', 'Pair this Machine with your account at a Fleet relay (fleet_relay_url), with a code from that account', cmd_fleet_pair)
+    c = add('fleet-pair', 'Pair this Machine with your account for a Fleet, with a code from that account', cmd_fleet_pair)
     c.add_argument('code', help='the pairing code, like ABCD-EFGH')
     c.add_argument('--label', help='a name for this Machine there (default: this computer\'s name)')
-    c.add_argument('--relay', help='the relay\'s https:// address, when fleet_relay_url is not set yet')
+    c.add_argument('--relay', help=argparse.SUPPRESS)  # ignored: commands copied from before the relay was built in
     c = add('raw', 'Call any non-owner service action with JSON args', cmd_raw)
     c.add_argument('action')
     c.add_argument('args', nargs='?', help='JSON object')

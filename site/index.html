@@ -192,6 +192,7 @@ footer{border-top:1px solid var(--line);padding:32px 0 48px;color:var(--faint);f
 footer .wrap{display:flex;gap:24px;flex-wrap:wrap;align-items:center}
 footer .wrap span{margin-right:auto}
 footer a{color:var(--muted);text-decoration:none}
+footer .tm{margin-top:14px;font-size:13px}
 @media (max-width:900px){
   .hero{grid-template-columns:1fr;padding-top:56px;gap:24px}
   .stage{min-height:380px;max-width:420px}
@@ -301,7 +302,7 @@ footer a{color:var(--muted);text-decoration:none}
     <li><b>One private database.</b> Plain SQLite in your home directory. No cloud, no account, no telemetry.</li>
     <li><b>People and projects, kept local.</b> Who you deal with and what they and their companies are to you, read from your messages with the line it came from, for your ✓. Who has gone quiet, what is still open between you and which projects are heating up, worked out on your own machine. Optionally, company facts from the enrichment service you already use, looked up by domain only.</li>
     <li><b>What your Fleet saw.</b> A daily or weekly brief of customers gone quiet, deals several of you touched and inbound nobody answered, put together from counts and dates, never anyone’s mail. And ask your Fleet anything: each teammate’s Machine drafts an answer from its own mail, and nothing comes back until they send it.</li>
-    <li><b>With your teammates’ Machines.</b> In a Fleet (beta), Machines ask each other who knows someone at a company, ask a teammate for a warm intro, hand a thread to a teammate, and split the follow-ups after a meeting you were both in. Each needs the owner’s yes, and only short summaries travel, never your messages.</li>
+    <li><b>With your teammates’ Machines.</b> In a Fleet (beta), Machines ask each other who knows someone at a company, ask a teammate for a warm intro, hand a thread to a teammate, and split the follow-ups after a meeting you were both in. Each needs the owner’s yes, and only short summaries travel, never your messages. A Machine you run yourself can join through our relay, for €4 a month per member who answers with one; pairing is free.</li>
     <li><b>Related by meaning, locally.</b> An optional small model on your machine finds related messages, notes and past conversations, and searches everything at once.</li>
     <li><b>Nothing goes out without you.</b> Every email and message is sent only after you approve that exact draft, and never twice.</li>
     <li><b>Do it means exactly that.</b> Tapping Do it approves what the card offered, and nothing beyond it.</li>
@@ -355,7 +356,7 @@ assistant doctor</pre>
   <a href="https://github.com/JeroenCorthout/TheMachine">GitHub</a>
   <a href="https://github.com/JeroenCorthout/TheMachine/blob/main/SECURITY.md">Security</a>
   <a href="https://github.com/JeroenCorthout/TheMachine/blob/main/docs/models.md">Models</a>
-</div></footer>
+</div><div class="wrap tm"><span>The code is MIT licensed. The names The Machine and The Fleet, the logo, and the hosted network and relay are not covered by the license.</span></div></footer>
 <script>
 // Hero demo: the same card flow as the real Telegram card and dashboard, with made-up data.
 // Nothing leaves the page. Wording and timing rules follow assistant.py, dashboard.html and the plugin.
