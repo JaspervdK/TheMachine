@@ -127,7 +127,7 @@ itself:
   default) or **With names** (for meeting context: **Names and promises**). Under each rule a short example, from
   made-up data, says what they would get. New teammates follow the Fleet's rule.
 - **Exceptions:** "Different for someone? Add an exception" picks a teammate and their own choice; it shows as a small
-  pill ("Lieven: Always") that × removes, back to the Fleet's rule. If someone is in several of your Fleets, the Fleet
+  pill ("Robin: Always") that × removes, back to the Fleet's rule. If someone is in several of your Fleets, the Fleet
   a question comes through decides. Rules set per teammate before were folded once: the most common choice per kind
   became the Fleet's rule (on a tie, Ask me first), the others stayed as exceptions, so nobody's rule changed.
 - **Only about…** narrows a rule (folded away until you open it): **Only about** some companies, domains or names

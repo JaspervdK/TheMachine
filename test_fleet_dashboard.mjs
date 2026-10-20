@@ -10,7 +10,7 @@ const {chromium}=await import(process.env.PLAYWRIGHT_CORE||OPENCLAW+'/node_modul
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const FL='fl_'+'a'.repeat(16);
 const fresh=()=>({relationships:{rule:'ask',details:false},meeting:{rule:'always',details:true},handling:{rule:'ask',details:false},brief:{rule:'never',details:false}});
-const members=[{member_id:'p',name:'Sam Doe (sam.doe@mail.example)'},{member_id:'q',name:'Alexandra Longname-Whitfield'},{member_id:'l',name:'Lieven Janssen'}];
+const members=[{member_id:'p',name:'Sam Doe (sam.doe@mail.example)'},{member_id:'q',name:'Alexandra Longname-Whitfield'},{member_id:'l',name:'Robin Vale'}];
 const view={on:true,kinds:{relationships:'who knows someone',meeting:'meeting context',handling:'who handles shared emails',brief:'brief facts'},ask_meetings:false,
  kind_rules:{relationships:['ask','always','never'],meeting:['ask','always','never'],handling:['ask','always','never'],brief:['ask','always','never']},
  no_details:['handling','brief'],scoped:['relationships','meeting','handling'],scopes:{},
@@ -19,7 +19,7 @@ const view={on:true,kinds:{relationships:'who knows someone',meeting:'meeting co
    {member_id:'p',name:'Sam Doe',role:'member',me:false,answers_with:'Hosted: sam.example.test',email:'sam.doe@mail.example'}],
   members:members.map(m=>({...m,rules:fresh()})),rules:fresh(),exceptions:{}}],
  waiting:[],asked:[],log:[],notices:[]};
-const reset=()=>{const w=view.fleets[0];w.rules=fresh();w.exceptions={relationships:[{member_id:'l',name:'Lieven Janssen',rule:'always',details:false,own_scope:false}]};
+const reset=()=>{const w=view.fleets[0];w.rules=fresh();w.exceptions={relationships:[{member_id:'l',name:'Robin Vale',rule:'always',details:false,own_scope:false}]};
  view.scopes={[FL]:{'*':{relationships:{only:['acme.com'],never:['initech'],work_only:true}}}}};
 const calls=[];
 const server=createServer(async(req,res)=>{res.setHeader('Content-Type','application/json');
@@ -68,7 +68,7 @@ try{
   assert.equal(await ex('brief'),'Example: They get “no”.');
   for(const k of ['relationships','meeting','handling','brief'])assert.ok((await ex(k)).length<=140,k+": "+await ex(k));
   // Exceptions: small pills, and a way to add one.
-  assert.equal(await R('relationships').locator('.fleet-ex').innerText().then(t=>t.replace('×','').trim()),'Lieven Janssen: Always');
+  assert.equal(await R('relationships').locator('.fleet-ex').innerText().then(t=>t.replace('×','').trim()),'Robin Vale: Always');
   calls.length=0;await R('relationships').locator('.fleet-ex button').click();
   await page.waitForFunction(()=>!document.querySelector('.fleet-rule[data-member="*"][data-kind="relationships"] .fleet-ex'));
   assert.deepEqual(calls[0].args,{fleet:FL,member_id:'l',kind:'relationships',clear:true});

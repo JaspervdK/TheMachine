@@ -10,8 +10,8 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const now=new Date().toISOString(),posts=[];
 const cards=[{id:'p1',title:'Reply to Sam about pricing',body:'Sam asked for pricing.',status:'pending',scope:'work',created_at:now,event_ids:[1],source_line:'Source: email from Sam · Mon 19 Oct'},
- {id:'r1',title:'Send Yuri the contract',body:'Draft ready.',status:'prepared',scope:'work',created_at:now,preparation_status:'done',event_ids:[2],
-  next_actions:[{kind:'email',revision:'v1',label:'Send to Yuri',to:['yuri@example.com'],to_name:'Yuri',subject:'Contract',body:'Hi Yuri'}]},
+ {id:'r1',title:'Send Noor the contract',body:'Draft ready.',status:'prepared',scope:'work',created_at:now,preparation_status:'done',event_ids:[2],
+  next_actions:[{kind:'email',revision:'v1',label:'Send to Noor',to:['noor@example.com'],to_name:'Noor',subject:'Contract',body:'Hi Noor'}]},
  {id:'h1',title:'Personal errand',body:'Buy a gift.',status:'pending',scope:'personal',created_at:now,event_ids:[3]}];
 const state=()=>({suggestions:cards,promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:true,fleets:[]}});
 const server=createServer(async(req,res)=>{let body='';for await(const c of req)body+=c;const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
@@ -37,7 +37,7 @@ try{
   assert.deepEqual(await menu('p1'),['Mark done','Change','Hand off']);
   assert.equal(await page.getByText('Hand off to a teammate').count(),0);
   // A ready draft: the button says it opens the preview first
-  assert.deepEqual(await shown('r1'),['Review and send to Yuri','Mark done','Snooze','More']);
+  assert.deepEqual(await shown('r1'),['Review and send to Noor','Mark done','Snooze','More']);
   assert.deepEqual(await menu('r1'),['Change','Not needed','Hand off']);
   // A personal card has no Hand off
   assert.ok(!(await menu('h1')).includes('Hand off'));
