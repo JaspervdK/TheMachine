@@ -13,7 +13,7 @@ From nothing to your first cards in about 15 minutes. Each step says how to chec
 ## 1. Install
 
 ```bash
-git clone https://github.com/JeroenCorthout/TheMachine.git ~/.openclaw/workspace/tools/personal-assistant
+git clone https://github.com/Salesflare/TheMachine.git ~/.openclaw/workspace/tools/personal-assistant
 cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 ```
