@@ -4,6 +4,7 @@ import json
 import shutil
 import sqlite3
 import tarfile
+import zipfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,12 +59,12 @@ class Moving(unittest.TestCase):
                              source='hosted')
 
     def names(self, path):
-        with tarfile.open(path, 'r:gz') as archive:
-            return set(archive.getnames()), archive
+        with zipfile.ZipFile(path) as archive:
+            return set(archive.namelist()), archive
 
     def read(self, path, name):
-        with tarfile.open(path, 'r:gz') as archive:
-            return archive.extractfile(name).read().decode()
+        with zipfile.ZipFile(path) as archive:
+            return archive.read(name).decode()
 
     def target(self):
         local = self.tmp / 'local'
@@ -71,7 +72,7 @@ class Moving(unittest.TestCase):
 
     def test_without_a_passphrase_no_key_leaves(self):
         path, manifest = self.export()
-        self.assertTrue(path.name.endswith('.tar.gz'))
+        self.assertTrue(path.name.endswith('.zip'))  # opens on Windows and macOS without extra tools
         names, _ = self.names(path)
         self.assertIn('data/events.sqlite', names)
         self.assertIn('data/notes.txt', names)
@@ -79,8 +80,8 @@ class Moving(unittest.TestCase):
         self.assertIn('workspace/memory/today.md', names)
         self.assertFalse([n for n in names if n.startswith(('secrets/', 'workspace/tools'))])
         self.assertNotIn('data/events-old.sqlite.bak', names)
-        with tarfile.open(path, 'r:gz') as archive:
-            blob = b''.join(archive.extractfile(m).read() for m in archive.getmembers() if m.isfile())
+        with zipfile.ZipFile(path) as archive:
+            blob = b''.join(archive.read(name) for name in archive.namelist())
         for secret in (b'xoxb-example', b'owner-example', b'hosted-example', b'123:example', b'relay-example'):
             self.assertNotIn(secret, blob)
         self.assertEqual(manifest['telegram'], {'enabled': True, 'owner_allow_from': ['tg:1000']})
@@ -91,8 +92,8 @@ class Moving(unittest.TestCase):
 
     def test_the_database_copy_is_whole(self):
         path, _ = self.export()
-        with tarfile.open(path, 'r:gz') as archive:
-            archive.extract('data/events.sqlite', self.tmp / 'check', filter='data')
+        with zipfile.ZipFile(path) as archive:
+            archive.extract('data/events.sqlite', self.tmp / 'check')
         db = sqlite3.connect(self.tmp / 'check/data/events.sqlite')
         self.addCleanup(db.close)
         rows = db.execute('SELECT title FROM events').fetchall()
@@ -142,6 +143,30 @@ class Moving(unittest.TestCase):
             moving.import_(bad, config_path, workspace=space, openclaw_home=claw)
         self.assertFalse((self.tmp / 'escape.txt').exists())
 
+    def test_a_zip_reaching_outside_is_refused(self):
+        config_path, space, claw = self.target()
+        for name in ('../escape.txt', 'C:/escape.txt', 'data\\..\\..\\escape.txt'):
+            bad = self.tmp / 'bad.zip'
+            with zipfile.ZipFile(bad, 'w') as archive:
+                archive.writestr('manifest.json', '{}')
+                archive.writestr(name, 'hi')
+            with self.assertRaisesRegex(moving.MoveError, 'outside'):
+                moving.import_(bad, config_path, workspace=space, openclaw_home=claw)
+        self.assertFalse((self.tmp / 'escape.txt').exists())
+
+    def test_an_older_tar_gz_export_still_imports(self):
+        path, _ = self.export()
+        older = self.tmp / 'the-machine-export-2026-01-01.tar.gz'
+        with zipfile.ZipFile(path) as source, tarfile.open(older, 'w:gz') as archive:
+            for name in source.namelist():
+                data = source.read(name)
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        config_path, space, claw = self.target()
+        moving.import_(older, config_path, workspace=space, openclaw_home=claw)
+        self.assertEqual((space / 'USER.md').read_text(), 'About the owner\n')
+
     def test_a_short_passphrase_is_refused(self):
         with self.assertRaisesRegex(moving.MoveError, 'at least'):
             self.export('short')
@@ -150,7 +175,7 @@ class Moving(unittest.TestCase):
     def test_with_a_passphrase_keys_move_encrypted(self):
         path, manifest = self.export('a long example passphrase')
         self.assertTrue(path.name.endswith('.tar.gz.enc'))
-        self.assertFalse(list(self.out.glob('*.tar.gz')))
+        self.assertFalse(list(self.out.glob('*.tar.gz')) + list(self.out.glob('*.zip')))
         self.assertTrue(manifest['includes_keys'])
         raw = path.read_bytes()
         self.assertNotIn(b'xoxb-example', raw)

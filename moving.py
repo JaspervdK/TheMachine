@@ -4,7 +4,9 @@ An export holds the databases (signals, suggestions, people and organisations wi
 config.json, connectors you built yourself, your OpenClaw workspace files (AGENTS.md, USER.md, memory and the like)
 and who may talk to your Telegram bot. Keys and tokens only come along when you pick a passphrase: then the whole
 archive is encrypted with it (AES-256, the passphrase stretched with PBKDF2), and nothing in it can be read without
-that passphrase. Without one, keys stay behind and the import lists what to connect again.
+that passphrase. Without one, keys stay behind and the import lists what to connect again; that archive is a plain
+.zip, which Windows, macOS and Linux open without extra tools. The encrypted one is a .tar.gz.enc: only openssl (and
+so `assistant import`) opens it, because a zip that Windows opens on its own can only use weak encryption.
 """
 import datetime as dt
 import io
@@ -15,6 +17,7 @@ import sqlite3
 import subprocess
 import tarfile
 import tempfile
+import zipfile
 from contextlib import closing
 from contextlib import contextmanager
 from pathlib import Path
@@ -151,9 +154,21 @@ def _add_bytes(archive, name, data):
     archive.addfile(info, io.BytesIO(data))
 
 
+def _pack(target, entries, zipped):
+    """Write (name in the archive, bytes or a file path) entries as a .zip or a .tar.gz."""
+    if zipped:
+        with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+            for name, source in entries:
+                archive.writestr(name, source) if isinstance(source, bytes) else archive.write(source, name)
+        return
+    with tarfile.open(target, 'w:gz') as archive:
+        for name, source in entries:
+            _add_bytes(archive, name, source) if isinstance(source, bytes) else archive.add(source, name)
+
+
 def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=None, source='local', now=None):
     """Write the archive into out_dir and return (path, manifest). With a passphrase the archive includes keys and is
-    encrypted as a whole (name ends in .tar.gz.enc); without one, keys stay out."""
+    encrypted as a whole (name ends in .tar.gz.enc); without one, keys stay out and it is a plain .zip."""
     if passphrase is not None and len(passphrase) < MIN_PASSPHRASE:
         raise MoveError(f'Pick a passphrase of at least {MIN_PASSPHRASE} characters')
     config_path = Path(config_path).expanduser()
@@ -168,20 +183,21 @@ def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=
     out_dir = Path(out_dir)
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     stem = f'the-machine-export-{now:%Y-%m-%d}'
-    plain = out_dir / f'{stem}.tar.gz'
+    plain = out_dir / (f'{stem}.tar.gz' if secrets else f'{stem}.zip')
     with tempfile.TemporaryDirectory() as temp:
-        with tarfile.open(plain, 'w:gz') as archive:
-            _add_bytes(archive, 'manifest.json', json.dumps(manifest, indent=2).encode())
-            _add_bytes(archive, 'README.txt', readme(manifest).encode())
+        def entries():
+            yield 'manifest.json', json.dumps(manifest, indent=2).encode()
+            yield 'README.txt', readme(manifest).encode()
             for kind, path, name in items:
                 if kind == 'db':
                     copy = Path(temp) / 'copy.sqlite'
                     copy.unlink(missing_ok=True)
                     with closing(sqlite3.connect(path, timeout=30)) as source_db, closing(sqlite3.connect(copy)) as target:
                         source_db.backup(target)  # a consistent copy while the service keeps writing
-                    archive.add(copy, name)
+                    yield name, copy
                 else:
-                    archive.add(path, name)
+                    yield name, path
+        _pack(plain, entries(), zipped=not secrets)
         os.chmod(plain, 0o600)
         if not secrets:
             return plain, manifest
@@ -219,10 +235,22 @@ def readme(manifest):
     return '\n'.join(lines) + '\n'
 
 
+def _outside(name, zipped=False):
+    path = Path(name)
+    # a zip may come from Windows: a backslash or a drive letter there points outside as well
+    return path.is_absolute() or '..' in path.parts or (zipped and ('\\' in name or name[1:2] == ':'))
+
+
 def _safe_extract(archive, target):
+    if isinstance(archive, zipfile.ZipFile):
+        for member in archive.infolist():
+            kind = (member.external_attr >> 16) & 0o170000
+            if _outside(member.filename, zipped=True) or kind not in (0, 0o100000, 0o040000):  # files and folders only, no links
+                raise MoveError('This archive has entries outside its own folder; not importing it')
+        archive.extractall(target)
+        return
     for member in archive.getmembers():
-        name = Path(member.name)
-        if name.is_absolute() or '..' in name.parts or not (member.isfile() or member.isdir()):
+        if _outside(member.name) or not (member.isfile() or member.isdir()):
             raise MoveError('This archive has entries outside its own folder; not importing it')
     archive.extractall(target, filter='data') if hasattr(tarfile, 'data_filter') else archive.extractall(target)
 
@@ -294,9 +322,9 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
             _openssl(['-in', str(archive_path), '-out', str(plain)], passphrase, decrypt=True)
         unpacked = temp / 'export'
         try:
-            with tarfile.open(plain, 'r:gz') as archive:
+            with (zipfile.ZipFile(plain) if zipfile.is_zipfile(plain) else tarfile.open(plain, 'r:gz')) as archive:
                 _safe_extract(archive, unpacked)
-        except tarfile.TarError:
+        except (tarfile.TarError, zipfile.BadZipFile, OSError):
             raise MoveError('This is not an export of The Machine, or it is damaged') from None
         try:
             manifest = json.loads((unpacked / 'manifest.json').read_text())
