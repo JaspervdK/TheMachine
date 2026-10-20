@@ -334,7 +334,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours'}
+OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -4835,6 +4835,35 @@ def signin_link(config, suggestion_id):
     return 'https://' + host + config.get('dashboard_path', '/') + '#signin-for=' + suggestion_id if host else None
 
 
+SIGNIN_ADDRESS = re.compile(r'(?i)log-?in|sign-?in|/auth|oauth|\bsso\b|/idp|switch-account|account-?select|challenge|/2fa|/mfa|verif|captcha')
+SIGNIN_KINDS = (('eid', re.compile(r'(?i)itsme|\be-?id\b|iamfas|\bcsam\b')), ('passkey', re.compile(r'(?i)passkey|security key')),
+                ('captcha', re.compile(r'(?i)captcha|not a robot')),
+                ('account', re.compile(r'(?i)switch-account|switch account|owning account|right account|choose (?:an |the )?account')),
+                ('code', re.compile(r'(?i)authenticator|one-time|six-digit|\b2fa\b|two-factor|verification code|sms code')))
+
+
+def signin_address(url, page):
+    """A tab address that is still a sign-in for the task waiting on `page`: another site (its identity provider, such
+    as itsme or eID) or a sign-in path on its own site."""
+    parts = urllib.parse.urlsplit(str(url or ''))
+    if parts.scheme not in ('http', 'https'):
+        return False
+    return not same_site(parts.hostname, page) or bool(SIGNIN_ADDRESS.search(parts.path + '?' + parts.query))
+
+
+def signin_kind(reason, urls=()):
+    """What a sign-in with nothing to type in the dialog wants (eid, passkey, captcha, account, code), from the task's
+    blocker and its tab's address, or None."""
+    text = ' '.join([reason or '', *[str(u) for u in urls]])
+    return next((kind for kind, pattern in SIGNIN_KINDS if pattern.search(text)), None)
+
+
+def signin_name(reason, page):
+    """The site's name as the task's blocker says it ("the open Drone Portal tab"), else its address."""
+    found = re.search(r"\b(?:the|open)\s+(?:[a-z]+\s+)?([A-Z][\w.]*(?:\s+[A-Z][\w.]*){0,2})\s+(?:login\s+|sign-?in\s+)?tab\b", reason or '')
+    return found.group(1) if found else browser_login.site(urllib.parse.urlsplit(page or '').hostname)
+
+
 def same_site(a, b):
     """Two hosts of one site: equal, one under the other, or the same last two labels (login.wise.com, wise.com)."""
     a, b = (browser_login.site(urllib.parse.urlsplit(x).hostname if '//' in str(x or '') else x) for x in (a, b))
@@ -6458,12 +6487,16 @@ class App:
                     return {'shown': False, 'unknown': True}
             shown = browser_viewer.focus(page, self.config.get('browser_cdp_url') or browser_viewer.CDP_URL)
             return {'shown': shown is not None}
-        if name in ('browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget'):
+        if name in ('browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget'):
             # A separate path: what the owner types goes into the page and, when asked, the encrypted store, never
             # into a log, the model or an error message (see browser_login.py).
             if not owner_dashboard:
                 raise ValueError('Only the owner signs in to sites, from the dashboard')
             logins = browser_login.LoginStore(Path(self.config['database']).expanduser().parent)
+            if name == 'browser_login_open':
+                if not isinstance(args.get('suggestion_id'), str):
+                    raise ValueError('Which task?')
+                return self.signin_open(args['suggestion_id'])
             if name == 'browser_login_pages':
                 found = browser_login.pages(self.config, logins, args.get('account') if isinstance(args.get('account'), str) else None)
                 if isinstance(args.get('suggestion_id'), str):
@@ -7246,6 +7279,44 @@ class App:
                     found.append((job['suggestion_id'], job['job_id'], waiting.get('page')))
         return found
 
+    def signin_reason(self, suggestion_id):
+        with self.store.connect() as db:
+            row = db.execute("SELECT reason FROM preparations WHERE suggestion_id=? AND status='blocked'", (suggestion_id,)).fetchone()
+        return row[0] if row else None
+
+    def signin_tabs(self):
+        """The shared browser's open pages, [{id, url}] (DevTools on loopback only)."""
+        base = browser_login.endpoints(self.config)[0]
+        return [{'id': t.get('id'), 'url': t.get('url') or ''} for t in browser_login.browser_cdp._http(base, '/json/list', timeout=3) if t.get('type') == 'page']
+
+    def signin_open(self, suggestion_id):
+        """The sign-in dialog for a task: its sign-in page in front in the shared browser, reopened from the address
+        its own run left off at when that tab is gone. Returns what the dialog shows: {state, site, kind, view}."""
+        page = self.signin_page(suggestion_id)
+        view = browser_link(self.config)
+        if not page:
+            return {'state': 'unknown', 'site': None, 'kind': None, 'view': view}
+        reason = self.signin_reason(suggestion_id)
+        opened = self.__dict__.setdefault('signin_opened', {})
+        try:
+            tabs = self.signin_tabs()
+        except (browser_login.browser_cdp.CdpError, OSError, TypeError, AttributeError):
+            raise ValueError('I couldn’t reach the browser on this computer') from None
+        mine = [t for t in tabs if t['id'] == opened.get(suggestion_id)] + [t for t in tabs if same_site(t['url'], page)]
+        if mine:  # followed from here on, also through an identity provider on another host
+            state, url, opened[suggestion_id] = 'open', mine[0]['url'], mine[0]['id']
+        else:
+            try:
+                opened[suggestion_id] = browser_login.browser_cdp.open_tab(browser_login.endpoints(self.config)[0], page)
+            except (browser_login.browser_cdp.CdpError, OSError):
+                raise ValueError('I couldn’t open the sign-in page in the browser') from None
+            state, url = 'opened', page
+        try:
+            browser_viewer.focus(url, browser_login.endpoints(self.config)[0])
+        except (ValueError, OSError):
+            pass
+        return {'state': state, 'site': signin_name(reason, page), 'kind': signin_kind(reason, [url]), 'view': view}
+
     def signin_page(self, suggestion_id):
         """The address a task's blocked sign-in waits on, from its own run steps (run_page), or None."""
         return next((page for task, job, page in self.signin_waits() if task == suggestion_id), None)
@@ -7269,8 +7340,10 @@ class App:
 
     def watch_sign_ins(self, every=SIGNIN_WATCH):
         """Signing in in the browser itself carries on too. While a task waits on a sign-in, look every `every` seconds
-        for the sign-in form on its site in the shared browser (read-only: which fields show, never what is in them).
-        Once one was seen and is gone, the owner got in: carry on, once per blocked run."""
+        at the shared browser (read-only: which sign-in fields show, never what is in them, and the tabs' addresses).
+        The task's site was seen at its sign-in (a form, a sign-in address, its identity provider) and now a tab of it
+        is past that with no form: the owner got in, so carry on, once per blocked run. Also for sign-ins with
+        nothing to type (itsme or eID, a passkey, a captcha, choosing an account)."""
         state = self.__dict__.setdefault('signin_watch', {'next': 0.0, 'seen': set(), 'done': set()})
         if time.monotonic() < state['next']:
             return
@@ -7281,12 +7354,15 @@ class App:
             return
         try:
             shown = [p['host'] for p in browser_login.pages(self.config)]
+            tabs = self.signin_tabs()
         except Exception:  # no browser right now: look again later
             return
+        opened = self.__dict__.get('signin_opened', {})
         for task, job, page in waits:
-            if any(same_site(host, page) for host in shown):
+            mine = [t['url'] for t in tabs if t['id'] == opened.get(task) or same_site(t['url'], page)]
+            if any(same_site(host, page) for host in shown) or any(signin_address(url, page) for url in mine):
                 state['seen'].add(job)
-            elif job in state['seen']:
+            elif job in state['seen'] and any(same_site(url, page) for url in mine):
                 state['seen'].discard(job)
                 state['done'].add(job)
                 self.resume_signed_in(suggestion_id=task)
@@ -7998,7 +8074,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','push_subscribe','push_unsubscribe','browser_focus','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

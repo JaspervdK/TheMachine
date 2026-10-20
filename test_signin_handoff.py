@@ -149,7 +149,8 @@ class SigninHandoff(unittest.TestCase):
     def test_signing_in_in_the_browser_itself_carries_on_once_the_form_is_gone(self):
         self.block()
         forms = [[{'host': 'www.example.com'}], [{'host': 'www.example.com'}], []]
-        with patch.object(a.browser_login, 'pages', side_effect=lambda config: forms.pop(0) if forms else []):
+        with patch.object(a.browser_login, 'pages', side_effect=lambda config: forms.pop(0) if forms else []), \
+                patch.object(a.App, 'signin_tabs', return_value=[{'id': 't', 'url': 'https://www.example.com/home'}]):
             for _ in range(3):
                 self.app.watch_sign_ins(every=0)
                 if _ < 2:
@@ -158,7 +159,16 @@ class SigninHandoff(unittest.TestCase):
 
     def test_the_watcher_never_resumes_without_having_seen_the_form(self):
         self.block()
-        with patch.object(a.browser_login, 'pages', return_value=[]):
+        with patch.object(a.browser_login, 'pages', return_value=[]), \
+                patch.object(a.App, 'signin_tabs', return_value=[{'id': 't', 'url': 'https://www.example.com/home'}]):
+            for _ in range(3):
+                self.app.watch_sign_ins(every=0)
+        self.assertEqual(self.job()['status'], 'blocked')
+
+    def test_the_watcher_waits_while_no_tab_of_the_site_is_past_the_sign_in(self):
+        self.block()
+        with patch.object(a.browser_login, 'pages', side_effect=[[{'host': 'www.example.com'}], [], []]), \
+                patch.object(a.App, 'signin_tabs', return_value=[]):
             for _ in range(3):
                 self.app.watch_sign_ins(every=0)
         self.assertEqual(self.job()['status'], 'blocked')
@@ -265,12 +275,89 @@ class PerTaskSite(unittest.TestCase):
 
     def test_the_watcher_is_keyed_per_site(self):
         looks = [self.forms, [self.forms[1]]]  # the Wise form goes, the other stays
-        with patch.object(a.browser_login, 'pages', side_effect=lambda config: looks.pop(0) if looks else [self.forms[1]]):
+        tabs = [{'id': 'w', 'url': 'https://wise.com/home'}, {'id': 'p', 'url': 'https://app.profit.example/login'}]
+        with patch.object(a.browser_login, 'pages', side_effect=lambda config: looks.pop(0) if looks else [self.forms[1]]), \
+                patch.object(a.App, 'signin_tabs', return_value=tabs):
             for _ in range(3):
                 self.app.watch_sign_ins(every=0)
         with self.store.connect() as db:
             states = dict(db.execute('SELECT suggestion_id,status FROM preparations').fetchall())
         self.assertEqual((states[self.sid], states[self.other]), ('queued', 'blocked'))
+
+
+class SigninDialogOpens(unittest.TestCase):
+    """The dialog opens the task's own sign-in itself (2026-10-20: it hung on "Looking for the sign-in page" once
+    the task's tab was closed), and an itsme or eID sign-in carries on by itself once the owner is through."""
+
+    job, steps = SigninHandoff.job, SigninHandoff.steps
+
+    def setUp(self):
+        SigninHandoff.setUp(self)
+
+    def block(self, url, reason):
+        self.steps(('browser', {'action': 'open', 'targetUrl': url}), ('exec', {'command': 'release lease'}))
+        self.store.preparation_blocked(self.sid, self.job()['job_id'], reason)
+
+    def open(self, tabs):
+        with patch.object(a.App, 'signin_tabs', return_value=tabs), \
+                patch.object(a.browser_login.browser_cdp, 'open_tab', return_value='new-tab') as open_tab, \
+                patch.object(a.browser_viewer, 'focus') as focus:
+            shown = self.app.action('browser_login_open', {'suggestion_id': self.sid}, owner_dashboard=True)
+        return shown, open_tab, focus
+
+    def test_a_closed_tab_is_reopened_at_the_tasks_own_sign_in(self):
+        self.block('https://www.example.com/login', HANDOFF)
+        shown, open_tab, focus = self.open([{'id': 'x', 'url': 'https://other.invalid/'}])
+        self.assertEqual(open_tab.call_args[0][1], 'https://www.example.com/login')
+        self.assertEqual(focus.call_args[0][0], 'https://www.example.com/login')
+        self.assertEqual((shown['state'], shown['site']), ('opened', 'example.com'))
+        self.assertEqual(self.app.signin_opened[self.sid], 'new-tab')
+
+    def test_an_open_tab_is_brought_up_rather_than_a_second_one(self):
+        self.block('https://www.example.com/login', HANDOFF)
+        shown, open_tab, focus = self.open([{'id': 'mine', 'url': 'https://www.example.com/login?next=1'}])
+        open_tab.assert_not_called()
+        self.assertEqual(focus.call_args[0][0], 'https://www.example.com/login?next=1')
+        self.assertEqual((shown['state'], self.app.signin_opened[self.sid]), ('open', 'mine'))
+
+    def test_an_unknown_site_opens_nothing(self):
+        self.steps(('exec', {'command': 'release lease'}))
+        self.store.preparation_blocked(self.sid, self.job()['job_id'], HANDOFF)
+        shown, open_tab, focus = self.open([])
+        open_tab.assert_not_called()
+        self.assertEqual(shown['state'], 'unknown')
+
+    def test_no_browser_is_a_plain_error(self):
+        self.block('https://www.example.com/login', HANDOFF)
+        with patch.object(a.App, 'signin_tabs', side_effect=OSError('refused')):
+            with self.assertRaisesRegex(ValueError, 'couldn’t reach the browser'):
+                self.app.signin_open(self.sid)
+
+    def test_itsme_or_eid_carries_on_once_back_on_the_site(self):
+        reason = 'The Drone Portal asks for itsme or eID; sign in on the open Drone Portal tab, then tap Continue.'
+        self.block('https://drones.example.be/login', reason)
+        shown, _, _ = self.open([])
+        self.assertEqual((shown['site'], shown['kind']), ('Drone Portal', 'eid'))
+        tabs = [[{'id': 'new-tab', 'url': 'https://drones.example.be/login'}],
+                [{'id': 'new-tab', 'url': 'https://idp.example.org/saml/sso?x=1'}],
+                [{'id': 'new-tab', 'url': 'https://drones.example.be/dashboard'}]]
+        with patch.object(a.browser_login, 'pages', return_value=[]), \
+                patch.object(a.App, 'signin_tabs', side_effect=lambda: tabs.pop(0)):
+            for step in range(3):
+                self.app.watch_sign_ins(every=0)
+                self.assertEqual(self.job()['status'], 'queued' if step == 2 else 'blocked')
+
+    def test_kinds_names_and_sign_in_addresses(self):
+        self.assertEqual(a.signin_kind('Sign in with itsme on the open tab'), 'eid')
+        self.assertEqual(a.signin_kind('', ['https://idp.iamfas.belgium.be/x']), 'eid')
+        self.assertEqual(a.signin_kind('Enter your six-digit authenticator code'), 'code')
+        self.assertEqual(a.signin_kind('Zapier shows a switch-account page'), 'account')
+        self.assertIsNone(a.signin_kind(HANDOFF))
+        self.assertEqual(a.signin_name('Enter the code in the ProfitWell tab, then tap Continue.', 'https://www2.profitwell.com/acc/login/'), 'ProfitWell')
+        self.assertEqual(a.signin_name('', 'https://www.example.com/login'), 'example.com')
+        self.assertTrue(a.signin_address('https://www.example.com/login', 'https://www.example.com/'))
+        self.assertTrue(a.signin_address('https://idp.example.org/saml/sso', 'https://www.example.com/'))
+        self.assertFalse(a.signin_address('https://www.example.com/dashboard', 'https://www.example.com/'))
 
 
 class DashboardWiring(unittest.TestCase):
@@ -279,6 +366,14 @@ class DashboardWiring(unittest.TestCase):
         self.assertIn('#signin-for=', html)
         self.assertIn('data-task="${esc(id)}"', html)
         self.assertIn('suggestion_id:signinTask', html)
+
+    def test_the_dialog_opens_the_sign_in_itself_and_never_hangs(self):
+        html = Path(__file__).with_name('dashboard.html').read_text()
+        self.assertIn("signinPost('browser_login_open',{suggestion_id:task})", html)
+        self.assertIn('signinWithin(', html)
+        self.assertIn('id="signin-frame"', html)
+        self.assertIn('id="signin-retry"', html)
+        self.assertIn("api/progress?id='+encodeURIComponent(signinTask)", html)
 
 
 if __name__ == '__main__':
