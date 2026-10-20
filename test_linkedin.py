@@ -339,6 +339,38 @@ class Tabs(unittest.TestCase):
                     patch.object(cdp, 'evaluate', side_effect=cdp.CdpError('browser not reachable')), self.assertRaises(reader.Fail):
                 reader.evaluate('T1', 'f')
 
+    def test_through_openclaw_a_reader_never_opens_an_about_page(self):
+        # OpenClaw's gateway refuses every non-http(s) address, about:blank#... included.
+        import importlib.util
+        for name in ('linkedin_inbox', 'x_inbox'):
+            spec = importlib.util.spec_from_file_location(name, Path(__file__).parent / 'integrations' / f'{name}.py')
+            reader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reader)
+            opened, urls = [], {}
+
+            def oc(*args, timeout=60):
+                if args[0] in ('open', 'navigate') and not args[-1].startswith(('http://', 'https://')):
+                    raise reader.Fail('browser command failed: Navigation blocked: unsupported protocol "about:"')
+                if args[0] == 'open':
+                    opened.append(args[-1])
+                    urls['T1'] = args[-1] + ''
+                    return 'id: T1\n'
+                if args[:2] == ('--json', 'tabs'):
+                    return json.dumps({'tabs': [{'targetId': t, 'url': u} for t, u in urls.items()]})
+                if args[0] == 'close':
+                    urls.pop(args[1], None)
+                return ''
+            with tempfile.TemporaryDirectory() as tmp, patch.object(reader, 'oc', oc), patch.object(reader, 'CDP', ''), \
+                    patch.object(reader, 'OPEN_TABS', Path(tmp) / 'tabs'), patch.object(reader, 'lease', lambda *a, **k: subprocess.CompletedProcess(a, 0, '', '')):
+                reader.with_tab('https://example.test/inbox#old', lambda target: None)
+                self.assertEqual(len(opened), 1, name)
+                self.assertRegex(opened[0], r'^https://example\.test/inbox#the-machine-[0-9a-f]{32}$', name)
+                self.assertEqual(urls, {}, name)
+                # A lost receipt is still recovered by the fragment, even if the page added a query.
+                urls['LOST'] = 'https://example.test/inbox?x=1' + opened[0][opened[0].index('#'):]
+                urls['OTHER'] = 'https://example.test/inbox#the-machine-' + '0' * 32
+                self.assertEqual(reader.recover_tab(opened[0]), 'LOST', name)
+
     def test_a_stopped_run_leaves_no_tab_and_the_owners_tabs_stay(self):
         import importlib.util
         for name in ('linkedin_inbox', 'x_inbox'):

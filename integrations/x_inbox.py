@@ -461,14 +461,18 @@ def tab_inventory():
 def recover_tab(marker):
     # Inventory differences also include tabs opened by unrelated concurrent jobs.
     # Only our persisted unique marker establishes ownership after a lost receipt.
+    tag = marker[marker.index('#'):]
     for row in tab_inventory():
-        if row.get('url') == marker:
+        if (row.get('url') or '').endswith(tag):
             return row.get('targetId') or row.get('id')
     return None
 
 
 def open_tab(label, url):
-    marker = 'about:blank#the-machine-' + uuid.uuid4().hex
+    # The unique fragment marks the tab as ours if its receipt is lost. OpenClaw's gateway only
+    # opens http(s) pages (about:blank#... is refused), so it rides on the real page's address there.
+    tag = '#the-machine-' + uuid.uuid4().hex
+    marker = 'about:blank' + tag if CDP else url.split('#')[0] + tag
     remember_tab('pending:' + marker, True)
     target = None
     try:
@@ -484,8 +488,6 @@ def open_tab(label, url):
         remember_tab('pending:' + marker, False)
         if CDP:
             browser_cdp.navigate(CDP, target, url)
-        else:
-            oc('navigate', '--target-id', target, url)
         return target
     except Exception:
         if target:
