@@ -90,6 +90,36 @@ class Moving(unittest.TestCase):
         self.assertTrue(any(line.startswith('slack:') for line in manifest['reconnect']))
         self.assertIn('assistant import', self.read(path, 'README.txt'))
 
+    def test_keys_kept_by_hand_stay_out_without_a_passphrase(self):
+        (self.data / 'old/share/gogcli/keyring').mkdir(parents=True)
+        (self.data / 'old/share/gogcli/keyring/_gogcli_key_v1_x').write_text('encrypted-example')
+        (self.data / 'old/openclaw-before.json').write_text('{"gateway": {"auth": {"mode": "x"}}}')
+        (self.data / 'answer.json').write_text('{"session_token": "abcdefghijklmnopqrstuvwxyz0123"}')
+        (self.data / 'events.sqlite.bak-20261020').write_text('old copy')
+        (self.data / 'events.pre-fix-20261020T101010Z.sqlite3').write_text('old copy')
+        (self.space / 'memory/fine.md').write_text('A token is a small thing\n')
+        path, _ = self.export()
+        names, _ = self.names(path)
+        self.assertFalse([n for n in names if 'keyring' in n or 'openclaw-before' in n or 'answer.json' in n or '.bak-' in n or '.pre-fix-' in n])
+        self.assertIn('workspace/memory/fine.md', names)
+        self.assertIn('data/notes.txt', names)
+
+    def test_rebuildable_folders_stay_out_and_are_listed(self):
+        for folder in ('.venvs/x/lib', 'project/node_modules/pkg', 'project/.git/objects', 'scripts/__pycache__'):
+            (self.space / folder).mkdir(parents=True)
+            (self.space / folder / 'blob').write_bytes(b'x' * 2000)
+        (self.space / 'project/notes.md').write_text('mine\n')
+        path, manifest = self.export()
+        names, _ = self.names(path)
+        self.assertIn('workspace/project/notes.md', names)
+        self.assertFalse([n for n in names if any(p in n for p in ('.venvs', 'node_modules', '.git/', '__pycache__'))])
+        self.assertEqual(set(manifest['left_out']) & {'.venvs', 'node_modules', '.git', '__pycache__'},
+                         {'.venvs', 'node_modules', '.git', '__pycache__'})
+        self.assertEqual(manifest['left_out']['node_modules'], 2000)
+        self.assertIn('node_modules 2 KB', moving.left_out_text(manifest['left_out']))
+        self.assertIn('node_modules', moving.estimate(self.config, workspace=self.space,
+                                                      openclaw_home=self.claw)['left_out'])
+
     def test_the_database_copy_is_whole(self):
         path, _ = self.export()
         with zipfile.ZipFile(path) as archive:

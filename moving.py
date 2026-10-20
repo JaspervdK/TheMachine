@@ -12,6 +12,7 @@ import datetime as dt
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -28,11 +29,24 @@ PASSPHRASE_ENV = 'THE_MACHINE_EXPORT_PASSPHRASE'
 MIN_PASSPHRASE = 10
 # openssl is on every Linux and macOS; the passphrase reaches it through its environment, never its arguments
 OPENSSL = ['openssl', 'enc', '-aes-256-cbc', '-pbkdf2', '-iter', '600000', '-md', 'sha256']
-# Workspace parts that are not yours to move: the app itself, and git's own bookkeeping
-WORKSPACE_SKIP = {'tools', '.git', 'node_modules'}
+# Workspace parts that are not yours to move: the app itself (git's bookkeeping is in REBUILDABLE)
+WORKSPACE_SKIP = {'tools'}
 SKIP_SUFFIXES = ('.bak', '.lock', '.tmp', '-wal', '-shm', '-journal')
 # Files in the data folder that are keys even when config.json does not point at them
 SECRET_NAMES = {'owner-token', 'api-token', 'vapid.json', 'gog-password', 'browser-logins.enc', 'browser-logins.key'}
+# Folders that only hold keys (a copied gog keyring, OpenClaw's credentials), and copies of OpenClaw's own settings
+SECRET_DIRS = {'keyring', 'credentials', '.ssh', '.gnupg'}
+SECRET_FILE = re.compile(r'^openclaw.*\.json$')
+# A small text file that spells out a token, key or password is a key too, whatever its name (a saved API answer, say)
+TOKEN_LIKE = re.compile(rb'(?i)(?:token|api[_-]?key|secret|password|bearer)["\']?\s*[:=]\s*["\']?[A-Za-z0-9_\-./+]{20,}')
+SCAN_SUFFIXES = ('.json', '.txt', '.md', '.env', '.yaml', '.yml', '.log', '.ini', '.conf', '.toml', '.sh', '.py', '')
+SCAN_LIMIT = 1_000_000
+# Older copies of a database or a folder kept by hand (events.sqlite.bak-20261020): not needed to move
+COPY_NAME = re.compile(r'\.(?:bak|backup)[-.]|\.before-|\.pre-[^.]*\d{8}')
+COPIES = 'older copies (.bak, .before-, dated .pre-)'
+# Folders any computer rebuilds by itself (installed packages, caches, git's own history): left out wherever they sit
+REBUILDABLE = {'.git', 'node_modules', '.venv', '.venvs', 'venv', '__pycache__', '.cache', '.pytest_cache', '.mypy_cache',
+               '.ruff_cache', '.tox'}
 # Tokens that only work for a hosted server; they are never exported
 HOSTED_ONLY = {'google-broker'}
 # Settings a hosted server added that mean nothing elsewhere
@@ -51,31 +65,75 @@ def _openclaw_home(path=None):
     return Path(path or os.environ.get('OPENCLAW_HOME') or Path.home() / '.openclaw').expanduser()
 
 
-def _files(root, skip_top=()):
-    for path in sorted(root.rglob('*')):
-        relative = path.relative_to(root)
-        if relative.parts[0] in skip_top or path.is_symlink() or not path.is_file():
-            continue
-        if path.name.endswith(SKIP_SUFFIXES):
-            continue
-        yield path, relative
+def _size(root):
+    total = 0
+    for base, _, names in os.walk(root):
+        for name in names:
+            try:
+                total += os.lstat(os.path.join(base, name)).st_size
+            except OSError:
+                pass
+    return total
 
 
-def plan(config_path, workspace=None, openclaw_home=None):
-    """What an export holds: [(kind, source path, name in the archive)]. kind is db, file or secret."""
+def _files(root, skip_top=(), left_out=None):
+    """The files under root worth moving. Folders any computer rebuilds (REBUILDABLE) and hand-made copies stay out;
+    left_out, when given, counts their bytes by name so the export can say what it skipped."""
+    found = []
+    for base, dirs, names in os.walk(root):
+        here = Path(base)
+        for name in list(dirs):
+            path = here / name
+            if (here == root and name in skip_top) or path.is_symlink():
+                dirs.remove(name)
+            elif name in REBUILDABLE:
+                dirs.remove(name)
+                if left_out is not None:
+                    left_out[name] = left_out.get(name, 0) + _size(path)
+        for name in names:
+            path = here / name
+            if path.is_symlink() or not path.is_file() or name.endswith(SKIP_SUFFIXES):
+                continue
+            if COPY_NAME.search(name):
+                if left_out is not None:
+                    left_out[COPIES] = left_out.get(COPIES, 0) + path.stat().st_size
+                continue
+            found.append((path, path.relative_to(root)))
+    return sorted(found)
+
+
+def _secretish(path, relative):
+    """A key by where it sits, its name, or what it says, even when config.json does not point at it."""
+    if path.name in SECRET_NAMES or path.suffix == '.env' or SECRET_FILE.match(path.name):
+        return True
+    if SECRET_DIRS & set(relative.parts[:-1]):
+        return True
+    if path.suffix.lower() not in SCAN_SUFFIXES:
+        return False
+    try:
+        if path.stat().st_size > SCAN_LIMIT:
+            return False
+        return bool(TOKEN_LIKE.search(path.read_bytes()))
+    except OSError:
+        return False
+
+
+def plan(config_path, workspace=None, openclaw_home=None, left_out=None):
+    """What an export holds: [(kind, source path, name in the archive)]. kind is db, file or secret.
+    left_out, when given, collects the bytes of what was skipped as rebuildable (see _files)."""
     config_path = Path(config_path).expanduser()
     config = json.loads(config_path.read_text())
     data = config_path.parent
     keys = {Path(p).expanduser().resolve() for name, p in (config.get('credentials') or {}).items() if name not in HOSTED_ONLY}
     hosted = {Path(p).expanduser().resolve() for name, p in (config.get('credentials') or {}).items() if name in HOSTED_ONLY}
     items = [('file', config_path, 'config/config.json')]
-    for path, relative in _files(data):
+    for path, relative in _files(data, left_out=left_out):
         resolved = path.resolve()
         if path == config_path or resolved in hosted or path.name == 'machine-token':
             continue
         if path.suffix in ('.sqlite', '.db'):
             items.append(('db', path, f'data/{relative}'))
-        elif resolved in keys or path.name in SECRET_NAMES or path.suffix == '.env':
+        elif resolved in keys or _secretish(path, relative):
             items.append(('secret', path, f'secrets/data/{relative}'))
         else:
             items.append(('file', path, f'data/{relative}'))
@@ -84,10 +142,10 @@ def plan(config_path, workspace=None, openclaw_home=None):
             items.append(('secret', path, f'secrets/elsewhere/{path.name}'))
     space = _workspace(workspace)
     if space.is_dir():
-        for path, relative in _files(space, WORKSPACE_SKIP):
+        for path, relative in _files(space, WORKSPACE_SKIP, left_out):
             if path.resolve() in hosted or path.name == 'machine-token':
                 continue
-            secret = path.resolve() in keys or path.name in SECRET_NAMES or path.suffix == '.env'
+            secret = path.resolve() in keys or _secretish(path, relative)
             items.append(('secret' if secret else 'file', path,
                           f'{"secrets/" if secret else ""}workspace/{relative}'))
     items += [('file', path, f'connectors/{path.relative_to(APP)}') for path in own_connectors()]
@@ -144,8 +202,9 @@ def reconnect(config, secrets):
 
 
 def estimate(config_path, secrets=False, workspace=None, openclaw_home=None):
-    items = [i for i in plan(config_path, workspace, openclaw_home) if secrets or i[0] != 'secret']
-    return {'files': len(items), 'bytes': sum(path.stat().st_size for _, path, _ in items)}
+    left_out = {}
+    items = [i for i in plan(config_path, workspace, openclaw_home, left_out) if secrets or i[0] != 'secret']
+    return {'files': len(items), 'bytes': sum(path.stat().st_size for _, path, _ in items), 'left_out': left_out}
 
 
 def _add_bytes(archive, name, data):
@@ -174,12 +233,13 @@ def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=
     config_path = Path(config_path).expanduser()
     config = json.loads(config_path.read_text())
     secrets = passphrase is not None
-    items = [i for i in plan(config_path, workspace, openclaw_home) if secrets or i[0] != 'secret']
+    left_out = {}
+    items = [i for i in plan(config_path, workspace, openclaw_home, left_out) if secrets or i[0] != 'secret']
     now = now or dt.datetime.now(dt.timezone.utc)
     manifest = {'format': FORMAT, 'created_at': now.isoformat(timespec='seconds'), 'source': source,
                 'data_dir': str(config_path.parent), 'workspace_dir': str(_workspace(workspace)), 'includes_keys': secrets,
                 'files': sorted(name for _, _, name in items), 'telegram': telegram(openclaw_home),
-                'reconnect': reconnect(config, secrets)}
+                'reconnect': reconnect(config, secrets), 'left_out': left_out}
     out_dir = Path(out_dir)
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     stem = f'the-machine-export-{now:%Y-%m-%d}'
@@ -232,7 +292,17 @@ def readme(manifest):
     lines.append('Keys and tokens are included.' if manifest['includes_keys'] else
                  'Keys and tokens are not included; the import lists what to connect again.')
     lines += ['', 'Connect again after the import:'] + [f'  - {line}' for line in manifest['reconnect']]
+    if manifest.get('left_out'):
+        lines += ['', 'Left out, because a computer rebuilds them (installed packages, caches, git history, older copies):',
+                  '  ' + left_out_text(manifest['left_out'])]
     return '\n'.join(lines) + '\n'
+
+
+def left_out_text(left_out):
+    """'node_modules 1.2 GB, .venvs 640 MB' for what an export skipped, biggest first."""
+    def size(n):
+        return f'{n / 1e9:.1f} GB' if n >= 1e9 else f'{n / 1e6:.0f} MB' if n >= 1e6 else f'{n / 1e3:.0f} KB'
+    return ', '.join(f'{name} {size(n)}' for name, n in sorted(left_out.items(), key=lambda kv: -kv[1]))
 
 
 def _outside(name, zipped=False):

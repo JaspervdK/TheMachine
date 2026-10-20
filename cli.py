@@ -617,13 +617,21 @@ def cmd_export(config, args):
     try:
         if args.estimate:
             out = moving.estimate(args.config, secrets=args.keys)
-            return out_json(out) if args.json else print(f'{out["files"]} files, about {out["bytes"] / 1e6:.1f} MB before compression')
+            if args.json:
+                return out_json(out)
+            print(f'{out["files"]} files, about {out["bytes"] / 1e6:.1f} MB before compression')
+            if out['left_out']:
+                print('Left out (a computer rebuilds these): ' + moving.left_out_text(out['left_out']))
+            return
         path, manifest = moving.export(args.config, args.out, passphrase=_passphrase(True) if args.keys else None)
     except moving.MoveError as error:
         raise CliError(str(error)) from None
     if args.json:
-        return out_json({'file': str(path), 'bytes': path.stat().st_size, 'includes_keys': manifest['includes_keys']})
+        return out_json({'file': str(path), 'bytes': path.stat().st_size, 'includes_keys': manifest['includes_keys'],
+                         'left_out': manifest['left_out']})
     print(f'Wrote {path} ({path.stat().st_size / 1e6:.1f} MB)' + (', keys included and encrypted' if args.keys else ', without keys'))
+    if manifest['left_out']:
+        print('Left out (a computer rebuilds these): ' + moving.left_out_text(manifest['left_out']))
     print('Put it back on another computer with:  assistant import ' + path.name)
 
 

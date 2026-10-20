@@ -698,6 +698,13 @@ class RelayRestart(unittest.TestCase):
                 relay.call('GET', '/inbox?wait=25')
         self.assertIsInstance(caught.exception, ValueError)  # callers showing a relay refusal still show this one
 
+        def broken(request, timeout=None):  # the Network's own bug (a 500 page) passes too: no Fleet error
+            raise urllib.error.HTTPError(request.full_url, 500, 'Server Error', {}, io.BytesIO(b'<html>500</html>'))
+
+        with patch.object(fleet.urllib.request, 'urlopen', broken):
+            with self.assertRaisesRegex(fleet.Unavailable, 'had a problem'):
+                relay.call('GET', '/directory')
+
         with tempfile.TemporaryDirectory() as tmp:
             store = a.Store(str(Path(tmp) / 'events.sqlite'))
             stop, steps, waits = threading.Event(), [], []

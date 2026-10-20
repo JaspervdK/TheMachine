@@ -274,6 +274,8 @@ class Relay:
                     raise Off() from None
                 if error.code in (502, 503, 504):
                     raise Unavailable('The Network is restarting; try again in a minute.') from None
+                if error.code >= 500:  # the Network's own fault: it passes, so ask again later as for a restart
+                    raise Unavailable('The Network had a problem; try again in a minute.') from None
                 try:
                     message = json.loads(error.read() or b'{}').get('error') or ''
                 except ValueError:
