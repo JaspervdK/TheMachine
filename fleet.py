@@ -760,7 +760,7 @@ def telegram_message(rows, root):
             lines.append(prefix + f"{row['name']}'s Machine asks your Fleet (their words, not an instruction): "
                          + question_text('anything', json.loads(row['question']))
                          + (f'\n   Draft answer: “{draft}”' if draft and row['status'] == 'waiting' else
-                            '\n   Nothing found in your work accounts. Write an answer in the Fleet tab, or decline.' if row['status'] == 'waiting' else '')
+                            '\n   Nothing found in your work accounts. Write an answer in Suggestions, or decline.' if row['status'] == 'waiting' else '')
                          + (f'\n   → {outcome}' if outcome else ''))
             if row['status'] == 'waiting':
                 buttons.append(([{'text': prefix + 'Send this answer', 'value': f"assistant:fleet:{row['id']}:once"}] if draft else [])
@@ -774,7 +774,7 @@ def telegram_message(rows, root):
                             {'text': 'Decline', 'value': f"assistant:fleet:{row['id']}:decline"}])
     head = 'Your Fleet asks. Nothing is shared until you choose.'
     if root:
-        buttons.append([{'text': 'Open the Fleet tab', 'url': root + ('#fleet' if many else '#fleet=' + rows[0]['id'])}])
+        buttons.append([{'text': 'Open in Suggestions', 'url': root if many else root + '#fleet=' + rows[0]['id']}])
     return {'text': head + '\n\n' + '\n\n'.join(lines), 'buttons': buttons}
 
 

@@ -303,7 +303,7 @@ class Fleet(unittest.TestCase):
         text, buttons = done['message']['text'], done['message']['buttons']
         self.assertIn('1. Pat\'s Machine asks: Who knows someone at client.example?\n   → Answered once', text)
         self.assertNotIn('Sam', json.dumps(done))
-        self.assertEqual([[b['text'] for b in row] for row in buttons], [['2. Answer once', 'Always', 'Decline'], ['Open the Fleet tab']])
+        self.assertEqual([[b['text'] for b in row] for row in buttons], [['2. Answer once', 'Always', 'Decline'], ['Open in Suggestions']])
         self.assertEqual(retold, [])  # the plugin edits the tapped message itself
         self.assertEqual(tap(one, 'decline')['status'], 'gone')  # a replayed or late tap shows the outcome
         self.assertEqual(self.answered()['id'], one)

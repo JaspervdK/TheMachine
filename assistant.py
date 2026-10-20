@@ -6969,7 +6969,7 @@ class App:
                                                                'url': url, 'tag': 'fleet-brief'}, 'fleet-brief')
         if not telegram_on(self.config):
             return None
-        result = fleet_telegram(self.config, {'text': text, 'buttons': [[{'text': 'Open the Fleet tab', 'url': url}]] if url else []})
+        result = fleet_telegram(self.config, {'text': text, 'buttons': [[{'text': 'Open the brief', 'url': url}]] if url else []})
         message_id = str(result.get('messageId') or '')
         return message_id if re.fullmatch(r'\d+', message_id) else None
 
@@ -7016,10 +7016,10 @@ class App:
         with self.store.connect() as db:
             subscriptions = [dict(r) for r in db.execute('SELECT endpoint,p256dh,auth FROM push_subscriptions')]
         if subscriptions and root:
-            push_send(self.store, self.config, subscriptions, {'title': 'Your Fleet', 'body': text[:200], 'url': root + '#fleet', 'tag': 'fleet-' + anchor},
+            push_send(self.store, self.config, subscriptions, {'title': 'Your Fleet', 'body': text[:200], 'url': root, 'tag': 'fleet-' + anchor},
                       'fleet=' + anchor)
         if telegram_on(self.config):
-            fleet_telegram(self.config, {'text': text, 'buttons': [[{'text': 'Open the Fleet tab', 'url': root + '#fleet'}]] if root else []})
+            fleet_telegram(self.config, {'text': text, 'buttons': [[{'text': 'Open in Suggestions', 'url': root}]] if root else []})
 
     def fleet_retell(self, message_id, message=None):
         try:
