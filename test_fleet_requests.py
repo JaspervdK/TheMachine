@@ -180,6 +180,71 @@ class Requests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM suggestions WHERE title LIKE 'Pat handed you%'").fetchone()[0], 2)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM action_jobs').fetchone()[0], 0)
 
+    # -- shared follow-ups
+    def meeting(self, organizer='owner@acme.example', source='cal1', hours_ago=3):
+        start = NOW - dt.timedelta(hours=hours_ago + 1)
+        event = {'account_id': 'work', 'source_id': source, 'kind': 'calendar.event', 'occurred_at': start.isoformat(), 'title': 'Deal review',
+                 'body': '', 'deleted': False, 'metadata': {'start': {'dateTime': start.isoformat()}, 'end_at': (start + dt.timedelta(hours=1)).isoformat(),
+                                                             'status': 'confirmed', 'organizer': {'email': organizer}, 'attendees': [
+                                                                 {'email': 'owner@acme.example', 'self': True}, {'email': TEAM}, {'email': 'sam@client.example'}]}}
+        self.store.commit_page('work', {}, [event])
+        with self.store.connect() as db:
+            return db.execute('SELECT id FROM events WHERE source_id=?', (source,)).fetchone()[0]
+
+    def test_the_organizer_proposes_one_split_and_sends_it_as_the_owner_filled_it_in(self):
+        event_id = self.meeting()
+        self.meeting(organizer=TEAM, source='cal2')  # Pat's Machine proposes that one
+        self.store.suggest('k-pricing', 'Send Sam the pricing', 'Sam asked for pricing.', [event_id])
+        self.assertEqual(self.fleet.followup_round(), 1)
+        self.assertEqual(self.fleet.followup_round(), 0)  # once per meeting
+        self.assertEqual(self.fleet.summary()['waiting'], 1)
+        (split,) = self.fleet.view()['splits']
+        self.assertEqual([(p['name'], p['mine'], p['what']) for p in split['parts']], [('Owner', True, 'Send Sam the pricing'), ('Pat', False, '')])
+        self.assertEqual(self.relay.sent('/ask'), [])  # nothing goes before the owner sends it
+        with self.assertRaisesRegex(ValueError, 'at least one teammate'):
+            self.fleet.send_split(split['id'], {'me1': 'Send pricing'})
+        self.app.action('fleet_split', {'id': split['id'], 'items': {'me1': 'Send pricing', 'pat1': 'Book the demo'}}, owner_dashboard=True)
+        sent = self.relay.sent('/ask')[-1]
+        self.assertEqual(sent['kind'], 'followup')
+        self.assertRegex(sent['question']['meeting'], r'^[0-9a-f]{64}$')
+        self.assertEqual(sent['question']['items'], [{'member_id': 'me1', 'what': 'Send pricing'}, {'member_id': 'pat1', 'what': 'Book the demo'}])
+        self.assertNotIn('Deal review', json.dumps(sent))  # the meeting's title stays here
+        with self.assertRaisesRegex(ValueError, 'sent or set aside'):
+            self.fleet.send_split(split['id'], {'pat1': 'again'})
+        suggestions = [{'id': 'x', 'event_ids': [event_id]}]
+        with self.store.connect() as db:
+            self.fleet.annotate(db, suggestions)
+        self.assertEqual(suggestions[0]['fleet_split'], 'you: Send pricing; Pat: Book the demo')
+        with self.store.connect() as db:
+            ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='followup'").fetchone()[0]
+        self.fleet.take_answer({'id': ask_id, 'status': 'answered', 'answer': {'stage': 'adjusted', 'what': 'Book the demo for next week'}})
+        self.assertEqual(self.fleet.view()['splits'][0]['parts'][1]['what'], 'Book the demo for next week')
+        self.assertEqual(self.told[-1], 'Pat accepted their part of the follow-ups, changed to: “Book the demo for next week”.')
+
+    def test_a_split_from_a_teammate_shows_the_owner_their_part_and_wins_over_their_own_proposal(self):
+        event_id = self.meeting()
+        self.fleet.followup_round()
+        secret = self.fleet.fleets()[self.ref]['secret']
+        key = fleet_requests.meeting_key(secret, 'cal1', (NOW - dt.timedelta(hours=4)).isoformat()[:10])
+        items = [{'member_id': 'me1', 'what': 'Send pricing. ' + EVIL}, {'member_id': 'pat1', 'what': 'Book the demo'}]
+        self.assertEqual(self.ask('followup', {'meeting': key, 'when': (NOW - dt.timedelta(hours=4)).isoformat()[:10], 'items': items}, 'q1'), 'waiting')
+        waiting = self.fleet.view()['waiting'][0]['question']
+        self.assertIn('Follow-ups from Deal review', waiting)  # this Machine's own title for it
+        self.assertIn('you: Send pricing. ' + EVIL, waiting)
+        with self.assertRaisesRegex(ValueError, 'Write your part'):
+            self.app.action('fleet_split_adjust', {'id': 'q1', 'text': ' '}, owner_dashboard=True)
+        done = self.app.action('fleet_split_adjust', {'id': 'q1', 'text': 'Send pricing on Friday'}, owner_dashboard=True)
+        self.assertEqual(self.answered()['answer'], {'stage': 'adjusted', 'what': 'Send pricing on Friday'})
+        card = self.card_row(done['card_id'])
+        self.assertEqual(card['title'], 'Follow up: Send pricing on Friday')
+        self.assertIn(event_id, json.loads(card['event_ids']))
+        self.assertEqual(self.fleet.view()['splits'], [])  # their split, not a second one
+        self.assertEqual(self.fleet.followup_round(), 0)
+        # No part for the owner, a meeting this Machine doesn't know of in another form, or a stranger: declined.
+        self.assertEqual(self.ask('followup', {'meeting': key, 'when': '2026-10-19', 'items': [{'member_id': 'pat1', 'what': 'x'}]}, 'q2'), 'declined')
+        self.assertEqual(self.ask('followup', {'meeting': 'not-a-key', 'when': '2026-10-19', 'items': items}, 'q3'), 'declined')
+        self.assertEqual(self.ask('followup', {'meeting': key, 'when': '2026-10-19', 'items': items}, 'q4', sender='stranger'), 'declined')
+
     # -- one Fleet at a time
     def test_requests_stay_in_the_fleet_they_came_from(self):
         other = {'id': 'fl_' + 'b' * 16, 'kind': 'work', 'name': 'Other', 'secret': 't' * 64, 'asks': list(fleet.ASKS['work']), 'members': [
