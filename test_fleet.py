@@ -435,6 +435,84 @@ class Fleet(unittest.TestCase):
 A, B = 'fl_' + 'a' * 16, 'fl_' + 'b' * 16
 
 
+class RuleScopes(unittest.TestCase):
+    """Every kind takes Ask me first / Always / Never; a rule can be narrowed with Only about, Never about and Only work
+    accounts. Shared emails: Ask me first sends nothing and offers to tell them on the card."""
+    setUp, ask, answered, card = Fleet.setUp, Fleet.ask, Fleet.answered, Fleet.card
+
+    def test_never_about_declines_and_leaves_its_people_out(self):
+        self.fleet.set_rule('work', 'pat1', 'relationships', 'always', scope={'never': 'client.example'})
+        self.assertEqual(self.ask('relationships', {'about': 'client.example'}), 'declined')
+        self.assertEqual(self.ask('relationships', {'about': 'eu.client.example'}, 'q2'), 'declined')  # its subdomains too
+        self.assertEqual(self.ask('relationships', {'about': 'Sam Lee'}, 'q3'), 'answered')
+        self.assertEqual(self.answered()['answer'], {'knows': False})  # Sam is at an excluded company
+        self.assertTrue(any(l['outcome'] == 'declined (your rule: never about that)' for l in self.fleet.view()['log']))
+
+    def test_only_about_asks_the_owner_about_anything_else(self):
+        self.fleet.set_rule('work', 'pat1', 'relationships', 'always', scope={'only': 'client.example'})
+        self.assertEqual(self.ask('relationships', {'about': 'client.example'}), 'answered')
+        self.assertEqual(self.ask('relationships', {'about': 'other.example'}, 'q2'), 'waiting')
+        self.fleet.set_rule('work', 'pat1', 'relationships', 'never')
+        self.assertEqual(self.ask('relationships', {'about': 'client.example'}, 'q3'), 'declined')
+        self.assertEqual(self.ask('relationships', {'about': 'other.example'}, 'q4'), 'waiting')
+        self.fleet.decide('q4', 'once')  # the owner said yes: Only about doesn't hide what they chose to share
+        self.assertEqual(self.answered()['status'], 'answered')
+        self.fleet.set_rule('work', 'pat1', 'meeting', 'always', scope={'never': ['client.example']})
+        self.assertEqual(self.ask('meeting', {'emails': ['sam@client.example']}, 'q5'), 'declined')
+
+    def test_only_work_accounts_is_on_until_turned_off(self):
+        self.fleet.set_rule('work', 'pat1', 'relationships', 'always')
+        self.ask('relationships', {'about': 'family.example'})
+        self.assertEqual(self.answered()['answer'], {'knows': False})
+        result = self.fleet.set_rule('work', 'pat1', 'relationships', scope={'work_only': False})
+        self.assertEqual(result['scope'], {'only': [], 'never': [], 'work_only': False})
+        self.ask('relationships', {'about': 'family.example'}, 'q2')
+        self.assertTrue(self.answered()['answer']['knows'])
+        self.fleet.set_rule('work', 'pat1', 'relationships', 'never')  # a later rule change keeps the scope
+        self.assertFalse(self.fleet.view()['scopes'][self.fleet.ref('work')]['pat1']['relationships']['work_only'])
+        with self.assertRaises(ValueError):
+            self.fleet.set_rule('work', 'pat1', 'brief' if 'brief' in fleet.RULE_KINDS['work'] else 'nope', scope={'only': 'x'})
+
+    def test_shared_emails_take_three_rules_and_ask_me_first_sends_nothing(self):
+        shared = mail('work', 1, 'sam@client.example', 'owner@acme.example', cc=TEAM, message_id='<deal@client.example>')
+        self.store.commit_page('work', {}, [shared])
+        card = self.card('accepted', shared['source_id'])
+        with self.store.connect() as db:
+            self.assertEqual(self.fleet.rule(db, self.fleet.ref('work'), 'pat1', 'handling')[0], 'ask')
+        self.fleet.claims_round()
+        self.assertEqual((self.relay.sent('/claims'), self.relay.sent('/claim')), ([], []))  # nothing goes out
+        suggestions = [{'id': card, 'status': 'accepted'}]
+        with self.store.connect() as db:
+            self.fleet.annotate(db, suggestions)
+        self.assertEqual(suggestions[0]['fleet_holder'], {'offer': ['Pat']})
+        self.assertEqual(self.fleet.take_over(card), {'mine': True})  # "Tell them you're on it"
+        self.assertTrue(self.relay.sent('/claim')[-1]['take'])
+        other = mail('work', 1, 'kim@eu.client.example', 'owner@acme.example', cc=TEAM, message_id='<other@client.example>')
+        self.store.commit_page('work', {}, [other])
+        later = self.card('accepted', other['source_id'])
+        self.fleet.set_rule('work', 'pat1', 'handling', 'never')
+        self.fleet.claims_round()
+        suggestions = [{'id': later, 'status': 'accepted'}]
+        with self.store.connect() as db:
+            self.fleet.annotate(db, suggestions)
+        self.assertNotIn('fleet_holder', suggestions[0])
+        self.fleet.set_rule('work', 'pat1', 'handling', 'always', scope={'never': 'client.example'})
+        self.fleet.claims_round()
+        self.assertEqual(len(self.relay.sent('/claim')), 1)  # not about that company: still nothing claimed
+
+    def test_a_saved_off_for_shared_emails_stays_never(self):
+        with self.store.connect() as db:
+            db.execute("INSERT OR REPLACE INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)",
+                       (self.fleet.ref('work'), 'pat1', 'handling', 'ask', 0, NOW.isoformat()))
+            db.execute("DELETE FROM fleet_meta WHERE key='handling_three_way'")
+            fleet.ensure(db)
+            self.assertEqual(self.fleet.rule(db, self.fleet.ref('work'), 'pat1', 'handling')[0], 'never')
+            fleet.ensure(db)  # once
+            db.execute("UPDATE fleet_rules SET rule='ask' WHERE kind='handling'")
+            fleet.ensure(db)
+            self.assertEqual(self.fleet.rule(db, self.fleet.ref('work'), 'pat1', 'handling')[0], 'ask')
+
+
 class SeveralFleets(unittest.TestCase):
     """Two Work Fleets, each with its own id from the relay: each on its own, asked and answered one at a time."""
 

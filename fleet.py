@@ -47,12 +47,13 @@ import urllib.error
 import urllib.request
 
 import graph
-import fleet_requests
 
 LOG = logging.getLogger('personal-assistant')
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS fleet_rules(fleet TEXT NOT NULL,member_id TEXT NOT NULL,kind TEXT NOT NULL,rule TEXT NOT NULL,
   details INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(fleet,member_id,kind));
+CREATE TABLE IF NOT EXISTS fleet_scopes(fleet TEXT NOT NULL,member_id TEXT NOT NULL,kind TEXT NOT NULL,scope TEXT NOT NULL,
+  updated_at TEXT NOT NULL,PRIMARY KEY(fleet,member_id,kind));
 CREATE TABLE IF NOT EXISTS fleet_in(id TEXT PRIMARY KEY,fleet TEXT NOT NULL,member_id TEXT NOT NULL,name TEXT NOT NULL,kind TEXT NOT NULL,
   question TEXT NOT NULL,status TEXT NOT NULL,at TEXT NOT NULL,decided_at TEXT);
 CREATE TABLE IF NOT EXISTS fleet_out(id TEXT PRIMARY KEY,fleet TEXT NOT NULL,member_id TEXT NOT NULL,name TEXT NOT NULL,kind TEXT NOT NULL,
@@ -108,10 +109,6 @@ NOTICE_KINDS = ('seat_request', 'joined', 'server_started', 'left', 'seat_confir
 FLEET_ID = re.compile(r'fl_[0-9a-f]{16}')
 NOTICE_DAYS = 30
 DECIDED = {'once': 'Answered once', 'always': 'Answered, and always from now on', 'decline': 'Declined', 'never': 'Declined, and never from now on'}
-# Warm intros, handoffs and shared follow-ups: requests to do something (fleet_requests.py)
-ASKS['work'] += fleet_requests.KINDS
-RULE_KINDS['work'] += fleet_requests.KINDS
-KIND_LABEL.update(intro='warm intros', handoff='handoffs', followup='shared follow-ups')
 
 
 class Off(Exception):
@@ -177,7 +174,6 @@ def now():
 
 def ensure(db):
     db.executescript(SCHEMA)
-    fleet_requests.ensure(db)
     have = {r[1] for r in db.execute('PRAGMA table_info(fleet_in)')}
     for column in ('notified_at TEXT', 'telegram_message_id TEXT', 'choice TEXT'):  # added 2026-10-20
         if column.split()[0] not in have:
@@ -186,6 +182,13 @@ def ensure(db):
         db.execute('ALTER TABLE fleet_claims ADD COLUMN fleet TEXT')
     if 'draft' not in {r[1] for r in db.execute('PRAGMA table_info(fleet_in)')}:  # added 2026-10-20: brief preview, free answer draft
         db.execute('ALTER TABLE fleet_in ADD COLUMN draft TEXT')
+    if 'offer' not in {r[1] for r in db.execute('PRAGMA table_info(fleet_claims)')}:  # added 2026-10-20: handling can be Ask me first
+        db.execute('ALTER TABLE fleet_claims ADD COLUMN offer TEXT')
+    if not db.execute("SELECT 1 FROM fleet_meta WHERE key='handling_three_way'").fetchone():
+        # Shared emails had Off ('ask') and Share ('always'); now they take Ask me first / Always / Never like every kind.
+        # A saved Off stays what it was: Never.
+        db.execute("UPDATE fleet_rules SET rule='never' WHERE kind='handling' AND rule='ask'")
+        db.execute("INSERT INTO fleet_meta(key,value) VALUES('handling_three_way','1')")
 
 
 def clean(text, chars):
@@ -277,7 +280,96 @@ def _person(db, address):
     return None
 
 
-def _view(db, row, accounts, details):
+# -- a rule's scope: what it is about. Every kind can use it; a kind lists itself in SCOPED once its answers apply it.
+SCOPED = ['relationships', 'meeting', 'handling']
+SCOPE_TERMS, SCOPE_CHARS = 20, 80
+
+
+def scope_terms(value):
+    """Companies, domains or names, from a list or text split on commas, semicolons or lines."""
+    items = value if isinstance(value, list) else re.split(r'[,;\n]+', str(value or ''))
+    out = []
+    for item in items:
+        term = clean(item, SCOPE_CHARS).lower().lstrip('@').strip()
+        if term and term not in out:
+            out.append(term)
+    return out[:SCOPE_TERMS]
+
+
+def scope_of(raw):
+    """A stored scope, filled in: only (empty: everything), never, and work_only (on unless turned off)."""
+    try:
+        found = raw if isinstance(raw, dict) else json.loads(raw) if raw else {}
+    except ValueError:
+        found = {}
+    found = found if isinstance(found, dict) else {}
+    return {'only': scope_terms(found.get('only')), 'never': scope_terms(found.get('never')), 'work_only': found.get('work_only') is not False}
+
+
+def scope_hit(term, domains, names):
+    """A term names a domain (acme.com, also its subdomains), or a company or person by its words (Acme, also acme.com)."""
+    if DOMAIN.fullmatch(term):
+        return any(d == term or d.endswith('.' + term) for d in domains)
+    words = graph.folded_words(term).split()
+    if not words:
+        return False
+    return (any(all(w in graph.folded_words(n).split() for w in words) for n in names)
+            or (len(words) == 1 and any(words[0] in d.split('.')[:-1] for d in domains)))
+
+
+def scope_verdict(scope, domains=(), names=()):
+    """'never' when the subject is one the owner excluded, 'outside' when the rule is only about others, else 'in'."""
+    domains, names = {str(d).lower() for d in domains if d}, [n for n in names if n]
+    if any(scope_hit(t, domains, names) for t in scope['never']):
+        return 'never'
+    if scope['only'] and not any(scope_hit(t, domains, names) for t in scope['only']):
+        return 'outside'
+    return 'in'
+
+
+def node_subjects(db, row):
+    """A graph person's companies: their email domains (not free-mail), their organisations, and their own name."""
+    domains, names = {e.rsplit('@', 1)[1] for e in _emails(row)} - graph.FREEMAIL, [row['name']]
+    for org in db.execute("SELECT n.id,n.name,n.info FROM graph_links l JOIN graph_nodes n ON n.id=l.b WHERE l.a=? AND l.kind='member' "
+                          "AND n.kind='org'", (row['id'],)):
+        names.append(org['name'])
+        domains.add(str(json.loads(org['info'] or '{}').get('domain') or org['id'][4:]).lower())
+    return domains, names
+
+
+def scope_keep(scope, only=True):
+    """A filter for the people in an answer: those at an excluded company are left out, and with `only`, so are those
+    outside an Only about list. None when the scope limits nothing."""
+    if not scope['never'] and not (only and scope['only']):
+        return None
+    limit = scope if only else {**scope, 'only': []}
+    return lambda db, row: scope_verdict(limit, *node_subjects(db, row)) == 'in'
+
+
+def question_verdict(kind, question, scope):
+    """Where a teammate's question falls in a rule's scope: by the company, domain or name it asks about, or for a
+    meeting by its attendees' domains (never only when all of them are excluded)."""
+    if kind == 'relationships':
+        about = str(question.get('about') or '').lower()
+        if EMAIL.fullmatch(about):
+            return scope_verdict(scope, {about.rsplit('@', 1)[1]}, [])
+        return scope_verdict(scope, {about}, []) if DOMAIN.fullmatch(about) else scope_verdict(scope, set(), [about])
+    if kind == 'meeting':
+        verdicts = [scope_verdict(scope, {e.rsplit('@', 1)[1]}, []) for e in question.get('emails', [])]
+        if verdicts and all(v == 'never' for v in verdicts):
+            return 'never'
+        return 'outside' if scope['only'] and 'in' not in verdicts else 'in'
+    return 'in'
+
+
+def scope_accounts(config, scope):
+    """The accounts an answer reads: the work ones, or with Only work accounts turned off every account."""
+    return work_accounts(config) if scope is None or scope['work_only'] else [a['id'] for a in config.get('accounts', [])]
+
+
+def _view(db, row, accounts, details, keep=None):
+    if keep and not keep(db, row):
+        return None
     last = _work_last(db, row['id'], accounts)
     if not last:
         return None
@@ -287,7 +379,7 @@ def _view(db, row, accounts, details):
     return out
 
 
-def relationships(db, about, accounts, details):
+def relationships(db, about, accounts, details, keep=None):
     about = clean(about, 120)
     lowered = about.lower()
     rows = []
@@ -318,7 +410,7 @@ def relationships(db, about, accounts, details):
         if row['id'] in seen:
             continue
         seen.add(row['id'])
-        view = _view(db, row, accounts, details)
+        view = _view(db, row, accounts, details, keep)
         if view:
             people.append(view)
     if not people:
@@ -331,11 +423,11 @@ def relationships(db, about, accounts, details):
     return out
 
 
-def meeting(db, emails, accounts, details):
+def meeting(db, emails, accounts, details, keep=None):
     found = []
     for address in emails[:20]:
         row = _person(db, address)
-        view = row and _view(db, row, accounts, details)
+        view = row and _view(db, row, accounts, details, keep)
         if not view:
             continue
         opened = graph.open_between(db, row['id'], limit=3)
@@ -499,8 +591,6 @@ def free_draft(db, accounts, text, search=None, internal=()):
 
 def parse_question(kind, question):
     """A teammate's question in its fixed form, else None. Nothing else of it is ever read."""
-    if kind in fleet_requests.KINDS:
-        return fleet_requests.parse(kind, question)
     if not isinstance(question, dict):
         return None
     if kind == 'relationships':
@@ -550,8 +640,6 @@ def clean_brief(answer):
 
 def clean_answer(kind, answer):
     """A teammate's answer, kept to the fields and shapes this Machine would send itself. None when it doesn't fit."""
-    if kind in fleet_requests.KINDS:
-        return fleet_requests.clean_answer(kind, answer)
     if not isinstance(answer, dict):
         return None
     def level(v):
@@ -594,8 +682,6 @@ def clean_answer(kind, answer):
 
 
 def question_text(kind, question):
-    if kind in fleet_requests.KINDS:
-        return fleet_requests.question_text(kind, question)
     if kind == 'relationships':
         return 'Who knows someone at ' + question.get('about', '?') + '?'
     if kind == 'meeting':
@@ -624,7 +710,7 @@ def push_payload(rows, root):
         return {'title': f"{row['name']}'s Machine asks", 'body': question_text(row['kind'], json.loads(row['question']))[:200],
                 'url': root + '#fleet=' + row['id'], 'tag': 'fleet-' + row['id'],
                 # a free question opens on its draft, to read and edit before anything goes
-                'actions': [] if row['kind'] == 'anything' else [{'action': 'once', 'title': 'Accept' if row['kind'] in fleet_requests.KINDS else 'Answer once'}, {'action': 'decline', 'title': 'Decline'}]}
+                'actions': [] if row['kind'] == 'anything' else [{'action': 'once', 'title': 'Answer once'}, {'action': 'decline', 'title': 'Decline'}]}
     return {'title': f'{len(rows)} Fleet questions wait for you',
             'body': ' · '.join(asks_line(r) for r in rows[:3]) + (' · …' if len(rows) > 3 else ''),
             'url': root + '#fleet', 'tag': 'fleet-' + rows[0]['id']}
@@ -636,7 +722,7 @@ def telegram_message(rows, root):
     many = len(rows) > 1
     lines, buttons = [], []
     for n, row in enumerate(rows, 1):
-        outcome = ((fleet_requests.ACCEPTED if row['kind'] in fleet_requests.KINDS else DECIDED).get(row['choice']) or ('Answered' if row['status'] == 'answered' else row['status'].capitalize())
+        outcome = (DECIDED.get(row['choice']) or ('Answered' if row['status'] == 'answered' else row['status'].capitalize())
                    if row['status'] != 'waiting' else '')
         prefix = f'{n}. ' if many else ''
         if row['kind'] == 'anything':
@@ -655,9 +741,8 @@ def telegram_message(rows, root):
             continue
         lines.append((f'{n}. ' if many else '') + asks_line(row) + (f'\n   → {outcome}' if outcome else ''))
         if row['status'] == 'waiting':
-            staged = row['kind'] in fleet_requests.KINDS
-            buttons.append([{'text': prefix + ('Accept' if staged else 'Answer once'), 'value': f"assistant:fleet:{row['id']}:once"},
-                            {'text': 'Always accept' if staged else 'Always', 'value': f"assistant:fleet:{row['id']}:always"},
+            buttons.append([{'text': prefix + 'Answer once', 'value': f"assistant:fleet:{row['id']}:once"},
+                            {'text': 'Always', 'value': f"assistant:fleet:{row['id']}:always"},
                             {'text': 'Decline', 'value': f"assistant:fleet:{row['id']}:decline"}])
     head = 'Your Fleet asks. Nothing is shared until you choose.'
     if root:
@@ -727,8 +812,6 @@ def person(member):
 
 def answer_text(kind, answer):
     """One plain line of an answer: for the dashboard, the log and preparations."""
-    if kind in fleet_requests.KINDS:
-        return fleet_requests.answer_text(kind, answer)
     if not answer:
         return 'no answer'
     if kind == 'brief':
@@ -844,7 +927,7 @@ def brief_text(view):
 
 # ---------------------------------------------------------------- the Fleet on this Machine
 
-class Fleet(fleet_requests.Requests):
+class Fleet:
     def __init__(self, connect, config, token, relay=None):
         self.connect, self.config = connect, config
         self.relay = relay or Relay(settings(config)['url'], token)
@@ -941,6 +1024,10 @@ class Fleet(fleet_requests.Requests):
         found = (row['rule'], bool(row['details'])) if row else ('ask', False)
         return ('ask', found[1]) if found[0] not in KIND_RULES.get(kind, RULES) else found
 
+    def scope(self, db, fleet, member_id, kind):
+        row = db.execute('SELECT scope FROM fleet_scopes WHERE fleet=? AND member_id=? AND kind=?', (fleet, member_id, kind)).fetchone()
+        return scope_of(row['scope'] if row else None)
+
     # -- the owner's hours
     def local_now(self):
         return self.hours['local_now']() if self.hours.get('local_now') else dt.datetime.now().astimezone()
@@ -977,14 +1064,14 @@ class Fleet(fleet_requests.Requests):
         db.execute('DELETE FROM fleet_log WHERE id NOT IN (SELECT id FROM fleet_log ORDER BY id DESC LIMIT 2000)')
 
     # -- questions from teammates
-    def compute(self, db, kind, question, details, fleet=None):
-        accounts = work_accounts(self.config)
+    def compute(self, db, kind, question, details, fleet=None, scope=None, only=True):
+        accounts, keep = scope_accounts(self.config, scope), scope and scope_keep(scope, only)
         if kind == 'brief':
             secret = (self.fleets().get(self.ref(fleet or 'work')) or {}).get('secret') or ''
             return brief_facts(db, self.fleet_accounts(fleet or 'work'), question['since'], secret, self.internal(fleet or 'work'))
         if kind == 'relationships':
-            return relationships(db, question['about'], accounts, details)
-        return meeting(db, question['emails'], accounts, details)
+            return relationships(db, question['about'], accounts, details, keep)
+        return meeting(db, question['emails'], accounts, details, keep)
 
     def take_ask(self, ask):
         """A teammate's question: answered by rule, declined, or kept for the owner. Never anything else."""
@@ -993,25 +1080,28 @@ class Fleet(fleet_requests.Requests):
         fleet = self.ref(asked_in)
         question = parse_question(kind, ask.get('question')) if kind in ASKS.get(self.kind_of(fleet), ()) else None
         name = clean(label(teammate) or ask.get('name'), 120) or 'A teammate'
-        if kind in fleet_requests.KINDS:  # a request to do something: its own path
-            return self.take_request(ask, teammate, fleet, kind, question, name)
         with self.connect() as db:
             if not teammate or not question:
                 self.log(db, 'in', fleet, ask.get('from'), name, kind if kind in KIND_LABEL else 'other', 'a question this Machine does not answer', 'declined')
                 status, body = 'declined', None
             else:
                 rule, details = self.rule(db, fleet, teammate['member_id'], kind)
+                scope = self.scope(db, fleet, teammate['member_id'], kind) if kind in SCOPED else None
+                verdict = question_verdict(kind, question, scope) if scope else 'in'
+                if verdict == 'outside' and rule != 'ask':  # beyond Only about: the rule doesn't apply, so the owner is asked
+                    rule = 'ask'
                 busy = kind == 'anything' and db.execute("SELECT COUNT(*) FROM fleet_in WHERE fleet=? AND member_id=? AND kind='anything' AND status='waiting'",
                                                          (fleet, teammate['member_id'])).fetchone()[0] >= FREE_OPEN
-                if rule == 'never':
+                if rule == 'never' or verdict == 'never':
                     status, body = 'declined', None
-                    self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question), 'declined (your rule)')
+                    self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question),
+                             'declined (your rule)' if rule == 'never' else 'declined (your rule: never about that)')
                 elif busy:  # a teammate can't pile free questions on the owner
                     status, body = 'declined', None
                     self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question),
                              f'declined: {FREE_OPEN} of their questions already wait for you')
                 elif rule == 'always':
-                    body = self.compute(db, kind, question, details, fleet)
+                    body = self.compute(db, kind, question, details, fleet, scope)
                     status = 'answered'
                     self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question), 'answered: ' + answer_text(kind, body))
                 else:
@@ -1032,8 +1122,6 @@ class Fleet(fleet_requests.Requests):
     def decide(self, ask_id, choice, retell=True, text=None):
         """The owner on a waiting question: once, always, decline or never. A free question is answered once at a
         time, with `text` (the draft as the owner edited it) or else its draft as shown."""
-        if self.is_request(ask_id):
-            return self.decide_request(ask_id, choice, retell=retell)
         if choice not in ('once', 'always', 'decline', 'never'):
             raise ValueError('Choose once, always, decline or never')
         with self.connect() as db:
@@ -1054,7 +1142,8 @@ class Fleet(fleet_requests.Requests):
                 db.execute('INSERT OR REPLACE INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
                            (row['fleet'], row['member_id'], row['kind'], choice, int(details), now()))
             if choice in ('once', 'always') and answer is None:
-                answer = self.compute(db, row['kind'], question, self.rule(db, row['fleet'], row['member_id'], row['kind'])[1], row['fleet'])
+                answer = self.compute(db, row['kind'], question, self.rule(db, row['fleet'], row['member_id'], row['kind'])[1], row['fleet'],
+                                      self.scope(db, row['fleet'], row['member_id'], row['kind']) if row['kind'] in SCOPED else None, only=False)
             status = 'answered' if answer is not None else 'declined'
         self.relay.call('POST', '/answer', {'id': row['id'], 'status': status, **({'answer': answer} if answer is not None else {})})
         with self.connect() as db:
@@ -1225,7 +1314,7 @@ class Fleet(fleet_requests.Requests):
         rows = db.execute("SELECT * FROM fleet_in WHERE status='waiting' AND notified_at IS NULL ORDER BY at,id").fetchall()
         return rows if self.working() else [r for r in rows if r['kind'] not in ('brief', 'anything')]
 
-    def set_rule(self, fleet, member_id, kind, rule=None, details=None):
+    def set_rule(self, fleet, member_id, kind, rule=None, details=None, scope=None):
         fleet = self.ref(fleet)
         if kind not in RULE_KINDS.get(self.kind_of(fleet), ()):
             raise ValueError('Unknown kind of question')
@@ -1239,10 +1328,17 @@ class Fleet(fleet_requests.Requests):
             details = current_details if details is None else bool(details)
             db.execute('INSERT OR REPLACE INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
                        (fleet, member_id, kind, rule, int(details), now()))
-        return {'rule': rule, 'details': details}
+            if scope is not None:
+                if kind not in SCOPED:
+                    raise ValueError('This kind of question has no Only about yet')
+                scope = scope_of(scope if isinstance(scope, dict) else None)
+                db.execute('INSERT OR REPLACE INTO fleet_scopes(fleet,member_id,kind,scope,updated_at) VALUES(?,?,?,?,?)',
+                           (fleet, member_id, kind, json.dumps(scope), now()))
+            scope = self.scope(db, fleet, member_id, kind)
+        return {'rule': rule, 'details': details, 'scope': scope}
 
     # -- asking teammates
-    def ask(self, kind, question, context=None, fleet='work', to=None):
+    def ask(self, kind, question, context=None, fleet='work'):
         """Asks one Fleet (its id). A kind ('work') asks each Fleet of that kind with teammates in it, one by one: the
         relay only ever asks one Fleet's people at a time."""
         if fleet in FLEET_NAMES:
@@ -1257,7 +1353,7 @@ class Fleet(fleet_requests.Requests):
             raise ValueError('Your Fleet does not ask that')
         if not self.teammates(fleet):
             raise ValueError('Nobody in your Fleet to ask yet')
-        sent = self.relay.call('POST', '/ask', {'fleet': fleet, 'kind': kind, 'question': question, **({'to': to} if to else {})})
+        sent = self.relay.call('POST', '/ask', {'fleet': fleet, 'kind': kind, 'question': question})
         with self.connect() as db:
             for member_id, ask_id in sent.get('ids', {}).items():
                 teammate = self.member(fleet, member_id) or {}
@@ -1290,8 +1386,6 @@ class Fleet(fleet_requests.Requests):
             if status != 'waiting':
                 self.log(db, 'out', row['fleet'], row['member_id'], row['name'], row['kind'], question_text(row['kind'], json.loads(row['question'])),
                          ('answered: ' + answer_text(row['kind'], answer)) if answer is not None else status)
-        if row['kind'] in fleet_requests.KINDS:
-            self.request_answered(row, status, answer)
 
     # -- meetings
     def meetings_on(self):
@@ -1475,17 +1569,42 @@ class Fleet(fleet_requests.Requests):
                 return hashlib.sha256((secret + '\n' + message_id).encode()).hexdigest()
         return None
 
+    def claim_match(self, db, card, secret, members, fleet):
+        """A card's email shared with teammates: its key, and who of them it is for (Always, Ask me first) within each
+        one's scope, judged by the email's outside companies. None when it is for nobody."""
+        ids = json.loads(card['event_ids'] or '[]')
+        if not ids:
+            return None
+        team = {e for m, _, _ in members for e in m.get('emails', [])}
+        for event in db.execute(f"SELECT metadata FROM events WHERE kind='gmail.message' AND deleted=0 AND id IN ({','.join('?' * len(ids))}) "
+                                'ORDER BY occurred_at DESC', ids):
+            meta = json.loads(event['metadata'] or '{}')
+            message_id = str(meta.get('message-id') or '').strip().strip('<>').lower()
+            people = {a for _, a in graph.addresses(meta.get('to')) + graph.addresses(meta.get('cc')) + graph.addresses(meta.get('from'))}
+            if not message_id or not people & team:
+                continue
+            outside = {a.rsplit('@', 1)[1] for a in people if '@' in a} - self.internal(fleet) - graph.FREEMAIL
+            fits = [(m, rule) for m, rule, scope in members if people & set(m.get('emails', []))
+                    and (not outside or any(scope_verdict(scope, {d}) == 'in' for d in outside))
+                    and not any(scope_verdict(scope, {d}) == 'never' for d in outside)]
+            if not fits:
+                return None
+            return (hashlib.sha256((secret + '\n' + message_id).encode()).hexdigest(),
+                    [m['member_id'] for m, rule in fits if rule == 'always'], [label(m) for m, rule in fits if rule == 'ask'])
+        return None
+
     def claims_round(self):
         """Claim what the owner took on, and look up who holds the rest, for emails shared with teammates whose
-        handling rule is Always."""
+        handling rule is Always (within its scope). With Ask me first nothing goes out: the card offers to tell them."""
         fleets = self.fleets()
         with self.connect() as db:
-            teams = {}
+            teams, offers = {}, {}
             for ref in self.work_fleets():
-                allowed = {r['member_id'] for r in db.execute("SELECT member_id FROM fleet_rules WHERE fleet=? AND kind='handling' AND rule='always'", (ref,))}
-                team = {e for m in self.teammates(ref) if m['member_id'] in allowed for e in m.get('emails', [])}
-                if team:
-                    teams[ref] = (allowed, team)
+                said = {r['member_id']: r['rule'] for r in db.execute("SELECT member_id,rule FROM fleet_rules WHERE fleet=? AND kind='handling'", (ref,))}
+                members = [(m, said.get(m['member_id'], 'ask'), self.scope(db, ref, m['member_id'], 'handling')) for m in self.teammates(ref)]
+                members = [x for x in members if x[1] in ('always', 'ask') and x[0].get('emails')]
+                if members:
+                    teams[ref] = members
             if not teams:
                 db.execute('DELETE FROM fleet_claims')
                 return
@@ -1494,12 +1613,26 @@ class Fleet(fleet_requests.Requests):
                                'ORDER BY created_at DESC LIMIT 300', OPEN_CARD + ('completed', 'rejected')).fetchall()
             keyed = {}  # an email shared with teammates in several Fleets: claimed in the first of them
             for card in cards:
-                for ref, (_, team) in teams.items():
-                    key = self.claim_key(db, card, fleets[ref]['secret'], team)
-                    if key:
-                        keyed[card['id']] = (ref, key, card['status'])
+                for ref, members in teams.items():
+                    found = self.claim_match(db, card, fleets[ref]['secret'], members, ref)
+                    if found:
+                        keyed[card['id']] = (ref, found[0], card['status'], found[1], found[2])
                         break
             held = {r['suggestion_id']: dict(r) for r in db.execute('SELECT * FROM fleet_claims')}
+        keyed_always = {card_id: v[:3] for card_id, v in keyed.items() if v[3] or held.get(card_id, {}).get('mine')}
+        for card_id, (ref, key, status, always, ask) in keyed.items():
+            if always or not ask or held.get(card_id, {}).get('mine') or held.get(card_id, {}).get('holder_id'):
+                continue
+            if status in TAKEN and status != 'completed':
+                offers[card_id] = (ref, key, ask)
+        with self.connect() as db:
+            db.execute("DELETE FROM fleet_claims WHERE offer IS NOT NULL AND mine=0 AND holder_id IS NULL AND suggestion_id NOT IN "
+                       '(' + (','.join('?' * len(offers)) or "''") + ')', tuple(offers))
+            for card_id, (ref, key, ask) in offers.items():
+                db.execute('INSERT OR REPLACE INTO fleet_claims(suggestion_id,key,holder_id,holder_name,mine,checked_at,fleet,offer) VALUES(?,?,?,?,?,?,?,?)',
+                           (card_id, key, None, None, 0, now(), ref, json.dumps(ask[:5])))
+        keyed = keyed_always
+        allowed_in = {ref: {m['member_id'] for m, rule, _ in members if rule == 'always'} for ref, members in teams.items()}
         for card_id, (ref, key, status) in keyed.items():
             mine = held.get(card_id, {}).get('mine')
             if status in TAKEN and not mine and not held.get(card_id, {}).get('holder_id'):
@@ -1507,7 +1640,7 @@ class Fleet(fleet_requests.Requests):
             elif status == 'rejected' and mine:
                 self.relay.call('POST', '/claim', {'fleet': ref, 'key': key, 'release': True})
                 self.store_claim(card_id, key, {'holder': None, 'mine': False}, ref)
-        for ref, (allowed, _) in teams.items():
+        for ref, allowed in allowed_in.items():
             look = [(card_id, key) for card_id, (r, key, status) in keyed.items() if r == ref and status in OPEN_CARD]
             if not look:
                 continue
@@ -1521,7 +1654,7 @@ class Fleet(fleet_requests.Requests):
     def store_claim(self, card_id, key, result, fleet='work'):
         holder = result.get('holder') or {}
         with self.connect() as db:
-            db.execute('INSERT OR REPLACE INTO fleet_claims(suggestion_id,key,holder_id,holder_name,mine,checked_at,fleet) VALUES(?,?,?,?,?,?,?)',
+            db.execute('INSERT OR REPLACE INTO fleet_claims(suggestion_id,key,holder_id,holder_name,mine,checked_at,fleet,offer) VALUES(?,?,?,?,?,?,?,NULL)',
                        (card_id, key, holder.get('member_id'), clean(holder.get('name'), 80) or None, int(bool(result.get('mine'))), now(),
                         self.ref(fleet)))
 
@@ -1577,10 +1710,6 @@ class Fleet(fleet_requests.Requests):
         if stamp - self.last['meetings'] > MEETINGS_EVERY or not wait:
             self.last['meetings'] = stamp
             self.meeting_round()
-        if stamp - self.last.get('requests', 0.0) > MEETINGS_EVERY or not wait:
-            self.last['requests'] = stamp
-            self.requests_round()
-            self.followup_round()
         if stamp - self.last['briefs'] > 60 or not wait:
             self.last['briefs'] = stamp
             self.brief_round()
@@ -1610,6 +1739,9 @@ class Fleet(fleet_requests.Requests):
         fleets = self.fleets()
         with self.connect() as db:
             rules = {(r['fleet'], r['member_id'], r['kind']): {'rule': r['rule'], 'details': bool(r['details'])} for r in db.execute('SELECT * FROM fleet_rules')}
+            scopes = {}
+            for r in db.execute('SELECT * FROM fleet_scopes'):
+                scopes.setdefault(r['fleet'], {}).setdefault(r['member_id'], {})[r['kind']] = scope_of(r['scope'])
             waiting = [{**{k: v for k, v in dict(r).items() if k != 'draft'}, 'question': question_text(r['kind'], json.loads(r['question'])),
                         **({'draft': json.loads(r['draft'])} if _get(r, 'draft') else {})}
                        for r in db.execute("SELECT * FROM fleet_in WHERE status='waiting' ORDER BY at DESC LIMIT 50")]
@@ -1632,8 +1764,9 @@ class Fleet(fleet_requests.Requests):
                                          rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False})) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(ref)]})
         return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
-                **self.requests_view(), 'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),
-                'kind_rules': {k: list(KIND_RULES.get(k, RULES)) for k in KIND_LABEL}, 'no_details': list(NO_DETAILS)}
+                'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),
+                'kind_rules': {k: list(KIND_RULES.get(k, RULES)) for k in KIND_LABEL}, 'no_details': list(NO_DETAILS),
+                'scoped': list(SCOPED), 'scopes': scopes}
 
     def free_asked(self, db):
         """The owner's free questions to a Fleet, each with its teammates' answers as they arrive, attributed; "no
@@ -1654,7 +1787,7 @@ class Fleet(fleet_requests.Requests):
         with self.connect() as db:
             waiting = db.execute("SELECT COUNT(*) FROM fleet_in WHERE status='waiting'").fetchone()[0]
             waiting += db.execute("SELECT COUNT(*) FROM fleet_notices WHERE kind='seat_request' AND status='open'").fetchone()[0]
-        return {'on': True, 'waiting': waiting + self.proposals()}
+        return {'on': True, 'waiting': waiting}
 
     def annotate(self, db, suggestions):
         """Who else is on a card's email, and what the Fleet said about its meeting."""
@@ -1670,14 +1803,13 @@ class Fleet(fleet_requests.Requests):
                 s['fleet_holder'] = {'name': c['holder_name'] or 'A teammate'}
             elif c and c['mine']:
                 s['fleet_holder'] = {'mine': True}
+            elif c and c['offer'] and s.get('status') in TAKEN:
+                s['fleet_holder'] = {'offer': json.loads(c['offer'])}
             if context.get(s['id']):
                 s['fleet_context'] = context[s['id']][:5]
-        self.annotate_requests(db, suggestions)
 
     def lines(self, suggestion_id):
         """What teammates' Machines said about this card's meeting, for a preparation."""
-        if self.request_lines(suggestion_id):
-            return self.request_lines(suggestion_id)
         with self.connect() as db:
             rows = db.execute("SELECT * FROM fleet_out WHERE context=? AND status='answered'", ('card:' + str(suggestion_id),)).fetchall()
         said = [f"- {r['name']}'s Machine: {answer_text(r['kind'], json.loads(r['answer']))}" for r in rows
