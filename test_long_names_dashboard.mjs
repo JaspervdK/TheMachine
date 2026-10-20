@@ -43,6 +43,22 @@ try{
   assert.ok(r.subTitle.includes(long));
   if(process.env.LONG_SHOT)await page.screenshot({path:process.env.LONG_SHOT+'-'+width+'.png',fullPage:true});
  }
+ // Fleet, Friends and Network lists, chips and a short bold date use the page's own markup helpers.
+ await page.evaluate(long=>{const box=document.createElement('section');box.id='long-fixture';box.className='fleet-box';
+  box.innerHTML=`<div class="fleet-pane-head"><h2 class="ell">${long}</h2>${chip(long,'person')}</div><ul class="fleet-people"><li><strong>${long}</strong> <small class="muted">@${long}</small><span class="actions"><button>Friend</button></span></li><li><strong>${long}</strong><br><small class="muted">${long}</small></li></ul><p id="long-date">${format('Prep for **Sunday 18 Oct** at the venue with everyone')}</p>`;
+  document.querySelector('main').append(box)},long);
+ for(const width of [320,390]){
+  await page.setViewportSize({width,height:844});
+  const m=await page.evaluate(()=>{const cut=[...document.querySelectorAll('#long-fixture .ct,#long-fixture .ell,#long-fixture .fleet-people strong,#long-fixture .fleet-people small')];const d=document.querySelector('#long-date strong'),r=d.getBoundingClientRect();
+   return {page:document.documentElement.scrollWidth,viewport:innerWidth,count:cut.length,cut:cut.every(e=>e.scrollWidth>e.clientWidth&&getComputedStyle(e).textOverflow==='ellipsis'&&e.getBoundingClientRect().right<=innerWidth+1),dateLines:Math.round(r.height/parseFloat(getComputedStyle(d).lineHeight))}});
+  assert.ok(m.page<=m.viewport,`page wider than the screen with long Fleet names at ${width}: ${m.page}`);
+  assert.equal(m.count,6);
+  assert.ok(m.cut,'long Fleet names and chips cut off with an ellipsis inside the screen');
+  assert.equal(m.dateLines,1,'short bold date stays on one line');
+ }
+ const name=page.locator('#long-fixture .fleet-people strong').first();
+ await name.hover();
+ assert.equal(await name.getAttribute('title'),long,'full name on hover');
  assert.deepEqual(errors,[]);
  console.log('long names ok');
 }finally{if(browser)await browser.close();await new Promise(r=>server.close(r))}

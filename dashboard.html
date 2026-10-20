@@ -559,6 +559,12 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .fleet-people{list-style:none;padding:0;margin:0 0 12px;display:grid;gap:8px}.fleet-people li{line-height:1.35}.fleet-people small{overflow-wrap:anywhere}
 /* Fleet tab: a pill row picks one view (each Fleet, Friends, Sharing, Activity); each view is a few calm boxes. */
 .fleet-tabs{display:flex;gap:6px;overflow-x:auto;margin:4px 0 18px;padding:2px;scrollbar-width:none}.fleet-tabs::-webkit-scrollbar{display:none}
+/* Long names and addresses: one line ending in an ellipsis, never wider than the screen; hover shows the full value */
+.chip{max-width:100%;min-width:0}.chip>.ct{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ell,.fleet-people strong,.fleet-people small{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fleet-people strong,.fleet-people small{display:inline-block;vertical-align:bottom}.fleet-people{grid-template-columns:minmax(0,1fr)}.fleet-people li{min-width:0}.fleet-people li>strong,.fleet-people li>small{flex:0 1 auto}.fleet-tabs .ell{max-width:14em}
+#fleet-view,.fleet-box,.fleet-card{min-width:0;overflow-wrap:anywhere}#fleet-view select{max-width:100%;min-width:0;text-overflow:ellipsis}#fleet-view form label{max-width:100%}
+strong.nb{white-space:nowrap}
 .fleet-tabs button{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);background:transparent;color:var(--muted);font-weight:600;font-size:.9rem;padding:6px 14px;border-radius:999px;white-space:nowrap;cursor:pointer}
 .fleet-tabs button:hover{color:var(--text)}.fleet-tabs button[aria-selected="true"]{background:var(--mint);border-color:var(--mint);color:var(--charcoal)}.fleet-tabs button[aria-selected="true"] .badge{background:#22252b26;color:var(--charcoal)}
 .fleet-pane-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;margin:0 0 14px}.fleet-pane-head h2{margin:0;font-size:1.15rem}
@@ -576,7 +582,7 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .fleet-pane>.fleet-brief{margin:0 0 14px;padding:16px 20px;box-shadow:none}.fleet-pane>.fleet-brief>p:first-child{margin-top:0}.fleet-discover:empty{display:none}
 @media(max-width:600px){.fleet-box{padding:14px 14px}.fleet-legend{gap:4px 14px}.fleet-tabs{gap:4px}.fleet-tabs button{padding:6px 11px;font-size:.85rem}}
 /* Settings gear: same row and height as the time pill. */
-.head-side{display:flex;align-items:stretch;gap:8px;align-self:flex-start;margin-top:6px}
+.head-side{display:flex;align-items:stretch;gap:8px;align-self:center;margin-top:0}
 .head-side>.live,.head-side>.head-link{margin-top:0;align-self:auto}
 .head-side>.settings-link{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:0;margin:0;padding:0 10px 0 9px;font:inherit;font-size:.72rem;font-weight:inherit;line-height:1;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--muted);box-shadow:none}
 [data-theme="light"] .head-side>.settings-link{background:#ffffffb3}
@@ -631,7 +637,7 @@ const ago=v=>{if(!v)return 'Not yet';const s=(new Date(v)-Date.now())/1000,a=Mat
 const time=(v,plain)=>`<time class="${plain?'':'mono '}muted" datetime="${esc(v||'')}" title="${esc(date(v))}">${esc(ago(v))}</time>`;
 const calendarDate=v=>new Date(v+'T12:00:00').toLocaleDateString();
 const when=e=>e.kind!=='calendar.event'?date(e.occurred_at):e.metadata.all_day?calendarDate(e.metadata.start.date)+' · All day':date(e.occurred_at)+' – '+new Date(e.metadata.end_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
-const format=v=>esc(v).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+const format=v=>esc(v).replace(/\*\*([^*]+)\*\*/g,(m,t)=>t.length<=24?`<strong class="nb">${t}</strong>`:`<strong>${t}</strong>`);
 // Card bodies: a fully bold first line is a small subtitle under the title, blank lines make paragraphs, long bodies fold behind Show more.
 const expandedBodies=new Set();
 function cardBody(s,section){let text=resultBody(s),lead='';const m=text.match(/^\*\*([^*\n]+)\*\*\s*\n([\s\S]+)$/);if(m){lead=m[1];text=m[2].trim()}
@@ -657,7 +663,7 @@ const label=v=>({pending:'Needs your decision',accepted:'Accepted',prepared:'Rea
 const tone=v=>({pending:'amber',accepted:'lavender',instructions:'lavender',prepared:'mint',snoozed:'lavender',completed:'mint',rejected:'muted'}[v]||'muted');
 // A blocker waiting on the owner (a sign-in in the kept tab) resumes with Continue; same rule as the service.
 const retryLabel=r=>/\b(?:sign(?:ed)?[ -]?in|log(?:ged)?[ -]?in|signed out|2fa|two-factor|authenticator|passkey|tap continue)\b/i.test(r||'')&&!/try again/i.test(r||'')?'Continue':'Try again';
-const chip=(text,t)=>`<span class="chip t-${t}">${esc(text)}</span>`;
+const chip=(text,t)=>`<span class="chip t-${t}"><span class="ct">${esc(text)}</span></span>`;
 // Deadlines in local days: overdue and today stand out; the rest read as a weekday or date.
 function dueChip(s){if(!s.due||closed(s))return '';const today=new Date(localDay(new Date())+'T12:00'),due=new Date(s.due+'T12:00'),days=Math.round((due-today)/864e5);
 const text=days<0?'Overdue':days===0?'Due today':days===1?'Due tomorrow':'Due '+due.toLocaleDateString(undefined,days<7?{weekday:'long'}:{day:'numeric',month:'short'});
@@ -1280,7 +1286,7 @@ async function fleetView(refresh=false,cached=false){const view=$('#fleet-view')
  // Who is who: each member with the Machine they answer with and their account email, so two people with one name stay apart.
  const who=x=>(x.people||[]).length?`<ul class="fleet-people">${x.people.map(p=>`<li><strong>${esc(p.name)}</strong>${p.me?' <span class="muted">(you, this Machine)</span>':''}${p.role==='owner'?' <span class="muted">· owner</span>':''}<br><small class="muted">${esc(p.answers_with||'')}${p.email?' · '+esc(p.email):''}</small></li>`).join('')}</ul>`:'';
  const box=(title,sub,body,cls='')=>`<div class="fleet-box${cls?' '+cls:''}"><h3>${title}</h3>${sub?`<p class="sub">${sub}</p>`:''}${body}</div>`;
- const head=(x,count)=>`<div class="fleet-pane-head"><h2>${esc(x.name)}</h2><span class="chip">${esc(x.label)}</span>${count?`<span class="muted">${count} ${count===1?'person':'people'}</span>`:''}</div>`;
+ const head=(x,count)=>`<div class="fleet-pane-head"><h2 class="ell">${esc(x.name)}</h2><span class="chip"><span class="ct">${esc(x.label)}</span></span>${count?`<span class="muted">${count} ${count===1?'person':'people'}</span>`:''}</div>`;
  const people=x=>box('People','',who(x)+(x.members.length?'':'<p class="muted">Nobody else yet. Invite teammates from your account page.</p>'));
  // One view at a time: each Work Fleet, Friends, Family, Sharing (every rule in one place) and Activity, as pills.
  const panes=[];
@@ -1313,7 +1319,7 @@ async function fleetView(refresh=false,cached=false){const view=$('#fleet-view')
  const current=panes.some(p=>p.id===fleetPane)?fleetPane:panes[0].id;
  let html=f.off?'<p class="note">The Network is off for now. Nothing is asked or answered.</p>':'';
  {const todo=fleetCardsOf(f).length;if(todo)html+=`<p class="note fleet-todo">${todo===1?'One Fleet item waits':todo+' Fleet items wait'} for you under Suggestions. <button type="button" class="link" data-tab-go="inbox">Show</button></p>`}
- html+=`<div class="fleet-tabs" role="tablist" aria-label="Fleet">${panes.map(p=>`<button type="button" role="tab" data-fleet-pane="${esc(p.id)}" aria-selected="${p.id===current}">${esc(p.label)}${p.badge?` <span class="badge">${p.badge}</span>`:''}</button>`).join('')}</div>`;
+ html+=`<div class="fleet-tabs" role="tablist" aria-label="Fleet">${panes.map(p=>`<button type="button" role="tab" data-fleet-pane="${esc(p.id)}" aria-selected="${p.id===current}"><span class="ell">${esc(p.label)}</span>${p.badge?` <span class="badge">${p.badge}</span>`:''}</button>`).join('')}</div>`;
  // A slot for suggested connections (people already on the Network you may know), filled by its own feature.
  html+='<div id="fleet-discover" class="fleet-discover"></div>';
  html+=panes.map(p=>`<div class="fleet-pane" role="tabpanel" data-pane="${esc(p.id)}"${p.id===current?'':' hidden'}>${p.html}</div>`).join('');
@@ -1430,6 +1436,8 @@ $('#suggestions').addEventListener('click',async e=>{const b=e.target.closest('[
  try{await fleetPost('fleet_take',{suggestion_id:b.dataset.fleetTake});toast('It’s yours now. Your teammates’ Machines will see that.');await refresh()}catch(err){b.disabled=false;toast(err.message,true)}});
 $('#people-view').addEventListener('click',async e=>{const b=e.target.closest('[data-fleet-ask]');if(!b)return;b.disabled=true;
  try{await fleetPost('fleet_ask',{kind:'relationships',question:{about:b.dataset.fleetAsk}});toast('Asked your Fleet. The answers show in the Fleet tab.')}catch(err){b.disabled=false;toast(err.message,true)}});
+// A name or address cut off with an ellipsis shows in full on hover or long-press.
+document.addEventListener('pointerover',e=>{const el=e.target.closest?.('.ct,.ell,.fleet-people strong,.fleet-people small');if(el&&!el.title&&el.scrollWidth>el.clientWidth)el.title=el.textContent.trim()});
 // Graph tab: projects heating up or cooling, who's closest, who has gone quiet; tap one for its links and events.
 const day=v=>v?new Date(String(v).length<=10?v+'T12:00':v).toLocaleDateString([],{weekday:'short',day:'numeric',month:'short'}):'never';
 const nodeButton=n=>`<button class="node" data-node="${esc(n.id)}" title="${esc(n.name)}">${esc(n.name)}</button>`;
