@@ -1,7 +1,7 @@
 # The Fleet
 
 The Fleet lets your Machine and the Machines of the people you work or live with help each other. It is in beta.
-Machines never talk to each other directly: questions and answers pass through The Machine's relay. Hosted Machines
+Machines never talk to each other directly: questions and answers pass through The Machine Network. Hosted Machines
 are on it already, and a Machine you run yourself can join too (see "A self-hosted Machine in a Fleet").
 
 There are two kinds:
@@ -134,7 +134,7 @@ itself:
   (anything else asks you first), **Never about** others (declined, and their people are left out of every answer),
   and **Only people from your work accounts** (on unless you turn it off). For shared emails it goes by the other
   companies on the email.
-- **Shared emails:** Always tells the relay you're on an email you both got, and shows who is on the ones they took.
+- **Shared emails:** Always tells the Network you're on an email you both got, and shows who is on the ones they took.
   Ask me first sends nothing by itself: the card says who else got it, with **Tell them you're on it**. Never sends
   nothing. A rule saved as Off before the three choices is Never; Share is Always.
 - **Only from your dashboard.** Rules and approvals can't be changed by Telegram, the command line, the API token or the
@@ -204,7 +204,7 @@ Your Machine then shares the addresses of its work accounts with your Fleet, so 
 them, and nothing else about you. Everything in "You decide, per Fleet" and "Safe by construction" applies the same
 way. You can disconnect it from your account at any time; its key then stops working.
 
-Pairing is free. While a self-hosted Machine answers for someone in a Fleet, the relay costs €4 a month for that
+Pairing is free. While a self-hosted Machine answers for someone in a Fleet, the Network costs €4 a month for that
 member, plus VAT where it applies, paid by the Fleet's owner and confirmed before it starts; nothing while the Fleet is
 free.
 
@@ -237,7 +237,7 @@ Friends are kept apart from your Fleets: a friend sees nothing of your Fleets, y
 friends, and your friends' rules don't apply to teammates. A friend's questions and answers are treated as data: kept
 to their fixed form, and never given to your AI, its tools or Do it.
 
-Friends are free between hosted Machines. For a self-hosted Machine they are included in the relay fee, at no extra
+Friends are free between hosted Machines. For a self-hosted Machine they are included in the Network fee, at no extra
 charge.
 
 ## Delivery and retry

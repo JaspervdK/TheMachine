@@ -174,9 +174,9 @@ def pair(code, label, emails, timeout=30):
                 message = json.loads(error.read() or b'{}').get('error') or ''
             except ValueError:
                 message = ''
-        raise ValueError(message or f'The Fleet relay said {error.code}') from None
+        raise ValueError(message or f'The Network said {error.code}') from None
     if not isinstance(found.get('token'), str) or not found['token']:
-        raise ValueError('The Fleet relay gave no token')
+        raise ValueError('The Network gave no token')
     return found
 
 
@@ -245,12 +245,12 @@ class Relay:
                 if error.code == 404:
                     raise Off() from None
                 if error.code in (502, 503, 504):
-                    raise Unavailable('The Fleet relay is restarting; try again in a minute.') from None
+                    raise Unavailable('The Network is restarting; try again in a minute.') from None
                 try:
                     message = json.loads(error.read() or b'{}').get('error') or ''
                 except ValueError:
                     message = ''
-            raise ValueError(message or f'The Fleet relay said {error.code}') from None
+            raise ValueError(message or f'The Network said {error.code}') from None
 
 
 # ---------------------------------------------------------------- answering (deterministic, read-only)
@@ -1371,7 +1371,7 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         except ValueError as error:
             result = {'status': 'stale', 'reason': clean(str(error), 300) + ' Nothing was done.', 'notice': json.loads(row['view'])}
         except (Off, OSError):
-            result = {'status': 'stale', 'reason': 'Your Machine could not reach the Fleet relay just now, so nothing was done. Tap again in a minute.',
+            result = {'status': 'stale', 'reason': 'Your Machine could not reach the Network just now, so nothing was done. Tap again in a minute.',
                       'notice': json.loads(row['view'])}
         message, key = self.notice_telegram(self.notice(nid))
         with self.connect() as db:

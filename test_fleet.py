@@ -706,7 +706,7 @@ class RelayRestart(unittest.TestCase):
             def step():
                 steps.append(1)
                 if len(steps) == 1:
-                    raise fleet.Unavailable('The Fleet relay is restarting')
+                    raise fleet.Unavailable('The Network is restarting')
                 if len(steps) == 2:
                     raise ConnectionResetError()
                 stop.set()

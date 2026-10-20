@@ -2,7 +2,7 @@
 
 A private assistant inbox for [OpenClaw](https://docs.openclaw.ai). It collects your email, calendar, chats and phone notifications, and lets your own agent find useful next steps. Cards reach the dashboard app and, optionally, Telegram. Tap **Do it** and the agent carries out the offered task.
 
-**Early release.** One owner per installation. Linux/systemd for managed installs. Your core assistant needs no cloud account; the optional Fleet/Friends network uses a hosted relay.
+**Early release.** One owner per installation. Linux/systemd for managed installs. Your core assistant needs no cloud account; the optional Fleet and Friends connections use The Machine Network.
 
 ## Quick start
 
@@ -26,7 +26,7 @@ Follow [Getting started](docs/getting-started.md). The installer can help set up
 | Cards, Change, snooze, work hours, sends and CLI | [Usage](docs/usage.md) |
 | Facts, people, projects, embeddings and enrichment | [Intelligence](docs/intelligence.md) |
 | Model/provider setup | [Models](docs/models.md) |
-| Work Fleets, Friends and relay pairing | [Fleet](docs/fleet.md) |
+| Work Fleets, Friends and the Network | [Fleet](docs/fleet.md) |
 | Add a connector | [Adding a source](docs/adding-a-source.md) |
 | Agent instructions | [AGENTS.md](AGENTS.md), [PREPARATION.md](PREPARATION.md) |
 | Contribute or report a vulnerability | [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) |

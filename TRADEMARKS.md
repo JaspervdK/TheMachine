@@ -4,7 +4,7 @@ The code in this repository is MIT licensed (see [LICENSE](LICENSE)). The licens
 
 - the names "The Machine" and "The Fleet",
 - The Machine's logo and icons,
-- the hosted service, the network of hosted Machines and the Fleet relay.
+- the hosted service, the network of hosted Machines and The Machine Network.
 
 You are welcome to run, change and share the code under the MIT license. If you publish a modified version or offer it
 as a service, give it a name and logo of your own, and don't suggest it is made or endorsed by us. Saying that your
