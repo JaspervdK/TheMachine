@@ -594,6 +594,10 @@ def gog_read(config, account, api, version, method, params, scope):
     except subprocess.TimeoutExpired:
         raise SourceError('timeout') from None
     if result.returncode:
+        if re.search(r'invalid_grant|expired or revoked', result.stderr):
+            # The stored Google sign-in is gone; retrying every cycle can't help until the owner runs
+            # `gog auth add <email> --client <client>` again, so say so and back off for an hour.
+            raise SourceError(api + ':google_signin_expired_run_gog_auth_add', retry_after=3600)
         match = re.search(r'\b(400|401|403|404|410|429|5\d\d)\b', result.stderr)
         raise SourceError(api, int(match[1]) if match else None)
     try:

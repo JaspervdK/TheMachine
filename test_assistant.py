@@ -628,6 +628,17 @@ class CalendarInvariants(unittest.TestCase):
         with patch.object(assistant, 'gog_read', return_value={'id': 'another@example.com'}):
             with self.assertRaises(assistant.SourceError): assistant.Calendar({}, self.account).profile()
 
+    def test_expired_google_signin_says_so_and_backs_off(self):
+        class Result:
+            returncode = 4; stdout = ''
+            stderr = 'read-only transport: refresh token expired or revoked: oauth2: "invalid_grant" "Token has been expired or revoked."; owner@example.com'
+        with patch.object(assistant, 'credential', return_value='secret'), patch.object(assistant.subprocess, 'run', return_value=Result()):
+            with self.assertRaises(assistant.SourceError) as error:
+                assistant.Calendar({'gog': 'gog'}, self.account).profile()
+        self.assertEqual(str(error.exception), 'calendar:google_signin_expired_run_gog_auth_add')
+        self.assertNotIn('@', str(error.exception))
+        self.assertEqual(error.exception.retry_after, 3600)
+
     def test_shared_calendar_is_exact_and_credentials_stay_separate(self):
         account = {**self.account, 'calendar_id': 'shared@example.com', 'boundary': 'personal:shared'}
         with patch.object(assistant, 'gog_read', return_value={'id': 'shared@example.com'}) as read:
