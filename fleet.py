@@ -52,6 +52,7 @@ import family
 import friends
 import discovery
 import network
+import skills
 
 LOG = logging.getLogger('personal-assistant')
 SCHEMA = '''
@@ -131,6 +132,10 @@ ASKS['family'] += family.KINDS  # += : other kinds a Family shares (skills) stay
 RULE_KINDS['family'] += family.KINDS
 KIND_LABEL.update(family.LABELS)
 NO_DETAILS += family.REQUESTS
+# Skills (skills.py): a teammate or friend shares a skill; the owner reads it and installs or declines it. Never by rule.
+for _kind in ('work', 'family', 'friends'):
+    ASKS[_kind] = ASKS[_kind] + ('skill',)
+KIND_LABEL.update(skill='skills')
 
 
 class Off(Exception):
@@ -682,6 +687,8 @@ def parse_question(kind, question):
         return fleet_requests.parse(kind, question)
     if kind == 'availability':
         return friends.parse_availability(question)
+    if kind == 'skill':
+        return skills.parse_share(question)
     if not isinstance(question, dict):
         return None
     if kind == 'relationships':
@@ -735,6 +742,8 @@ def clean_answer(kind, answer):
         return fleet_requests.clean_answer(kind, answer)
     if kind == 'availability':
         return friends.clean_availability(answer)
+    if kind == 'skill':
+        return skills.clean_answer(answer)
     if not isinstance(answer, dict):
         return None
     def level(v):
@@ -781,6 +790,8 @@ def question_text(kind, question):
         return fleet_requests.question_text(kind, question)
     if kind == 'availability':
         return friends.question_text(question)
+    if kind == 'skill':
+        return skills.question_text(question)
     if kind == 'relationships':
         return 'Who knows someone at ' + question.get('about', '?') + '?'
     if kind == 'meeting':
@@ -917,6 +928,8 @@ def answer_text(kind, answer):
         return fleet_requests.answer_text(kind, answer)
     if kind == 'availability':
         return friends.answer_text(answer)
+    if kind == 'skill':
+        return skills.answer_text(answer)
     if not answer:
         return 'no answer'
     if kind == 'brief':
@@ -1358,6 +1371,8 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         name = clean(label(teammate) or ask.get('name'), 120) or 'A teammate'
         if kind in fleet_requests.STAGED:  # a request to do something: its own path
             return self.take_request(ask, teammate, fleet, kind, question, name)
+        if kind == 'skill':  # a shared skill: kept for the owner to read (skills.py), never installed by itself
+            return self.take_skill(ask, teammate, fleet, name)
         with self.connect() as db:
             if not teammate or not question:
                 self.log(db, 'in', fleet, ask.get('from'), name, kind if kind in KIND_LABEL else 'other', 'a question this Machine does not answer', 'declined')
@@ -1395,6 +1410,17 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
                     self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question), 'waiting for you')
                     status, body = 'waiting', None
         self.relay.call('POST', '/answer', {'id': ask['id'], 'status': status, **({'answer': body} if body is not None else {})})
+        return status
+
+    def take_skill(self, ask, teammate, fleet, name):
+        keeper = getattr(self, 'skills', None)
+        status = keeper.take_share(ask, teammate, fleet, name) if keeper else 'declined'
+        question = skills.parse_share(ask.get('question'))
+        with self.connect() as db:
+            self.log(db, 'in', fleet, (teammate or {}).get('member_id') or ask.get('from'), name, 'skill',
+                     skills.question_text(question) if question else 'a skill this Machine can\'t read',
+                     {'waiting': 'waiting for you', 'answered': 'already installed'}.get(status, 'declined'))
+        self.relay.call('POST', '/answer', {'id': ask['id'], 'status': status, **({'answer': {'stage': 'installed'}} if status == 'answered' else {})})
         return status
 
     def decide(self, ask_id, choice, retell=True, text=None):

@@ -42,6 +42,7 @@ import embeddings
 import graph
 import enrichment
 import fleet
+import skills
 import google_api
 import next_actions
 import browser_login
@@ -345,6 +346,10 @@ OWNER_ACTIONS |= FRIEND_ACTIONS
 # Family (family.py): asking when everyone is free, proposing a to-do or a plan. The owner's own, from their dashboard.
 FAMILY_ACTIONS = {'family_free', 'family_todo', 'family_event'}
 OWNER_ACTIONS |= FAMILY_ACTIONS
+# Skills (skills.py): writing, sharing and installing them is the owner's own, from the dashboard. The agent can only
+# propose one (skill_propose), which waits for the owner's Approve.
+SKILL_ACTIONS = {'skill_save', 'skill_get', 'skill_toggle', 'skill_delete', 'skill_share', 'skill_decide', 'skill_example'}
+OWNER_ACTIONS |= SKILL_ACTIONS
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -6330,6 +6335,10 @@ class App:
                                 'morning': lambda: WORK_HOURS['morning']}
             self.fleet.search = lambda accounts, query, limit: self.related(accounts, query=query, limit=limit)[0]
             self.fleet.notify_brief = self.fleet_notify_brief
+        # Skills (skills.py): the owner's how-tos, written to the OpenClaw workspace; shared ones come in through the Fleet.
+        self.skills = skills.Skills(self.store.connect, config.get('openclaw_workspace') or WORKSPACE, self.fleet)
+        if self.fleet:
+            self.fleet.skills = self.skills
 
     def gmail_message(self, account_id, message_id):
         account = next(a for a in self.config['accounts'] if a['id'] == account_id)
@@ -6442,6 +6451,8 @@ class App:
             proposal_id = self.store.tool_approval_proposal(args['id'], args['title'], args['detail'])
             root = 'https://' + host + self.config.get('dashboard_path', '/')
             return {'id': proposal_id, 'url': root.rstrip('/') + '/approval?id=' + proposal_id}
+        if name in SKILL_ACTIONS or name == 'skill_propose':
+            return self.skill_action(name, args)
         if name in ('events', 'related') and selected in ('all', ['all']):
             selected = accounts  # search everything, asked for explicitly
         if name in ['events', 'begin_analysis', 'related'] and (not selected or not set(selected) <= set(accounts)):
@@ -6460,6 +6471,7 @@ class App:
                     connector['sign_in_command'] = gog_signin_command(self.config, by_id[connector['id']])
             result['model_usage'] = getattr(self, 'model_usage', None)
             result['model_status'] = getattr(self, 'model_status', None)
+            result['skills'] = self.skills.view() if getattr(self, 'skills', None) else None
             result['review_live'] = self.review_live()
             result['reviews_on'] = bool((self.config.get('review_worker') or {}).get('enabled'))  # off until activated
             result['started_at'] = self.started_at()
@@ -7101,6 +7113,27 @@ class App:
             self.fleet.set_meta('ask_meetings', bool(args.get('on')))
             return {'ask_meetings': self.fleet.meetings_on()}
         raise ValueError('Unknown Fleet action')
+
+    def skill_action(self, name, args):
+        keeper = self.skills
+        if name == 'skill_propose':  # from the agent: waits for the owner's Approve
+            return keeper.propose(args.get('name'), args.get('description'), args.get('body'), args.get('why') or '')
+        if name == 'skill_save':  # id: an existing skill; body may be a whole pasted SKILL.md
+            return keeper.save(str(args.get('id') or ''), args.get('name') or '', args.get('description') or '', args.get('body') or '')
+        if name == 'skill_get':
+            return keeper.get(str(args.get('id') or ''))
+        if name == 'skill_example':
+            return keeper.example(str(args.get('key') or 'customer-inquiries'))
+        if name == 'skill_toggle':
+            return keeper.toggle(str(args.get('id') or ''), bool(args.get('on')))
+        if name == 'skill_delete':
+            return keeper.delete(str(args.get('id') or ''))
+        if name == 'skill_share':  # to: member ids, or none for everyone in that Fleet
+            to = args.get('to')
+            return keeper.share(str(args.get('id') or ''), str(args.get('fleet') or ''), to if isinstance(to, list) else None, str(args.get('note') or ''))
+        if name == 'skill_decide':
+            return keeper.decide(str(args.get('id') or ''), str(args.get('choice') or ''))
+        raise ValueError('Unknown skill action')
 
     def is_work(self, account_ids):
         if isinstance(account_ids, str):
@@ -8451,7 +8484,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')
@@ -8468,6 +8501,8 @@ class App:
 
         server = http.server.ThreadingHTTPServer(('127.0.0.1', self.config.get('port', 8787)), Handler)
         watch_faults(self.store)
+        if getattr(self, 'skills', None):
+            self.skills.sync()  # the workspace has the skills that are on, also after edits made while this was off
         signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
         signal.signal(signal.SIGINT, lambda *_: self.stop.set())
         for account in self.config['accounts']:

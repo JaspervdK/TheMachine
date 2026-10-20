@@ -49,11 +49,11 @@ class Network:
             if kind in self.groups:
                 group = self.net[kind]
                 fleets.append({'id': group['id'], 'kind': kind, 'name': group['name'], 'asks': ['relationships', 'meeting', 'brief', 'anything',
-                               'intro', 'handoff', 'followup'] if kind == 'work' else ['availability', 'todo', 'event'], 'me': {'member_id': self.net['owner']['member_id'], 'role': 'owner'},
+                               'intro', 'handoff', 'followup', 'skill'] if kind == 'work' else ['availability', 'todo', 'event', 'skill'], 'me': {'member_id': self.net['owner']['member_id'], 'role': 'owner'},
                                'members': [self.me()] + [self.member(m) for m in group['team']]})
         if 'friends' in self.groups:
             fleets.append({'id': self.net['friends']['id'], 'kind': 'friends', 'name': 'Friends', 'username': self.net['owner']['username'],
-                           'asks': ['availability'], 'me': {'member_id': self.net['owner']['member_id'], 'role': 'owner'},
+                           'asks': ['availability', 'skill'], 'me': {'member_id': self.net['owner']['member_id'], 'role': 'owner'},
                            'members': [self.me()] + [{'member_id': f['member_id'], 'name': f['name'], 'role': 'friend', 'emails': [], 'machine': True,
                                                       'label': f['name'] + ' (@' + f['username'] + ')'} for f in self.friends],
                            'requests': {'in': list(self.requests_in), 'out': list(self.requests_out)}, 'blocked': list(self.blocked)})

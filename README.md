@@ -28,6 +28,7 @@ Follow [Getting started](docs/getting-started.md). The installer can help set up
 | Model/provider setup | [Models](docs/models.md) |
 | Work Fleets, Friends and the Network | [Fleet](docs/fleet.md) |
 | Family Fleets: free times, to-dos and plans | [Family](docs/family.md) |
+| Skills: write, approve and share them | [Skills](docs/skills.md) |
 | Encryption, reliability and roadmap of the Network | [Network](docs/network.md) |
 | Add a connector | [Adding a source](docs/adding-a-source.md) |
 | Sandbox, screenshots and layout checks | [Development](docs/development.md) |
@@ -43,6 +44,7 @@ Follow [Getting started](docs/getting-started.md). The installer can help set up
 - Prepares likely useful work ahead, without committing its consequential last step.
 - Carries out owner-requested work, with useful task-specific Send, Submit or Merge actions where appropriate.
 - Shows health, review history and the same tasks on the dashboard and Telegram.
+- Follows your [skills](docs/skills.md): plain OpenClaw skills you write, approve or get from your Fleet or a friend; instructions only, never more permissions.
 
 ## Requirements
 

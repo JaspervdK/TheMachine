@@ -669,6 +669,25 @@ def cmd_fleet_pair(config, args):
           'Restart the service so it joins your Fleet; pick this Machine for a Fleet in your account there.')
 
 
+def cmd_skills(config, args):
+    view = call(config, 'status', {}).get('skills') or {'skills': []}
+    if args.json:
+        return out_json(view)
+    if not view['skills']:
+        print('No skills yet. Write one on the dashboard: Settings, Skills.')
+    for skill in view['skills']:
+        state = {'on': 'on', 'off': 'off', 'proposed': 'proposed, waits for you', 'incoming': f"from {skill['author']}, waits for you"}[skill['status']]
+        print(f"{skill['name']}  ({state})\n  {skill['description']}")
+
+
+def cmd_skills_propose(config, args):
+    body = sys.stdin.read() if args.file == '-' else Path(args.file).read_text()
+    out = call(config, 'skill_propose', {'name': args.name, 'description': args.description, 'body': body, 'why': args.why or ''})
+    if args.json:
+        return out_json(out)
+    print('Already proposed or on.' if out.get('duplicate') else 'Proposed: it waits for the owner\'s Approve on the dashboard (Settings, Skills).')
+
+
 def cmd_raw(config, args):
     out_json(call(config, args.action, json.loads(args.args) if args.args else {}))
 
@@ -756,6 +775,12 @@ def parser():
     c.add_argument('code', help='the pairing code, like ABCD-EFGH')
     c.add_argument('--label', help='a name for this Machine there (default: this computer\'s name)')
     c.add_argument('--relay', help=argparse.SUPPRESS)  # ignored: commands copied from before the relay was built in
+    add('skills', 'Skills your agent follows: yours, proposed and shared ones (edit them on the dashboard: Settings, Skills)', cmd_skills)
+    c = add('skills-propose', 'Propose a skill from repeated work; it stays off until the owner approves it on the dashboard', cmd_skills_propose)
+    c.add_argument('--name', required=True, help='short name, like "Answer pricing questions"')
+    c.add_argument('--description', required=True, help='one line: when to use it')
+    c.add_argument('--file', required=True, help='markdown file with the instructions, or - for stdin')
+    c.add_argument('--why', help='one line for the owner: what repeated work this comes from')
     c = add('raw', 'Call any non-owner service action with JSON args', cmd_raw)
     c.add_argument('action')
     c.add_argument('args', nargs='?', help='JSON object')

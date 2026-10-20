@@ -138,7 +138,33 @@ def load(directory, states, port=8870, network_port=8871, fixture_path=HERE / 'f
     if not fresh:
         with store.connect() as db:
             graph.build(db, config, base.isoformat())
+            load_skills(db, states, fixture, base)
     return config, config_path
+
+
+def load_skills(db, states, fixture, base):
+    """Settings > Skills: the example as the owner's own, one the Machine proposes, and in a Fleet one a teammate shared."""
+    import skills
+    skills.ensure(db)
+    example = skills.EXAMPLES['customer-inquiries']
+    rows = [('sk_sandbox_mine', example, 'on', 'mine', None, None, None),
+            ('sk_sandbox_proposed', {'name': 'Prepare the weekly pipeline update',
+                                     'description': 'When the owner asks for the weekly pipeline numbers for the team call.',
+                                     'body': '1. Count new, won and lost deals since last Monday.\n2. List the three largest open deals with their next step.\n3. Draft five lines for the owner to post.'},
+             'proposed', 'proposed', None, None, 'You asked for this four Mondays in a row.')]
+    if {'fleet', 'all'} & set(states):
+        team = fixture['network']['work']
+        rows.append(('sk_sandbox_shared', {'name': 'Qualify an inbound demo request before the first call',
+                                           'description': 'When someone books a demo through the website form.',
+                                           'body': '1. Look up the company: size, industry, current tools.\n2. Check earlier conversations with anyone there.\n3. Write three questions for the call.'},
+                     'incoming', 'shared', team['team'][0]['name'], team['id'], 'Saved me an hour a day on demo prep.'))
+    for skill_id, s, status, origin, author, fleet_id, note in rows:
+        at = stamp(60 * 24, base)
+        db.execute('INSERT OR REPLACE INTO skills(id,slug,name,description,body,status,origin,version,sha,author,fleet,member_id,note,created_at,updated_at) '
+                   'VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)',
+                   (skill_id, skills.slug_of(s['name']), s['name'], s['description'], s['body'], status, origin,
+                    skills.digest(s['name'], s['description'], s['body']), author, fleet_id,
+                    fixture['network']['work']['team'][0]['member_id'] if author else None, note, at, at))
 
 
 def load_cards(db, fixture, ids, base):

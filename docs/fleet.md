@@ -17,6 +17,9 @@ Fleet tab shows each Work Fleet as its own section. Asking from a Fleet's sectio
 who knows" from the Graph tab asks each of your Work Fleets, one at a time. Leaving one Fleet leaves the others as they
 are.
 
+Any Fleet, and any friend, can also share **skills**: how-tos your Machine follows, which the other person reads and
+installs themselves (see [Skills](skills.md)). A skill is instructions only and never changes your rules here.
+
 What a Fleet needs from you (a teammate's question or request, a meeting's follow-ups to split, a server to confirm)
 shows as a card under **Suggestions**, tagged Fleet and Work, with the same buttons as your other cards; the
 Suggestions badge counts them. The Fleet tab keeps the people, the rules, the team brief, your own questions with
