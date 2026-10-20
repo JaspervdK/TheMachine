@@ -39,7 +39,11 @@ try{
  // self-hosted, not paired: a way to start a Fleet in the cloud, marked alpha
  assert.match(await page.locator('#settings-more').textContent(),/Start a Fleet in the cloud/);
  assert.equal(await page.locator('#settings-more .alpha').textContent(),'alpha');
- assert.equal(await page.locator('#settings-more a').getAttribute('href'),'https://app.themachine.computer/');
+ assert.equal(await page.locator('#settings-more a').count(),0);  // a button, not an inline link
+ assert.equal(await page.locator('#settings-cloud').textContent(),'Start a Fleet');
+ assert.equal(await page.locator('#settings-cloud').getAttribute('href'),'https://app.themachine.computer/');
+ assert.equal(await page.locator('#settings-cloud').getAttribute('target'),'_blank');
+ {const r=await page.evaluate(()=>{const t=document.querySelector('#settings-more').getBoundingClientRect(),b=document.querySelector('#settings-cloud').getBoundingClientRect();return b.top>=t.bottom-1});assert.equal(r,true)}  // below the text on a phone
  // section notes sit under their titles, not off to the right
  const head=await page.locator('#settings .section-head').first().evaluate(e=>{const h=e.querySelector('h2').getBoundingClientRect(),p=e.querySelector('p').getBoundingClientRect();return {below:p.top>=h.bottom-1,left:Math.abs(p.left-h.left)<2}});
  assert.deepEqual(head,{below:true,left:true});
