@@ -335,6 +335,9 @@ class SourceError(Exception):
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
 OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief'}
+# Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
+FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_split', 'fleet_split_dismiss', 'fleet_split_adjust'}
+OWNER_ACTIONS |= FLEET_REQUEST_ACTIONS
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -4737,6 +4740,7 @@ SOURCE_KIND = {'gmail.message': 'email', 'calendar.event': 'calendar', 'slack.me
                'salesflare.email': 'CRM email', 'salesflare.meeting': 'CRM meeting',
                'android.notification': 'phone', 'whatsapp.message': 'WhatsApp',
                'gateway.alert': 'OpenClaw'}
+SOURCE_KIND['fleet.request'] = 'Fleet'
 
 
 AGENT_DB = Path.home() / '.openclaw/agents/main/agent/openclaw-agent.sqlite'
@@ -6116,6 +6120,7 @@ class App:
             self.fleet.notify = self.fleet_notify
             self.fleet.retell = lambda message_id: threading.Thread(target=self.fleet_retell, args=(message_id,), daemon=True).start()
             self.fleet.notify_notice = self.fleet_notify_notice
+            self.fleet.make_card, self.fleet.tell = self.fleet_card, self.fleet_tell  # Fleet requests (fleet_requests.py)
             self.fleet.retell_notice = lambda message_id, message: threading.Thread(
                 target=self.fleet_retell, args=(message_id, message), daemon=True).start()
             # Briefs and free questions keep to the owner's hours; a free question is searched with the Machine's own search.
@@ -6736,6 +6741,46 @@ class App:
         message_id = str(result.get('messageId') or '')
         return message_id if re.fullmatch(r'\d+', message_id) else None
 
+    def fleet_card(self, kind, ask_id, name, title, body, evidence, action=None, due=None):
+        """A card for a Fleet request the owner accepted (fleet_requests.py), made from this Machine's own data. Its
+        first evidence is a Fleet event on one of the owner's work accounts, marked reviewed so no model reads it by
+        itself; an intro also gets its double-opt-in draft, which goes out only with the owner's own Send."""
+        accounts = fleet.work_accounts(self.config)
+        with self.store.connect() as db:
+            own = [r['account_id'] for r in db.execute(f"SELECT account_id FROM events WHERE id IN ({','.join('?' * len(evidence)) or 'NULL'})", evidence)]
+        account = next((a for a in own if a in accounts), accounts[0] if accounts else None)
+        if not account:
+            raise ValueError('this Machine has no work account')
+        stamp, source_id = now(), 'fleet:' + str(ask_id)
+        meta = {'sender_display': f'{name} (your Fleet)', 'fleet_kind': kind}
+        with self.store.connect() as db:
+            db.execute('INSERT OR IGNORE INTO events(account_id,source_id,kind,occurred_at,title,body,metadata,deleted,content_hash,version,analyzed_version,ingested_at) '
+                       "VALUES(?,?,'fleet.request',?,?,?,?,0,?,1,1,?)",
+                       (account, source_id, stamp, title, body, json.dumps(meta), hashlib.sha256((title + body).encode()).hexdigest(), stamp))
+            event_id = db.execute('SELECT id FROM events WHERE account_id=? AND source_id=?', (account, source_id)).fetchone()[0]
+        card = self.store.suggest('fleet:' + str(ask_id), title[:90], body[:700], [event_id, *[e for e in evidence if e != event_id]], when='now', work=True, due=due)
+        if action and not card.get('duplicate'):
+            with self.store.connect() as db:
+                row = db.execute('SELECT account_ids FROM suggestions WHERE id=?', (card['id'],)).fetchone()
+                db.execute("UPDATE suggestions SET status='accepted' WHERE id=? AND status='pending'", (card['id'],))
+            draft = next_actions.validate(action, self.config, json.loads(row['account_ids']))
+            self.store.prepare(card['id'], f"A double-opt-in email to {action['to'][0]}: it asks them first whether they want the "
+                                           f"introduction. Read it, change it if you like, and send it yourself.", next_action=draft,
+                               outcome={'state': 'needs_you', 'needs': 'read and send the intro email'})
+        return card['id']
+
+    def fleet_tell(self, text, anchor):
+        """How the owner's own Fleet request went (an intro, a handoff, a follow-up split): a phone notification, and a
+        plain Telegram line with Open when Telegram is on. No buttons to act on: it only tells."""
+        root = fleet.dashboard_root(self.config)
+        with self.store.connect() as db:
+            subscriptions = [dict(r) for r in db.execute('SELECT endpoint,p256dh,auth FROM push_subscriptions')]
+        if subscriptions and root:
+            push_send(self.store, self.config, subscriptions, {'title': 'Your Fleet', 'body': text[:200], 'url': root + '#fleet', 'tag': 'fleet-' + anchor},
+                      'fleet=' + anchor)
+        if telegram_on(self.config):
+            fleet_telegram(self.config, {'text': text, 'buttons': [[{'text': 'Open the Fleet tab', 'url': root + '#fleet'}]] if root else []})
+
     def fleet_retell(self, message_id, message=None):
         try:
             message = message or self.fleet.telegram_view(message_id)
@@ -6769,6 +6814,20 @@ class App:
             return self.fleet.ask_free(str(args.get('text') or ''), args.get('fleet') or 'work')
         if name == 'fleet_brief':
             return self.fleet.set_brief(args.get('every'), args.get('tell'))
+        if name == 'fleet_intro':  # ask one teammate who knows someone there for an intro
+            return self.fleet.ask_intro(str(args.get('fleet') or ''), str(args.get('member_id') or ''), str(args.get('about') or ''),
+                                        str(args.get('note') or ''))
+        if name == 'fleet_handoff_draft':  # what a handoff of this card would send, to read and edit first
+            return self.fleet.handoff_draft(str(args.get('suggestion_id') or ''))
+        if name == 'fleet_handoff':
+            return self.fleet.hand_off(str(args.get('suggestion_id') or ''), str(args.get('fleet') or ''), str(args.get('member_id') or ''),
+                                       str(args.get('title') or ''), str(args.get('summary') or ''), str(args.get('contact') or '') or None)
+        if name == 'fleet_split':  # send a follow-up split as the owner filled it in
+            return self.fleet.send_split(str(args.get('id') or ''), args.get('items'))
+        if name == 'fleet_split_dismiss':
+            return self.fleet.set_split_aside(str(args.get('id') or ''))
+        if name == 'fleet_split_adjust':  # accept a teammate's split with the owner's own part as they changed it
+            return self.fleet.decide_request(str(args.get('id') or ''), 'adjust', text=str(args.get('text') or ''))
         if name == 'fleet_rule':
             return self.fleet.set_rule(args.get('fleet') or 'work', str(args.get('member_id') or ''), args.get('kind'),
                                        args.get('rule'), args.get('details'), args.get('scope'))
@@ -8097,7 +8156,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

@@ -47,6 +47,7 @@ import urllib.error
 import urllib.request
 
 import graph
+import fleet_requests
 
 LOG = logging.getLogger('personal-assistant')
 SCHEMA = '''
@@ -109,6 +110,10 @@ NOTICE_KINDS = ('seat_request', 'joined', 'server_started', 'left', 'seat_confir
 FLEET_ID = re.compile(r'fl_[0-9a-f]{16}')
 NOTICE_DAYS = 30
 DECIDED = {'once': 'Answered once', 'always': 'Answered, and always from now on', 'decline': 'Declined', 'never': 'Declined, and never from now on'}
+# Warm intros, handoffs and shared follow-ups: requests to do something (fleet_requests.py)
+ASKS['work'] += fleet_requests.KINDS
+RULE_KINDS['work'] += fleet_requests.KINDS
+KIND_LABEL.update(intro='warm intros', handoff='handoffs', followup='shared follow-ups')
 
 
 class Off(Exception):
@@ -174,6 +179,7 @@ def now():
 
 def ensure(db):
     db.executescript(SCHEMA)
+    fleet_requests.ensure(db)
     have = {r[1] for r in db.execute('PRAGMA table_info(fleet_in)')}
     for column in ('notified_at TEXT', 'telegram_message_id TEXT', 'choice TEXT'):  # added 2026-10-20
         if column.split()[0] not in have:
@@ -591,6 +597,8 @@ def free_draft(db, accounts, text, search=None, internal=()):
 
 def parse_question(kind, question):
     """A teammate's question in its fixed form, else None. Nothing else of it is ever read."""
+    if kind in fleet_requests.KINDS:
+        return fleet_requests.parse(kind, question)
     if not isinstance(question, dict):
         return None
     if kind == 'relationships':
@@ -640,6 +648,8 @@ def clean_brief(answer):
 
 def clean_answer(kind, answer):
     """A teammate's answer, kept to the fields and shapes this Machine would send itself. None when it doesn't fit."""
+    if kind in fleet_requests.KINDS:
+        return fleet_requests.clean_answer(kind, answer)
     if not isinstance(answer, dict):
         return None
     def level(v):
@@ -682,6 +692,8 @@ def clean_answer(kind, answer):
 
 
 def question_text(kind, question):
+    if kind in fleet_requests.KINDS:
+        return fleet_requests.question_text(kind, question)
     if kind == 'relationships':
         return 'Who knows someone at ' + question.get('about', '?') + '?'
     if kind == 'meeting':
@@ -710,7 +722,7 @@ def push_payload(rows, root):
         return {'title': f"{row['name']}'s Machine asks", 'body': question_text(row['kind'], json.loads(row['question']))[:200],
                 'url': root + '#fleet=' + row['id'], 'tag': 'fleet-' + row['id'],
                 # a free question opens on its draft, to read and edit before anything goes
-                'actions': [] if row['kind'] == 'anything' else [{'action': 'once', 'title': 'Answer once'}, {'action': 'decline', 'title': 'Decline'}]}
+                'actions': [] if row['kind'] == 'anything' else [{'action': 'once', 'title': 'Accept' if row['kind'] in fleet_requests.KINDS else 'Answer once'}, {'action': 'decline', 'title': 'Decline'}]}
     return {'title': f'{len(rows)} Fleet questions wait for you',
             'body': ' · '.join(asks_line(r) for r in rows[:3]) + (' · …' if len(rows) > 3 else ''),
             'url': root + '#fleet', 'tag': 'fleet-' + rows[0]['id']}
@@ -722,7 +734,7 @@ def telegram_message(rows, root):
     many = len(rows) > 1
     lines, buttons = [], []
     for n, row in enumerate(rows, 1):
-        outcome = (DECIDED.get(row['choice']) or ('Answered' if row['status'] == 'answered' else row['status'].capitalize())
+        outcome = ((fleet_requests.ACCEPTED if row['kind'] in fleet_requests.KINDS else DECIDED).get(row['choice']) or ('Answered' if row['status'] == 'answered' else row['status'].capitalize())
                    if row['status'] != 'waiting' else '')
         prefix = f'{n}. ' if many else ''
         if row['kind'] == 'anything':
@@ -741,8 +753,9 @@ def telegram_message(rows, root):
             continue
         lines.append((f'{n}. ' if many else '') + asks_line(row) + (f'\n   → {outcome}' if outcome else ''))
         if row['status'] == 'waiting':
-            buttons.append([{'text': prefix + 'Answer once', 'value': f"assistant:fleet:{row['id']}:once"},
-                            {'text': 'Always', 'value': f"assistant:fleet:{row['id']}:always"},
+            staged = row['kind'] in fleet_requests.KINDS
+            buttons.append([{'text': prefix + ('Accept' if staged else 'Answer once'), 'value': f"assistant:fleet:{row['id']}:once"},
+                            {'text': 'Always accept' if staged else 'Always', 'value': f"assistant:fleet:{row['id']}:always"},
                             {'text': 'Decline', 'value': f"assistant:fleet:{row['id']}:decline"}])
     head = 'Your Fleet asks. Nothing is shared until you choose.'
     if root:
@@ -812,6 +825,8 @@ def person(member):
 
 def answer_text(kind, answer):
     """One plain line of an answer: for the dashboard, the log and preparations."""
+    if kind in fleet_requests.KINDS:
+        return fleet_requests.answer_text(kind, answer)
     if not answer:
         return 'no answer'
     if kind == 'brief':
@@ -927,7 +942,7 @@ def brief_text(view):
 
 # ---------------------------------------------------------------- the Fleet on this Machine
 
-class Fleet:
+class Fleet(fleet_requests.Requests):
     def __init__(self, connect, config, token, relay=None):
         self.connect, self.config = connect, config
         self.relay = relay or Relay(settings(config)['url'], token)
@@ -1080,6 +1095,8 @@ class Fleet:
         fleet = self.ref(asked_in)
         question = parse_question(kind, ask.get('question')) if kind in ASKS.get(self.kind_of(fleet), ()) else None
         name = clean(label(teammate) or ask.get('name'), 120) or 'A teammate'
+        if kind in fleet_requests.KINDS:  # a request to do something: its own path
+            return self.take_request(ask, teammate, fleet, kind, question, name)
         with self.connect() as db:
             if not teammate or not question:
                 self.log(db, 'in', fleet, ask.get('from'), name, kind if kind in KIND_LABEL else 'other', 'a question this Machine does not answer', 'declined')
@@ -1122,6 +1139,8 @@ class Fleet:
     def decide(self, ask_id, choice, retell=True, text=None):
         """The owner on a waiting question: once, always, decline or never. A free question is answered once at a
         time, with `text` (the draft as the owner edited it) or else its draft as shown."""
+        if self.is_request(ask_id):
+            return self.decide_request(ask_id, choice, retell=retell)
         if choice not in ('once', 'always', 'decline', 'never'):
             raise ValueError('Choose once, always, decline or never')
         with self.connect() as db:
@@ -1338,7 +1357,7 @@ class Fleet:
         return {'rule': rule, 'details': details, 'scope': scope}
 
     # -- asking teammates
-    def ask(self, kind, question, context=None, fleet='work'):
+    def ask(self, kind, question, context=None, fleet='work', to=None):
         """Asks one Fleet (its id). A kind ('work') asks each Fleet of that kind with teammates in it, one by one: the
         relay only ever asks one Fleet's people at a time."""
         if fleet in FLEET_NAMES:
@@ -1353,7 +1372,7 @@ class Fleet:
             raise ValueError('Your Fleet does not ask that')
         if not self.teammates(fleet):
             raise ValueError('Nobody in your Fleet to ask yet')
-        sent = self.relay.call('POST', '/ask', {'fleet': fleet, 'kind': kind, 'question': question})
+        sent = self.relay.call('POST', '/ask', {'fleet': fleet, 'kind': kind, 'question': question, **({'to': to} if to else {})})
         with self.connect() as db:
             for member_id, ask_id in sent.get('ids', {}).items():
                 teammate = self.member(fleet, member_id) or {}
@@ -1386,6 +1405,8 @@ class Fleet:
             if status != 'waiting':
                 self.log(db, 'out', row['fleet'], row['member_id'], row['name'], row['kind'], question_text(row['kind'], json.loads(row['question'])),
                          ('answered: ' + answer_text(row['kind'], answer)) if answer is not None else status)
+        if row['kind'] in fleet_requests.KINDS:
+            self.request_answered(row, status, answer)
 
     # -- meetings
     def meetings_on(self):
@@ -1710,6 +1731,10 @@ class Fleet:
         if stamp - self.last['meetings'] > MEETINGS_EVERY or not wait:
             self.last['meetings'] = stamp
             self.meeting_round()
+        if stamp - self.last.get('requests', 0.0) > MEETINGS_EVERY or not wait:
+            self.last['requests'] = stamp
+            self.requests_round()
+            self.followup_round()
         if stamp - self.last['briefs'] > 60 or not wait:
             self.last['briefs'] = stamp
             self.brief_round()
@@ -1764,7 +1789,7 @@ class Fleet:
                                          rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False})) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(ref)]})
         return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
-                'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),
+                **self.requests_view(), 'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),
                 'kind_rules': {k: list(KIND_RULES.get(k, RULES)) for k in KIND_LABEL}, 'no_details': list(NO_DETAILS),
                 'scoped': list(SCOPED), 'scopes': scopes}
 
@@ -1787,7 +1812,7 @@ class Fleet:
         with self.connect() as db:
             waiting = db.execute("SELECT COUNT(*) FROM fleet_in WHERE status='waiting'").fetchone()[0]
             waiting += db.execute("SELECT COUNT(*) FROM fleet_notices WHERE kind='seat_request' AND status='open'").fetchone()[0]
-        return {'on': True, 'waiting': waiting}
+        return {'on': True, 'waiting': waiting + self.proposals()}
 
     def annotate(self, db, suggestions):
         """Who else is on a card's email, and what the Fleet said about its meeting."""
@@ -1807,9 +1832,12 @@ class Fleet:
                 s['fleet_holder'] = {'offer': json.loads(c['offer'])}
             if context.get(s['id']):
                 s['fleet_context'] = context[s['id']][:5]
+        self.annotate_requests(db, suggestions)
 
     def lines(self, suggestion_id):
         """What teammates' Machines said about this card's meeting, for a preparation."""
+        if self.request_lines(suggestion_id):
+            return self.request_lines(suggestion_id)
         with self.connect() as db:
             rows = db.execute("SELECT * FROM fleet_out WHERE context=? AND status='answered'", ('card:' + str(suggestion_id),)).fetchall()
         said = [f"- {r['name']}'s Machine: {answer_text(r['kind'], json.loads(r['answer']))}" for r in rows
