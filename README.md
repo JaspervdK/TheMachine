@@ -158,6 +158,9 @@ The runner isolates HOME/config and uses synthetic providers and disposable data
 
 [Contributing](CONTRIBUTING.md), [private security reports](SECURITY.md). Never publish real accounts, messages, customer records, credentials, raw logs or operational backups. A successful secret scan alone does not prove prose or images are public-safe.
 
+Report ordinary bugs through the dashboard's [GitHub issue link](https://github.com/Salesflare/TheMachine/issues/new), leaving out personal data. Keep sensitive reports private.
+
+
 ## License
 
 MIT: [LICENSE](LICENSE). OpenClaw and optional components: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Names, branding and the hosted service have separate terms: [TRADEMARKS.md](TRADEMARKS.md). Website: [themachine.computer](https://themachine.computer).

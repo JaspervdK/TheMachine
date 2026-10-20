@@ -23,6 +23,7 @@ from decimal import Decimal
 import random
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -607,6 +608,34 @@ def gog_read(config, account, api, version, method, params, scope):
     if not isinstance(data, dict) or data.get('error'):
         raise SourceError('invalid_response')
     return data
+
+def gog_signin_command(config, account):
+    """The command that signs a Google account in again where the assistant reads it: gog's file
+    keyring, unlocked with the password file it was given. A plain `gog auth add` lands in the
+    desktop keyring, which the assistant never reads. Shows the password file's path, never its contents."""
+    base = f"gog auth add {shlex.quote(account.get('email', ''))} --client {shlex.quote(account.get('client', ''))}"
+    path = (config.get('credentials') or {}).get('gog-password')
+    if not path:
+        return base
+    return f'GOG_KEYRING_BACKEND=file GOG_KEYRING_PASSWORD="$(cat {shlex.quote(str(Path(path).expanduser()))})" ' + base
+
+
+def gog_token_path(config, account):
+    """gog's file-keyring entry for this account's refresh token (token:<client>:<email>, base64url)."""
+    name = base64.urlsafe_b64encode(f"token:{account.get('client', '')}:{account.get('email', '')}".encode()).decode().rstrip('=')
+    root = config.get('gog_keyring_dir') or Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share') / 'gogcli/keyring'
+    return Path(root).expanduser() / ('_gogcli_key_v1_' + name)
+
+
+def gog_signed_in_since(config, account, since):
+    """True when the account's stored Google sign-in was written after `since` (an ISO time)."""
+    if account.get('transport') != 'gog' or not since:
+        return False
+    try:
+        written = gog_token_path(config, account).stat().st_mtime
+        return written > dt.datetime.fromisoformat(since).timestamp()
+    except (OSError, ValueError):
+        return False
 
 
 class Gmail:
@@ -6421,8 +6450,11 @@ class App:
             result['manage_url'] = manage if manage.startswith('https://') else None
             result['browser_link'] = browser_link(self.config)  # the sign-in dialog's way out to the browser itself
             result['needs_you'] = needs_you(self.config)
+            by_id = {a['id']: a for a in self.config['accounts']}
             for connector in result['connectors']:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
+                if 'google_signin_expired' in (connector.get('error') or '') and connector['id'] in by_id:
+                    connector['sign_in_command'] = gog_signin_command(self.config, by_id[connector['id']])
             result['model_usage'] = getattr(self, 'model_usage', None)
             result['model_status'] = getattr(self, 'model_status', None)
             result['review_live'] = self.review_live()
@@ -6843,6 +6875,22 @@ class App:
         since = (dt.datetime.fromisoformat(now()) - dt.datetime.fromisoformat(row['last_success'])).total_seconds()
         return max(0, min(delay, delay - since))
 
+    def wait_for_retry(self, account, row):
+        """Wait until the checkpoint's retry time; True when stopping. An expired Google sign-in
+        is retried as soon as the owner signs in again, instead of after the full hour."""
+        expired = 'google_signin_expired' in (row['error'] or '')
+        while True:
+            seconds = (dt.datetime.fromisoformat(row['retry_at']) - dt.datetime.fromisoformat(now())).total_seconds()
+            if seconds <= 0:
+                return False
+            if expired and gog_signed_in_since(self.config, account, row['error_at']):
+                LOG.info('sync account=%s signed in again, retrying now', account['id'])
+                with self.store.connect() as db:
+                    db.execute('UPDATE checkpoints SET retry_at=NULL WHERE account_id=?', (account['id'],))
+                return False
+            if self.stop.wait(min(seconds, 15) if expired else seconds):
+                return True
+
     def collector(self, account):
         source = Slack(self.config, account, self.stop) if account.get('service') == 'slack' else None
         try:
@@ -6857,13 +6905,11 @@ class App:
         while not self.stop.is_set():
             try:
                 with self.store.connect() as db:
-                    row = db.execute('SELECT retry_at FROM checkpoints WHERE account_id=?', (account['id'],)).fetchone()
+                    row = db.execute('SELECT retry_at,error,error_at FROM checkpoints WHERE account_id=?', (account['id'],)).fetchone()
                 local_android_feed = account.get('service') == 'android' and account.get('transport') == 'openclaw-feed'
                 if row and row['retry_at'] and not local_android_feed:
-                    seconds = (dt.datetime.fromisoformat(row['retry_at']) - dt.datetime.fromisoformat(now())).total_seconds()
-                    if seconds > 0:
-                        if self.stop.wait(seconds):
-                            break
+                    if self.wait_for_retry(account, row):
+                        break
                 delay = account.get('poll_seconds', self.config.get('poll_seconds', 300))
                 try:
                     result = sync_slack(self.store, self.config, account, source) if source else sync_source(self.store, self.config, account)
