@@ -431,6 +431,23 @@ def notice_message(view, root):
     return {'text': text, 'buttons': buttons}
 
 
+def label(member):
+    """A member's name; with their email when someone else in that Fleet has the same name (the relay says so)."""
+    member = member or {}
+    return member.get('label') or member.get('name') or ''
+
+
+def person(member):
+    """A member as the Fleet tab lists them: their name, the Machine they answer with ("Self-hosted: ...", "Hosted:
+    ...", "No Machine yet") and their account email, all as the relay gave them to every member of that Fleet; me
+    marks the member this Machine answers for."""
+    emails = member.get('emails') or []
+    return {'member_id': member.get('member_id'), 'name': clean(member.get('name'), 80), 'label': clean(label(member), 120),
+            'role': clean(member.get('role'), 10), 'me': bool(member.get('me')),
+            'answers_with': clean(member.get('answers_with'), 120) or ('' if member.get('machine') else 'No Machine yet'),
+            'email': clean(member.get('account_email') or (emails[0] if emails else ''), 120)}
+
+
 def answer_text(kind, answer):
     """One plain line of an answer: for the dashboard, the log and preparations."""
     if not answer:
@@ -563,7 +580,7 @@ class Fleet:
         teammate = self.member(asked_in, ask.get('from')) or (self.directory(refresh=True) and self.member(asked_in, ask.get('from')))
         fleet = self.ref(asked_in)
         question = parse_question(kind, ask.get('question')) if kind in ASKS.get(self.kind_of(fleet), ()) else None
-        name = clean((teammate or {}).get('name') or ask.get('name'), 80) or 'A teammate'
+        name = clean(label(teammate) or ask.get('name'), 120) or 'A teammate'
         with self.connect() as db:
             if not teammate or not question:
                 self.log(db, 'in', fleet, ask.get('from'), name, kind if kind in KIND_LABEL else 'other', 'a question this Machine does not answer', 'declined')
@@ -802,7 +819,7 @@ class Fleet:
             for member_id, ask_id in sent.get('ids', {}).items():
                 teammate = self.member(fleet, member_id) or {}
                 db.execute('INSERT OR IGNORE INTO fleet_out(id,fleet,member_id,name,kind,question,context,status,at) VALUES(?,?,?,?,?,?,?,?,?)',
-                           (ask_id, fleet, member_id, clean(teammate.get('name'), 80) or 'A teammate', kind, json.dumps(question), context, 'asked', now()))
+                           (ask_id, fleet, member_id, clean(label(teammate), 120) or 'A teammate', kind, json.dumps(question), context, 'asked', now()))
             self.log(db, 'out', fleet, None, 'your Fleet', kind, question_text(kind, question), f"asked {len(sent.get('ids', {}))}")
         return sent
 
@@ -1016,7 +1033,8 @@ class Fleet:
         for ref, found in fleets.items():
             kind = found['kind']
             out.append({'id': ref, 'kind': kind, 'label': FLEET_NAMES.get(kind, kind), 'name': found.get('name'), 'asks': list(ASKS.get(kind, ())),
-                        'members': [{'member_id': m['member_id'], 'name': m['name'], 'machine': m.get('machine'),
+                        'people': [person(m) for m in found.get('members', [])],
+                        'members': [{'member_id': m['member_id'], 'name': label(m), 'machine': m.get('machine'),
                                      'rules': {k: rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False}) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(ref)]})
         return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,

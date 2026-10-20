@@ -489,5 +489,34 @@ class SeveralFleets(unittest.TestCase):
             self.assertEqual(db.execute('SELECT fleet FROM fleet_notices').fetchone()[0], B)
         self.assertEqual(self.fleet.view()['notices'][0]['fleet_id'], B)
 
+
+class WhoIsWho(unittest.TestCase):
+    """Each member with the Machine they answer with and their account email, as the relay gives them; two members
+    with one name are told apart."""
+
+    def setUp(self):
+        Fleet.setUp(self)
+        self.relay.directory = {'fleets': [{'id': A, 'kind': 'work', 'name': 'Acme', 'secret': 's' * 64, 'asks': ['relationships', 'meeting'], 'members': [
+            {'member_id': 'me1', 'name': 'Sam Doe', 'label': 'Sam Doe (sam@acme.example)', 'role': 'owner', 'me': True, 'machine': True,
+             'emails': ['sam@acme.example'], 'account_email': 'sam@acme.example', 'answers_with': 'Self-hosted: Desk'},
+            {'member_id': 'pat1', 'name': 'Sam Doe', 'label': 'Sam Doe (sam.doe@mail.example)', 'role': 'member', 'machine': True,
+             'emails': ['sam.doe@mail.example'], 'account_email': 'sam.doe@mail.example', 'answers_with': 'Hosted: sam.example.test'},
+            {'member_id': 'kim1', 'name': 'Kim', 'role': 'member', 'machine': False, 'emails': ['kim@acme.example']}]}]}
+        self.fleet.directory(refresh=True)
+
+    def test_people_say_which_machine_and_which_account(self):
+        people = self.fleet.view()['fleets'][0]['people']
+        self.assertEqual([(p['name'], p['me'], p['answers_with'], p['email']) for p in people], [
+            ('Sam Doe', True, 'Self-hosted: Desk', 'sam@acme.example'),
+            ('Sam Doe', False, 'Hosted: sam.example.test', 'sam.doe@mail.example'),
+            ('Kim', False, 'No Machine yet', 'kim@acme.example')])
+        rules = self.fleet.view()['fleets'][0]['members']
+        self.assertEqual([m['name'] for m in rules], ['Sam Doe (sam.doe@mail.example)', 'Kim'])  # teammates only, told apart
+
+    def test_a_question_from_a_namesake_shows_who(self):
+        self.fleet.take_ask({'id': 'q_' + 'd' * 16, 'fleet': 'work', 'fleet_id': A, 'from': 'pat1', 'kind': 'relationships',
+                             'question': {'about': 'client.example'}})
+        self.assertEqual(self.fleet.view()['waiting'][0]['name'], 'Sam Doe (sam.doe@mail.example)')
+
 if __name__ == '__main__':
     unittest.main()
