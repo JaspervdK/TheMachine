@@ -36,6 +36,13 @@ try{
  assert.equal(await page.locator('#settings #theme-toggle').isVisible(),true);
  assert.equal(await page.locator('#settings-fleet').isHidden(),true);  // no Fleet here
  assert.match(await page.locator('#settings-more').textContent(),/assistant telegram/);
+ // self-hosted, not paired: a way to start a Fleet in the cloud, marked alpha
+ assert.match(await page.locator('#settings-more').textContent(),/Start a Fleet in the cloud/);
+ assert.equal(await page.locator('#settings-more .alpha').textContent(),'alpha');
+ assert.equal(await page.locator('#settings-more a').getAttribute('href'),'https://app.themachine.computer/');
+ // section notes sit under their titles, not off to the right
+ const head=await page.locator('#settings .section-head').first().evaluate(e=>{const h=e.querySelector('h2').getBoundingClientRect(),p=e.querySelector('p').getBoundingClientRect();return {below:p.top>=h.bottom-1,left:Math.abs(p.left-h.left)<2}});
+ assert.deepEqual(head,{below:true,left:true});
  assert.equal(await page.locator('.site-footer #theme-toggle, .site-footer #push-toggle').count(),0);
  assert.deepEqual(await page.locator('#hours-days [aria-pressed="true"]').allTextContents(),['Mon','Tue','Wed','Thu','Fri']);
  assert.equal(await page.locator('#hours-start').inputValue(),'08:00');

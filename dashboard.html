@@ -137,6 +137,9 @@ select{appearance:none;padding-right:34px;background:var(--surface-2) url("data:
 .section-head .count{font:600 .78rem var(--mono);color:var(--muted)}
 #later-list>summary{display:flex;align-items:baseline;gap:10px;font-size:inherit;color:var(--text)}#later-list>summary::before{align-self:center}
 .section-head p{margin:0 0 0 auto;font-size:.85rem;color:var(--muted)}
+#settings .section-head{flex-direction:column;align-items:flex-start;gap:3px}
+#settings .section-head p{margin:0}
+.alpha{margin-left:6px;padding:1px 7px;border-radius:999px;font:600 .68rem/1.5 var(--mono);letter-spacing:.04em;text-transform:uppercase;background:#eca45b33;color:var(--amber);vertical-align:middle}
 .role-all{margin:-4px 0 12px}
 .lead{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:.9rem;margin:0 0 14px}
 .summary-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 14px}
@@ -635,7 +638,8 @@ function zones(){try{return Intl.supportedValuesOf('timeZone')}catch(e){return[]
 $('#open-settings').onclick=()=>{for(const b of document.querySelectorAll('nav button')){b.classList.remove('active');b.setAttribute('aria-current','false')}for(const x of document.querySelectorAll('main>section'))x.hidden=x.id!=='settings';$('#open-settings').setAttribute('aria-current','page');scrollTo(0,0)};
 $('nav').addEventListener('click',e=>{if(e.target.closest('button')?.dataset.tab)$('#open-settings').setAttribute('aria-current','false')});
 $('#settings-fleet-rules').onclick=()=>{document.querySelector('nav [data-tab="fleet"]').click();fleetShown.then(()=>document.querySelector('.fleet-rules')?.scrollIntoView({block:'center',behavior:'smooth'}))};
-function renderHours(){$('#settings-fleet').hidden=!state.fleet?.on;$('#settings-more').textContent=state.manage_url?'Your plan, billing and connections are on your account page.':'Everything else is set on this computer: config.json, or assistant telegram, assistant connect and assistant doctor.';const h=state.hours,form=$('#hours');if(!h){form.hidden=true;return}form.hidden=false;if(hoursDirty)return;
+const CLOUD='https://app.themachine.computer';  // the hosted service (alpha): a self-hosted Machine's Fleet account lives there
+function renderHours(){$('#settings-fleet').hidden=!state.fleet?.on;if(state.manage_url)$('#settings-more').textContent='Your plan, billing and connections are on your account page.';else{const cli='Everything else is set on this computer: config.json, or assistant telegram, assistant connect and assistant doctor.';$('#settings-more').innerHTML=state.fleet?`<strong>Your Fleet account</strong><small>This Machine is paired with your Fleet. Seats, invites and billing are on <a href="${CLOUD}/account" target="_blank" rel="noopener">your account in the cloud</a>.</small><small>${cli}</small>`:`<strong>Start a Fleet in the cloud</strong><span class="alpha">alpha</span><small>Let your Machine answer teammates through the hosted relay. The hosted service is still early. <a href="${CLOUD}/" target="_blank" rel="noopener">Sign in to start one</a>, then pair this Machine with the code from your account.</small><small>${cli}</small>`}const h=state.hours,form=$('#hours');if(!h){form.hidden=true;return}form.hidden=false;if(hoursDirty)return;
  $('#hours-days').innerHTML=DAYS.map((d,i)=>`<button type="button" data-day="${i+1}" aria-pressed="${h.days.includes(i+1)}" aria-label="${['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][i]}">${d}</button>`).join('');
  $('#hours-start').value=h.start;$('#hours-end').value=h.end;$('#hours-morning').value=h.morning;$('#hours-digest').value=h.digest_at;
  const list=[...new Set([h.timezone,...zones()])].sort();$('#hours-zone').innerHTML=list.map(z=>`<option${z===h.timezone?' selected':''}>${esc(z)}</option>`).join('');
