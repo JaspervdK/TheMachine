@@ -342,6 +342,9 @@ OWNER_ACTIONS |= FLEET_REQUEST_ACTIONS
 # Friends (friends.py): adding, accepting, removing and blocking friends, and asking a friend when they are free.
 FRIEND_ACTIONS = {'fleet_friend', 'fleet_availability', 'fleet_network'}  # fleet_network: finding people on the Network (discovery.py)
 OWNER_ACTIONS |= FRIEND_ACTIONS
+# Family (family.py): asking when everyone is free, proposing a to-do or a plan. The owner's own, from their dashboard.
+FAMILY_ACTIONS = {'family_free', 'family_todo', 'family_event'}
+OWNER_ACTIONS |= FAMILY_ACTIONS
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -6484,7 +6487,7 @@ class App:
                 except (sqlite3.Error, ValueError) as error:
                     LOG.error('fleet status error=%s', type(error).__name__)
             return result if args.get('full') else compact_status(result)
-        if name.startswith('fleet_'):
+        if name.startswith('fleet_') or name in FAMILY_ACTIONS:
             return self.fleet_action(name, args, owner_dashboard)
         if name == 'related':
             if not embeddings.settings(self.config):
@@ -6973,18 +6976,21 @@ class App:
         message_id = str(result.get('messageId') or '')
         return message_id if re.fullmatch(r'\d+', message_id) else None
 
-    def fleet_card(self, kind, ask_id, name, title, body, evidence, action=None, due=None, into=None):
+    def fleet_card(self, kind, ask_id, name, title, body, evidence, action=None, due=None, into=None, family=False):
         """A card for a Fleet request the owner accepted (fleet_requests.py), made from this Machine's own data. Its
         first evidence is a Fleet event on one of the owner's work accounts, marked reviewed so no model reads it by
-        itself; an intro also gets its double-opt-in draft, which goes out only with the owner's own Send."""
+        itself; an intro also gets its double-opt-in draft, which goes out only with the owner's own Send. A Family's
+        to-do or plan (family.py) is a personal card on any of the owner's accounts, never a work one by necessity."""
         accounts = fleet.work_accounts(self.config)
+        if family:  # a personal account first
+            accounts = [a['id'] for a in self.config.get('accounts', []) if a['id'] not in accounts] + accounts
         with self.store.connect() as db:
             own = [r['account_id'] for r in db.execute(f"SELECT account_id FROM events WHERE id IN ({','.join('?' * len(evidence)) or 'NULL'})", evidence)]
         account = next((a for a in own if a in accounts), accounts[0] if accounts else None)
         if not account:
-            raise ValueError('this Machine has no work account')
+            raise ValueError('this Machine has no account' if family else 'this Machine has no work account')
         stamp, source_id = now(), 'fleet:' + str(ask_id)
-        meta = {'sender_display': f'{name} (your Fleet)', 'fleet_kind': kind}
+        meta = {'sender_display': f"{name} (your {'Family' if family else 'Fleet'})", 'fleet_kind': kind}
         with self.store.connect() as db:
             db.execute('INSERT OR IGNORE INTO events(account_id,source_id,kind,occurred_at,title,body,metadata,deleted,content_hash,version,analyzed_version,ingested_at) '
                        "VALUES(?,?,'fleet.request',?,?,?,?,0,?,1,1,?)",
@@ -6998,7 +7004,7 @@ class App:
                     db.execute('UPDATE suggestions SET event_ids=?,body=? WHERE id=?',
                                (json.dumps([*ids, event_id]), ((row['body'] or '') + '\n\n' + body[:700])[:2400], into))
             return into
-        card = self.store.suggest('fleet:' + str(ask_id), title[:90], body[:700], [event_id, *[e for e in evidence if e != event_id]], when='now', work=True, due=due)
+        card = self.store.suggest('fleet:' + str(ask_id), title[:90], body[:700], [event_id, *[e for e in evidence if e != event_id]], when='now', work=not family, due=due)
         if action and not card.get('duplicate'):
             with self.store.connect() as db:
                 row = db.execute('SELECT account_ids FROM suggestions WHERE id=?', (card['id'],)).fetchone()
@@ -7080,6 +7086,15 @@ class App:
             return self.fleet.network_action(str(args.get('do') or ''), str(args.get('email') or ''), str(args.get('relation') or ''))
         if name == 'fleet_availability':  # ask one friend's Machine when they are busy (busy blocks only)
             return self.fleet.ask_availability(str(args.get('member_id') or ''), str(args.get('start') or ''), args.get('days'))
+        if name == 'family_free':  # ask everyone in the Family when they are busy; the common free times show here
+            return self.fleet.ask_family_free(str(args.get('start') or ''), args.get('days'))
+        if name == 'family_todo':  # a to-do for one member, who accepts or declines it on their Machine
+            return self.fleet.propose_todo(str(args.get('member_id') or ''), str(args.get('title') or ''), str(args.get('due') or '') or None,
+                                           str(args.get('note') or ''))
+        if name == 'family_event':  # a plan for the Family (or some of it): each says yes or no; nothing is written to a calendar
+            return self.fleet.propose_event(str(args.get('title') or ''), str(args.get('start') or ''), str(args.get('end') or '') or None,
+                                            str(args.get('place') or ''), str(args.get('note') or ''),
+                                            [str(m) for m in args.get('to') or [] if isinstance(m, str)] or None)
         if name == 'fleet_meetings':
             self.fleet.set_meta('ask_meetings', bool(args.get('on')))
             return {'ask_meetings': self.fleet.meetings_on()}
@@ -8434,7 +8449,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

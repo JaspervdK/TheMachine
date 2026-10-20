@@ -565,6 +565,8 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .fleet-box{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:16px 20px;margin:0 0 14px;min-width:0}
 .fleet-box>h3{margin:0 0 4px;font-size:1rem}.fleet-box>.sub{margin:0 0 12px;color:var(--muted);font-size:.88rem;line-height:1.45}.fleet-box>h3+:not(.sub){margin-top:10px}
 .fleet-box .fleet-people{margin:0}.fleet-box .fleet-ask{margin:0 0 4px}.fleet-box .list{margin-top:12px}.fleet-box>:last-child{margin-bottom:0}
+/* Family (family.py): compact, self-contained */
+.family .fleet-ask input[type=date],.family .fleet-ask input[type=datetime-local],.family .fleet-ask select{flex:0 1 auto;min-width:0}.family-slots{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.family-list{list-style:none;padding:0;margin:8px 0 0;display:grid;gap:6px}.family-list li{line-height:1.35;overflow-wrap:anywhere}.family-sub{margin:10px 0 0;font-weight:600;font-size:.85rem}.family-cal{font-size:.85rem;white-space:nowrap}
 .fleet-pane>.fleet-rules-head{margin:22px 0 10px}.fleet-pane>.fleet-rules-head h3{margin:0 0 2px}.fleet-pane>.fleet-rules-head p{margin:0}
 .fleet-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:0 0 4px;font-size:.88rem;color:var(--muted)}.fleet-legend b{color:var(--text);font-weight:650;margin-right:4px}
 .fleet-never{margin:0 0 4px;font-size:.85rem}.fleet-rule-kind small{display:block;margin-top:2px;font-weight:400;font-size:.8rem;color:var(--muted)}
@@ -1138,7 +1140,7 @@ const FLEET_RULE={ask:'Ask me first',always:'Always answer',never:'Never'};
 // (how: the two "how much" choices; sees(company, withNames): what an answer says; ask(name): what Ask me first does).
 const FLEET_SEG={ask:'Ask me first',always:'Always',never:'Never'};
 const FLEET_SEG_HINT={ask:'You see each question and choose',always:'Answered by itself, without asking you',never:'They get “no”'};
-const FLEET_KIND_Q={relationships:'“Who knows someone at Acme?”',meeting:'“Who’s this guest in our meeting?”',handling:'“Who’s on this email we both got?”',
+const FLEET_KIND_Q={todo:'“Can you pick up the kids Friday?”',event:'“Dinner at grandma’s Sunday?”',relationships:'“Who knows someone at Acme?”',meeting:'“Who’s this guest in our meeting?”',handling:'“Who’s on this email we both got?”',
  intro:'“Can you introduce me?”',handoff:'“Can you take this over?”',availability:'“When are you busy?”',followup:'“Will you take your part of the follow-ups?”',brief:'“What did you see this week?”'};
 const FLEET_KIND_UI={
  relationships:{how:['Without names','With names'],sees:(c,d)=>`3 people at ${c} know them, one well${d?': Ann Lee (well), Bob Ray':''}`},
@@ -1147,7 +1149,9 @@ const FLEET_KIND_UI={
  intro:{sees:()=>'“accepted”, then “sent” once you send the intro your Machine drafts',ask:()=>'You see each intro asked of you; nothing is drafted or sent without you.'},
  handoff:{sees:()=>'“accepted”, then “done” when you finish the card',ask:()=>'You see each handoff with its summary, to accept or decline.'},
  availability:{sees:()=>'your busy times on those days, never what or with whom'},
- followup:{sees:()=>'that you took your part of a meeting’s follow-ups',ask:()=>'You see your part of a meeting’s follow-ups to accept, change or decline.'}};
+ followup:{sees:()=>'that you took your part of a meeting’s follow-ups',ask:()=>'You see your part of a meeting’s follow-ups to accept, change or decline.'},
+ todo:{sees:()=>'“accepted”, then “done” when you finish it',ask:()=>'You see each to-do to accept or decline.'},
+ event:{sees:()=>'“is in” or “can’t make it”; never your calendar',ask:()=>'You see each plan to say yes or no. Nothing is added to your calendar by itself.'}};
 const fleetFirst=n=>String(n||'').trim().split(/[\s(]/)[0]||'They';
 const fleetScopeText=sc=>sc?[sc.only.length?'only '+sc.only.join(', '):'',sc.never.length?'not '+sc.never.join(', '):'',sc.work_only?'':'personal accounts too'].filter(Boolean).join('; '):'';
 // The example under a rule, from made-up data. wide: the rule of a whole Fleet ("they"), else one person's.
@@ -1189,8 +1193,9 @@ const splitDay=v=>{const d=new Date(String(v).length<=10?v+'T12:00':v);if(isNaN(
 const splitWho=p=>{if(p.mine)return 'You';const m=/^(.*?) \(([^()]+@[^()]+)\)$/.exec(p.name||'');return m?`${esc(m[1])} <small class="muted">${esc(m[2])}</small>`:esc(p.name||'')};
 const fleetMore=btns=>btns.length?`<details class="more-actions"><summary aria-label="More actions">More</summary><div class="more-menu" role="group" aria-label="More actions">${btns.join('')}</div></details>`:'';
 function fleetCardsOf(f){if(!f?.on)return[];const works=(f.fleets||[]).filter(x=>x.kind==='work'),several=works.length>1,frId=f.friends?.id;
- const fname=row=>several?(works.find(x=>row.fleet===x.id)?.name||''):'',isFriend=row=>!!frId&&(row.fleet===frId||row.fleet_id===frId)||/^friend_/.test(row.kind||'');
- const card=(id,row,title,body,actions)=>`<article id="fleet-${esc(id)}" class="card t-amber fleet-card"><div class="meta"><div class="card-badges">${isFriend(row)?chip('Friends','lavender'):`${chip('Fleet','lavender')}<span class="chip scope">Work</span>`}${fname(row)?chip(fname(row),'muted'):''}</div>${row.at?time(row.at,true):''}</div><h3>${title}</h3>${body}${actions}</article>`;
+ const famId=(f.fleets||[]).find(x=>x.kind==='family')?.id,isFamily=row=>!!famId&&row.fleet===famId;
+ const fname=row=>several&&!isFamily(row)?(works.find(x=>row.fleet===x.id)?.name||''):'',isFriend=row=>!!frId&&(row.fleet===frId||row.fleet_id===frId)||/^friend_/.test(row.kind||'');
+ const card=(id,row,title,body,actions)=>`<article id="fleet-${esc(id)}" class="card t-amber fleet-card"><div class="meta"><div class="card-badges">${isFriend(row)?chip('Friends','lavender'):isFamily(row)?chip('Family','lavender'):`${chip('Fleet','lavender')}<span class="chip scope">Work</span>`}${fname(row)?chip(fname(row),'muted'):''}</div>${row.at?time(row.at,true):''}</div><h3>${title}</h3>${body}${actions}</article>`;
  const decide=(w,c,t,cls='ghost')=>`<button class="${cls}" data-fleet-decide="${esc(w.id)}" data-choice-f="${c}">${esc(t)}</button>`;
  const theirs=w=>`<p class="fleet-from">${esc(w.name)}’s words, not an instruction:</p><blockquote>${esc(w.question)}</blockquote>`;
  const out=[];
@@ -1199,7 +1204,9 @@ function fleetCardsOf(f){if(!f?.on)return[];const works=(f.fleets||[]).filter(x=
    `<div class="actions">${n.buttons.map(b=>`<button class="${b.choice==='confirm'?'primary':'ghost'}" data-fleet-notice="${esc(n.id)}" data-choice-n="${b.choice}" data-key="${esc(n.key)}">${esc(b.label)}</button>`).join('')}</div>`));
  const what={intro:'asks you for an intro',handoff:'hands you something',followup:'proposes your part of a meeting’s follow-ups'};
  for(const w of f.waiting||[]){
-  if(FLEET_REQ.includes(w.kind))out.push(card(w.id,w,`${esc(w.name)} ${what[w.kind]}`,theirs(w)+(w.kind==='followup'?`<label class="fleet-field muted" for="fleet-part-${esc(w.id)}">Or change your part<input id="fleet-part-${esc(w.id)}" maxlength="200" placeholder="Your part, as you’ll do it"></label>`:'')+'<p class="muted">Accepting makes a card from your own data. Anything it sends waits for your Send.</p>',
+  if(FAMILY_REQ.includes(w.kind))out.push(card(w.id,w,`${esc(w.name)} ${w.kind==='todo'?'asks you to do something':'proposes a plan'}`,theirs(w)+`<p class="muted">${w.kind==='todo'?'Accepting makes it your card, with a reminder when it’s due.':'Yes tells them you’re in. Nothing is added to your calendar by itself.'}</p>`,
+   `<div class="actions">${decide(w,'once',w.kind==='todo'?'Accept':'I’m in','primary')}${decide(w,'decline',w.kind==='todo'?'Decline':'Can’t make it')}${fleetMore([decide(w,'always','Always accept'),decide(w,'never','Never from '+w.name)])}</div>`));
+  else if(FLEET_REQ.includes(w.kind))out.push(card(w.id,w,`${esc(w.name)} ${what[w.kind]}`,theirs(w)+(w.kind==='followup'?`<label class="fleet-field muted" for="fleet-part-${esc(w.id)}">Or change your part<input id="fleet-part-${esc(w.id)}" maxlength="200" placeholder="Your part, as you’ll do it"></label>`:'')+'<p class="muted">Accepting makes a card from your own data. Anything it sends waits for your Send.</p>',
    `<div class="actions">${decide(w,'once','Accept','primary')}${w.kind==='followup'?`<button class="ghost" data-fleet-adjust="${esc(w.id)}">Accept my change</button>`:''}${decide(w,'decline','Decline')}${fleetMore([decide(w,'always','Always accept'),decide(w,'never','Never from '+w.name)])}</div>`));
   else if(w.kind==='anything'){const d=w.draft||{};out.push(card(w.id,w,`${esc(w.name)} asks your Fleet`,theirs(w)+((d.matches||[]).length?`<p class="muted">In your work accounts: ${d.matches.slice(0,5).map(m=>`${esc(m.title)} (${esc(m.at||'')})`).join(' · ')}</p>`:'<p class="muted">Nothing found in your work accounts. You can still answer.</p>')+`<label class="fleet-field muted" for="fleet-free-${esc(w.id)}">Your answer (only this goes to them)<textarea id="fleet-free-${esc(w.id)}" maxlength="600">${esc(d.text||'')}</textarea></label>`,
    `<div class="actions"><button class="primary" data-fleet-send="${esc(w.id)}">Send answer</button>${decide(w,'decline','Decline')}${fleetMore([decide(w,'never','Never from '+w.name)])}</div>`))}
@@ -1291,13 +1298,14 @@ async function fleetView(refresh=false,cached=false){const view=$('#fleet-view')
  const fr=f.friends,friendsHtml=friendsSection(f,notices);
  if(friendsHtml)panes.push({id:'friends',label:'Friends',badge:(fr?.in||[]).length,html:friendsHtml});
  {const net=networkSection(f);if(net)panes.push({id:'network',label:'Network',html:net})}
- if(family)panes.push({id:'family',label:family.name||'Family',html:head(family)+box('Coming later','','<p class="muted">A Family Fleet links your Machines. Its questions (who’s free, household admin, trips) are coming later.</p>')});
+ if(family)panes.push({id:'family',label:family.name||'Family',html:head(family,(family.people||[]).length)+familySection(f,family)});
  // Sharing: every rule in one place. What the three choices mean, once, at the top; per kind a plain question and an example.
- const friendsToo=!!fr&&(f.fleets.find(x=>x.id===fr.id)?.members||[]).length,rulesOf=works.filter(x=>x.members.length);
- if(rulesOf.length||friendsToo){
+ const friendsToo=!!fr&&(f.fleets.find(x=>x.id===fr.id)?.members||[]).length,rulesOf=works.filter(x=>x.members.length),familyToo=!!family&&family.members.length;
+ if(rulesOf.length||friendsToo||familyToo){
   let h=`<div class="fleet-legend" role="note"><span><b>Ask me first</b> you choose each time</span><span><b>Always</b> answered by itself</span><span><b>Never</b> they get “no”</span><span><b>Names</b> whether they hear who</span></div><p class="muted fleet-never">Never email content, never what your meetings are about.</p>`;
   for(const work of rulesOf)h+=fleetRules(work,f,several);
   h+=friendRules(f);
+  if(familyToo)h+=fleetRules(family,f,true);
   h+=box('Meetings and brief','',`<label class="fleet-option"><input type="checkbox" id="fleet-meetings"${f.ask_meetings?' checked':''}><span>${rulesOf.length?`Ask my Work ${several?'Fleets':'Fleet'}${friendsToo?', and a friend who is in the meeting,':''} about the outside people in my meetings this week`:'Ask a friend who is in one of my meetings this week about the other people in it'}<small class="muted">They see those email addresses.</small></span></label>${rulesOf.length?fleetBriefSettings(f):''}`,'fleet-settings');
   panes.push({id:'sharing',label:'Sharing',html:h})}
  panes.push({id:'activity',label:'Activity',html:(told.length?box('Lately','Who joined, asked for a server, had one started, or left.',`<div class="list">${told.map(noticeCard).join('')}</div>`):'')
@@ -1315,6 +1323,29 @@ async function fleetView(refresh=false,cached=false){const view=$('#fleet-view')
  view.innerHTML=html;view._fleetHTML=html;
  for(const draft of drafts){const form=[...view.querySelectorAll('form')].find(f=>f.className+'|'+(f.dataset.fleet||'')===draft.key);if(form)for(const [name,value]of draft.values){const input=form.elements.namedItem(name);if(input&&'value'in input)input.value=value}}
 }
+// Family (family.py): when everyone is free, to-dos for one another and plans to say yes or no to. Self-contained:
+// its forms post family_free, family_todo and family_event; what waits for you is a card under Suggestions.
+const FAMILY_REQ=['todo','event'];
+const familyWhen=v=>{const d=new Date(String(v).length<=10?v+'T12:00':v);if(isNaN(d))return esc(v);return esc(d.toLocaleString([],String(v).length<=10?{weekday:'short',day:'numeric',month:'short'}:{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}))};
+// A datetime-local value with this browser's offset, so every Machine reads the same moment.
+const familyMoment=v=>{if(!v)return '';const off=-new Date(v).getTimezoneOffset(),a=Math.abs(off);return `${v.slice(0,16)}${off<0?'-':'+'}${String(Math.floor(a/60)).padStart(2,'0')}:${String(a%60).padStart(2,'0')}`};
+function familySection(f,family){const fam=f.family||{free:[],todos:[],plans:[],mine:[]},people=(family.people||[]).filter(p=>!p.me),today=new Date().toISOString().slice(0,10);
+ const who=`<ul class="fleet-people">${(family.people||[]).map(p=>`<li><strong>${esc(p.label||p.name)}</strong>${p.me?' <span class="muted">(you)</span>':''}<br><small class="muted">${esc(p.answers_with||'')}</small></li>`).join('')}</ul>`;
+ if(!people.length)return `<div id="fleet-family" class="family">${who}<p class="muted">Nobody else yet. Invite your family from your account page.</p></div>`;
+ const opts=people.map(p=>`<option value="${esc(p.member_id)}">${esc(p.name)}</option>`).join(''),latest=fam.free[0];
+ const stage={accepted:'accepted',declined:'declined',done:'done',asked:'asked','waiting for them':'waiting'};
+ let h=`<div id="fleet-family" class="family">${who}`;
+ h+=`<div class="fleet-box family-free"><h3>When are we all free?</h3><form class="fleet-ask family-free-form"><input type="date" name="start" required value="${today}" aria-label="From"><select name="days" aria-label="For">${[1,2,3,7,14].map(d=>`<option value="${d}"${d===7?' selected':''}>${d} day${d>1?'s':''}</option>`).join('')}</select><button class="primary">Ask everyone</button></form>`
+  +(latest?`<p class="muted">${latest.answered+1} of ${latest.asked+1} calendars${latest.waiting.length?` · waiting for ${esc(latest.waiting.join(', '))}`:''}</p>${latest.slots.length?`<div class="family-slots">${latest.slots.map(s=>`<span class="chip">${esc(s.text)}</span>`).join('')}</div>`:'<p class="muted">No common free time, 8:00 to 21:00.</p>'}`:'<p class="muted">Busy times only, never what. Free times are between 8:00 and 21:00, at least an hour.</p>')+'</div>';
+ h+=`<div class="fleet-box family-todos"><h3>To-dos</h3><form class="fleet-ask family-todo-form"><select name="member" aria-label="For">${opts}</select><input name="title" maxlength="120" required placeholder="Pick up the groceries" aria-label="What"><input type="date" name="due" aria-label="Due (optional)"><button>Ask</button></form>`
+  +((fam.mine||[]).length?`<p class="family-sub">Yours</p><ul class="family-list">${fam.mine.map(t=>`<li>${esc(t.title)} <small class="muted">· from ${esc(t.name)}${t.due?' · '+familyWhen(t.due):''}${t.stage==='waiting'?' · waits for you in Suggestions':''}</small></li>`).join('')}</ul>`:'')
+  +(fam.todos.length?`<p class="family-sub">Asked</p><ul class="family-list">${fam.todos.map(t=>`<li>${esc(t.title)} <small class="muted">· ${esc(t.name)} · ${esc(stage[t.stage]||t.stage)}${t.due?' · '+familyWhen(t.due):''}</small></li>`).join('')}</ul>`:'')+'</div>';
+ h+=`<div class="fleet-box family-plans"><h3>Plans</h3><form class="fleet-ask family-event-form"><input name="title" maxlength="120" required placeholder="Dinner at grandma’s" aria-label="What"><input type="datetime-local" name="start" required aria-label="When"><input name="place" maxlength="120" placeholder="Where (optional)" aria-label="Where"><button>Propose to everyone</button></form>`
+  +(fam.plans.length?`<ul class="family-list">${fam.plans.map(p=>`<li><strong>${esc(p.title)}</strong> <small class="muted">· ${familyWhen(p.start)}${p.place?' · '+esc(p.place):''}</small><br><small>${p.yes.length?'In: '+esc(p.yes.join(', ')):''}${p.no.length?`${p.yes.length?' · ':''}Can’t: ${esc(p.no.join(', '))}`:''}${p.waiting.length?`${p.yes.length||p.no.length?' · ':''}<span class="muted">Waiting: ${esc(p.waiting.join(', '))}</span>`:''}</small> <a class="family-cal" href="${esc(p.link)}" target="_blank" rel="noopener">Add to my calendar</a></li>`).join('')}</ul>`:'<p class="muted">Each says yes or no on their Machine. Nothing is added to a calendar by itself.</p>')+'</div>';
+ return h+'</div>'}
+fleetOn('submit',async e=>{const t=e.target,act=t.classList.contains('family-free-form')?'family_free':t.classList.contains('family-todo-form')?'family_todo':t.classList.contains('family-event-form')?'family_event':'';if(!act)return;e.preventDefault();
+ const v=n=>t.elements[n]?.value.trim()||'',args=act==='family_free'?{start:v('start'),days:Number(v('days'))}:act==='family_todo'?{member_id:v('member'),title:v('title'),due:v('due')}:{title:v('title'),start:familyMoment(v('start')),place:v('place')};
+ try{await fleetPost(act,args);if(act!=='family_free')t.reset();toast({family_free:'Asked everyone. Free times show here as they answer.',family_todo:'Asked. It shows as accepted once they take it.',family_event:'Proposed. Yes and no show here.'}[act]);await fleetView()}catch(err){toast(err.message,true)}});
 // Friends (friends.py): add by username, requests both ways, your friends with the Machine they answer with, asking them,
 // and your rules per friend (the same rule component as teammates). Friends see nothing of your Fleets.
 const friendBtn=(label,attrs,cls='ghost',confirmText='')=>`<button type="button" class="${cls}" ${attrs}${confirmText?` data-confirm-text="${esc(confirmText)}"`:''}>${esc(label)}</button>`;

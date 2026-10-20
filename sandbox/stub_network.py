@@ -2,6 +2,7 @@
 /answer, /decide, /claim(s), /friends, /me), answered from memory. Teammates and friends are the fixture's invented
 people; their Machines answer a question a few seconds after it is asked, so asking, handing off and adding friends
 behave as they would. Nothing leaves this machine."""
+import datetime as dt
 import json
 import secrets
 import sys
@@ -48,7 +49,7 @@ class Network:
             if kind in self.groups:
                 group = self.net[kind]
                 fleets.append({'id': group['id'], 'kind': kind, 'name': group['name'], 'asks': ['relationships', 'meeting', 'brief', 'anything',
-                               'intro', 'handoff', 'followup'] if kind == 'work' else [], 'me': {'member_id': self.net['owner']['member_id'], 'role': 'owner'},
+                               'intro', 'handoff', 'followup'] if kind == 'work' else ['availability', 'todo', 'event'], 'me': {'member_id': self.net['owner']['member_id'], 'role': 'owner'},
                                'members': [self.me()] + [self.member(m) for m in group['team']]})
         if 'friends' in self.groups:
             fleets.append({'id': self.net['friends']['id'], 'kind': 'friends', 'name': 'Friends', 'username': self.net['owner']['username'],
@@ -74,8 +75,11 @@ class Network:
             return {'text': ['Not that I know of. Tomasz met them in September, I think.', 'Yes, I spoke to their ops lead on Monday.'][index % 2]}
         if kind in ('intro', 'handoff', 'followup'):
             return {'stage': 'accepted'}
-        if kind == 'availability':
-            return {'busy': []}
+        if kind in ('todo', 'event'):
+            return {'stage': 'accepted'} if index == 0 else None
+        if kind == 'availability':  # the first one busy most mornings, from tomorrow
+            day = dt.datetime.now(dt.timezone.utc).date() + dt.timedelta(days=1)
+            return {'busy': [[f'{day + dt.timedelta(days=n)}T07:00Z', f'{day + dt.timedelta(days=n)}T10:30Z'] for n in range(7)] if index == 0 else []}
         return None
 
     def answer_later(self, ids, kind):

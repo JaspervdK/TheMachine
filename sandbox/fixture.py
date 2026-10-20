@@ -17,7 +17,8 @@ OWNER = {'name': 'Alex Morgan', 'email': 'alex@lumenlabs.example', 'company': 'L
 TEAM = [{'member_id': 'm_team_priya', 'name': 'Priya Okonedo', 'email': 'priya@lumenlabs.example', 'role': 'member', 'machine': True},
         {'member_id': 'm_team_tomasz', 'name': 'Tomasz Varga', 'email': 'tomasz@lumenlabs.example', 'role': 'member', 'machine': True},
         {'member_id': 'm_team_ines', 'name': 'Ines Calloway', 'email': 'ines@lumenlabs.example', 'role': 'member', 'machine': False}]
-FAMILY = [{'member_id': 'm_fam_robin', 'name': 'Robin Morgan', 'email': 'robin@mail.example', 'role': 'member', 'machine': True}]
+FAMILY = [{'member_id': 'm_fam_robin', 'name': 'Robin Morgan', 'email': 'robin@mail.example', 'role': 'member', 'machine': True},
+          {'member_id': 'm_fam_jules', 'name': 'Jules Morgan', 'email': 'jules@mail.example', 'role': 'member', 'machine': True}]
 FRIENDS = [{'member_id': 'm_fr_sam', 'name': 'Sam Whitlock', 'username': 'sam-whitlock'},
            {'member_id': 'm_fr_dana', 'name': 'Dana Kerrigan', 'username': 'dana-k'}]
 FRIEND_REQUEST_IN = {'name': 'Lee Fontaine', 'username': 'lee-fontaine'}
@@ -235,6 +236,8 @@ def build(profile):
             {'id': 'fa_sandbox0003', 'fleet': 'work', 'from': 'm_team_priya', 'kind': 'handoff',
              'question': {'title': 'Answer Harborline Health about SSO', 'summary': 'Their IT lead wants SAML before the pilot. I am out Thursday and Friday.', 'contact': people[3]['email']}},
             {'id': 'fa_sandbox0004', 'fleet': 'work', 'from': 'm_team_ines', 'kind': 'intro', 'question': {'about': 'kestrelenergy.example', 'note': 'They are expanding to the Nordics'}},
+            {'id': 'fa_sandbox0005', 'fleet': 'family', 'from': 'm_fam_robin', 'kind': 'todo', 'question': {'title': 'Pick up the kids from football', 'due': '2026-10-23', 'note': 'I have the dentist at 4'}},
+            {'id': 'fa_sandbox0006', 'fleet': 'family', 'from': 'm_fam_jules', 'kind': 'event', 'question': {'title': 'Sunday lunch at grandma’s', 'start': '2026-10-25T12:30', 'place': 'Grandma’s'}},
         ],
         'notices': [
             {'id': 'fn_5a4db0c0ffee0004', 'kind': 'seat_request', 'fleet': 'work', 'fleet_id': 'fl_5a4db0c0ffee0001', 'fleet_name': 'Lumen Labs', 'status': 'open', 'version': 1,

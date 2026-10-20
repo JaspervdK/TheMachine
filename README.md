@@ -27,6 +27,7 @@ Follow [Getting started](docs/getting-started.md). The installer can help set up
 | Facts, people, projects, embeddings and enrichment | [Intelligence](docs/intelligence.md) |
 | Model/provider setup | [Models](docs/models.md) |
 | Work Fleets, Friends and the Network | [Fleet](docs/fleet.md) |
+| Family Fleets: free times, to-dos and plans | [Family](docs/family.md) |
 | Encryption, reliability and roadmap of the Network | [Network](docs/network.md) |
 | Add a connector | [Adding a source](docs/adding-a-source.md) |
 | Sandbox, screenshots and layout checks | [Development](docs/development.md) |

@@ -33,8 +33,8 @@ their answers, and the log.
 3. **No double replies.** When the same email reaches you and a teammate, the first one to take it on claims it. The
    other's card says "<teammate> is on it", with **I'll handle it** to take it over.
 
-A Family Fleet links your Machines but asks nothing yet. Its questions (who's free, the household calendar, bills and
-renewals, trips, birthdays, errands, care for parents) are designed and come later.
+A Family Fleet asks three things: when everyone is free, to-dos for one another, and family plans to say yes or no to.
+See [Family](family.md). Work questions never travel in a Family.
 
 ## Asking a teammate to do something
 

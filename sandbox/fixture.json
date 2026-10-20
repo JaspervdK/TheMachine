@@ -6332,6 +6332,13 @@
      "email": "robin@mail.example",
      "role": "member",
      "machine": true
+    },
+    {
+     "member_id": "m_fam_jules",
+     "name": "Jules Morgan",
+     "email": "jules@mail.example",
+     "role": "member",
+     "machine": true
     }
    ]
   },
@@ -6393,6 +6400,28 @@
     "question": {
      "about": "kestrelenergy.example",
      "note": "They are expanding to the Nordics"
+    }
+   },
+   {
+    "id": "fa_sandbox0005",
+    "fleet": "family",
+    "from": "m_fam_robin",
+    "kind": "todo",
+    "question": {
+     "title": "Pick up the kids from football",
+     "due": "2026-10-23",
+     "note": "I have the dentist at 4"
+    }
+   },
+   {
+    "id": "fa_sandbox0006",
+    "fleet": "family",
+    "from": "m_fam_jules",
+    "kind": "event",
+    "question": {
+     "title": "Sunday lunch at grandma’s",
+     "start": "2026-10-25T12:30",
+     "place": "Grandma’s"
     }
    }
   ],
