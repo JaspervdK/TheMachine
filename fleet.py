@@ -47,6 +47,7 @@ import urllib.request
 
 import graph
 import fleet_requests
+import friends
 
 LOG = logging.getLogger('personal-assistant')
 SCHEMA = '''
@@ -113,6 +114,13 @@ DECIDED = {'once': 'Answered once', 'always': 'Answered, and always from now on'
 ASKS['work'] += fleet_requests.KINDS
 RULE_KINDS['work'] += fleet_requests.KINDS
 KIND_LABEL.update(intro='warm intros', handoff='handoffs', followup='shared follow-ups')
+# Friends (friends.py): one more group in the directory, its own rules per friend, apart from the Fleets
+FLEET_NAMES['friends'] = 'Friends'
+ASKS['friends'] = RULE_KINDS['friends'] = friends.KINDS
+KIND_LABEL.update(availability='free/busy times', friend='friends')
+NO_DETAILS += ('availability',)
+NOTICE_KINDS += ('friend_request', 'friend_accepted')
+FLEET_ID = re.compile(r'(?:fl|fr)_[0-9a-f]{16}')  # a Fleet's id, or the owner's friends group
 
 
 class Off(Exception):
@@ -227,7 +235,8 @@ class Relay:
 
     def call(self, method, path, body=None, timeout=40):
         request = urllib.request.Request(self.url + path, method=method, data=json.dumps(body).encode() if body is not None else None,
-                                         headers={'Authorization': 'Bearer ' + self.token(), 'Content-Type': 'application/json'})
+                                         headers={'Authorization': 'Bearer ' + self.token(), 'Content-Type': 'application/json',
+                                                  'X-Machine-Friends': '1'})  # this Machine knows Friends (friends.py)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read() or b'{}')
@@ -598,6 +607,8 @@ def parse_question(kind, question):
     """A teammate's question in its fixed form, else None. Nothing else of it is ever read."""
     if kind in fleet_requests.KINDS:
         return fleet_requests.parse(kind, question)
+    if kind == 'availability':
+        return friends.parse_availability(question)
     if not isinstance(question, dict):
         return None
     if kind == 'relationships':
@@ -649,6 +660,8 @@ def clean_answer(kind, answer):
     """A teammate's answer, kept to the fields and shapes this Machine would send itself. None when it doesn't fit."""
     if kind in fleet_requests.KINDS:
         return fleet_requests.clean_answer(kind, answer)
+    if kind == 'availability':
+        return friends.clean_availability(answer)
     if not isinstance(answer, dict):
         return None
     def level(v):
@@ -693,6 +706,8 @@ def clean_answer(kind, answer):
 def question_text(kind, question):
     if kind in fleet_requests.KINDS:
         return fleet_requests.question_text(kind, question)
+    if kind == 'availability':
+        return friends.question_text(question)
     if kind == 'relationships':
         return 'Who knows someone at ' + question.get('about', '?') + '?'
     if kind == 'meeting':
@@ -767,7 +782,7 @@ def notice_clean(view):
     if not isinstance(view, dict) or not re.fullmatch(r'fn_[a-f0-9]{16}', str(view.get('id') or '')) or view.get('kind') not in NOTICE_KINDS:
         return None
     buttons = [{'choice': b['choice'], 'label': clean(b.get('label'), 40)} for b in view.get('buttons') or []
-               if isinstance(b, dict) and b.get('choice') in ('confirm', 'decline')] if view['kind'] == 'seat_request' else []
+               if isinstance(b, dict) and b.get('choice') in ('confirm', 'decline')] if view['kind'] in ('seat_request', 'friend_request') else []
     url = str(view.get('url') or '')
     try:
         version = int(view.get('version') or 1)
@@ -785,7 +800,8 @@ def notice_clean(view):
 def notice_push(view, root):
     """The phone notification for a notice: its line, opening the Fleet tab at it."""
     title = {'seat_request': 'Your Fleet asks you', 'seat_confirmed': 'Your server was confirmed',
-             'seat_declined': 'Your server was not confirmed'}.get(view['kind'], 'Your Fleet')
+             'seat_declined': 'Your server was not confirmed', 'friend_request': 'Friend request',
+             'friend_accepted': 'Friends now'}.get(view['kind'], 'Your Fleet')
     return {'title': title, 'body': view['text'], 'url': (root + '#fleet=' + view['id']) if root else view['url'],
             'tag': 'fleet-' + view['id']}
 
@@ -793,7 +809,7 @@ def notice_push(view, root):
 def notice_message(view, root):
     """The Telegram message for a notice. A seat request waiting for the owner: its line, the fine print, Confirm
     (with the amount) and Decline; once settled, its outcome. Anything else: its line and Open."""
-    text = view['text'] + (f"\n\n{view['detail']}" if view['detail'] and (view['buttons'] or view['kind'] != 'seat_request') else '')
+    text = view['text'] + (f"\n\n{view['detail']}" if view['detail'] and (view['buttons'] or view['kind'] not in ('seat_request', 'friend_request')) else '')
     if view['outcome']:
         text += f"\n\n→ {view['outcome']}"
     buttons = []
@@ -826,6 +842,8 @@ def answer_text(kind, answer):
     """One plain line of an answer: for the dashboard, the log and preparations."""
     if kind in fleet_requests.KINDS:
         return fleet_requests.answer_text(kind, answer)
+    if kind == 'availability':
+        return friends.answer_text(answer)
     if not answer:
         return 'no answer'
     if kind == 'brief':
@@ -941,7 +959,7 @@ def brief_text(view):
 
 # ---------------------------------------------------------------- the Fleet on this Machine
 
-class Fleet(fleet_requests.Requests):
+class Fleet(fleet_requests.Requests, friends.Friends):
     def __init__(self, connect, config, token, relay=None):
         self.connect, self.config = connect, config
         self.relay = relay or Relay(settings(config)['url'], token)
@@ -1083,8 +1101,13 @@ class Fleet(fleet_requests.Requests):
         if kind == 'brief':
             secret = (self.fleets().get(self.ref(fleet or 'work')) or {}).get('secret') or ''
             return brief_facts(db, self.fleet_accounts(fleet or 'work'), question['since'], secret, self.internal(fleet or 'work'))
+        if kind == 'availability':  # a friend's free/busy question: busy blocks only (friends.py)
+            return friends.free_busy(db, self.config, question)
         if kind == 'relationships':
             return relationships(db, question['about'], accounts, details, keep)
+        if self.kind_of(fleet or 'work') == friends.KIND:  # a friend's meeting: never about the owner themselves
+            mine = {e.lower() for e in account_emails(self.config)} | {str(a.get('email') or '').lower() for a in self.config.get('accounts', [])}
+            question = {**question, 'emails': [e for e in question['emails'] if e not in mine]}
         return meeting(db, question['emails'], accounts, details, keep)
 
     def take_ask(self, ask):
@@ -1246,7 +1269,7 @@ class Fleet(fleet_requests.Requests):
         told = []
         for row in rows:
             view = json.loads(row['view'])
-            if row['status'] != 'open' if view['kind'] == 'seat_request' else row['at'] < old:
+            if row['status'] != 'open' if view['kind'] in ('seat_request', 'friend_request') else row['at'] < old:
                 continue
             message, key = self.notice_telegram(row)
             try:
@@ -1267,7 +1290,7 @@ class Fleet(fleet_requests.Requests):
         if choice not in ('confirm', 'decline'):
             raise ValueError('Choose confirm or decline')
         row = self.notice(nid)
-        if not row or row['kind'] != 'seat_request':
+        if not row or row['kind'] not in ('seat_request', 'friend_request'):
             raise ValueError('No such request')
         found = self.relay.call('POST', '/decide', {'id': row['id'], 'choice': choice, 'key': key or '', 'via': via}, timeout=40)
         view = notice_clean(found.get('notice')) or json.loads(row['view'])
@@ -1277,7 +1300,7 @@ class Fleet(fleet_requests.Requests):
             db.execute('UPDATE fleet_notices SET status=?,version=MAX(version,?),view=?,decided_at=?,reason=? WHERE id=?',
                        (view['status'], view['version'], json.dumps(view), now() if status in ('confirmed', 'declined') else None, reason, row['id']))
             name = view['text'].split(' wants ')[0]
-            self.log(db, 'in', view['fleet'], None, name, 'seat', view['text'],
+            self.log(db, 'in', view['fleet_id'] or view['fleet'], None, name, 'friend' if row['kind'] == 'friend_request' else 'seat', view['text'],
                      {'confirmed': f'confirmed ({via})', 'declined': f'declined ({via})'}.get(status, 'nothing done: ' + reason))
         if via != 'telegram' and row['telegram_message_id']:
             self.retell_notice_now(row['telegram_message_id'])
@@ -1730,6 +1753,8 @@ class Fleet(fleet_requests.Requests):
         if stamp - self.last['meetings'] > MEETINGS_EVERY or not wait:
             self.last['meetings'] = stamp
             self.meeting_round()
+            if self.meetings_on():
+                self.friends_meeting_round()
         if stamp - self.last.get('requests', 0.0) > MEETINGS_EVERY or not wait:
             self.last['requests'] = stamp
             self.requests_round()
@@ -1771,7 +1796,8 @@ class Fleet(fleet_requests.Requests):
                        for r in db.execute("SELECT * FROM fleet_in WHERE status='waiting' ORDER BY at DESC LIMIT 50")]
             asked = [{**{k: r[k] for k in ('id', 'fleet', 'member_id', 'name', 'kind', 'context', 'status', 'at', 'answered_at')},
                       'question': question_text(r['kind'], json.loads(r['question'])),
-                      'answer': answer_text(r['kind'], json.loads(r['answer'])) if r['answer'] else None}
+                      'answer': answer_text(r['kind'], json.loads(r['answer'])) if r['answer'] else None,
+                      **({'busy': json.loads(r['answer']).get('busy', [])} if r['kind'] == 'availability' and r['answer'] else {})}
                      for r in db.execute("SELECT * FROM fleet_out WHERE (context IS NULL OR (context NOT LIKE 'card:%' AND context NOT LIKE 'brief:%' "
                                          "AND context NOT LIKE 'free:%')) ORDER BY at DESC LIMIT 60")]
             free = self.free_asked(db)
@@ -1787,7 +1813,7 @@ class Fleet(fleet_requests.Requests):
                                      'rules': {k: (lambda r: r if r['rule'] in KIND_RULES.get(k, RULES) else {**r, 'rule': 'ask'})(
                                          rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False})) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(ref)]})
-        return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
+        return {'on': True, 'off': self.off, 'fleets': out, 'friends': self.friends_view(), 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
                 **self.requests_view(), 'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),
                 'kind_rules': {k: list(KIND_RULES.get(k, RULES)) for k in KIND_LABEL}, 'no_details': list(NO_DETAILS),
                 'scoped': list(SCOPED), 'scopes': scopes}
@@ -1810,7 +1836,7 @@ class Fleet(fleet_requests.Requests):
     def summary(self):
         with self.connect() as db:
             waiting = db.execute("SELECT COUNT(*) FROM fleet_in WHERE status='waiting'").fetchone()[0]
-            waiting += db.execute("SELECT COUNT(*) FROM fleet_notices WHERE kind='seat_request' AND status='open'").fetchone()[0]
+            waiting += db.execute("SELECT COUNT(*) FROM fleet_notices WHERE kind IN ('seat_request','friend_request') AND status='open'").fetchone()[0]
         return {'on': True, 'waiting': waiting + self.proposals()}
 
     def annotate(self, db, suggestions):

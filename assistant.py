@@ -338,6 +338,9 @@ OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', '
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_split', 'fleet_split_dismiss', 'fleet_split_adjust'}
 OWNER_ACTIONS |= FLEET_REQUEST_ACTIONS
+# Friends (friends.py): adding, accepting, removing and blocking friends, and asking a friend when they are free.
+FRIEND_ACTIONS = {'fleet_friend', 'fleet_availability'}
+OWNER_ACTIONS |= FRIEND_ACTIONS
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -7008,6 +7011,11 @@ class App:
                                        args.get('rule'), args.get('details'), args.get('scope'))
         if name == 'fleet_take':
             return self.fleet.take_over(str(args.get('suggestion_id') or ''))
+        if name == 'fleet_friend':  # add by username; withdraw, accept, decline or block a request; remove, block or unblock a friend
+            return self.fleet.friend_action(str(args.get('do') or ''), str(args.get('username') or ''), str(args.get('id') or ''),
+                                            str(args.get('member_id') or ''))
+        if name == 'fleet_availability':  # ask one friend's Machine when they are busy (busy blocks only)
+            return self.fleet.ask_availability(str(args.get('member_id') or ''), str(args.get('start') or ''), args.get('days'))
         if name == 'fleet_meetings':
             self.fleet.set_meta('ask_meetings', bool(args.get('on')))
             return {'ask_meetings': self.fleet.meetings_on()}
@@ -8362,7 +8370,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

@@ -9,6 +9,8 @@ There are two kinds:
 - a **Work Fleet**: you and your teammates;
 - a **Family Fleet**: you and the people you live with.
 
+Next to the Fleets you can have **Friends**: people whose Machines help yours one to one (see "Friends").
+
 You can be in several Work Fleets, ones you started and ones you joined, and one Family Fleet. Your Machine answers in
 each and keeps them apart: each Fleet has its own people, its own rules per teammate and its own questions, and the
 Fleet tab shows each Work Fleet as its own section. Asking from a Fleet's section asks only that Fleet; "Ask the Fleet
@@ -201,3 +203,35 @@ way. You can disconnect it from your account at any time; its key then stops wor
 Pairing is free. While a self-hosted Machine answers for someone in a Fleet, the relay costs €4 a month for that
 member, plus VAT where it applies, paid by the Fleet's owner and confirmed before it starts; nothing while the Fleet is
 free.
+
+## Friends
+
+Friends are people outside your Fleets whose Machines can help yours, one to one. Each person has a **username**: on a
+hosted Machine it is your Machine's address name, and you can change it on your account page. A self-hosted Machine
+paired with your account (see above) claims a username too.
+
+- **Adding someone.** In the Fleet tab under **Friends**, or on your account page, type their exact username and send a
+  request. There is no directory and no search, and a request looks the same whether or not that name exists. Nothing
+  connects until they accept.
+- **A request for you** shows in the Fleet tab and on your account page, as a Telegram message with Accept and Decline,
+  and as a phone notification. Only you can answer it; a tap on an old message does nothing.
+- **Remove or block** a friend, or block a request, at any time. Blocking is silent: their requests are dropped from
+  then on. You can unblock later.
+
+What a friend's Machine can ask yours, each under the rules you set for that friend (Ask me first by default, Without
+names by default, and Always or Never per kind):
+
+1. **Who knows someone at X?**, the same short answer as for a teammate.
+2. **Meeting context**, only for a meeting that friend is in too.
+3. **A warm intro**: you see the request with Accept and Decline; nothing is drafted before you accept, and nothing
+   goes out without your Send.
+4. **When are you busy?** For one to fourteen days, your Machine answers from your own calendars with busy times only:
+   start and end, never what, where or with whom. All-day events, events you declined and calendars shared with you
+   by someone else don't count.
+
+Friends are kept apart from your Fleets: a friend sees nothing of your Fleets, your Fleet rules don't apply to
+friends, and your friends' rules don't apply to teammates. A friend's questions and answers are treated as data: kept
+to their fixed form, and never given to your AI, its tools or Do it.
+
+Friends are free between hosted Machines. For a self-hosted Machine they are included in the relay fee, at no extra
+charge.
