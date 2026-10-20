@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {createServer} from 'node:http';
+import {OPENCLAW} from './openclaw-root.mjs';
+const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs');
+
+// Connections: an expired Google sign-in names the problem and shows the exact command that signs in again
+// where the assistant reads it (the file keyring, by its password file's path), with a copy button. All mocked.
+const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
+const command='GOG_KEYRING_BACKEND=file GOG_KEYRING_PASSWORD="$(cat /home/owner/private/keyring-password)" gog auth add owner@example.com --client existing';
+const connectors=[{id:'work-gmail',service:'gmail',email:'owner@example.com',boundary:'work:Example',display_name:'owner@example.com',
+ error:'gmail:google_signin_expired_run_gog_auth_add',retry_at:new Date(Date.now()+3600e3).toISOString(),failures:2,sign_in_command:command,
+ sync_activity:[{at:new Date().toISOString(),status:'failed',error:'gmail:google_signin_expired_run_gog_auth_add'}]}];
+const server=createServer((req,res)=>{
+ const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
+ if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
+ if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},connectors,review_runs:[]}));return}
+ res.statusCode=404;res.end('{}');
+});
+await new Promise(r=>server.listen(0,'127.0.0.1',r));
+const errors=[];let browser;
+try{
+ browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+ const context=await browser.newContext({viewport:{width:390,height:844}}),page=await context.newPage();
+ await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:'http://127.0.0.1:'+server.address().port});
+ await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
+ page.on('pageerror',e=>errors.push(e.message));
+ await page.goto('http://127.0.0.1:'+server.address().port);
+ await page.locator('nav [data-tab="health"]').click();
+ const pre=page.locator('#connectors .signin-command');await pre.waitFor();
+ assert.equal(await pre.textContent(),command);
+ const card=await page.locator('#connectors').textContent();
+ assert.match(card,/Google sign-in for Email expired\. Run this in a terminal on this computer/);
+ assert.doesNotMatch(card,/Please reconnect this account/);
+ await page.locator('#connectors [data-copy-command]').click();
+ await page.locator('#toast',{hasText:'Copied.'}).waitFor();
+ assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),command);
+ assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ assert.deepEqual(errors,[]);
+ console.log('signin command dashboard ok');
+}finally{await browser?.close();server.close()}

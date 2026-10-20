@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import os
+import threading
 import types
 from pathlib import Path
 import tempfile
@@ -638,6 +640,34 @@ class CalendarInvariants(unittest.TestCase):
         self.assertEqual(str(error.exception), 'calendar:google_signin_expired_run_gog_auth_add')
         self.assertNotIn('@', str(error.exception))
         self.assertEqual(error.exception.retry_after, 3600)
+
+    def test_expired_google_signin_shows_the_file_keyring_command(self):
+        config = {'credentials': {'gog-password': '~/private/keyring password'}}
+        command = assistant.gog_signin_command(config, self.account)
+        path = str(Path('~/private/keyring password').expanduser())
+        self.assertEqual(command, f"GOG_KEYRING_BACKEND=file GOG_KEYRING_PASSWORD=\"$(cat '{path}')\" gog auth add owner@example.com --client existing")
+        self.assertEqual(assistant.gog_signin_command({}, self.account), 'gog auth add owner@example.com --client existing')
+
+    def test_expired_google_signin_retries_once_signed_in_again(self):
+        keyring = Path(self.temp.name) / 'keyring'; keyring.mkdir()
+        app = object.__new__(assistant.App)
+        app.config, app.store, app.stop = {'gog_keyring_dir': str(keyring)}, self.store, threading.Event()
+        self.store.failed(self.account['id'], assistant.SourceError('calendar:google_signin_expired_run_gog_auth_add', retry_after=3600))
+        with self.store.connect() as db:
+            row = db.execute('SELECT retry_at,error,error_at FROM checkpoints WHERE account_id=?', (self.account['id'],)).fetchone()
+        token = assistant.gog_token_path(app.config, self.account)
+        self.assertEqual(token.parent, keyring)
+        token.write_text('old'); os.utime(token, (0, 0))  # written before the failure: keep waiting
+        waits = []
+        def wait(seconds):
+            waits.append(seconds)
+            if len(waits) == 2: token.write_text('new')  # the owner signs in again meanwhile
+            return False
+        app.stop.wait = wait
+        self.assertFalse(app.wait_for_retry(self.account, row))
+        self.assertEqual(waits, [15, 15])
+        with self.store.connect() as db:
+            self.assertIsNone(db.execute('SELECT retry_at FROM checkpoints WHERE account_id=?', (self.account['id'],)).fetchone()[0])
 
     def test_shared_calendar_is_exact_and_credentials_stay_separate(self):
         account = {**self.account, 'calendar_id': 'shared@example.com', 'boundary': 'personal:shared'}
