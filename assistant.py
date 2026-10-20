@@ -5071,10 +5071,14 @@ def push_notify(store, config, row, sender=None):
         payload = {'title': ('Reminder: ' if row.get('reminder') else '') + row['title'],
                    'body': plain(row['body']), 'url': root + '#card=' + row['id']}
     payload['tag'] = row['id']  # a newer notification for the same card replaces the older one
+    return push_send(store, config, subscriptions, payload, 'suggestion=' + row['id'], sender)
+
+
+def push_send(store, config, subscriptions, payload, label, sender=None):
     try:
         results = (sender or (lambda request: push_node(config, request)))({'action': 'send', 'subscriptions': subscriptions, 'payload': payload})['results']
     except (subprocess.TimeoutExpired, ValueError, KeyError) as error:
-        LOG.warning('push suggestion=%s error=%s', row['id'], type(error).__name__)
+        LOG.warning('push %s error=%s', label, type(error).__name__)
         return []
     with store.connect() as db:
         for result in results:
@@ -5082,8 +5086,30 @@ def push_notify(store, config, row, sender=None):
                 db.execute('DELETE FROM push_subscriptions WHERE endpoint=?', (result['endpoint'],))
             else:
                 db.execute('UPDATE push_subscriptions SET last_status=?,last_sent_at=? WHERE endpoint=?', (result['status'], now(), result['endpoint']))
-    LOG.info('push suggestion=%s statuses=%s', row['id'], ','.join(str(r['status']) for r in results))
+    LOG.info('push %s statuses=%s', label, ','.join(str(r['status']) for r in results))
     return results
+
+
+def fleet_push(store, config, rows, sender=None):
+    """Phone notification for Fleet questions waiting for the owner: who asks and what, nothing of the owner's."""
+    with store.connect() as db:
+        subscriptions = [dict(r) for r in db.execute('SELECT endpoint,p256dh,auth FROM push_subscriptions')]
+    if not subscriptions or not config.get('dashboard_host'):
+        return []
+    return push_send(store, config, subscriptions, fleet.push_payload(rows, fleet.dashboard_root(config)), 'fleet=' + rows[0]['id'], sender)
+
+
+def fleet_telegram(config, message, message_id=None, request=None):
+    """The Telegram message for Fleet questions (fleet.telegram_message), sent or brought up to date. Owner chat only."""
+    escape = lambda text: re.sub(r'([\\`*_{}\[\]()#+.!>|~-])', r'\\\1', text)
+    blocks = [{'type': 'buttons', 'buttons': [{'label': b['text'], 'action': {'type': 'url', 'url': b['url']} if b.get('url') else
+                                               {'type': 'callback', 'value': b['value']}} for b in row]} for row in message['buttons']]
+    args = {'action': 'edit' if message_id else 'send', 'channel': 'telegram', 'accountId': telegram_account(config),
+            'target': config.get('telegram_owner'), 'message': escape(message['text']),
+            'presentation': {'blocks': blocks or [{'type': 'buttons', 'buttons': []}]}}
+    if message_id:
+        args['messageId'] = str(message_id)
+    return (request or telegram_request)(config, args)
 
 
 def telegram(config, row, action, message_id=None):
@@ -5704,6 +5730,9 @@ class App:
         self.model_usage = None
         # The Fleet (fleet.py): only when the control plane put this Machine in one.
         self.fleet = fleet.Fleet(self.store.connect, config, lambda: credential(config, 'fleet')) if fleet.settings(config) and config.get('credentials', {}).get('fleet') else None
+        if self.fleet:
+            self.fleet.notify = self.fleet_notify
+            self.fleet.retell = lambda message_id: threading.Thread(target=self.fleet_retell, args=(message_id,), daemon=True).start()
 
     def gmail_message(self, account_id, message_id):
         account = next(a for a in self.config['accounts'] if a['id'] == account_id)
@@ -6244,12 +6273,33 @@ class App:
                 delay = 60
             self.stop.wait(delay)
 
+    def fleet_notify(self, rows):
+        """Questions waiting for the owner: a phone notification, and a Telegram message with quick buttons when
+        Telegram is on. Returns the Telegram message id, which binds those buttons to these questions."""
+        fleet_push(self.store, self.config, rows)
+        if not telegram_on(self.config):
+            return None
+        result = fleet_telegram(self.config, fleet.telegram_message(rows, fleet.dashboard_root(self.config)))
+        message_id = str(result.get('messageId') or '')
+        return message_id if re.fullmatch(r'\d+', message_id) else None
+
+    def fleet_retell(self, message_id):
+        try:
+            message = self.fleet.telegram_view(message_id)
+            if message and telegram_on(self.config):
+                fleet_telegram(self.config, message, message_id)
+        except Exception as error:
+            LOG.warning('fleet telegram edit error=%s', type(error).__name__)
+
     def fleet_action(self, name, args, owner_dashboard):
-        """The owner's Fleet controls. Only from the owner's own dashboard: never Telegram, an agent or a teammate."""
-        if not owner_dashboard:
+        """The owner's Fleet controls. From the owner's own dashboard; the one exception is a tap on the Telegram
+        message sent for that very question (the plugin's owner key). Never an agent or a teammate."""
+        if not owner_dashboard and not (name == 'fleet_decide' and args.get('source') == 'telegram'):
             raise ValueError('The Fleet is set from the dashboard')
         if not getattr(self, 'fleet', None):
             raise ValueError('This Machine is not in a Fleet')
+        if not owner_dashboard:
+            return self.fleet.decide_from_telegram(str(args.get('id') or ''), args.get('choice'), args.get('message_id'))
         if name == 'fleet_ask':
             kind = args.get('kind')
             question = fleet.parse_question(kind, args.get('question'))

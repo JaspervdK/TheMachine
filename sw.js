@@ -9,12 +9,15 @@ self.addEventListener('push', event => {
     body: data.body || '', tag: data.tag || undefined, renotify: !!data.tag,
     icon: 'brand/app-icon-192.png', badge: 'brand/app-icon-badge-96.png',
     data: {url: new URL(data.url || '.', self.registration.scope).href},
+    // Fleet questions: Answer once and Decline open the dashboard at the question, which asks to confirm.
+    actions: Array.isArray(data.actions) ? data.actions.slice(0, 2) : [],
   }));
 });
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const url = event.notification.data?.url || self.registration.scope;
+  let url = event.notification.data?.url || self.registration.scope;
+  if (['once', 'decline'].includes(event.action) && /#fleet=q_[a-f0-9]{16}$/.test(url)) url += '&choice=' + event.action;
   event.waitUntil((async () => {
     const open = await self.clients.matchAll({type: 'window', includeUncontrolled: true});
     const client = open.find(c => c.url.startsWith(self.registration.scope));

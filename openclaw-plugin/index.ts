@@ -15,7 +15,9 @@ const taskActions=(item:any)=>{
  const emailReady=choices.some((a:any)=>['email','email_demo','linkedin','slack','x','whatsapp','merge','finish'].includes(a.kind));
  return choices.filter((a:any)=>a.kind!=='prepare'||(!emailReady&&!/^Draft (shorter|longer|another|alternative|follow-up)\b/i.test(a.label||'')));
 };
-const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge']);
+const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'fleet_decide']);
+// The service lays out its Fleet question message; callbacks get the same wire format as card buttons.
+const fleetButtons=(rows:any[])=>rows.map(row=>row.map((b:any)=>b.url?{text:b.text,url:b.url}:{text:b.text,callback_data:buildCallback(b.value)}));
 const TOOL_ACTIONS = ['status', 'events', 'begin_analysis', 'analysis_page', 'finish_analysis', 'suggest', 'prepare', 'preparation_blocked', 'preparation_history', 'remember_fact', 'looks_handled', 'promise', 'related', 'graph', 'profile_evidence', 'save_profile'];
 // dismiss_handled stays for older cards; the service records that reason as done.
 const DISMISS_REASONS: Record<string,string> = {dismiss_irrelevant:'Not relevant', dismiss_handled:'Already handled', dismiss_wrong:'Wrong facts'};
@@ -171,6 +173,20 @@ export default definePluginEntry({
         const config = await settings();
         if (!ctx.auth.isAuthorizedSender || ctx.isGroup || ctx.accountId !== (config.telegram_account || 'default') ||
             String(ctx.senderId) !== config.telegram_owner || String(ctx.callback.chatId) !== config.telegram_owner) {
+          return { handled: true };
+        }
+        // A Fleet question waiting for the owner. The service accepts the tap only from the message it sent for it.
+        const fleetTap = /^assistant:fleet:(q_[a-f0-9]{16}):(once|always|decline)$/.exec(ctx.callback.data);
+        if (fleetTap) {
+          let result;
+          try { result = await call('fleet_decide', { id: fleetTap[1], choice: fleetTap[2], source: 'telegram',
+            message_id: String(ctx.callback.messageId), decision_id: `telegram:${ctx.callbackId}` }); }
+          catch (error:any) {
+            if (error.status !== 400) throw error;
+            await ctx.respond.clearButtons();
+            return { handled: true };
+          }
+          if (result?.message) await ctx.respond.editMessage({ text: result.message.text, buttons: fleetButtons(result.message.buttons) });
           return { handled: true };
         }
         const match = /^assistant:([a-f0-9]{16}):(accept|reject|snooze|other|complete|undo|unmerge|retry|back|snooze_(?:2h|tomorrow|3d|1w)|dismiss_(?:irrelevant|handled|wrong|other|none)|(?:send|confirm|next)_[a-f0-9]{12}|confirm_[a-f0-9]{12}_[0-5])$/.exec(ctx.callback.data);

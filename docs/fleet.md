@@ -45,10 +45,15 @@ itself:
 - **Off by default.** Joining a Fleet only makes your Machine reachable. The first question from a teammate waits for
   you in the Fleet tab: **Answer once**, **Always**, **Decline** or **Never**. Always and Never become your rule for
   that teammate and that kind of question.
+- **You hear about it.** A waiting question sends one phone notification (if you turned them on in the dashboard
+  app) and, with Telegram connected, one Telegram message with **Answer once**, **Always** and **Decline**. Questions
+  that arrive within a minute share one. They say who asks and what, never anything of yours. A tap on the phone
+  notification opens the question in the Fleet tab and asks you to confirm.
 - **Rules:** per teammate and per kind (who knows someone, meeting context, who handles shared emails): Ask me first,
   Always answer or Never, plus Details. Shared-email claims are Off until you choose Share.
 - **Only from your dashboard.** Rules and approvals can't be changed by Telegram, the command line, the API token or the
-  assistant. A prompt in an email can't change who gets told what.
+  assistant. The one exception: the buttons on the Telegram message sent for that very question, tapped by you in your
+  own chat. Never is only on the dashboard. A prompt in an email can't change who gets told what.
 - **A log** in the Fleet tab shows every question asked or answered, both ways.
 
 ## Safe by construction

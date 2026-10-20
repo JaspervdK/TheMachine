@@ -222,6 +222,95 @@ class Fleet(unittest.TestCase):
         self.assertEqual([p['email'] for p in people], ['sam@client.example'])
         self.assertEqual(set(people[0]), {'email', 'closeness', 'last_contact', 'you_promised', 'they_promised'})
 
+    def test_waiting_questions_notify_once_together_with_nothing_of_the_owners(self):
+        from unittest.mock import patch
+        told = []
+        self.fleet.notify = lambda rows: told.append([r['id'] for r in rows]) or '77'
+        self.ask('relationships', {'about': 'client.example'}, 'q_' + 'a' * 16)
+        self.ask('meeting', {'emails': ['sam@client.example']}, 'q_' + 'b' * 16)
+        stamp = dt.datetime.now(dt.timezone.utc)
+        self.assertEqual(self.fleet.notify_round(stamp), [])  # still arriving: wait for the rest
+        self.assertEqual(self.fleet.notify_round(stamp + dt.timedelta(seconds=fleet.NOTIFY_SETTLE + 1)), ['q_' + 'a' * 16, 'q_' + 'b' * 16])
+        self.assertEqual(told, [['q_' + 'a' * 16, 'q_' + 'b' * 16]])
+        self.assertEqual(self.fleet.notify_round(stamp + dt.timedelta(seconds=120)), [])  # once each
+        with self.store.connect() as db:
+            self.assertEqual({r[0] for r in db.execute('SELECT telegram_message_id FROM fleet_in')}, {'77'})
+        # A steady trickle still tells the owner within a minute.
+        self.ask('relationships', {'about': 'eu.client.example'}, 'q_' + 'c' * 16)
+        later = stamp + dt.timedelta(seconds=fleet.NOTIFY_MAX + 1)
+        with self.store.connect() as db:
+            db.execute('UPDATE fleet_in SET at=? WHERE id=?', ((later - dt.timedelta(seconds=5)).isoformat(), 'q_' + 'c' * 16))
+        self.assertEqual(self.fleet.notify_round(later), [])
+        with self.store.connect() as db:
+            db.execute('UPDATE fleet_in SET at=? WHERE id=?', ((later - dt.timedelta(seconds=fleet.NOTIFY_MAX)).isoformat(), 'q_' + 'c' * 16))
+        self.ask('relationships', {'about': 'acme.example'}, 'q_' + 'd' * 16)
+        self.assertEqual(len(self.fleet.notify_round(later)), 2)
+        # What reaches the phone and Telegram: who asks and the question, never an answer or the owner's data.
+        with self.store.connect() as db:
+            db.execute("INSERT INTO push_subscriptions(endpoint,p256dh,auth,created_at) VALUES('https://push.example/1','k','a',?)", (NOW.isoformat(),))
+            rows = db.execute('SELECT * FROM fleet_in ORDER BY at,id').fetchall()
+        config = {**CONFIG, 'dashboard_host': 'machine.example', 'dashboard_path': '/', 'telegram_owner': '1000001'}
+        pushed = []
+        a.fleet_push(self.store, config, rows[:1], sender=lambda request: pushed.append(request['payload']) or {'results': []})
+        self.assertEqual(pushed[0]['title'], "Pat's Machine asks")
+        self.assertEqual(pushed[0]['body'], 'Who knows someone at client.example?')
+        self.assertEqual(pushed[0]['url'], 'https://machine.example/#fleet=q_' + 'a' * 16)
+        self.assertEqual([x['action'] for x in pushed[0]['actions']], ['once', 'decline'])
+        a.fleet_push(self.store, config, rows[:2], sender=lambda request: pushed.append(request['payload']) or {'results': []})
+        self.assertEqual(pushed[1]['title'], '2 Fleet questions wait for you')
+        sent = []
+        a.fleet_telegram(config, fleet.telegram_message(rows[:2], 'https://machine.example/'), request=lambda c, args: sent.append(args) or {'messageId': '78'})
+        values = [b['action'].get('value') for block in sent[0]['presentation']['blocks'] for b in block['buttons']]
+        self.assertIn('assistant:fleet:q_' + 'a' * 16 + ':once', values)
+        self.assertIn('assistant:fleet:q_' + 'b' * 16 + ':decline', values)
+        self.assertTrue(all(len('tgcb1:xxxxx:' + v) <= 64 for v in values if v))
+        self.assertEqual(sent[0]['target'], '1000001')
+        everything = json.dumps([pushed, sent])
+        for private in ('Sam', '40k', 'Kim', 'owner@acme.example', 'closeness', '"knows"', 'last_contact'):
+            self.assertNotIn(private, everything)
+        with patch.object(a, 'telegram_request', lambda c, args: sent.append(args) or {'messageId': '79'}):
+            app = object.__new__(a.App)
+            app.store, app.config, app.fleet = self.store, {**config, 'telegram_owner': ''}, self.fleet
+            self.assertIsNone(app.fleet_notify(rows[:1]))  # Telegram off: the phone only
+            self.assertEqual(len(sent), 1)
+            app.config = config
+            self.assertEqual(app.fleet_notify(rows[:1]), '79')
+
+    def test_a_telegram_tap_decides_only_from_the_message_sent_for_it(self):
+        retold = []
+        self.fleet.notify, self.fleet.retell = (lambda rows: '77'), retold.append
+        one, two = 'q_' + 'a' * 16, 'q_' + 'b' * 16
+        self.ask('relationships', {'about': 'client.example'}, one)
+        self.ask('relationships', {'about': 'eu.client.example'}, two)
+        self.fleet.notify_round(dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=30))
+        app = object.__new__(a.App)
+        app.store, app.config, app.fleet = self.store, {**CONFIG, 'dashboard_host': 'machine.example'}, self.fleet
+        self.fleet.config = app.config
+        tap = lambda ask_id, choice, message='77': app.action('fleet_decide', {'id': ask_id, 'choice': choice, 'source': 'telegram', 'message_id': message})
+        with self.assertRaisesRegex(ValueError, 'not the one sent'):
+            tap(one, 'once', '12')
+        with self.assertRaisesRegex(ValueError, 'once, always or decline'):
+            tap(one, 'never')
+        with self.assertRaisesRegex(ValueError, 'dashboard'):
+            app.action('fleet_rule', {'member_id': 'pat1', 'kind': 'relationships', 'rule': 'always', 'source': 'telegram', 'message_id': '77'})
+        with self.assertRaisesRegex(ValueError, 'dashboard'):
+            app.action('fleet_decide', {'id': one, 'choice': 'once', 'message_id': '77'})
+        self.assertEqual(self.relay.sent('/answer')[-1]['status'], 'waiting')
+        done = tap(one, 'once')
+        self.assertEqual(done['status'], 'answered')
+        self.assertNotIn('answer', done)
+        self.assertTrue(self.answered()['answer']['knows'])
+        text, buttons = done['message']['text'], done['message']['buttons']
+        self.assertIn('1. Pat\'s Machine asks: Who knows someone at client.example?\n   → Answered once', text)
+        self.assertNotIn('Sam', json.dumps(done))
+        self.assertEqual([[b['text'] for b in row] for row in buttons], [['2. Answer once', 'Always', 'Decline'], ['Open the Fleet tab']])
+        self.assertEqual(retold, [])  # the plugin edits the tapped message itself
+        self.assertEqual(tap(one, 'decline')['status'], 'gone')  # a replayed or late tap shows the outcome
+        self.assertEqual(self.answered()['id'], one)
+        self.fleet.decide(two, 'decline')  # on the dashboard: the Telegram message is brought up to date
+        self.assertEqual(retold, ['77'])
+        self.assertNotIn('Answer once', json.dumps(self.fleet.telegram_view('77')))
+
     def test_off_and_not_configured(self):
         self.assertIsNone(fleet.settings({}))
         self.assertIsNone(fleet.settings({'fleet': {'url': 'http://evil.example'}}))

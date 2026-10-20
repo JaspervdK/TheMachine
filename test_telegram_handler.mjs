@@ -139,6 +139,18 @@ const handled=await beforeDispatch({content:'I fixed it already',timestamp:17916
  globalThis.fixtureCall=async(action,args)=>{assert.equal(args._profile_session,undefined);return {ok:true};};
  await mainTool.execute('test',{action:'profile_evidence',args:{_profile_session:key}});
 }
+// A Fleet question: the tap goes to the service with the tapped message id; the service's message replaces the old one.
+{const saved=globalThis.fixtureCall,calls=[];const q='q_'+'c'.repeat(16);
+ globalThis.fixtureCall=async(action,args)=>{calls.push([action,args]);if(args.message_id!=='321'){throw Object.assign(new Error('That Telegram message is not the one sent for this question'),{status:400});}
+  return {status:'answered',message:{text:"Pat's Machine asks: Who knows someone at acme.example?\n   → Answered once",buttons:[[{text:'Open the Fleet tab',url:'https://machine.example.ts.net/assistant/#fleet='+q}]]}};};
+ const fleetCtx=(data,message='321')=>({...ctx('accept',message),callback:{data,chatId:'1000001',messageId:message}});
+ const before=edits.length;await handler(fleetCtx(`assistant:fleet:${q}:once`));
+ assert.deepEqual(calls.pop(),['fleet_decide',{id:q,choice:'once',source:'telegram',message_id:'321',decision_id:'telegram:unique'}]);
+ const edited=edits.pop();assert.equal(edits.length,before);assert.match(edited.text,/Answered once/);assert.equal(edited.buttons[0][0].url.endsWith('#fleet='+q),true);
+ await handler(fleetCtx(`assistant:fleet:${q}:never`));await handler(fleetCtx(`assistant:fleet:q_x:once`));assert.equal(calls.length,0);  // never is for the dashboard
+ await handler(fleetCtx(`assistant:fleet:${q}:always`,'999'));assert.equal(calls.pop()[1].message_id,'999');assert.equal(edits.length,before);  // refused: buttons cleared, nothing decided
+ const stranger=fleetCtx(`assistant:fleet:${q}:once`);stranger.senderId='someone-else';await handler(stranger);assert.equal(calls.length,0);
+ globalThis.fixtureCall=saved;}
 console.log('Telegram handler: snooze menu, typed callback sizes, old recorded cards, completion and ownership passed.');
 
 await rm(fixtureDir,{recursive:true,force:true});
