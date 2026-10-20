@@ -28,6 +28,12 @@
   "delivery_enabled": false,
   "delivery_batch_size": 5,
   "digest_at": "08:30",
+  "work_hours": {
+    "days": [1, 2, 3, 4, 5],
+    "start": "08:00",
+    "end": "23:00",
+    "morning": "09:00"
+  },
   "bootstrap_days": 7,
   "poll_seconds": 300,
   "http_timeout": 15,

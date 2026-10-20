@@ -100,6 +100,89 @@ def set_timezone(name):
     global LOCAL_TZ
     if name:
         LOCAL_TZ = ZoneInfo(name)
+
+
+# The owner's hours (`work_hours` in config.json, the dashboard's Work hours, `assistant hours`):
+# `days` are ISO weekdays (1 = Monday) when work cards go out and snoozed work and returning
+# threads come back; nothing is sent outside `start`–`end` (it may wrap past midnight); `morning`
+# is when "Tomorrow", "3 days" and "1 week" land. Missing keys keep these defaults.
+WORK_HOURS_DEFAULT = {'days': [1, 2, 3, 4, 5], 'start': '08:00', 'end': '23:00', 'morning': '09:00'}
+WORK_HOURS = dict(WORK_HOURS_DEFAULT)
+DAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+
+
+def clock(value, what='time'):
+    """'8:30' or '08:30' as (8, 30); anything else is a ValueError naming `what`."""
+    match = re.fullmatch(r'\s*([01]?\d|2[0-3]):([0-5]\d)\s*', str(value or ''))
+    if not match:
+        raise ValueError(f'{what} must be a time like 09:00')
+    return int(match[1]), int(match[2])
+
+
+def work_hours(value=None):
+    """`work_hours` checked and completed with the defaults; a ValueError says what is wrong."""
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError('work_hours must be an object with days, start, end and morning')
+    days = value.get('days', WORK_HOURS_DEFAULT['days'])
+    if isinstance(days, str):  # 'mon-fri', 'sun-thu' or 'mon,wed,fri'
+        listed = []
+        for part in (p for p in re.split(r'[\s,]+', days.lower()) if p):
+            first, _, last = part.partition('-')
+            if last and first[:3] in DAY_NAMES and last[:3] in DAY_NAMES:
+                start, stop = DAY_NAMES.index(first[:3]), DAY_NAMES.index(last[:3])
+                listed += [DAY_NAMES[(start + i) % 7] for i in range((stop - start) % 7 + 1)]
+            else:
+                listed.append(part)
+        days = listed
+    picked = set()
+    for day in days if isinstance(days, list) else [None]:
+        name = str(day).strip().lower()[:3]
+        if isinstance(day, int) and not isinstance(day, bool) and 1 <= day <= 7:
+            picked.add(day)
+        elif name in DAY_NAMES:
+            picked.add(DAY_NAMES.index(name) + 1)
+        else:
+            raise ValueError('work days are weekday numbers 1 (Monday) to 7 (Sunday) or names like mon')
+    if not picked:
+        raise ValueError('Pick at least one work day')
+    hours = {'days': sorted(picked)}
+    for key, what in (('start', 'The start'), ('end', 'The end'), ('morning', 'The morning time')):
+        hours[key] = '%02d:%02d' % clock(value.get(key, WORK_HOURS_DEFAULT[key]), what)
+    return hours
+
+
+def set_work_hours(value):
+    global WORK_HOURS
+    WORK_HOURS = work_hours(value)
+
+
+def is_work_day(day):
+    """A date or datetime (in local time) on one of the owner's work days."""
+    return day.isoweekday() in WORK_HOURS['days']
+
+
+def next_work_day(local):
+    """`local` itself when it is on a work day, else the same time on the next one."""
+    for _ in range(7):
+        if is_work_day(local):
+            return local
+        local += dt.timedelta(days=1)
+    return local
+
+
+def in_hours(local):
+    """Within the owner's hours (start–end, local time), when cards and reminders may go out."""
+    start, end, minute = clock(WORK_HOURS['start']), clock(WORK_HOURS['end']), (local.hour, local.minute)
+    if start == end:
+        return True
+    return start <= minute < end if start < end else minute >= start or minute < end
+
+
+def morning_label():
+    hour, minute = clock(WORK_HOURS['morning'])
+    return f'{hour}:{minute:02d}'
 LOG = logging.getLogger('personal-assistant')
 
 
@@ -124,12 +207,13 @@ def snooze_time(option=None, explicit=None, hours=24, work=False):
         due = current + dt.timedelta(hours=2)
     elif option in ['tomorrow','1d','3d','1w']:
         local = current.astimezone(local_tz())
-        # The owner's day starts at 03:00: "tomorrow" pressed at 01:30 means 09:00 the
+        # The owner's day starts at 03:00: "tomorrow" pressed at 01:30 means the morning of the
         # same calendar day, pressed from 03:00 onwards it means the next day.
         days = {'tomorrow':1,'1d':1,'3d':3,'1w':7}[option] - (1 if local.hour < 3 else 0)
-        due = (local + dt.timedelta(days=days)).replace(hour=9,minute=0,second=0,microsecond=0)
-        if work and due.weekday() >= 5:
-            due += dt.timedelta(days=7 - due.weekday())  # work comes back on Monday, not the weekend
+        hour, minute = clock(WORK_HOURS['morning'])
+        due = (local + dt.timedelta(days=days)).replace(hour=hour,minute=minute,second=0,microsecond=0)
+        if work:
+            due = next_work_day(due)  # work comes back on a work day, not the weekend
     elif option is not None:
         raise ValueError('Choose one of the snooze times')
     else:
@@ -140,12 +224,41 @@ def snooze_time(option=None, explicit=None, hours=24, work=False):
     return due.isoformat()
 
 
+def hours_settings(config, changes):
+    """`timezone`, `digest_at` and `work_hours` after `changes` (any of those, or the work_hours keys
+    days/start/end/morning at the top level), checked; a ValueError says what is wrong."""
+    current = {**WORK_HOURS_DEFAULT, **(config.get('work_hours') or {})}
+    nested = changes.get('work_hours') if isinstance(changes.get('work_hours'), dict) else {}
+    merged = {**current, **nested, **{k: changes[k] for k in WORK_HOURS_DEFAULT if changes.get(k) is not None}}
+    zone = str(changes.get('timezone') or config.get('timezone') or getattr(local_tz(), 'key', '') or 'UTC').strip()
+    try:
+        ZoneInfo(zone)
+    except (ValueError, KeyError, OSError):
+        raise ValueError(f'Unknown time zone {zone!r}; use a name like Europe/Brussels or America/New_York') from None
+    digest = '%02d:%02d' % clock(changes.get('digest_at') or config.get('digest_at') or '08:30', 'The digest time')
+    return {'timezone': zone, 'digest_at': digest, 'work_hours': work_hours(merged)}
+
+
+def save_hours(path, values):
+    """Write these settings into config.json as it is on disk now (other keys untouched), keeping a .bak."""
+    path = Path(path)
+    text = path.read_text()
+    config = json.loads(text)
+    config.update(values)
+    backup = path.with_name(path.name + '.bak')
+    for target, content in ((backup, text), (path, json.dumps(config, indent=2) + '\n')):
+        temp = target.with_name(target.name + '.tmp')
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(content)
+        os.replace(temp, target)
+
+
 def thread_return_time(days):
-    """Days from now at 09:00, moved to Monday when it lands in the weekend."""
+    """Days from now in the morning (work_hours.morning), moved to the next work day when it lands on a day off."""
     local = dt.datetime.fromisoformat(now()).astimezone(local_tz())
-    due = (local + dt.timedelta(days=days)).replace(hour=9, minute=0, second=0, microsecond=0)
-    if due.weekday() >= 5:
-        due += dt.timedelta(days=7 - due.weekday())
+    hour, minute = clock(WORK_HOURS['morning'])
+    due = next_work_day((local + dt.timedelta(days=days)).replace(hour=hour, minute=minute, second=0, microsecond=0))
     return due.astimezone(dt.timezone.utc).isoformat()
 
 
@@ -184,7 +297,7 @@ def queue_delegate_wait(db, action, job, result):
 
 
 def snooze_choices(work=False):
-    """The quick snooze options with labels for when each lands; work skips the weekend."""
+    """The quick snooze options with labels for when each lands; work skips days off."""
     local_now = dt.datetime.fromisoformat(now()).astimezone(local_tz())
     tomorrow = (local_now - dt.timedelta(hours=3)).date() + dt.timedelta(days=1)
     choices, seen = [['2h', '2 hours']], set()
@@ -195,7 +308,7 @@ def snooze_choices(work=False):
         seen.add(due)
         moved = work and due.date() != (local_now - dt.timedelta(hours=3)).date() + dt.timedelta(days={'tomorrow': 1, '3d': 3, '1w': 7}[option])
         name = 'Tomorrow' if due.date() == tomorrow else due.strftime('%A') if moved and (due.date() - tomorrow).days < 6 else due.strftime('%a %-d %b') if moved else plain
-        choices.append([option, name + ' · 9:00'])
+        choices.append([option, name + ' · ' + morning_label()])
     return choices
 
 
@@ -221,7 +334,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings'}
+OWNER_ACTIONS = {'browser_focus', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -4834,9 +4947,10 @@ def delivery_time(when, digest_at='08:30', current=None, work=False, urgent=Fals
     local = current.astimezone(local_tz())
     hour, minute = (int(x) for x in digest_at.split(':'))
     def weekend(target):
+        # Work waits for a work day (work_hours.days), at the digest.
         local_target=target.astimezone(local_tz())
-        if work and not urgent and local_target.weekday()>=5:
-            return (local_target+dt.timedelta(days=7-local_target.weekday())).replace(hour=hour,minute=minute,second=0,microsecond=0).astimezone(dt.timezone.utc).isoformat()
+        if work and not urgent and not is_work_day(local_target):
+            return next_work_day(local_target).replace(hour=hour,minute=minute,second=0,microsecond=0).astimezone(dt.timezone.utc).isoformat()
         return None if target<=current else target.astimezone(dt.timezone.utc).isoformat()
     if when == 'now':
         return weekend(current)
@@ -5404,9 +5518,8 @@ def deliver_one(store, config, edit_cards=True):
             with store.connect() as db:
                 db.execute('UPDATE deliveries SET edit_failures=?,edit_retry_at=? WHERE suggestion_id=?',
                            (failures, retry.isoformat(), row['id']))
-    local = dt.datetime.now(local_tz())
-    if local.hour >= 23 or local.hour < 8:
-        return
+    if not in_hours(dt.datetime.now(local_tz())):
+        return  # quiet outside the owner's hours (work_hours.start–end)
     with store.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         # A crash/timeout after sending may have delivered. Never blindly resend.
@@ -5418,7 +5531,7 @@ def deliver_one(store, config, edit_cards=True):
         if not rows:
             return
         row = dict(rows[0])
-        # Enforce at delivery too: Friday's queued work may catch up on Saturday.
+        # Enforce at delivery too: the last work day's queued work may catch up on a day off.
         # Owner-selected snoozes/preparations are reminders and keep their timing.
         work=any(a['id'] in json.loads(row['account_ids']) and a.get('boundary','').startswith('work:') for a in config.get('accounts',[]))
         held=delivery_time('now',work=work,urgent=bool(row.get('urgent')))
@@ -5852,9 +5965,15 @@ def needs_you(config):
 
 
 class App:
-    def __init__(self, config):
+    def __init__(self, config, config_path=None):
         set_timezone(config.get('timezone'))
+        try:
+            set_work_hours(config.get('work_hours'))
+        except ValueError as error:
+            LOG.warning('work_hours ignored, using the defaults: %s', error)
+            set_work_hours(None)
         self.config = config
+        self.config_path = Path(config_path) if config_path else None  # where Work hours are saved
         self.store = Store(config['database'])
         self.store.exclusions = {a['id']: rules for a in config['accounts'] if (rules := (a.get('exclude') or []) + default_exclusions(config, a))}
         self.store.owner_user_ids = {a['user_id'] for a in config['accounts'] if a.get('service') == 'slack' and a.get('user_id')}
@@ -5941,6 +6060,22 @@ class App:
                                             'https://www.googleapis.com/auth/gmail.readonly').get('data', '')
         return base64.urlsafe_b64decode(data + '=' * (-len(data) % 4)), node.get('mimeType', 'application/octet-stream'), node.get('filename') or 'image'
 
+    def hours(self):
+        """Work hours as the dashboard shows and edits them."""
+        return {**WORK_HOURS, 'timezone': getattr(local_tz(), 'key', str(local_tz())), 'digest_at': self.config.get('digest_at', '08:30'),
+                'saveable': bool(getattr(self, 'config_path', None))}
+
+    def set_hours(self, args):
+        """The owner's Work hours from the dashboard: checked, saved in config.json and in use at once."""
+        if not getattr(self, 'config_path', None):
+            raise ValueError('Work hours can only be changed in config.json here')
+        values = hours_settings(self.config, args)
+        save_hours(self.config_path, values)
+        self.config.update(values)
+        set_timezone(values['timezone'])
+        set_work_hours(values['work_hours'])
+        return self.hours()
+
     def started_at(self):
         """When this Machine started: `started_at` in the config (a hosted machine's signup), else its first own activity."""
         given = str(self.config.get('started_at') or '')
@@ -5981,6 +6116,7 @@ class App:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
             result['model_usage'] = getattr(self, 'model_usage', None)
             result['started_at'] = self.started_at()
+            result['hours'] = self.hours()
             # Read only the existing heartbeat's runtime facts, never conversation
             # content or scheduler configuration. Missing evidence stays unknown.
             try:
@@ -6266,6 +6402,10 @@ class App:
             if not owner_dashboard or args.get('status') not in ('kept', 'dropped'):
                 raise ValueError('Only the owner closes a promise, on the dashboard')
             return self.store.update_promise({'id': args.get('id'), 'status': args['status']}, source='dashboard')
+        if name == 'set_work_hours':
+            if not owner_dashboard:
+                raise ValueError('Only the owner changes work hours, on the dashboard or with: assistant hours')
+            return self.set_hours(args)
         if name == 'forget_fact':
             if not owner_dashboard:
                 raise ValueError('Only the owner can remove a fact, on the dashboard')
@@ -7724,7 +7864,7 @@ def main():
         lock = Path(config['database']).parent / 'service.lock'
         with lock.open('w') as handle:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            App(config).serve()
+            App(config, args.config).serve()
     elif args.command == 'status':
         app = App(config)
         print(json.dumps(app.store.snapshot(config['accounts']), indent=2))

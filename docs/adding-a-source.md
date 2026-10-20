@@ -18,7 +18,7 @@ This guide covers the plugin.
 
 - `id` is the account's own ID. Its checkpoint, health and events are keyed by it.
 - `service` picks the connector: `rss` loads `connectors/rss.py`.
-- `boundary` (`work:<Company>` or `personal:<name>`) keeps signals apart in reviews and on the dashboard; only `work:` ones count as work (weekend hold, work cards). In `SETUP`, a bare `work` makes `assistant connect` ask which company.
+- `boundary` (`work:<Company>` or `personal:<name>`) keeps signals apart in reviews and on the dashboard; only `work:` ones count as work (work cards wait for a work day). In `SETUP`, a bare `work` makes `assistant connect` ask which company.
 - Any other keys (`url` here) are yours to read in the connector. Keep secrets out of `config.json`: name a credential (`"credential": "stripe"`) and read it with `helpers.credential`.
 
 ## 2. The module

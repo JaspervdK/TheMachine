@@ -87,7 +87,7 @@ Choose the useful NEXT ACTION on the finished result, not more preparation for i
 - Write the body as plain text; put links behind words as [text](https://url). End with the closing, a blank line, then the owner's first name (Cheers,\n\nAlex). Never write a signature: the owner's real Gmail HTML signature is added below the name when sent. Keep emails short.
 - When offering to meet, put the owner's booking link (from USER.md or the config's `booking_links`) behind text, e.g. [pick a time](https://example.com/book).
 - Optional cc/bcc are explicit arrays; thread_id replies require in_reply_to with the original RFC Message-ID.
-- A thread reply snoozes the thread after sending: snooze_days defaults to 3; set 1-14 when another wait fits (e.g. they said they'd answer next week), or 0 when no answer is expected. It returns on a weekday at 09:00, or sooner if they reply.
+- A thread reply snoozes the thread after sending: snooze_days defaults to 3; set 1-14 when another wait fits (e.g. they said they'd answer next week), or 0 when no answer is expected. It returns on a work day in the morning (the owner's work hours), or sooner if they reply.
 - Attach files with attachments:[<paths>]: save each file (e.g. a gog gmail attachment download) under the job's attachments folder or memory/assistant/ with a clear file name, at most 10 files and 18 MB together; the Send preview lists them. Never say an email needs an attachment-capable sender: put it in next_actions with its attachments.
 
 ### LinkedIn message

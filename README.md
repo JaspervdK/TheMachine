@@ -159,7 +159,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | Key | Default | Meaning |
 |---|---|---|
 | `owner_name` | — | Your name; preparations sign emails with your first name |
-| `timezone` | `Europe/Amsterdam` | IANA zone for quiet hours, digests, snoozes and weekend rules |
+| `timezone` | `Europe/Amsterdam` (the installer sets this computer's) | IANA zone for your work hours, digests, snoozes and recaps (the dashboard's Work hours, or `assistant hours --timezone`) |
 | `telegram_owner` | empty | Your Telegram chat ID; the only chat that gets cards and whose taps count. Empty: Telegram off, cards go to the dashboard app's notifications |
 | `telegram_account` | `default` | The OpenClaw Telegram account (bot) that sends cards, when you run several; the installer sets it |
 | `tailscale_owner` | — (required) | The Tailscale login allowed to open the dashboard |
@@ -188,7 +188,8 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | `browser_lease_script` | `integrations/browser-lease.py` | Lease helper Do it runs use for the shared browser |
 | `delivery_enabled` | `false` | Send cards to Telegram (leave off while you test) |
 | `delivery_batch_size` | `5` | Cards per delivery pass |
-| `digest_at` | `08:30` | Morning digest time |
+| `digest_at` | `08:30` | Morning digest time; also when work held over a day off goes out |
+| `work_hours` | Mon–Fri, `08:00`–`23:00`, mornings `09:00` | [Work hours](#work-hours): `days` (1 = Monday … 7, or `"mon-fri"`), `start`/`end` (nothing is sent outside them; may wrap past midnight), `morning` (when Tomorrow, 3 days and 1 week snoozes and returning threads land) |
 | `bootstrap_days` | `7` | History collected on first import |
 | `poll_seconds` | `300` | Default source poll interval (per account `poll_seconds` overrides) |
 | `http_timeout` | `15` | Dashboard request timeout |
@@ -293,9 +294,19 @@ Your decisions and written reasons are summarised into every review prompt, and 
 - **iPhone/iPad (iOS 16.4 or newer, Safari):** open the dashboard, tap **Share** → **Add to Home Screen**, open The Machine from your Home Screen (notifications only work there, not in a Safari tab) and tap the bell.
 - Turn Telegram off or back on any time: `assistant telegram off`, `assistant telegram on <your Telegram user ID>`. `--remove-bot` with off also deletes the bot and its token from OpenClaw. Without Telegram, **Change** is typed on the dashboard card.
 
+### Work hours
+
+One setting for when The Machine works with you: on the dashboard under **Connections → Work hours** (phone-friendly), with `assistant hours`, or as `work_hours` in `config.json`.
+- **Work days** (default Monday–Friday): work cards (from `work:` sources) wait for a work day, and snoozed work and returning email threads come back on one. Personal cards keep their timing.
+- **Messages from / until** (default 08:00–23:00): nothing is sent outside these hours, to Telegram or the phone; it waits until they start. Reviews keep running in the background. A range like 20:00–04:00 wraps past midnight.
+- **Snoozes land at** (default 09:00): where Tomorrow, 3 days and 1 week land, and when a snoozed email thread comes back.
+- **Morning digest** (`digest_at`, default 08:30) and **time zone** (`timezone`; the installer takes this computer's, and the dashboard offers the device's when it differs).
+
+Saved from the dashboard, it takes effect at once and is written to `config.json` (the old file stays as `config.json.bak`).
+
 **Telegram** uses OpenClaw's existing bot and message route, never a second poller.
 - The outbox records intent before sending. A send with an unknown outcome is held as `uncertain` and reconciled against the chat; it is never resent blindly.
-- Quiet hours are 23:00–08:00 local time. Non-urgent work cards wait for Monday on weekends. Several cards may go out together; only the first buzzes.
+- Cards and reminders go out only within your [work hours](#work-hours) (by default 08:00–23:00). Non-urgent work cards wait for your next work day (by default Monday after a weekend). Several cards may go out together; only the first buzzes.
 - Buttons: **Do it**, **Change**, **Snooze** (2 hours, tomorrow, 3 days, 1 week, pick a date), **Dismiss** (with a reason), **Mark done**, **Undo** (five minutes). They edit the existing card instead of sending new messages; a finished Do it sends one short Ready notice. Each row holds up to three buttons that fit a phone's width, in order, so a Send shares its row with Mark done (`controls()` in `assistant.py` and `packRows` in the plugin follow the same rule).
 - **Change** opens Telegram's native reply box. Only a reply to that exact prompt, within ten minutes, counts as instructions. `/assistant_feedback <id> <text>` is the fallback.
 - The weekly recap (`weekly_recap`, off by default) arrives once per week, Fridays from 16:00 local time. Short sections with one point per line, so it reads at a glance on a phone: the hit rate first, then cards and decisions, what it noticed about how you acted (including how many drafts went out as written since the writing rules last changed), busy sources without results, promises (kept, open, past their date), people and projects (heating up, cooling, gone quiet, new), and behind the scenes (reviews, backlog, token usage).
@@ -422,6 +433,7 @@ Read this before you turn on delivery.
 | `assistant roles` | Your agent reads the first and latest messages with your closest people and notes what each is to you in the graph (also the last step of `assistant profile`; `--again` to run it again right away) |
 | `assistant profile` | Your agent drafts how you write and what matters to you from your own messages, and notes what your closest people are to you in the graph; the draft is saved to `USER.md` only after your yes, within the 4,000 characters OpenClaw loads (`--again` for a fresh draft, `--all` to keep every line) |
 | `assistant connect [<source>]` | Set up or redo a source (sign-in or key, IDs, a test read, first sync); without a source, lists what still needs connecting. `--account <id>` picks or adds one of several |
+| `assistant hours` | Your [work hours](#work-hours); `--days mon-fri --start 08:00 --end 23:00 --morning 09:00 --digest 08:30 --timezone Europe/Brussels` changes them and restarts the service |
 | `assistant telegram status\|on <id>\|off` | Telegram is optional: turn card delivery there off (cards then reach you through the dashboard app) or back on. `off --remove-bot` also deletes the bot and its token from OpenClaw |
 | `assistant doctor` | Checks the service, OpenClaw bridge, Telegram approval, every source, reviews, dashboard and `USER.md`; every problem comes with its fix. Exits 1 when something is broken |
 | `assistant enrich [domain]` | Organisation data from your enrichment service: status, or look up one domain now |

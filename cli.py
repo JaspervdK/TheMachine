@@ -574,6 +574,33 @@ def cmd_telegram(config, args):
         print('  ' + note)
 
 
+def hours_text(hours):
+    days = assistant.WORK_HOURS_DEFAULT['days'] if not hours.get('days') else hours['days']
+    names = ', '.join(assistant.DAY_NAMES[d - 1].capitalize() for d in days)
+    return (f"Work days: {names}\nHours: {hours['start']}–{hours['end']} (nothing is sent outside them)\n"
+            f"Snoozes and returning threads land at {hours['morning']}; morning digest at {hours['digest_at']}\n"
+            f"Time zone: {hours['timezone']}")
+
+
+def cmd_hours(config, args):
+    changes = {key: value for key, value in (('days', args.days), ('start', args.start), ('end', args.end), ('morning', args.morning),
+                                             ('digest_at', args.digest), ('timezone', args.timezone)) if value}
+    try:
+        values = assistant.hours_settings(config, changes)
+    except ValueError as error:
+        raise CliError(str(error)) from None
+    if changes:
+        assistant.save_hours(args.config, values)
+        if not args.no_restart and assistant.shutil.which('systemctl'):
+            onboarding.run(['systemctl', '--user', 'restart', onboarding.UNIT_NAME], timeout=60)
+    hours = {**values['work_hours'], 'timezone': values['timezone'], 'digest_at': values['digest_at']}
+    if args.json:
+        return out_json(hours)
+    print(('Saved. ' if changes else '') + hours_text(hours))
+    if not changes:
+        print('Change with e.g.: assistant hours --days mon-fri --start 08:00 --end 23:00 --morning 09:00 (or on the dashboard, Connections > Work hours)')
+
+
 def _passphrase(confirm):
     import getpass
     if os.environ.get(moving.PASSPHRASE_ENV):
@@ -705,6 +732,14 @@ def parser():
     c.add_argument('state', choices=('status', 'on', 'off'))
     c.add_argument('owner', nargs='?', help='with on: your Telegram user ID')
     c.add_argument('--remove-bot', action='store_true', help='with off: also delete the Telegram bot and its token from OpenClaw')
+    c = add('hours', 'Your work hours: work days, when The Machine may message you, when snoozes land, the digest and time zone', cmd_hours)
+    c.add_argument('--days', help='work days, like mon-fri, sun-thu or mon,tue,thu')
+    c.add_argument('--start', help='messages from this time, like 08:00')
+    c.add_argument('--end', help='until this time, like 23:00 (may be past midnight)')
+    c.add_argument('--morning', help='when Tomorrow, 3 days and 1 week snoozes land, like 09:00')
+    c.add_argument('--digest', help='morning digest time, like 08:30')
+    c.add_argument('--timezone', help='IANA time zone, like Europe/Brussels')
+    c.add_argument('--no-restart', action='store_true', help='save only; the service picks it up at its next restart')
     c = add('export', 'Everything The Machine knows and how it is set up, in one archive to move to another computer', cmd_export)
     c.add_argument('--keys', action='store_true', help='include keys and tokens, encrypted with a passphrase you pick')
     c.add_argument('--out', default='.', help='folder to write the archive to (default: here)')
