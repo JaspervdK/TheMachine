@@ -125,6 +125,7 @@ One pass over the service, the OpenClaw bridge, your Telegram approval, every so
 - Sending approved emails needs `gmail.send` on top of read-only access; add it with gog when you want it. Connecting never asks for more than read access.
 - Company facts next to each organisation (industry, size, location): add a key for an enrichment service you use (Apollo, People Data Labs, Hunter or any that looks companies up by domain). Only domains are sent. When a look-up gets a company wrong, Edit on its page fixes the details or clears them. See [Organisation data](../README.md#organisation-data-optional-enrichment).
 - Upgrade: `git pull && ./install.sh`. Your config, data and secrets are kept.
+- Backups: on your own computer nothing backs up by itself. A nightly encrypted [restic](https://restic.net) backup of your home folder is enough: it holds `~/.openclaw` (workspace, memory, settings) and The Machine's data. Leave out what an install makes again (`~/.npm`, `~/.cache`, `~/.local/lib`, `~/.openclaw/npm`, `node_modules`, model files such as `*.gguf`), and keep the repository password somewhere else. `assistant export --keys` makes a one-file copy too.
 
 ## Moving from hosted to your own computer
 
