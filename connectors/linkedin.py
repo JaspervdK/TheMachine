@@ -61,7 +61,7 @@ class Source:
                 raise SourceError('linkedin_signed_out', retry_after=3600)
             if 'in time' in err:
                 raise SourceError('linkedin_read_timeout', retry_after=900)
-            raise SourceError('linkedin_read_failed', retry_after=900)
+            raise SourceError(self.helpers.browser_read_failure('linkedin', result.stderr), retry_after=900)
         try:
             return json.loads(result.stdout)
         except ValueError:

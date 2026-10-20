@@ -72,7 +72,7 @@ class Source:
                 raise SourceError('x_rate_limited', retry_after=1800)
             if 'in time' in err:
                 raise SourceError('x_read_timeout', retry_after=900)
-            raise SourceError('x_read_failed', retry_after=900)
+            raise SourceError(self.helpers.browser_read_failure('x', done.stderr), retry_after=900)
         try:
             data = json.loads(done.stdout)
         except ValueError:

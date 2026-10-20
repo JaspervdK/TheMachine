@@ -529,3 +529,9 @@ Owner-authorized execution stays broad. No new generic approvals were added. The
 Tests: `test_oct19_repairs.py`, WhatsApp transport and LinkedIn/X tab fixtures; run the complete Python and Node suites with a disposable HOME. No live owner decisions or messages are needed for these tests.
 
 Customer export/import: configured credentials under the workspace are secret files, omitted without a passphrase and restored/rebased in encrypted exports. Stop `personal-assistant` and close SQLite readers before importing. Import takes the service lock, rejects existing WAL/SHM files without deleting them, validates every database before replacing files, and installs each database atomically. Start the service afterwards. Trello cursor rejection preserves the original unread time window, so catch-up cannot silently jump forward seven days.
+
+## October 20 recovery review
+
+Saved browser sign-ins now serialize across separate dashboard requests; a disconnected browser after Submit is reported as unconfirmed, not signed in. Slack rate-limit records identify the read method without retaining response content. Browser-source failures distinguish unavailable web-client queries, HTTP rejection and browser transport failures using fixed labels only. These changes preserve polling/checkpoints and broad owner-authorized execution; they add no approval step. Two concurrent collectors may still share Slack's upstream quota.
+
+Activation: commit tested code, then restart only the Assistant service. Roll back source by reverting this repair, leaving the live database, saved sign-ins, decisions, checkpoints and delivery receipts intact. Private operation evidence belongs in the workspace report, not this public README.

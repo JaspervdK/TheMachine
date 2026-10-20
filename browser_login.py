@@ -126,6 +126,8 @@ def pages(config, store=None, account=None):
 
 
 _filling = threading.Lock()
+_store_locks = {}
+_store_locks_guard = threading.Lock()
 
 
 def fill(config, page, host, username=None, password=None, code=None, settle=SETTLE):
@@ -193,7 +195,7 @@ def fill(config, page, host, username=None, password=None, code=None, settle=SET
         try:
             shown = browser_cdp.evaluate(base, target, DETECT, timeout_ms=3000)
         except browser_cdp.CdpError:
-            pass
+            raise ValueError('The browser did not answer after submitting; could not confirm the sign-in') from None
         if state == 'same':
             return {'result': 'still_here', 'page': shown and {**shown, 'id': page, 'site': site(shown['host'])}}
         if shown:
@@ -209,7 +211,9 @@ class LoginStore:
 
     def __init__(self, folder):
         self.path, self.key_path = Path(folder) / STORE, Path(folder) / KEY
-        self.lock = threading.Lock()
+        # API requests construct separate stores, but their read/change/write must share one lock.
+        with _store_locks_guard:
+            self.lock = _store_locks.setdefault(str(self.path.resolve()), threading.Lock())
 
     def _key(self):
         if not self.key_path.exists():

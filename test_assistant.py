@@ -830,6 +830,15 @@ class SlackInvariants(unittest.TestCase):
                     self.assertEqual(str(raised.exception),'network:'+name+':conversations.replies')
                     self.assertNotIn('private',str(raised.exception))
 
+    def test_slack_rate_limit_identifies_method_without_content(self):
+        account={**self.account,'credential':'slack','credential_variable':'KEY'}
+        client=assistant.Slack({},account)
+        error=assistant.urllib.error.HTTPError('https://private.invalid',429,'private text',{'Retry-After':'120'},None)
+        with patch.object(client,'pace'),patch.object(assistant,'credential',return_value='KEY=fake'),patch.object(assistant.urllib.request,'urlopen',side_effect=error):
+            with self.assertRaises(assistant.SourceError) as raised:client.get('conversations.replies')
+        self.assertEqual(str(raised.exception),'slack:conversations.replies:HTTP_429')
+        self.assertEqual(raised.exception.retry_after,120)
+
     def test_slack_old_known_thread_is_refreshed_after_overlap(self):
         self.channel.update(last_scan='40000.000001',next_full=assistant.time.time()+86400,threads=['1100.000001'])
         self.state(mode='incremental');source,calls=self.source([
@@ -875,3 +884,11 @@ class NeedsYou(unittest.TestCase):
         self.assertIsNone(items[2]['url'])
         self.assertEqual(len(items), 3)
         self.assertEqual(assistant.needs_you({'accounts': []}), [])
+
+class BrowserFailureDiagnostics(unittest.TestCase):
+    def test_fixed_codes_never_keep_page_or_account_details(self):
+        for text,want in [('X read failed: web client token not found','x_query_unavailable'),
+                          ('X read failed: query-failed (HTTP 403)','x_query_failed:HTTP_403'),
+                          ('browser command failed: private title','x_browser_failed'),
+                          ('private text and private@email.invalid','x_read_failed')]:
+            self.assertEqual(assistant.browser_read_failure('x',text),want)

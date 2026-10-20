@@ -197,6 +197,19 @@ def snooze_choices(work=False):
     return choices
 
 
+def browser_read_failure(service, stderr):
+    """Only fixed diagnostic codes, never the CLI's page text, URL or account details."""
+    text = str(stderr).lower()
+    if 'web client token not found' in text or 'not found in the web client' in text:
+        return service + '_query_unavailable'
+    if 'rejected the query' in text or 'query-failed' in text or 'http ' in text:
+        status = re.search(r'http[ _:]*(\d{3})', text)
+        return service + '_query_failed' + (':HTTP_' + status.group(1) if status else '')
+    if 'browser command failed' in text or 'target page, context or browser' in text:
+        return service + '_browser_failed'
+    return service + '_read_failed'
+
+
 class SourceError(Exception):
     """Only redacted, structured error labels are allowed in logs/checkpoints."""
     def __init__(self, category, status=None, retry_after=None):
@@ -1128,7 +1141,7 @@ class Slack:
                 retry_after = max(60, min(3600, int(error.headers.get('Retry-After', '300'))))
             except ValueError:
                 retry_after = 300
-            raise SourceError('slack', error.code, retry_after) from None
+            raise SourceError('slack:' + method, error.code, retry_after) from None
         except (urllib.error.URLError, TimeoutError) as error:
             # Keep only the exception class and an allowlisted read method,
             # never exception messages, endpoints, credentials or response bodies.
@@ -1143,7 +1156,7 @@ class Slack:
             label = data.get('error') if isinstance(data, dict) else None
             known = {'ratelimited', 'invalid_cursor', 'thread_not_found', 'channel_not_found',
                      'not_in_channel', 'missing_scope', 'invalid_auth', 'token_revoked'}
-            raise SourceError('slack_' + (label if label in known else 'invalid_response'),
+            raise SourceError('slack_' + (label if label in known else 'invalid_response') + ':' + method,
                               retry_after=60 if label == 'ratelimited' else None)
         return data
 
@@ -4420,7 +4433,7 @@ def sync_source(store, config, account):
 # optional KINDS {kind: label}. Loaded by validated name only. See docs/adding-a-source.md.
 CONNECTORS = ROOT / 'connectors'
 CONNECTOR_HELPERS = types.SimpleNamespace(
-    SourceError=SourceError, now=lambda: now(), credential=lambda config, name: credential(config, name), local_tz=lambda: local_tz(),
+    SourceError=SourceError, browser_read_failure=browser_read_failure, now=lambda: now(), credential=lambda config, name: credential(config, name), local_tz=lambda: local_tz(),
     iso=lambda stamp: dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat())
 _connectors = {}
 
