@@ -126,7 +126,8 @@ NO_DETAILS += ('availability',)
 NOTICE_KINDS += ('friend_request', 'friend_accepted')
 FLEET_ID = re.compile(r'(?:fl|fr)_[0-9a-f]{16}')  # a Fleet's id, or the owner's friends group
 # Family (family.py): free/busy, to-dos and plans; friendlier defaults, never the Work kinds
-ASKS['family'] = RULE_KINDS['family'] = family.KINDS
+ASKS['family'] += family.KINDS  # += : other kinds a Family shares (skills) stay
+RULE_KINDS['family'] += family.KINDS
 KIND_LABEL.update(family.LABELS)
 NO_DETAILS += family.REQUESTS
 
