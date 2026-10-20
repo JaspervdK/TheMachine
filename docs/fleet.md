@@ -1,8 +1,8 @@
 # The Fleet
 
-The Fleet lets your Machine and the Machines of the people you work or live with help each other. It is in beta and
-only available on hosted Machines for now. Machines never talk to each other directly: questions and answers
-pass through The Machine's relay.
+The Fleet lets your Machine and the Machines of the people you work or live with help each other. It is in beta.
+Machines never talk to each other directly: questions and answers pass through The Machine's relay. Hosted Machines
+are on it already, and a Machine you run yourself can join too (see "A self-hosted Machine in a Fleet").
 
 There are two kinds:
 
@@ -70,3 +70,26 @@ Each person answers with one Machine per Fleet, so teammates never get two answe
 (say a hosted one and one at home), you pick which one answers in your account. Removing someone from a Fleet takes
 effect at once, and how often a Machine can ask is limited.
 
+
+## A self-hosted Machine in a Fleet
+
+A Machine you run yourself can be your Machine in a Fleet, next to teammates on hosted Machines. It needs an account
+with The Machine (no subscription) and is off until you pair it:
+
+1. In your account, make a pairing code. It works once, for 15 minutes.
+2. In The Machine's folder, run `python3 cli.py fleet-pair ABCD-EFGH --label "My computer"`. This stores the
+   Machine's own key, readable only by you, next to its database. A wrong, expired or already used code is refused:
+   make a new one.
+3. Restart the service, and pick this Machine for your Fleet in your account.
+
+Or simply ask your Machine's AI to do it: "Pair this Machine with my Fleet: in The Machine's folder, run
+`python3 cli.py fleet-pair ABCD-EFGH --label "My computer"`, then restart The Machine." Your account page shows this
+with your code filled in, ready to copy.
+
+Your Machine then shares the addresses of its work accounts with your Fleet, so your teammates' Machines recognise
+them, and nothing else about you. Everything in "You decide, per teammate" and "Safe by construction" applies the same
+way. You can disconnect it from your account at any time; its key then stops working.
+
+Pairing is free. While a self-hosted Machine answers for someone in a Fleet, the relay costs €4 a month for that
+member, plus VAT where it applies, paid by the Fleet's owner and confirmed before it starts; nothing while the Fleet is
+free.

@@ -58,4 +58,16 @@ class CliTests(unittest.TestCase):
   out,_=self.run_cli('reviews',responses={'status':status})
   self.assertIn('40 signal versions saved',out);self.assertIn('model_idle_timeout (model)',out)
 
+ def test_fleet_pair_keeps_its_token_private_and_points_the_config_at_it(self):
+  import os,tempfile
+  with tempfile.TemporaryDirectory() as d:
+   path=Path(d)/'config.json';path.write_text(json.dumps({'database':str(Path(d)/'events.sqlite'),'accounts':[{'id':'work','email':'me@acme.example','boundary':'work:Acme'}],'credentials':{}}))
+   with patch.object(cli.assistant.fleet,'pair',return_value={'token':'fd_secret','label':'Laptop'}) as pair,contextlib.redirect_stdout(io.StringIO()) as out:
+    cli.main(['--config',str(path),'fleet-pair','ABCD-EFGH','--label','Laptop','--relay','https://relay.example'])
+   pair.assert_called_once_with('https://relay.example','ABCD-EFGH','Laptop',['me@acme.example'])
+   saved=json.loads(path.read_text());token=Path(saved['credentials']['fleet'])
+   self.assertEqual((saved['fleet_relay_url'],token.read_text().strip(),oct(token.stat().st_mode&0o777)),('https://relay.example','fd_secret','0o600'))
+   self.assertNotIn('fd_secret',out.getvalue())
+   with self.assertRaises(SystemExit):cli.main(['--config',str(Path(d)/'none.json'),'fleet-pair','X'])
+
 if __name__=='__main__':unittest.main()

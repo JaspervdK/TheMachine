@@ -1,7 +1,9 @@
 """The Fleet: your Machine and the Machines of the people you work or live with help each other (docs/fleet.md).
 
 A hosted Machine whose owner is in a Fleet has `fleet` in its config ({"url": ...}, the relay on the control plane) and
-a `fleet` credential (the app's own token). Machines never call each other: this module asks and answers through the
+a `fleet` credential (the app's own token). A self-hosted Machine sets `fleet_relay_url` (the relay service's address)
+and pairs once with a code from its owner's account there (`cli.py fleet-pair`): that stores its own token as the
+`fleet` credential. Without that credential the Fleet stays off. Machines never call each other: this module asks and answers through the
 relay, and picks up what waits for it with a long poll. A Work Fleet asks three things:
 
 - relationships: "who knows someone at acme.com?" Answered from the graph with closeness, last contact (a month) and
@@ -66,9 +68,45 @@ class Off(Exception):
     """Not in a Fleet (any more), or the Fleet is switched off: the relay said 404."""
 
 
+def reachable(url):
+    return str(url or '').startswith(('https://', 'http://127.0.0.1'))
+
+
 def settings(config):
+    """The relay to use: the hosted setup's `fleet`, else a self-hosted Machine's `fleet_relay_url`."""
     found = config.get('fleet')
-    return found if isinstance(found, dict) and str(found.get('url') or '').startswith(('https://', 'http://127.0.0.1')) else None
+    if isinstance(found, dict) and reachable(found.get('url')):
+        return found
+    base = str(config.get('fleet_relay_url') or '').rstrip('/')
+    return {'url': base + '/api/fleet'} if reachable(base) else None
+
+
+def account_emails(config):
+    """The owner's own addresses in the accounts a Fleet may hear about (work_accounts), so teammates know them."""
+    work = set(work_accounts(config))
+    return sorted({str(a.get('email') or '').strip().lower() for a in config.get('accounts', [])
+                   if a.get('id') in work and '@' in str(a.get('email') or '')})
+
+
+def pair(base, code, label, emails, timeout=30):
+    """A self-hosted Machine trades the pairing code from its owner's account for its own relay token: {token, label}."""
+    if not reachable(base):
+        raise ValueError('fleet_relay_url must be an https:// address')
+    request = urllib.request.Request(base.rstrip('/') + '/api/fleet/pair', method='POST', headers={'Content-Type': 'application/json'},
+                                     data=json.dumps({'code': code, 'label': label, 'emails': emails}).encode())
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            found = json.loads(response.read() or b'{}')
+    except urllib.error.HTTPError as error:
+        with error:
+            try:
+                message = json.loads(error.read() or b'{}').get('error') or ''
+            except ValueError:
+                message = ''
+        raise ValueError(message or f'The Fleet relay said {error.code}') from None
+    if not isinstance(found.get('token'), str) or not found['token']:
+        raise ValueError('The Fleet relay gave no token')
+    return found
 
 
 def now():
@@ -336,6 +374,13 @@ class Fleet:
         import time
         stamp = (clock or time.monotonic)()
         if refresh or not self.meta('directory') or stamp - self.last['directory'] > DIRECTORY_EVERY:
+            emails = account_emails(self.config)
+            if self.meta('me_sent') != emails:  # a self-hosted Machine's addresses, for its teammates' "who knows"
+                try:
+                    self.relay.call('POST', '/me', {'emails': emails}, timeout=30)
+                    self.set_meta('me_sent', emails)
+                except ValueError:
+                    pass
             self.set_meta('directory', self.relay.call('GET', '/directory', timeout=30))
             self.last['directory'] = stamp
         return self.meta('directory', {'fleets': []})

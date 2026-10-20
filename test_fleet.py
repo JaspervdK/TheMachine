@@ -225,7 +225,35 @@ class Fleet(unittest.TestCase):
     def test_off_and_not_configured(self):
         self.assertIsNone(fleet.settings({}))
         self.assertIsNone(fleet.settings({'fleet': {'url': 'http://evil.example'}}))
+        self.assertIsNone(fleet.settings({'fleet_relay_url': 'http://evil.example'}))
         self.assertTrue(fleet.settings(CONFIG))
+        # Self-hosted: the relay's address, and its own token once paired (assistant.py starts the Fleet only with both)
+        self.assertEqual(fleet.settings({'fleet_relay_url': 'https://relay.example/'}), {'url': 'https://relay.example/api/fleet'})
+
+    def test_a_self_hosted_machine_tells_its_work_addresses_only(self):
+        self.assertEqual(self.relay.sent('/me'), [{'emails': ['owner@acme.example']}])
+        self.fleet.directory(refresh=True)
+        self.assertEqual(len(self.relay.sent('/me')), 1)  # only again when they change
+
+    def test_pairing_trades_the_code_for_a_token_and_says_why_not(self):
+        import io
+        import urllib.error
+        from unittest.mock import patch
+        seen = []
+
+        def opener(request, timeout=None):
+            seen.append((request.full_url, json.loads(request.data)))
+            if json.loads(request.data)['code'] == 'BAD1-BAD1':
+                raise urllib.error.HTTPError(request.full_url, 403, 'no', {}, io.BytesIO(b'{"error":"That code is wrong"}'))
+            return io.BytesIO(b'{"token":"fd_x","label":"Laptop"}')
+
+        with patch.object(fleet.urllib.request, 'urlopen', opener):
+            self.assertEqual(fleet.pair('https://relay.example', 'ABCD-EFGH', 'Laptop', ['owner@acme.example'])['token'], 'fd_x')
+            with self.assertRaisesRegex(ValueError, 'That code is wrong'):
+                fleet.pair('https://relay.example', 'BAD1-BAD1', 'Laptop', [])
+        self.assertEqual(seen[0], ('https://relay.example/api/fleet/pair', {'code': 'ABCD-EFGH', 'label': 'Laptop', 'emails': ['owner@acme.example']}))
+        with self.assertRaises(ValueError):
+            fleet.pair('http://relay.example', 'ABCD-EFGH', 'x', [])
 
 
 if __name__ == '__main__':
