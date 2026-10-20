@@ -71,8 +71,10 @@ def parse(kind, question):
         if not title or not summary:
             return None
         contact = str(question.get('contact') or '').strip().lower()
+        messages = [m for m in question.get('messages') or [] if isinstance(m, str) and KEY.fullmatch(m)][:5]
         return {'title': title, 'summary': summary, **({'contact': contact} if fleet.EMAIL.fullmatch(contact) else {}),
-                **({'when': _day(question.get('when'))} if _day(question.get('when')) else {})}
+                **({'when': _day(question.get('when'))} if _day(question.get('when')) else {}),
+                **({'messages': messages} if messages else {})}
     if kind != 'followup':
         return None
     key, items, when = question.get('meeting'), question.get('items'), _day(question.get('when'))
@@ -164,7 +166,7 @@ class Requests:
     """The Fleet's requests on this Machine (mixed into fleet.Fleet). make_card(...) is set by the app: it makes a card
     from this Machine's own evidence (and a draft, for an intro); tell(text, anchor) tells the owner how their own
     request went (phone, Telegram)."""
-    make_card = tell = None
+    make_card = tell = close_card = None
 
     # -- a teammate asks this owner
     def is_request(self, ask_id):
@@ -278,6 +280,11 @@ class Requests:
                         f"AND e.account_id IN ({','.join('?' * len(accounts) or '?')}) ORDER BY e.occurred_at DESC LIMIT 1", (person['id'], *(accounts or ['']))).fetchone()
                 evidence = [last['id']] if last else []
             summary = question['summary'][:480]
+            same = self.same_card(row['fleet'], question)
+            if same:  # they already have a card on it: the handoff joins that card instead of making a second one
+                return self.make_card(kind='handoff', ask_id=row['id'], name=sender, title=f'{sender} handed you: {question["title"]}'[:90],
+                                      body=f'{sender} handed this to you too, through your Fleet. Their summary, as they wrote it: “{summary}”',
+                                      evidence=[], into=same)
             return self.make_card(kind='handoff', ask_id=row['id'], name=sender, title=f'{sender} handed you: {question["title"]}'[:90],
                                   body=(f'{sender} handed this to you through your Fleet. Their summary, as they wrote it: “{summary}”'
                                         + (f' Contact: {question["contact"]}.' if question.get('contact') else '')),
@@ -310,6 +317,8 @@ class Requests:
             ids = json.loads(card['event_ids'] or '[]')
             mails = db.execute(f"SELECT metadata FROM events WHERE kind='gmail.message' AND id IN ({','.join('?' * len(ids)) or 'NULL'}) "
                                'ORDER BY occurred_at DESC', ids).fetchall()
+            givers = {(r['fleet'], r['member_id']) for r in db.execute(
+                "SELECT fleet,member_id FROM fleet_requests WHERE card_id=? AND kind='handoff'", (card['id'],))}
         mine = self.my_emails()
         team = {e for ref in self.work_fleets() for m in self.teammates(ref) for e in m.get('emails', [])}
         contact = next((a for m in mails for _, a in graph.addresses(json.loads(m['metadata'] or '{}').get('from'))
@@ -317,9 +326,11 @@ class Requests:
         summary = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', re.sub(r'[*_`#>]', '', card['body'] or ''))
         return {'suggestion_id': card['id'], 'title': fleet.clean(card['title'], 120), 'summary': fleet.clean(summary, 1000),
                 'contact': contact, 'due': card['due'] if 'due' in card.keys() else None,
-                'fleets': [{'id': ref, 'name': self.fleets()[ref].get('name'),
-                            'members': [{'member_id': m['member_id'], 'name': fleet.label(m)} for m in self.teammates(ref)]}
-                           for ref in self.work_fleets() if self.teammates(ref) and 'handoff' in self.fleets()[ref].get('asks', fleet.ASKS['work'])]}
+                'fleets': [f for f in [{'id': ref, 'name': self.fleets()[ref].get('name'),
+                            'members': [{'member_id': m['member_id'], 'name': fleet.label(m)} for m in self.teammates(ref)
+                                        if (ref, m['member_id']) not in givers]}  # not back to who handed it to you
+                           for ref in self.work_fleets() if self.teammates(ref) and 'handoff' in self.fleets()[ref].get('asks', fleet.ASKS['work'])]
+                           if f['members']]}
 
     def hand_off(self, card_id, fleet_ref, member_id, title, summary, contact=None):
         """Hand a card to a teammate, with the summary exactly as the owner read and edited it. Their card says how it went."""
@@ -332,7 +343,55 @@ class Requests:
             raise ValueError('Give it a title and a short summary')
         if contact and contact != draft['contact']:
             raise ValueError('Only the contact on this card can go along')
+        if not any(m['member_id'] == member_id for f in draft['fleets'] if f['id'] == fleet_ref for m in f['members']):
+            raise ValueError('Not someone to hand this to')
+        keys = self.message_keys(card_id, fleet_ref)
+        if keys:
+            question['messages'] = keys
         return self.ask('handoff', question, context='handoff:' + str(card_id), fleet=fleet_ref, to=[member_id])
+
+    def message_keys(self, card_id, fleet_ref):
+        """The card's emails as sha256(Fleet secret + Message-ID), as handling claims send them: the teammate's Machine
+        can see it has the same email, and nothing else of it travels."""
+        secret = (self.fleets().get(fleet_ref) or {}).get('secret')
+        if not secret:
+            return []
+        with self.connect() as db:
+            card = db.execute('SELECT event_ids FROM suggestions WHERE id=?', (str(card_id),)).fetchone()
+            ids = json.loads(card['event_ids'] or '[]') if card else []
+            rows = db.execute(f"SELECT metadata FROM events WHERE kind='gmail.message' AND id IN ({','.join('?' * len(ids)) or 'NULL'})", ids).fetchall()
+        found = [str(json.loads(r['metadata'] or '{}').get('message-id') or '').strip().strip('<>').lower() for r in rows]
+        return [fleet._hash(secret, m) for m in dict.fromkeys(found) if m][:5]
+
+    def same_card(self, fleet_ref, question):
+        """An open card of the owner's on what a teammate hands them: the same email (by its Fleet key), else the one open
+        card on email from the same contact, else of those the one that shares the most words with their title and summary
+        (at least three). Plain code, never a model: their text is data. None when nothing fits."""
+        keys, contact = set(question.get('messages') or []), question.get('contact')
+        secret = (self.fleets().get(fleet_ref) or {}).get('secret')
+        if not (keys and secret) and not contact:
+            return None
+        with self.connect() as db:
+            cards = db.execute("SELECT id,title,body,event_ids FROM suggestions WHERE status IN ('pending','accepted','instructions','prepared','snoozed') "
+                               'ORDER BY created_at DESC LIMIT 300').fetchall()
+            near = []
+            for card in cards:
+                ids = json.loads(card['event_ids'] or '[]')
+                rows = db.execute(f"SELECT metadata FROM events WHERE kind='gmail.message' AND id IN ({','.join('?' * len(ids)) or 'NULL'})", ids).fetchall()
+                for r in rows:
+                    m = json.loads(r['metadata'] or '{}')
+                    message_id = str(m.get('message-id') or '').strip().strip('<>').lower()
+                    if keys and secret and message_id and fleet._hash(secret, message_id) in keys:
+                        return card['id']
+                    if contact and contact in {a for _, a in graph.addresses(m.get('from'))}:
+                        near.append(card)
+                        break
+        if len(near) == 1:
+            return near[0]['id']
+        words = lambda text: set(re.findall(r'\w{5,}', (text or '').lower()))
+        want = words(question.get('title', '') + ' ' + question.get('summary', ''))
+        scored = sorted(((len(want & words(c['title'] + ' ' + (c['body'] or ''))), c['id']) for c in near), reverse=True)
+        return scored[0][1] if scored and scored[0][0] >= 3 and (len(scored) == 1 or scored[1][0] < scored[0][0]) else None
 
     def request_answered(self, row, status, answer):
         """A teammate's stage on the owner's own request: kept, logged, and told (accepted, sent, declined, done)."""
@@ -349,6 +408,11 @@ class Requests:
                             if (answer or {}).get('what'):
                                 p['what'] = answer['what']
                     db.execute('UPDATE fleet_splits SET parts=?,updated_at=? WHERE id=?', (json.dumps(parts), fleet.now(), split['id']))
+        if row['kind'] == 'handoff' and stage == 'accepted' and self.close_card and str(row['context'] or '').startswith('handoff:'):
+            try:  # it's theirs now: the owner's card is done, saying to whom (Undo or Reopen bring it back)
+                self.close_card(row['context'][8:], f"Handed off to {row['name']}", 'fleet-handoff-' + str(row['id']))
+            except ValueError as error:
+                LOG.info('fleet handoff close skipped error=%s', error)
         if stage == 'waiting' or not self.tell:
             return
         what = {'intro': f"your intro request ({question.get('about')})", 'handoff': f"your handoff: {question.get('title')}",

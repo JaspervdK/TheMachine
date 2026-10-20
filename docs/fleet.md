@@ -47,9 +47,12 @@ default, Always accept, Never), and nothing happens on your side until you accep
    any other draft. You follow it in your Fleet tab, on your phone and in Telegram: asked, accepted, sent, or declined.
 5. **Handoffs.** **Hand off to a teammate** on a work card shows what would go: the card's title, a short summary from
    it, its outside contact and due date. You read and edit it, pick the teammate and send. They get "<you> hands you:
-   ..." with **Accept** and **Decline**; accepting makes the follow-up card on their side, with your summary quoted.
-   Your card then says "Handed off to <teammate>" and how it went: accepted, declined, done. Marking your own card done
-   stays yours.
+   ..." with **Accept** and **Decline**; accepting makes the follow-up card on their side, with your summary quoted. If
+   they already have an open card on it (the same email, recognised by a key of its Message-ID, or else the one open
+   card on email from the same contact), your handoff joins that card instead of making a second one. The card's own
+   emails travel only as those keys. Your card says "Handed off to <teammate>" and how it went; once they accept, it is
+   marked done for you, still saying to whom (Undo brings it back). A card handed to you can't be handed straight back to
+   whoever gave it; to others it can.
 6. **Shared follow-ups.** After a meeting that several members of one Work Fleet attended (in the last two days), one
    Machine proposes who does which follow-up: the organizer's, else that of the member who joined the Fleet first, so
    there is only ever one proposal. It starts from that owner's own open cards and promises on the meeting; the owner

@@ -18,7 +18,7 @@ const view={on:true,kinds:{relationships:'who knows someone',intro:'warm intros'
  intro_offers:[{ask_id:'r1',fleet:FL,member_id:'p',name:'Pat',about:'client.example'}],
  splits:[{id:'out:'+'k'.repeat(64),fleet:FL,title:'Deal review',day:'2026-10-20',status:'proposed',parts:[{member_id:'m',name:'You',mine:true,what:'Send pricing'},{member_id:'p',name:'Pat',mine:false,what:''}]}],
  log:[],notices:[]};
-const card={id:'c1',title:'Send Sam the pricing',body:'Sam asked for pricing.',status:'pending',event_ids:[1],scope:'work',created_at:new Date().toISOString()};
+const card={id:'c1',title:'Send Sam the pricing',body:'Sam asked for pricing.',status:'pending',event_ids:[1],scope:'work',created_at:new Date().toISOString(),fleet_holder:{}};  // a claim without a name
 const state={suggestions:[card],connectors:[],suggestion_counts:{pending:1},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],fleet:{on:true,waiting:3}};
 const calls=[];
 const server=createServer(async(req,res)=>{res.setHeader('Content-Type','application/json');
@@ -44,6 +44,7 @@ try{
  await form.locator('textarea').fill('Sam wants pricing for 40 seats.');
  await form.locator('button.primary').click();
  await page.getByText('Handed off to Pat: asked').waitFor();
+ assert.equal(await page.getByText('is on it').count(),0);  // a claim without a teammate's name says nothing
  assert.deepEqual(calls.at(-1),{action:'fleet_handoff',args:{suggestion_id:'c1',fleet:FL,member_id:'p',title:'Send Sam the pricing',summary:'Sam wants pricing for 40 seats.',contact:'sam@client.example'}});
  // Requests wait as cards under Suggestions (tagged Fleet, Work) with Accept, their words shown as text; the Suggestions
  // badge counts them and the Fleet tab has no badge.

@@ -1178,14 +1178,15 @@ function fleetSync(force){if(!state?.fleet?.on)return Promise.resolve();if(fleet
 const fleetOn=(type,fn)=>{for(const el of [$('#fleet-view'),$('#suggestions')])el.addEventListener(type,fn)};
 function fleetIntroOffers(f,work,inFleet){const offers=(f.intro_offers||[]).filter(o=>inFleet(o,work));
  return offers.length?`<div class="list">${offers.map(o=>`<article><p><strong>${esc(o.name)}</strong> knows someone at ${esc(o.about)}.</p><form class="fleet-ask fleet-intro-form" data-fleet="${esc(o.fleet)}" data-member="${esc(o.member_id)}" data-about="${esc(o.about)}"><input name="note" maxlength="300" placeholder="Why, in a line (optional; they see it)" aria-label="Why"><button class="primary">Ask ${esc(o.name)} for an intro</button></form></article>`).join('')}</div>`:''}
-function fleetHandoff(s){if(closed(s)||!state?.fleet?.on||s.scope!=='work')return'';
+function fleetHandoff(s){if(s.fleet_handoff)return`<p class="note handled fleet">Handed off to ${esc(s.fleet_handoff.name)}: ${esc(s.fleet_handoff.stage)}</p>`;  // also once it is done
+ if(closed(s)||!state?.fleet?.on||s.scope!=='work')return'';
  if(s.fleet_handoff)return`<p class="note handled fleet">Handed off to ${esc(s.fleet_handoff.name)}: ${esc(s.fleet_handoff.stage)}</p>`;
  return''}  // the Hand off button sits with the card's other buttons (cardActions); its form with the other editors
 function handoffEditor(s){const d=handingOff.get(s.id);if(!d||closed(s))return'';
  return`<form class="change-editor fleet-handoff-form" data-card="${esc(s.id)}"><label>Hand off to <select name="to">${d.who.map(([f,m,n])=>`<option value="${esc(f)}|${esc(m)}"${d.to===f+'|'+m?' selected':''}>${esc(n)}</option>`).join('')}</select></label><label>Title<input name="title" maxlength="120" value="${esc(d.title)}"></label><label>What they need to know (only this goes to them)<textarea name="summary" maxlength="1000">${esc(d.summary)}</textarea></label>${d.contact?`<label><input type="checkbox" name="contact" value="${esc(d.contact)}"${d.with_contact!==false?' checked':''}> With the contact: ${esc(d.contact)}</label>`:''}<div class="actions"><button class="primary">Hand off</button><button type="button" class="ghost" data-handoff-cancel="${esc(s.id)}">Cancel</button></div></form>`}
-function fleetNote(s){if(closed(s))return'';const h=s.fleet_holder;let out='';
+function fleetNote(s){if(closed(s))return fleetHandoff(s);const h=s.fleet_holder;let out='';
  if(h?.offer)out+=`<p class="note fleet">${esc(h.offer.join(', '))} also got this email. <button type="button" class="link" data-fleet-take="${esc(s.id)}">Tell them you’re on it</button></p>`;
- else if(h&&!h.mine)out+=`<p class="note handled fleet">${esc(h.name)} is on it. <button type="button" class="link" data-fleet-take="${esc(s.id)}">I’ll handle it</button></p>`;
+ else if(h?.name&&!h.mine)out+=`<p class="note handled fleet">${esc(h.name)} is on it. <button type="button" class="link" data-fleet-take="${esc(s.id)}">I’ll handle it</button></p>`;
  if(s.fleet_context?.length)out+=`<p class="note fleet">From your Fleet: ${s.fleet_context.map(esc).join(' · ')}</p>`;
  if(s.fleet_split)out+=`<p class="note fleet">Follow-ups split in your Fleet: ${esc(s.fleet_split)}</p>`;return out+fleetHandoff(s)}
 function fleetAskRow(n){if(!state?.fleet?.on||!['person','org'].includes(n.kind))return'';const about=n.kind==='org'?n.id.replace(/^org:/,''):/^email:/.test(n.id)?n.id.slice(6):n.name;

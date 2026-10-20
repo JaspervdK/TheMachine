@@ -6270,6 +6270,8 @@ class App:
             self.fleet.retell = lambda message_id: threading.Thread(target=self.fleet_retell, args=(message_id,), daemon=True).start()
             self.fleet.notify_notice = self.fleet_notify_notice
             self.fleet.make_card, self.fleet.tell = self.fleet_card, self.fleet_tell  # Fleet requests (fleet_requests.py)
+            # A handoff the teammate accepted is theirs now: the owner's card is done, saying to whom (Undo brings it back).
+            self.fleet.close_card = lambda card_id, why, key: self.store.decide(card_id, 'complete', why, key, 'fleet')
             self.fleet.retell_notice = lambda message_id, message: threading.Thread(
                 target=self.fleet_retell, args=(message_id, message), daemon=True).start()
             # Briefs and free questions keep to the owner's hours; a free question is searched with the Machine's own search.
@@ -6906,7 +6908,7 @@ class App:
         message_id = str(result.get('messageId') or '')
         return message_id if re.fullmatch(r'\d+', message_id) else None
 
-    def fleet_card(self, kind, ask_id, name, title, body, evidence, action=None, due=None):
+    def fleet_card(self, kind, ask_id, name, title, body, evidence, action=None, due=None, into=None):
         """A card for a Fleet request the owner accepted (fleet_requests.py), made from this Machine's own data. Its
         first evidence is a Fleet event on one of the owner's work accounts, marked reviewed so no model reads it by
         itself; an intro also gets its double-opt-in draft, which goes out only with the owner's own Send."""
@@ -6923,6 +6925,14 @@ class App:
                        "VALUES(?,?,'fleet.request',?,?,?,?,0,?,1,1,?)",
                        (account, source_id, stamp, title, body, json.dumps(meta), hashlib.sha256((title + body).encode()).hexdigest(), stamp))
             event_id = db.execute('SELECT id FROM events WHERE account_id=? AND source_id=?', (account, source_id)).fetchone()[0]
+        if into:  # a handoff on something the owner already has a card on: it joins that card, with their summary
+            with self.store.connect() as db:
+                row = db.execute('SELECT event_ids,body FROM suggestions WHERE id=?', (into,)).fetchone()
+                ids = json.loads(row['event_ids'] or '[]')
+                if event_id not in ids:
+                    db.execute('UPDATE suggestions SET event_ids=?,body=? WHERE id=?',
+                               (json.dumps([*ids, event_id]), ((row['body'] or '') + '\n\n' + body[:700])[:2400], into))
+            return into
         card = self.store.suggest('fleet:' + str(ask_id), title[:90], body[:700], [event_id, *[e for e in evidence if e != event_id]], when='now', work=True, due=due)
         if action and not card.get('duplicate'):
             with self.store.connect() as db:

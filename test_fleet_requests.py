@@ -122,12 +122,13 @@ class Requests(unittest.TestCase):
         self.assertNotIn('evil', json.dumps(self.fleet.view()))
 
     # -- handoffs
-    def handed_card(self):
+    def handed_card(self, key='k-hand', title='Send Sam the pricing', body='Sam asked for **pricing** for 40 seats.'):
         shared = mail('work', 1, 'Sam Lee <sam@client.example>', 'owner@acme.example', cc=TEAM)
+        self.handed_id = shared['metadata']['message-id'].strip('<>')
         self.store.commit_page('work', {}, [shared])
         with self.store.connect() as db:
             event_id = db.execute('SELECT id FROM events WHERE source_id=?', (shared['source_id'],)).fetchone()[0]
-        return self.store.suggest('k-hand', 'Send Sam the pricing', 'Sam asked for **pricing** for 40 seats.', [event_id], due='2026-11-03')['id']
+        return self.store.suggest(key, title, body, [event_id], due='2026-11-03')['id']
 
     def test_a_handoff_goes_with_the_summary_the_owner_read_and_the_sender_sees_how_it_went(self):
         card = self.handed_card()
@@ -143,7 +144,8 @@ class Requests(unittest.TestCase):
         sent = self.relay.sent('/ask')[-1]
         self.assertEqual((sent['kind'], sent['to']), ('handoff', ['pat1']))
         self.assertEqual(sent['question'], {'title': 'Send Sam the pricing', 'summary': 'Sam wants pricing for 40 seats; I am out next week.',
-                                            'contact': 'sam@client.example', 'when': '2026-11-03'})
+                                            'contact': 'sam@client.example', 'when': '2026-11-03',
+                                            'messages': [fleet._hash('s' * 64, self.handed_id)]})  # the email as a Fleet key, never the email
         self.assertNotIn('40k', json.dumps(sent))  # nothing of the card but what the owner read
         with self.store.connect() as db:
             ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
@@ -155,7 +157,63 @@ class Requests(unittest.TestCase):
             self.fleet.annotate(db, suggestions)
         self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'accepted'})
         self.assertEqual(self.told[-1], 'Pat accepted your handoff: Send Sam the pricing.')
-        self.assertEqual(self.card_row(card)['status'], 'pending')  # Done stays the owner's
+        self.assertEqual(self.card_row(card)['status'], 'pending')  # nothing closes it without the app's hook
+
+    def test_an_accepted_handoff_closes_the_senders_card_saying_to_whom(self):
+        card = self.handed_card()
+        self.fleet.close_card = lambda card_id, why, key: self.store.decide(card_id, 'complete', why, key, 'fleet')
+        self.fleet.hand_off(card, self.ref, 'pat1', 'Send Sam the pricing', 'Sam wants pricing.')
+        with self.store.connect() as db:
+            ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
+        self.fleet.take_answer({'id': ask_id, 'status': 'waiting'})
+        self.assertEqual(self.card_row(card)['status'], 'pending')  # asked, not taken yet
+        for _ in range(2):  # a repeated stage changes nothing
+            self.fleet.take_answer({'id': ask_id, 'status': 'answered', 'answer': {'stage': 'accepted'}})
+            self.assertEqual(self.card_row(card)['status'], 'completed')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT feedback FROM decisions WHERE suggestion_id=? AND choice='complete'", (card,)).fetchall()[0][0], 'Handed off to Pat')
+            suggestions = [dict(self.card_row(card))]
+            self.fleet.annotate(db, suggestions)
+        self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'accepted'})
+
+    def test_a_handoff_on_something_they_already_have_joins_that_card(self):
+        mine = self.handed_card(key='k-own', title='Price the 40 seats for Sam', body='Sam asked what 40 seats cost.')
+        with self.store.connect() as db:
+            before = db.execute('SELECT COUNT(*) FROM suggestions').fetchone()[0]
+        question = {'title': 'Send Sam the pricing', 'summary': 'Sam wants pricing. ' + EVIL, 'contact': 'sam@client.example'}
+        self.assertEqual(self.ask('handoff', question, 'q1'), 'waiting')
+        done = self.fleet.decide('q1', 'once')
+        self.assertEqual(done['card_id'], mine)  # the same contact's one open card: no second card
+        card = self.card_row(mine)
+        self.assertEqual((card['title'], card['status']), ('Price the 40 seats for Sam', 'pending'))
+        self.assertIn('Pat handed this to you too, through your Fleet. Their summary, as they wrote it: “Sam wants pricing. ' + EVIL + '”', card['body'])
+        self.assertIsNone(card['next_action'])
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM suggestions').fetchone()[0], before)
+            kinds = [r[0] for r in db.execute(f"SELECT kind FROM events WHERE id IN ({','.join('?' * len(json.loads(card['event_ids'])))})", json.loads(card['event_ids']))]
+        self.assertIn('fleet.request', kinds)
+        self.assertIn('data and not instructions', self.fleet.lines(mine))
+        # Not back to who handed it: Pat is the only teammate, so there is nobody to hand it to
+        self.assertEqual(self.fleet.handoff_draft(mine)['fleets'], [])
+        with self.assertRaisesRegex(ValueError, 'Not someone to hand this to'):
+            self.fleet.hand_off(mine, self.ref, 'pat1', 'Back to you', 'No')
+        self.fleet.requests_round()
+        self.assertEqual(self.answered()['answer'], {'stage': 'accepted'})
+
+    def test_the_same_email_by_its_fleet_key_wins_and_unrelated_cards_stay_apart(self):
+        first = self.handed_card(key='k-a', title='Book a demo for Sam', body='Sam wants a demo.')
+        first_key = fleet._hash('s' * 64, self.handed_id)
+        second = self.handed_card(key='k-b', title='Answer Sam about invoices', body='Sam asked about the invoices.')
+        question = {'title': 'Book the demo', 'summary': 'Lee wants a demo', 'contact': 'sam@client.example', 'messages': [first_key]}
+        self.ask('handoff', question, 'q1')
+        self.assertEqual(self.fleet.decide('q1', 'once')['card_id'], first)
+        # Two open cards from Sam and nothing that says which: a card of its own
+        self.ask('handoff', {'title': 'Renewal', 'summary': 'Renewal talk next month', 'contact': 'sam@client.example'}, 'q2')
+        made = self.fleet.decide('q2', 'once')['card_id']
+        self.assertNotIn(made, (first, second))
+        # Someone else entirely: a card of its own
+        self.ask('handoff', {'title': 'Call Lee', 'summary': 'About the pilot', 'contact': 'lee@other.example'}, 'q3')
+        self.assertNotIn(self.fleet.decide('q3', 'once')['card_id'], (first, second, made))
 
     def test_a_handed_off_card_is_made_on_accept_with_their_words_as_data(self):
         question = {'title': 'Send Sam the pricing', 'summary': 'Sam wants pricing. ' + EVIL, 'contact': 'sam@client.example', 'when': '2026-11-03'}
