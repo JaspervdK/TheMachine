@@ -620,7 +620,7 @@ def cmd_import(config, args):
 def cmd_fleet_pair(config, args):
     base = (args.relay or config.get('fleet_relay_url') or '').rstrip('/')
     if not assistant.fleet.reachable(base):
-        raise CliError('set fleet_relay_url in config.json to your Fleet relay\'s https:// address (or pass --relay) first')
+        raise CliError('pass --relay with your Fleet relay\'s https:// address (it is shown with your pairing code)')
     try:
         found = assistant.fleet.pair(base, args.code, args.label or os.uname().nodename, assistant.fleet.account_emails(config))
     except (ValueError, OSError) as error:
