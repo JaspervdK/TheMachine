@@ -316,7 +316,7 @@ class NextActions(unittest.TestCase):
         choices=self.menu();self.confirm(choices[0]['revision']);sent=[]
         self.app().action_step(self.transport(send=lambda action,job:(sent.append(action),{'message_id':'approved'})[1]))
         self.assertEqual(sent[0]['body'],choices[0]['body']);self.assertEqual(self.row()['next_actions'][0]['state']['status'],'sent')
-        self.assertIn('Email sent.',a.card(self.row()))
+        self.assertIn('✓ Email sent to recipient@example.com at ',a.card(self.row()))
         self.assertNotIn('Send reply',[b['label'] for block in a.controls(self.row())['blocks'] for b in block['buttons']])
 
     def test_menu_cannot_start_new_preparation_while_send_is_unknown(self):
@@ -498,3 +498,59 @@ class EmailFormat(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Nothing was sent'):transport.preflight(self.email())
 
 if __name__=='__main__':unittest.main()
+
+
+class CardDraft(unittest.TestCase):
+    """Telegram shows the draft on the card, so Send there sends exactly what the owner read."""
+    setUp=ux.UX.setUp
+    row=ux.UX.row
+    decide=ux.UX.decide
+    app=NextActions.app
+    draft=NextActions.draft
+    ready=NextActions.ready
+    CONFIG={'dashboard_host':'machine.example','dashboard_path':'/','telegram_owner':'owner'}
+
+    def send(self):
+        with patch.object(a,'telegram_request',side_effect=lambda config,args:args):
+            return a.telegram(self.CONFIG,self.row(),'send')
+
+    def buttons(self,payload):
+        return [(b['label'],b['action'].get('value') or b['action'].get('url')) for block in payload['presentation']['blocks'] for b in block['buttons']]
+
+    def test_card_shows_the_draft_and_send_confirms_that_revision(self):
+        revision=self.ready(cc=['cc@example.com'],body='Hi Ada,\n\nThanks! See you on the 3rd.')['revision']
+        payload=self.send()
+        for text in ('To: recipient@example\\.com','Cc: cc@example\\.com','Subject: Verified subject','Thanks\\! See you on the 3rd\\.'):
+            self.assertIn(text,payload['message'])
+        self.assertEqual(self.buttons(payload)[:2],[('Send',f'assistant:{self.sid}:confirm_{revision}'),
+                         ('Edit',f'https://machine.example/#send={self.sid}&revision={revision}&edit=1')])
+        self.assertEqual(self.row()['card_send'],revision)  # the plugin's redraws offer the same Send
+        with self.store.connect() as db:self.assertEqual(db.execute('SELECT count(*) FROM action_jobs').fetchone()[0],0)
+
+    def test_a_trimmed_draft_opens_the_review_first(self):
+        revision=self.ready(body='Long line. '*600)['revision']
+        payload=self.send()
+        self.assertIn('Full draft in the dashboard\\.',payload['message']);self.assertLess(len(payload['message']),4096)
+        self.assertEqual(self.buttons(payload)[0],('Send',f'assistant:{self.sid}:send_{revision}'))
+        self.assertNotIn('card_send',self.row())
+
+    def test_a_recipient_still_to_choose_keeps_the_review(self):
+        revision=self.ready()['revision'];row=self.row()
+        row['next_actions']=[{**row['next_actions'][0],'to':[],'to_options':['a@example.com','b@example.com']}]  # set by the service
+        with patch.object(a,'telegram_request',side_effect=lambda config,args:args):
+            payload=a.telegram(self.CONFIG,row,'send')
+        self.assertNotIn('**Draft**',payload['message'])
+        self.assertEqual(self.buttons(payload)[0],('Send',f'assistant:{self.sid}:send_{revision}'))
+
+    def test_an_older_card_send_after_the_draft_changed_sends_nothing(self):
+        old=self.ready()['revision'];self.ready(body='A newer draft.')
+        with self.assertRaises(ValueError):
+            self.app().action('confirm_action',{'suggestion_id':self.sid,'revision':old,'approval_id':'telegram:1'},owner_dashboard=True)
+        with self.store.connect() as db:self.assertEqual(db.execute('SELECT count(*) FROM action_jobs').fetchone()[0],0)
+
+    def test_sent_card_says_to_whom_and_when(self):
+        self.ready();action=self.row()['next_action']
+        self.app().action('confirm_action',{'suggestion_id':self.sid,'revision':action['revision'],'approval_id':'telegram:1'},owner_dashboard=True)
+        self.app().action_step(NextActions.transport(self,send=lambda *_:{'message_id':'sent'}))
+        self.assertRegex(a.card(self.row()),r'✓ Email sent to recipient@example\.com at \d\d:\d\d\.')
+        self.assertNotIn('**Draft**',self.send()['message'])

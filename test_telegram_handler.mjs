@@ -49,7 +49,14 @@ await handler(ctx('back'));buttons=edits.pop().buttons.flat();assert.equal(butto
 const beforeSend=choices.length;await handler(ctx('send_abcdef123456'));const review=edits.pop();assert.match(review.text,/From: owner@example.com/);assert.match(review.text,/Exact draft/);assert.equal(choices.length,beforeSend);
 assert.deepEqual(review.buttons.flat().map(b=>b.text),['Send now','Edit','Cancel']);assert.match(review.buttons.flat()[1].url,/#send=[a-f0-9]{16}&revision=abcdef123456&edit=1$/);
 await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');edits.pop();
-await handler(ctx('confirm_000000000000'));assert.equal(choices.length,beforeSend);edits.pop();delete item.next_action;
+{const before=replies.length;await handler(ctx('confirm_000000000000'));assert.equal(choices.length,beforeSend);edits.pop();
+ assert.equal(replies.length,before+1);assert.match(replies.pop().text,/nothing was sent/);}  // a Send on an older card says so
+// The card shows this draft in full (card_send): its redraw offers Send that confirms, and Edit.
+item.card_send='abcdef123456';await handler(ctx('back'));{const b=edits.pop().buttons.flat();assert.deepEqual(b.slice(0,2).map(x=>x.text),['Send','Edit']);
+ assert.match(JSON.stringify(decodeCallback(b[0].callback_data)),/confirm_abcdef123456/);
+ assert.match(b[1].url,/^https:\/\/machine\.example\.ts\.net\/assistant\/#send=a{16}&revision=abcdef123456&edit=1$/);}
+{const before=choices.length;await handler(ctx('confirm_abcdef123456'));assert.equal(choices.length,before+1);assert.equal(choices.pop().revision,'abcdef123456');edits.pop();}
+delete item.card_send;delete item.next_action;
 item.next_action={kind:'email',revision:'abcdef123456',from:'owner@example.com',to:[],to_options:['will@vendor.example','ann@example.com'],cc:[],bcc:[],subject:'Pick',body:'Draft'};
 {await handler(ctx('send_abcdef123456'));const pick=edits.pop();assert.match(pick.text,/Who should get this email/);const b=pick.buttons.flat();
  assert.deepEqual(b.map(x=>x.text),['Send to will@vendor.example','Send to ann@example.com','Choose several','Edit','Cancel']);assert.equal(b.find(x=>x.text==='Edit').url.endsWith('&edit=1'),true);assert.ok(b.every(x=>!x.callback_data||Buffer.byteLength(x.callback_data)<=64));

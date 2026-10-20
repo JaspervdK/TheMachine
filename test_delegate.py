@@ -155,7 +155,7 @@ class Delegate(unittest.TestCase):
         self.confirm()
         self.app().action_step(self.transport(lambda *_: {'message_id': 'slack:D0SAM1:1.2', 'channel_id': 'D0SAM1', 'user_id': 'U0SAM12'}))
         self.assertEqual(self.suggestion()['status'], 'prepared')
-        self.assertIn('Slack message sent.', a.card(self.row()))
+        self.assertIn('✓ Slack message sent to Sam at ', a.card(self.row()))
 
 
 class SlackSender(unittest.TestCase):

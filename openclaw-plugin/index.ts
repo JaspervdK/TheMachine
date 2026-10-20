@@ -25,6 +25,8 @@ const DISMISS_REASONS: Record<string,string> = {dismiss_irrelevant:'Not relevant
 // A blocker waiting on the owner (a sign-in in the kept tab) resumes with Continue; same rule as the service.
 const retryLabel=(r?:string)=>/\b(?:sign(?:ed)?[ -]?in|log(?:ged)?[ -]?in|signed out|2fa|two-factor|authenticator|passkey|tap continue)\b/i.test(r||'')&&!/try again/i.test(r||'')?'Continue':'Try again';
 
+// The dashboard root for Edit links on redrawn cards; set from the config on each tap.
+let dashboardRoot='';
 function cardButtons(item: any) {
   const choices = ['completed', 'rejected'].includes(item.status) ? (item.undo_until && Date.parse(item.undo_until)>Date.now() ? [['Undo','undo']] : []) : item.status === 'snoozed'
     ? [['Bring back', 'accept'], ['Change time', 'snooze'], ['Not needed', 'reject']]
@@ -38,8 +40,15 @@ function cardButtons(item: any) {
   if(item.status==='prepared')for(const action of taskActions(item)){
     if(action.kind==='finish'&&(action.state||item.action_status)?.status==='done')continue;
     if(action.kind==='open')buttons.push({text:action.label,url:action.url});
-    else if(['email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((action.state||item.action_status)?.status))
+    else if(['email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish'].includes(action.kind)&&!['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((action.state||item.action_status)?.status)){
+      // The card shows this draft in full (card_send, card_draft in assistant.py): Send confirms it, Edit opens the editor.
+      if(item.card_send&&item.card_send===action.revision){
+        buttons.push(button(item.id,action.label||'Send','confirm_'+action.revision));
+        if(dashboardRoot)buttons.push({text:'Edit',url:`${dashboardRoot}#send=${item.id}&revision=${action.revision}&edit=1`});
+        continue;
+      }
       buttons.push(button(item.id,action.label||(action.kind==='prepare'?'Prepare next step':'Send'),(action.kind==='prepare'?'next_':'send_')+action.revision));
+    }
   }
   // A merged fix stays reversible for a day. Same rule as controls() in assistant.py.
   if(['prepared','completed'].includes(item.status)&&taskActions(item).some((a:any)=>a.kind==='merge'&&Date.parse((a.state||item.action_status)?.undo_until||'')>Date.now()))
@@ -175,6 +184,7 @@ export default definePluginEntry({
             String(ctx.senderId) !== config.telegram_owner || String(ctx.callback.chatId) !== config.telegram_owner) {
           return { handled: true };
         }
+        dashboardRoot=config.dashboard_host?`https://${config.dashboard_host}${config.dashboard_path||'/'}`:'';
         // A Fleet question waiting for the owner. The service accepts the tap only from the message it sent for it.
         const fleetTap = /^assistant:fleet:(q_[a-f0-9]{16}):(once|always|decline)$/.exec(ctx.callback.data);
         if (fleetTap) {
@@ -208,7 +218,10 @@ export default definePluginEntry({
           const [,revision,pick]=choice.split('_'),draft=taskActions(item).find((a:any)=>a.revision===revision);
           if(draft?.kind==='finish'&&(draft.state||item.action_status)?.status==='done'){await ctx.respond.editButtons({buttons:cardButtons(item)});return {handled:true};}
           if(item.status!=='prepared'||!draft||!['email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish'].includes(draft.kind)||['queued','sending','sent','uncertain','local_preparation','undoing','undone'].includes((draft.state||item.action_status)?.status)){
-            await ctx.respond.editButtons({buttons:cardButtons(item)});return {handled:true};
+            await ctx.respond.editButtons({buttons:cardButtons(item)});
+            // A Send on an older version of the card: nothing goes out, and the tap says why.
+            if(choice.startsWith('confirm_'))await ctx.respond.reply({text:['sending','sent','queued'].includes((draft?.state||item.action_status)?.status)?'Already sent. Nothing was sent twice.':'That draft changed or is no longer ready, so nothing was sent. Check the updated card.'});
+            return {handled:true};
           }
           if((choice.startsWith('next_')&&draft.kind!=='prepare')||(choice.startsWith('confirm_')&&!['email','linkedin','slack','x','whatsapp','merge','finish'].includes(draft.kind))||(choice.startsWith('send_')&&!['email','email_demo','linkedin','slack','x','whatsapp','merge','finish'].includes(draft.kind)))return {handled:true};
           if(choice.startsWith('send_')){
@@ -220,7 +233,8 @@ export default definePluginEntry({
           const options:string[]=draft.to_options||[],recipient=/^\d$/.test(pick||'')?options[Number(pick)]:undefined;
           if(options.length&&!recipient){await ctx.respond.editMessage(sendReview(item,draft,`https://${config.dashboard_host}${config.dashboard_path||'/'}`));return {handled:true};}
           try{await call('confirm_action',{suggestion_id:id,revision,approval_id:`telegram:${ctx.callbackId}`,...(recipient?{recipients:[recipient]}:{})});}
-          catch(error:any){if(error.status!==400)throw error;await call('refresh_card',{suggestion_id:id});return {handled:true};}
+          catch(error:any){if(error.status!==400)throw error;await call('refresh_card',{suggestion_id:id});
+            await ctx.respond.reply({text:`Nothing was sent: ${error.message}`});return {handled:true};}
           await ctx.respond.editButtons({buttons:cardButtons({...item,...(['prepare','finish'].includes(draft.kind)?{status:'accepted'}:{}),next_actions:taskActions(item).map((a:any)=>a.revision===revision?{...a,state:{status:'queued'}}:a)})});
           return {handled:true};
         }

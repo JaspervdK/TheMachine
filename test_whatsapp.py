@@ -93,7 +93,7 @@ class WhatsAppSend(unittest.TestCase):
   self.app().action_step(self.transport(send=lambda action,job:(calls.append(action),{'message_id':'whatsapp:3EB0AA'})[1]))
   self.app().action_step(self.transport(send=lambda *_:self.fail('Duplicate send')))
   self.assertEqual([c['body'] for c in calls],['Yes, Friday works.'])
-  self.assertEqual(self.job()['status'],'sent');self.assertIn('WhatsApp message sent.',str(a.card(self.row())))
+  self.assertEqual(self.job()['status'],'sent');self.assertIn('✓ WhatsApp message sent to Sam at ',str(a.card(self.row())))
   raw=message();raw.update(ChatJID=CHAT,ChatName='Sam',SenderJID=CHAT,MsgID='ANSWER',Text='Great!',Timestamp='2099-01-01T00:00:00Z')
   self.store.commit_page(WA['id'],{},[a.whatsapp_event(WA,raw)])
   with self.store.connect() as db:rows=[dict(r) for r in db.execute("SELECT * FROM events WHERE kind='whatsapp.message' ORDER BY occurred_at DESC LIMIT 1")]

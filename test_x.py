@@ -229,7 +229,7 @@ class XSend(unittest.TestCase):
         self.app().action_step(self.transport(send=lambda *_: self.fail('Duplicate send')))
         self.assertEqual([c['body'] for c in calls], ['Yes, shared inboxes sync too.'])
         self.assertEqual(self.job()['status'], 'sent')
-        self.assertIn('Reply posted on X.', str(a.card(self.row())))
+        self.assertIn('✓ Reply posted on X to Ada at ', str(a.card(self.row())))
         # Ada's answer to that reply comes back to the card.
         with patch.object(a, 'now', return_value='2099-01-01T00:00:00+00:00'):
             self.store.commit_page('x-sf', {}, x.events(ACCOUNT, page([mention(id='1980000000000000001', at=4070908800000, text='Thanks!',
@@ -242,7 +242,7 @@ class XSend(unittest.TestCase):
         self.ready(reply_to=None, conversation_id=CONV, label='Send')
         self.confirm()
         self.app().action_step(self.transport(send=lambda *_: {'message_id': 'xdm:1979000000000000007'}))
-        self.assertIn('X message sent.', str(a.card(self.row())))
+        self.assertIn('✓ X message sent to Ada at ', str(a.card(self.row())))
 
     def test_busy_browser_waits_without_sending(self):
         self.ready()

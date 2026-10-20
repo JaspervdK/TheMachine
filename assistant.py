@@ -3724,11 +3724,15 @@ class Store:
         if action:
             states={r['revision']:{**{k:r[k] for k in ('status','error','message_id','snooze_status','snooze_until','snooze_error') if r[k] is not None or k in ('status','error','message_id')},
                                    **({'auto':True} if r['approval_id'].startswith('auto-merge:') else {}),
+                                   **({'sent_at':r['updated_at']} if r['status']=='sent' else {}),
                                    # A merged fix can be undone for a day.
                                    **({'undo_until':(dt.datetime.fromisoformat(r['updated_at'])+UNDO_MERGE).isoformat()} if r['status']=='sent' and str(r['message_id']).startswith('merge:') else {})}
                     for r in db.execute('SELECT j.revision,j.status,j.error,j.message_id,j.approval_id,j.updated_at,t.status snooze_status,t.until snooze_until,t.error snooze_error FROM action_jobs j LEFT JOIN thread_snoozes t ON t.job_id=j.id WHERE j.suggestion_id=?',(suggestion['id'],))}
             extra['next_actions']=[{**item,**({'state':states[item['revision']]} if item['revision'] in states else {})} for item in next_actions.visible_actions(action)]
             if action['kind']!='menu' and action['revision'] in states:extra['action_status']=states[action['revision']]
+            # The draft Telegram shows in full on the card, so its Send there confirms directly (card_draft).
+            shown=card_draft({**suggestion,**extra})
+            if shown and shown['full']:extra['card_send']=shown['action']['revision']
         prompt=db.execute('SELECT status,error FROM feedback_prompts WHERE request_id=?',(suggestion.get('feedback_request_id'),)).fetchone()
         if prompt:extra['change_prompt']=dict(prompt)
         job=db.execute('SELECT job_id,status FROM preparations WHERE suggestion_id=?',(suggestion['id'],)).fetchone()
@@ -4862,11 +4866,15 @@ def card(row):
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed','undoing','undone')),None)
     if action_state and row['status']=='prepared':
         merging=merge_state(row,action_state)
+        sent=next((a for a in row.get('next_actions') or [] if a.get('state') is action_state),{})
+        who=', '.join(sent.get('to') or []) if sent.get('kind')=='email' and not sent.get('to_options') else sent.get('to_name') or ''
+        at=dt.datetime.fromisoformat(action_state['sent_at']).astimezone(local_tz()).strftime('%H:%M') if action_state.get('sent_at') else ''
+        to_at=(' to '+who if who else '')+(' at '+at if at else '')
         auto=merging and action_state.get('auto')
         status={'queued':'Testing the fix. It merges by itself if every check passes.' if auto else 'Testing and merging the fix…' if merging else 'Sending your approved draft…','sending':'Testing and merging the fix…' if merging else 'Sending your approved draft…',
                 'sent':(('Merged by itself and restarted. You can undo it for 24 hours; it undoes itself if the error comes back.' if auto else 'Merged. The Machine restarts with the fix.')
                         +(' '+action_state['error'] if action_state.get('error') else '')) if merging else
-                ('LinkedIn message sent.' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent.' if str(action_state.get('message_id') or '').startswith('slack:') else 'Reply posted on X.' if str(action_state.get('message_id') or '').startswith('x:') else 'X message sent.' if str(action_state.get('message_id') or '').startswith('xdm:') else 'WhatsApp message sent.' if str(action_state.get('message_id') or '').startswith('whatsapp:') else 'Email sent.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':(action_state.get('error') or '')+(' Tap Merge fix to merge it anyway.' if auto else ''),'failed':action_state.get('error'),
+                ('✓ '+('LinkedIn message sent' if str(action_state.get('message_id') or '').startswith(('urn:li:','linkedin:')) else 'Slack message sent' if str(action_state.get('message_id') or '').startswith('slack:') else 'Reply posted on X' if str(action_state.get('message_id') or '').startswith('x:') else 'X message sent' if str(action_state.get('message_id') or '').startswith('xdm:') else 'WhatsApp message sent' if str(action_state.get('message_id') or '').startswith('whatsapp:') else 'Email sent')+to_at+'.'+thread_snooze_note(action_state)),'uncertain':action_state.get('error'),'blocked':(action_state.get('error') or '')+(' Tap Merge fix to merge it anyway.' if auto else ''),'failed':action_state.get('error'),
                 'undoing':'Undoing the merge…','undone':action_state.get('error') or 'Merge undone.'}.get(action_state['status'],status)
     try:
         handed = json.loads(row['awaiting']) if row.get('awaiting') else {}
@@ -4899,7 +4907,50 @@ def card(row):
     return ('**' + title + '**\n\n' + row['body'] + source + ('\n\n' + status if status else '')).strip()
 
 
-def controls(row):
+CARD_DRAFT_KINDS = ('email', 'linkedin', 'slack', 'x', 'whatsapp')
+ACTION_BUSY = ('queued', 'sending', 'sent', 'uncertain', 'local_preparation', 'undoing', 'undone')
+
+
+def card_draft(row):
+    """The one message draft a ready card shows in Telegram, so the owner reads it there and can
+    just press Send (2026-10-20). Returns {'action','text','full'}. full is False when the body
+    had to be trimmed to keep the card under Telegram's limit: Send then opens the review first,
+    so a one-tap send always sends exactly the text on the card. None when there is no single
+    message draft, or the owner still has to pick the recipient."""
+    if row.get('status') != 'prepared':
+        return None
+    actions = next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
+    ready = [a for a in actions if a['kind'] in next_actions.APPROVE_KINDS+next_actions.FINISH_KINDS+('email_demo','prepare')
+             and (a.get('state') or row.get('action_status') or {}).get('status') not in ACTION_BUSY]
+    if len(ready) != 1 or ready[0]['kind'] not in CARD_DRAFT_KINDS or ready[0].get('to_options') or not ready[0].get('body'):
+        return None
+    a, escape = ready[0], lambda text: re.sub(r'([\\`*_{}\[\]()#+.!>|~-])', r'\\\1', str(text))
+    if a['kind'] == 'email':
+        head = ['To: ' + ', '.join(a.get('to') or [])] + [key.capitalize() + ': ' + ', '.join(a[key]) for key in ('cc', 'bcc') if a.get(key)]
+        head.append('Subject: ' + (a.get('subject') or ''))
+    elif a['kind'] == 'x':
+        head = ['Reply on X to @' + a.get('to_screen_name', '') if a.get('reply_to') else 'X message to ' + a.get('to_name', '')]
+    else:
+        head = [{'linkedin': 'LinkedIn', 'slack': 'Slack', 'whatsapp': 'WhatsApp'}[a['kind']] + ' message to ' + a.get('to_name', '')]
+    tail = []
+    if a.get('signature'): tail.append('+ your Gmail signature')
+    if a.get('attachments'): tail.append('Attachments: ' + ', '.join(x.get('name', '') for x in a['attachments']))
+    if a.get('delegate') and a.get('wait_days'):
+        tail.append(f"After sending, this card waits {a['wait_days']} day{'s' if a['wait_days'] > 1 else ''} for {a['to_name'] + '’s' if a.get('to_name') else 'a'} reply.")
+    if a.get('snooze_days'):
+        tail.append(f"After sending, the thread leaves your inbox for {a['snooze_days']} day{'s' if a['snooze_days'] > 1 else ''}.")
+    # Telegram takes 4096 characters; the title, summary, links and status share them.
+    room = max(400, min(2500, 3300 - len(row.get('title') or '') - len(row.get('body') or '') - len(''.join(head + tail))))
+    body = a['body'].strip()
+    full = len(body) <= room
+    if not full:
+        body = body[:room].rstrip() + '…'
+        tail.append('Full draft in the dashboard.')
+    text = '**Draft**\n' + '\n'.join(escape(line) for line in head) + '\n\n' + escape(body) + ('\n\n' + '\n'.join(escape(line) for line in tail) if tail else '')
+    return {'action': a, 'text': text, 'full': full}
+
+
+def controls(row, root=''):
     if row['status'] in ['completed','rejected']:
         choices = [('Undo','undo')] if row.get('undo_until') and row['undo_until']>now() else []
     elif row['status'] == 'snoozed':
@@ -4915,10 +4966,16 @@ def controls(row):
     if link.startswith('https://') and row['status'] in ('accepted','instructions'):
         buttons.append({'label':'Open the browser','action':{'type':'url','url':link}})
     if row['status']=='prepared':
+        shown=card_draft(row)
         for action in actions:
             state=action.get('state') or row.get('action_status',{})
             if action['kind']=='finish' and state.get('status')=='done':continue
             if action['kind'] in ('email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation','undoing','undone'):
+                if shown and shown['full'] and shown['action']['revision']==action['revision']:
+                    # The card shows this draft in full: Send confirms it, Edit opens it in the dashboard editor.
+                    buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:confirm_{action['revision']}"}})
+                    if root:buttons.append({'label':'Edit','action':{'type':'url','url':f"{root}#send={row['id']}&revision={action['revision']}&edit=1"}})
+                    continue
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
                 buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
             elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
@@ -5134,12 +5191,14 @@ def telegram(config, row, action, message_id=None):
             body['body']='You asked: “'+asked+'”\n\nGot it — I’m preparing your update. I’ll send it here when it’s ready.'
         else:body['body']='Got it — I’m preparing your update. I’ll send it here when it’s ready.'
     root='https://'+config['dashboard_host']+config.get('dashboard_path','/') if config.get('dashboard_host') else ''
+    shown=card_draft(row)
     if root:
         body['body']=strip_result_links(body['body'])
+        if shown:body['body']+='\n\n'+shown['text']
         if row['status']=='prepared':body['body']+='\n\n[Read result]('+root+'#result='+row['id']+')'
         elif row.get('original_urls'):body['body']+='\n\n[Open original]('+row['original_urls'][0]+')'
     args = {'action':action,'channel':'telegram','accountId':telegram_account(config),'target':config.get('telegram_owner'),
-            'message':('Your update\n\n' if action=='send' and row.get('reminder') and (row['status'] in ('prepared','instructions') or row.get('preparation_status')=='blocked') else 'Reminder\n\n' if action=='send' and row.get('reminder') else '')+card(body),'presentation':controls(row)}
+            'message':('Your update\n\n' if action=='send' and row.get('reminder') and (row['status'] in ('prepared','instructions') or row.get('preparation_status')=='blocked') else 'Reminder\n\n' if action=='send' and row.get('reminder') else '')+card(body),'presentation':controls(row,root)}
     if message_id:
         args['messageId'] = str(message_id)
     elif row.get('_silent'):

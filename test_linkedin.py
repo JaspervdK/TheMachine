@@ -189,7 +189,7 @@ class LinkedInSend(unittest.TestCase):
         self.app().action_step(self.transport(send=lambda *_: self.fail('Duplicate send')))
         self.assertEqual([c['body'] for c in calls], ['Friday works.'])
         self.assertEqual(self.job()['status'], 'sent')
-        self.assertIn('LinkedIn message sent.', str(a.card(self.row())))
+        self.assertIn('✓ LinkedIn message sent to Ada Lovelace at ', str(a.card(self.row())))
 
     def test_reply_in_that_conversation_answers_the_card(self):
         self.ready()
