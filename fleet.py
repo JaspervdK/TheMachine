@@ -1042,13 +1042,19 @@ def _waited(value, today):
     return days, ('since yesterday' if days == 1 else f'{days} days' if days < 7 else f"since {d.day} {d.strftime('%b')}")
 
 
+def _plain_name(label):
+    """A teammate's label as a name: without "(their@address)" or any address in it."""
+    text = re.sub(r'\([^)]*\)|<[^>]*>|\S+@\S+', ' ', str(label or ''))
+    return ' '.join(text.split()) or 'A teammate'
+
+
 def _first_names(view):
-    """Teammates by first name when that's unambiguous in this brief ("Priya" for Priya Okonedo)."""
+    """Teammates by first name when that's unambiguous in this brief ("Priya" for Priya Okonedo), never an address."""
     everyone = {w if isinstance(w, str) else w.get('name') for k in ('unanswered', 'several', 'meetings', 'quiet') for x in view.get(k) or []
-                for w in x.get('who') or []} | set(view.get('from') or [])
+                for w in x.get('who') or []} | set(view.get('from') or []) | set(view.get('missing') or [])
     everyone = {str(n) for n in everyone if n and n != 'You'}
-    first = collections.Counter(n.split()[0] for n in everyone)
-    return {n: n.split()[0] for n in everyone if first[n.split()[0]] == 1}
+    first = collections.Counter(_plain_name(n).split()[0] for n in everyone)
+    return {n: _plain_name(n).split()[0] if first[_plain_name(n).split()[0]] == 1 else _plain_name(n) for n in everyone}
 
 
 def _people(who, short=None):
@@ -1127,7 +1133,7 @@ def brief_text(view, today=None, hidden=()):
     told = view.get('from') or []
     lines += ['', ('From ' + _people(['You'] + told, _first_names(view)) + '.') if told else 'Only from your own Machine so far.']
     if view.get('missing'):
-        lines.append('Still to answer: ' + ', '.join(view['missing']) + '.')
+        lines.append('Still to answer: ' + _people(view['missing'], _first_names(view)) + '.')
     return '\n'.join(lines)
 
 

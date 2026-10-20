@@ -248,6 +248,9 @@ class Items(unittest.TestCase):
         self.assertEqual(hidden[0]['key'], 'unanswered:initech.example')
         many = {'quiet': [{'org': f'Co {n}', 'domain': f'c{n}.example', 'last': '2026-09-01', 'who': ['Pat']} for n in range(8)]}
         self.assertIn('…and 3 more in the Fleet tab.', fleet.brief_text(many, self.TODAY))
+        waiting = fleet.brief_text({**self.VIEW, 'missing': ['Jeroen Example (jeroen@other.example)', 'Kim Ito']}, self.TODAY)
+        self.assertIn('Still to answer: Jeroen and Kim.', waiting)
+        self.assertNotIn('@', waiting)
 
 
 class SeveralFleets(unittest.TestCase):
