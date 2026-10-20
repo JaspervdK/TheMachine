@@ -75,7 +75,8 @@ MEETING_DAYS, APPROVAL_DAYS = 7, 3
 # A waiting question tells the owner once: after it settled for NOTIFY_SETTLE seconds, so questions that
 # arrive together share one phone notification and one Telegram message, and never later than NOTIFY_MAX.
 NOTIFY_SETTLE, NOTIFY_MAX, NOTIFY_ROWS = 15, 60, 5
-NOTICE_KINDS = ('seat_request', 'joined', 'server_started', 'left', 'seat_confirmed', 'seat_declined')
+NOTICE_KINDS = ('seat_request', 'joined', 'server_started', 'left', 'seat_confirmed', 'seat_declined', 'seat_moved')
+FLEET_ID = re.compile(r'fl_[0-9a-f]{16}')
 NOTICE_DAYS = 30
 DECIDED = {'once': 'Answered once', 'always': 'Answered, and always from now on', 'decline': 'Declined', 'never': 'Declined, and never from now on'}
 
@@ -135,6 +136,8 @@ def ensure(db):
     for column in ('notified_at TEXT', 'telegram_message_id TEXT', 'choice TEXT'):  # added 2026-10-20
         if column.split()[0] not in have:
             db.execute('ALTER TABLE fleet_in ADD COLUMN ' + column)
+    if 'fleet' not in {r[1] for r in db.execute('PRAGMA table_info(fleet_claims)')}:  # added 2026-10-20: several Work Fleets
+        db.execute('ALTER TABLE fleet_claims ADD COLUMN fleet TEXT')
 
 
 def clean(text, chars):
@@ -396,7 +399,9 @@ def notice_clean(view):
         version = int(view.get('version') or 1)
     except (TypeError, ValueError):
         return None
+    fleet_id = str(view.get('fleet_id') or '')
     return {'id': view['id'], 'kind': view['kind'], 'fleet': view.get('fleet') if view.get('fleet') in FLEET_NAMES else 'work',
+            'fleet_id': fleet_id if FLEET_ID.fullmatch(fleet_id) else '',
             'fleet_name': clean(view.get('fleet_name'), 80), 'status': clean(view.get('status'), 20) or 'open',
             'version': version, 'at': clean(view.get('at'), 40) or now(),
             'text': clean(view.get('text'), 300), 'detail': clean(view.get('detail'), 600), 'outcome': clean(view.get('outcome'), 200),
@@ -491,21 +496,49 @@ class Fleet:
                     pass
             self.set_meta('directory', self.relay.call('GET', '/directory', timeout=30))
             self.last['directory'] = stamp
+            self.by_id()
         return self.meta('directory', {'fleets': []})
 
     def fleets(self):
-        return {f['kind']: f for f in (self.meta('directory') or {}).get('fleets', [])}
+        """The Fleets this Machine answers in, by their id (by kind from a relay that sends no ids): someone can be in
+        several Work Fleets, owned or joined, and one Family Fleet. Each is on its own: its own people, rules and asks."""
+        return {f.get('id') or f['kind']: f for f in (self.meta('directory') or {}).get('fleets', [])}
+
+    def ref(self, fleet):
+        """A Fleet's key here: its id; a kind ('work') means the first Fleet of that kind, as before several Fleets."""
+        fleets = self.fleets()
+        if fleet in fleets:
+            return fleet
+        return next((ref for ref, f in fleets.items() if f['kind'] == fleet), fleet)
+
+    def kind_of(self, fleet):
+        return fleet if fleet in FLEET_NAMES else (self.fleets().get(fleet) or {}).get('kind', 'work')
+
+    def work_fleets(self):
+        return [ref for ref, f in self.fleets().items() if f['kind'] == 'work']
+
+    def by_id(self):
+        """Once the relay sends ids: what was kept by kind ('work') is kept by that Fleet's id. Before several Fleets
+        there was one of each kind, the one joined first, which the relay lists first."""
+        fleets = self.fleets()
+        with self.connect() as db:
+            for kind in FLEET_NAMES:
+                first = next((ref for ref, f in fleets.items() if f['kind'] == kind and FLEET_ID.fullmatch(ref)), None)
+                if not first:
+                    continue
+                for table in ('fleet_rules', 'fleet_in', 'fleet_out', 'fleet_log', 'fleet_notices', 'fleet_claims'):
+                    db.execute(f'UPDATE OR IGNORE {table} SET fleet=? WHERE fleet=?', (first, kind))
+            db.execute('UPDATE fleet_claims SET fleet=? WHERE fleet IS NULL', (self.ref('work'),))
 
     def teammates(self, fleet='work'):
-        found = self.fleets().get(fleet)
+        found = self.fleets().get(self.ref(fleet))
         return [m for m in found['members'] if not m.get('me')] if found else []
 
     def member(self, fleet, member_id):
         return next((m for m in self.teammates(fleet) if m['member_id'] == member_id), None)
 
     def my_emails(self):
-        found = self.fleets().get('work') or {}
-        mine = {e for m in found.get('members', []) if m.get('me') for e in m.get('emails', [])}
+        mine = {e for ref in self.work_fleets() for m in self.fleets()[ref].get('members', []) if m.get('me') for e in m.get('emails', [])}
         return mine | {str(a.get('email') or '').lower() for a in self.config.get('accounts', []) if a.get('email')}
 
     def rule(self, db, fleet, member_id, kind):
@@ -526,9 +559,10 @@ class Fleet:
 
     def take_ask(self, ask):
         """A teammate's question: answered by rule, declined, or kept for the owner. Never anything else."""
-        fleet, kind = ask.get('fleet') or 'work', ask.get('kind')
-        teammate = self.member(fleet, ask.get('from')) or (self.directory(refresh=True) and self.member(fleet, ask.get('from')))
-        question = parse_question(kind, ask.get('question')) if kind in ASKS.get(fleet, ()) else None
+        kind, asked_in = ask.get('kind'), ask.get('fleet_id') or ask.get('fleet') or 'work'  # its id; a kind from an older relay
+        teammate = self.member(asked_in, ask.get('from')) or (self.directory(refresh=True) and self.member(asked_in, ask.get('from')))
+        fleet = self.ref(asked_in)
+        question = parse_question(kind, ask.get('question')) if kind in ASKS.get(self.kind_of(fleet), ()) else None
         name = clean((teammate or {}).get('name') or ask.get('name'), 80) or 'A teammate'
         with self.connect() as db:
             if not teammate or not question:
@@ -614,7 +648,7 @@ class Fleet:
                 db.execute('UPDATE fleet_notices SET status=?,version=?,view=? WHERE id=?', (view['status'], view['version'], json.dumps(view), view['id']))
             else:
                 db.execute('INSERT INTO fleet_notices(id,fleet,kind,status,version,view,at,received_at) VALUES(?,?,?,?,?,?,?,?)',
-                           (view['id'], view['fleet'], view['kind'], view['status'], view['version'], json.dumps(view), view['at'], now()))
+                           (view['id'], view['fleet_id'] or self.ref(view['fleet']), view['kind'], view['status'], view['version'], json.dumps(view), view['at'], now()))
         if row and row['telegram_message_id']:
             self.retell_notice_now(row['telegram_message_id'])
         return view['status']
@@ -732,7 +766,8 @@ class Fleet:
         return [r['id'] for r in rows]
 
     def set_rule(self, fleet, member_id, kind, rule=None, details=None):
-        if kind not in RULE_KINDS.get(fleet, ()):
+        fleet = self.ref(fleet)
+        if kind not in RULE_KINDS.get(self.kind_of(fleet), ()):
             raise ValueError('Unknown kind of question')
         if not self.member(fleet, member_id):
             raise ValueError('Not in your Fleet')
@@ -748,7 +783,17 @@ class Fleet:
 
     # -- asking teammates
     def ask(self, kind, question, context=None, fleet='work'):
-        if kind not in ASKS.get(fleet, ()):
+        """Asks one Fleet (its id). A kind ('work') asks each Fleet of that kind with teammates in it, one by one: the
+        relay only ever asks one Fleet's people at a time."""
+        if fleet in FLEET_NAMES:
+            each = [ref for ref, f in self.fleets().items() if f['kind'] == fleet and self.teammates(ref)]
+            if len(each) > 1:
+                sent = {'ids': {}}
+                for ref in each:
+                    sent['ids'].update(self.ask(kind, question, context, ref).get('ids', {}))
+                return sent
+        fleet = self.ref(fleet)
+        if kind not in ASKS.get(self.kind_of(fleet), ()):
             raise ValueError('Your Fleet does not ask that')
         if not self.teammates(fleet):
             raise ValueError('Nobody in your Fleet to ask yet')
@@ -781,15 +826,19 @@ class Fleet:
         return bool(self.meta('ask_meetings', False))
 
     def meeting_round(self):
-        """Ask the Work Fleet once about the outside people of each open card on a meeting in the next week."""
-        if not self.meetings_on() or not self.teammates('work'):
+        """Ask each Work Fleet once about the outside people of each open card on a meeting in the next week."""
+        if not self.meetings_on():
             return 0
-        mine, team = self.my_emails(), {e for m in self.teammates('work') for e in m.get('emails', [])}
+        return sum(self.meeting_round_in(ref) for ref in self.work_fleets() if self.teammates(ref))
+
+    def meeting_round_in(self, fleet):
+        mine, team = self.my_emails(), {e for m in self.teammates(fleet) for e in m.get('emails', [])}
         today = dt.datetime.now(dt.timezone.utc)
         asked = 0
         with self.connect() as db:
             cards = db.execute(f"SELECT id,event_ids FROM suggestions WHERE status IN ({','.join('?' * len(OPEN_CARD))}) "
-                               "AND id NOT IN (SELECT substr(context,6) FROM fleet_out WHERE context LIKE 'card:%')", OPEN_CARD).fetchall()
+                               "AND id NOT IN (SELECT substr(context,6) FROM fleet_out WHERE context LIKE 'card:%' AND fleet=?)",
+                               OPEN_CARD + (fleet,)).fetchall()
             todo = []
             for card in cards:
                 ids = json.loads(card['event_ids'] or '[]')
@@ -813,7 +862,7 @@ class Fleet:
                         todo.append((card['id'], {'emails': outside, 'when': when[:10]}))
                         break
         for card_id, question in todo[:10]:
-            self.ask('meeting', question, context='card:' + card_id)
+            self.ask('meeting', question, context='card:' + card_id, fleet=fleet)
             asked += 1
         return asked
 
@@ -834,54 +883,63 @@ class Fleet:
     def claims_round(self):
         """Claim what the owner took on, and look up who holds the rest, for emails shared with teammates whose
         handling rule is Always."""
-        work = self.fleets().get('work')
-        if not work:
-            return
+        fleets = self.fleets()
         with self.connect() as db:
-            allowed = {r['member_id'] for r in db.execute("SELECT member_id FROM fleet_rules WHERE fleet='work' AND kind='handling' AND rule='always'")}
-            team = {e for m in self.teammates('work') if m['member_id'] in allowed for e in m.get('emails', [])}
-            if not team:
+            teams = {}
+            for ref in self.work_fleets():
+                allowed = {r['member_id'] for r in db.execute("SELECT member_id FROM fleet_rules WHERE fleet=? AND kind='handling' AND rule='always'", (ref,))}
+                team = {e for m in self.teammates(ref) if m['member_id'] in allowed for e in m.get('emails', [])}
+                if team:
+                    teams[ref] = (allowed, team)
+            if not teams:
                 db.execute('DELETE FROM fleet_claims')
                 return
+            db.execute(f"DELETE FROM fleet_claims WHERE fleet NOT IN ({','.join('?' * len(teams))})", tuple(teams))
             cards = db.execute(f"SELECT id,status,event_ids FROM suggestions WHERE status IN ({','.join('?' * len(OPEN_CARD + ('completed', 'rejected')))}) "
                                'ORDER BY created_at DESC LIMIT 300', OPEN_CARD + ('completed', 'rejected')).fetchall()
-            keyed = {}
+            keyed = {}  # an email shared with teammates in several Fleets: claimed in the first of them
             for card in cards:
-                key = self.claim_key(db, card, work['secret'], team)
-                if key:
-                    keyed[card['id']] = (key, card['status'])
+                for ref, (_, team) in teams.items():
+                    key = self.claim_key(db, card, fleets[ref]['secret'], team)
+                    if key:
+                        keyed[card['id']] = (ref, key, card['status'])
+                        break
             held = {r['suggestion_id']: dict(r) for r in db.execute('SELECT * FROM fleet_claims')}
-        for card_id, (key, status) in keyed.items():
+        for card_id, (ref, key, status) in keyed.items():
             mine = held.get(card_id, {}).get('mine')
             if status in TAKEN and not mine and not held.get(card_id, {}).get('holder_id'):
-                self.store_claim(card_id, key, self.relay.call('POST', '/claim', {'fleet': 'work', 'key': key}))
+                self.store_claim(card_id, key, self.relay.call('POST', '/claim', {'fleet': ref, 'key': key}), ref)
             elif status == 'rejected' and mine:
-                self.relay.call('POST', '/claim', {'fleet': 'work', 'key': key, 'release': True})
-                self.store_claim(card_id, key, {'holder': None, 'mine': False})
-        look = [(card_id, key) for card_id, (key, status) in keyed.items() if status in OPEN_CARD]
-        if look:
-            found = self.relay.call('POST', '/claims', {'fleet': 'work', 'keys': [k for _, k in look][:200]}).get('claims', {})
+                self.relay.call('POST', '/claim', {'fleet': ref, 'key': key, 'release': True})
+                self.store_claim(card_id, key, {'holder': None, 'mine': False}, ref)
+        for ref, (allowed, _) in teams.items():
+            look = [(card_id, key) for card_id, (r, key, status) in keyed.items() if r == ref and status in OPEN_CARD]
+            if not look:
+                continue
+            found = self.relay.call('POST', '/claims', {'fleet': ref, 'keys': [k for _, k in look][:200]}).get('claims', {})
             for card_id, key in look[:200]:
                 holder = found.get(key)
                 if holder and not holder.get('mine') and holder.get('member_id') not in allowed:
                     holder = None  # someone whose claims the owner doesn't want to see
-                self.store_claim(card_id, key, {'holder': holder, 'mine': bool(holder and holder.get('mine'))})
+                self.store_claim(card_id, key, {'holder': holder, 'mine': bool(holder and holder.get('mine'))}, ref)
 
-    def store_claim(self, card_id, key, result):
+    def store_claim(self, card_id, key, result, fleet='work'):
         holder = result.get('holder') or {}
         with self.connect() as db:
-            db.execute('INSERT OR REPLACE INTO fleet_claims(suggestion_id,key,holder_id,holder_name,mine,checked_at) VALUES(?,?,?,?,?,?)',
-                       (card_id, key, holder.get('member_id'), clean(holder.get('name'), 80) or None, int(bool(result.get('mine'))), now()))
+            db.execute('INSERT OR REPLACE INTO fleet_claims(suggestion_id,key,holder_id,holder_name,mine,checked_at,fleet) VALUES(?,?,?,?,?,?,?)',
+                       (card_id, key, holder.get('member_id'), clean(holder.get('name'), 80) or None, int(bool(result.get('mine'))), now(),
+                        self.ref(fleet)))
 
     def take_over(self, card_id):
         with self.connect() as db:
-            row = db.execute('SELECT key FROM fleet_claims WHERE suggestion_id=?', (str(card_id),)).fetchone()
+            row = db.execute('SELECT key, fleet FROM fleet_claims WHERE suggestion_id=?', (str(card_id),)).fetchone()
         if not row:
             raise ValueError('Nobody else is on this one')
-        result = self.relay.call('POST', '/claim', {'fleet': 'work', 'key': row['key'], 'take': True})
-        self.store_claim(card_id, row['key'], result)
+        fleet = self.ref(row['fleet'] or 'work')
+        result = self.relay.call('POST', '/claim', {'fleet': fleet, 'key': row['key'], 'take': True})
+        self.store_claim(card_id, row['key'], result, fleet)
         with self.connect() as db:
-            self.log(db, 'out', 'work', None, 'your Fleet', 'handling', 'You took over an email a teammate was on', 'claimed')
+            self.log(db, 'out', fleet, None, 'your Fleet', 'handling', 'You took over an email a teammate was on', 'claimed')
         return {'mine': bool(result.get('mine'))}
 
     # -- the loop
@@ -955,11 +1013,12 @@ class Fleet:
             notices = [{**json.loads(r['view']), 'reason': r['reason'] or ''}
                        for r in db.execute('SELECT * FROM fleet_notices ORDER BY at DESC LIMIT 30')]
         out = []
-        for kind, found in fleets.items():
-            out.append({'kind': kind, 'label': FLEET_NAMES.get(kind, kind), 'name': found.get('name'), 'asks': list(ASKS.get(kind, ())),
+        for ref, found in fleets.items():
+            kind = found['kind']
+            out.append({'id': ref, 'kind': kind, 'label': FLEET_NAMES.get(kind, kind), 'name': found.get('name'), 'asks': list(ASKS.get(kind, ())),
                         'members': [{'member_id': m['member_id'], 'name': m['name'], 'machine': m.get('machine'),
-                                     'rules': {k: rules.get((kind, m['member_id'], k), {'rule': 'ask', 'details': False}) for k in RULE_KINDS.get(kind, ())}}
-                                    for m in self.teammates(kind)]})
+                                     'rules': {k: rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False}) for k in RULE_KINDS.get(kind, ())}}
+                                    for m in self.teammates(ref)]})
         return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
                 'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL}
 

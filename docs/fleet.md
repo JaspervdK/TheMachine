@@ -9,7 +9,11 @@ There are two kinds:
 - a **Work Fleet**: you and your teammates;
 - a **Family Fleet**: you and the people you live with.
 
-You can be in one of each. Your Machine keeps the rules for each Fleet apart.
+You can be in several Work Fleets, ones you started and ones you joined, and one Family Fleet. Your Machine answers in
+each and keeps them apart: each Fleet has its own people, its own rules per teammate and its own questions, and the
+Fleet tab shows each Work Fleet as its own section. Asking from a Fleet's section asks only that Fleet; "Ask the Fleet
+who knows" from the Graph tab asks each of your Work Fleets, one at a time. Leaving one Fleet leaves the others as they
+are.
 
 ## What a Work Fleet does
 
@@ -59,7 +63,7 @@ itself:
 ## What happens in your Fleet
 
 If you own a Fleet, your Machine also tells you what happens in it: someone asks the Fleet for a server, someone
-joined, a member's server started, someone left or was removed. They show in the Fleet tab, as a phone notification and,
+joined, a member's server started, someone left or was removed, a member's server is now paid by another Fleet they are in. They show in the Fleet tab, as a phone notification and,
 with Telegram connected, as a Telegram message. Most only have **Open**.
 
 A member asking for a server waits for you. The message says what it costs, for example "Ann wants a Standard server in

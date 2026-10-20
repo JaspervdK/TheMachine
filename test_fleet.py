@@ -431,5 +431,63 @@ class Fleet(unittest.TestCase):
             fleet.pair('http://relay.example', 'ABCD-EFGH', 'x', [])
 
 
+
+A, B = 'fl_' + 'a' * 16, 'fl_' + 'b' * 16
+
+
+class SeveralFleets(unittest.TestCase):
+    """Two Work Fleets, each with its own id from the relay: each on its own, asked and answered one at a time."""
+
+    def setUp(self):
+        Fleet.setUp(self)
+        # Before ids: a rule kept by kind, as an older Machine kept it
+        self.fleet.set_rule('work', 'pat1', 'relationships', 'always')
+        acme = dict(self.relay.directory['fleets'][0], id=A)
+        other = {'id': B, 'kind': 'work', 'name': 'Beta', 'secret': 't' * 64, 'asks': ['relationships', 'meeting'], 'members': [
+            {'member_id': 'me2', 'name': 'Owner', 'role': 'member', 'me': True, 'emails': ['owner@acme.example']},
+            {'member_id': 'lee2', 'name': 'Lee', 'role': 'owner', 'emails': ['lee@beta.example']}]}
+        self.relay.directory = {'fleets': [acme, other]}
+        self.fleet.directory(refresh=True)
+
+    def test_kept_by_kind_moves_to_the_fleets_id_and_each_fleet_has_its_own_people(self):
+        with self.store.connect() as db:
+            self.assertEqual([tuple(r) for r in db.execute('SELECT fleet, member_id FROM fleet_rules')], [(A, 'pat1')])
+        self.assertEqual([m['name'] for m in self.fleet.teammates(A)], ['Pat'])
+        self.assertEqual([m['name'] for m in self.fleet.teammates(B)], ['Lee'])
+        self.assertIsNone(self.fleet.member(B, 'pat1'))
+        view = self.fleet.view()
+        self.assertEqual([(f['id'], f['name']) for f in view['fleets']], [(A, 'Acme'), (B, 'Beta')])
+        self.assertEqual(view['fleets'][0]['members'][0]['rules']['relationships']['rule'], 'always')
+        self.assertEqual(view['fleets'][1]['members'][0]['rules']['relationships']['rule'], 'ask')
+        with self.assertRaises(ValueError):
+            self.fleet.set_rule(B, 'pat1', 'relationships', 'always')  # Pat is not in Beta
+
+    def test_an_ask_carries_its_fleet_and_rules_are_per_fleet(self):
+        self.assertEqual(self.fleet.take_ask({'id': 'q1', 'fleet': 'work', 'fleet_id': A, 'from': 'pat1', 'kind': 'relationships',
+                                              'question': {'about': 'client.example'}}), 'answered')
+        # Lee in Beta: no rule there yet, so it waits; Pat's id said to come from Beta is nobody there
+        self.assertEqual(self.fleet.take_ask({'id': 'q2', 'fleet': 'work', 'fleet_id': B, 'from': 'lee2', 'kind': 'relationships',
+                                              'question': {'about': 'client.example'}}), 'waiting')
+        self.assertEqual(self.fleet.take_ask({'id': 'q3', 'fleet': 'work', 'fleet_id': B, 'from': 'pat1', 'kind': 'relationships',
+                                              'question': {'about': 'client.example'}}), 'declined')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT fleet FROM fleet_in WHERE id='q2'").fetchone()[0], B)
+
+    def test_asking_goes_to_one_fleet_at_a_time(self):
+        self.fleet.ask('relationships', {'about': 'client.example'}, fleet=B)
+        self.assertEqual(self.relay.sent('/ask')[-1]['fleet'], B)
+        before = len(self.relay.sent('/ask'))
+        self.fleet.ask('relationships', {'about': 'client.example'})  # no Fleet said: each Work Fleet, one by one
+        self.assertEqual([b['fleet'] for b in self.relay.sent('/ask')[before:]], [A, B])
+
+    def test_a_notice_is_kept_under_its_fleet(self):
+        view = {'id': 'fn_' + 'c' * 16, 'kind': 'seat_moved', 'fleet': 'work', 'fleet_id': B, 'fleet_name': 'Beta', 'status': 'info',
+                'version': 1, 'at': NOW.isoformat(), 'text': 'Lee\'s server is now paid by another Fleet they are in.', 'detail': '',
+                'url': 'https://cp.example/account#fleet', 'buttons': []}
+        self.fleet.take_notice(view)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT fleet FROM fleet_notices').fetchone()[0], B)
+        self.assertEqual(self.fleet.view()['notices'][0]['fleet_id'], B)
+
 if __name__ == '__main__':
     unittest.main()
