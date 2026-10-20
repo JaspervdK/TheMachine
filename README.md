@@ -27,6 +27,7 @@ Follow [Getting started](docs/getting-started.md). The installer can help set up
 | Facts, people, projects, embeddings and enrichment | [Intelligence](docs/intelligence.md) |
 | Model/provider setup | [Models](docs/models.md) |
 | Work Fleets, Friends and the Network | [Fleet](docs/fleet.md) |
+| Encryption, reliability and roadmap of the Network | [Network](docs/network.md) |
 | Add a connector | [Adding a source](docs/adding-a-source.md) |
 | Agent instructions | [AGENTS.md](AGENTS.md), [PREPARATION.md](PREPARATION.md) |
 | Contribute or report a vulnerability | [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) |

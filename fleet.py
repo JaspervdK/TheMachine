@@ -48,6 +48,7 @@ import urllib.request
 import graph
 import fleet_requests
 import friends
+import network
 
 LOG = logging.getLogger('personal-assistant')
 SCHEMA = '''
@@ -102,6 +103,7 @@ DOMAIN = re.compile(r'(?:[a-z0-9-]+\.)+[a-z]{2,}')
 MONTH = re.compile(r'\d{4}-\d{2}')
 DAY = re.compile(r'\d{4}-\d{2}-\d{2}')
 DIRECTORY_EVERY, CLAIMS_EVERY, MEETINGS_EVERY, OFF_WAIT = 600, 120, 300, 600
+DELIVERY_EVERY = 120  # how often the open questions' delivery state is asked (network.py)
 MEETING_DAYS, APPROVAL_DAYS = 7, 3
 # A waiting question tells the owner once: after it settled for NOTIFY_SETTLE seconds, so questions that
 # arrive together share one phone notification and one Telegram message, and never later than NOTIFY_MAX.
@@ -229,12 +231,30 @@ def day(value):
 
 
 class Relay:
-    """The Fleet relay, with this Machine's token."""
-    def __init__(self, url, token):
-        self.url, self.token = url.rstrip('/'), token
+    """The Fleet relay (The Machine Network), with this Machine's token. `others` are more Network endpoints for the
+    same API (config network_urls): when one is away (502/503/504, or no connection) the next is tried, and the one
+    that answered is used first from then on (docs/network.md)."""
+    def __init__(self, url, token, others=()):
+        self.urls = [u.rstrip('/') for u in [url, *others] if u]
+        self.url, self.token = self.urls[0], token
 
     def call(self, method, path, body=None, timeout=40):
-        request = urllib.request.Request(self.url + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+        for i, url in enumerate(self.urls):
+            try:
+                found = self._call(url, method, path, body, timeout)
+            except (Unavailable, urllib.error.URLError, OSError):
+                if i == len(self.urls) - 1:
+                    raise
+                LOG.info('network endpoint away, trying the next one')
+                continue
+            if url != self.url:
+                self.urls.remove(url)
+                self.urls.insert(0, url)
+                self.url = url
+            return found
+
+    def _call(self, base, method, path, body, timeout):
+        request = urllib.request.Request(base + path, method=method, data=json.dumps(body).encode() if body is not None else None,
                                          headers={'Authorization': 'Bearer ' + self.token(), 'Content-Type': 'application/json',
                                                   'X-Machine-Friends': '1'})  # this Machine knows Friends (friends.py)
         try:
@@ -963,7 +983,9 @@ def brief_text(view):
 class Fleet(fleet_requests.Requests, friends.Friends):
     def __init__(self, connect, config, token, relay=None):
         self.connect, self.config = connect, config
-        self.relay = relay or Relay(settings(config)['url'], token)
+        self.relay = relay or Relay(settings(config)['url'], token, [u for u in config.get('network_urls', []) if reachable(u)])
+        if relay is None or config.get('network_keys'):  # end-to-end sealing, an outbox and delivery state (network.py)
+            self.relay = network.wrap(self.relay, self, config)
         self.lock = threading.Lock()
         self.last = {'directory': 0.0, 'claims': 0.0, 'meetings': 0.0}
         self.off = False
@@ -1802,10 +1824,17 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         with self.connect() as db:  # a question still to tell the owner about: come back sooner
             if wait and self.untold(db):
                 wait = min(wait, NOTIFY_SETTLE)
+        sealing = self.relay if isinstance(self.relay, network.Sealing) else None
+        if sealing:
+            sealing.flush()  # answers kept while the Network was away go first
         found = self.relay.call('GET', f'/inbox?wait={int(wait)}&notices=1&ack=1', timeout=wait + 15)
         for ask in found.get('asks', []):
+            if sealing and ask.get('id') and sealing.taken(ask['id']):
+                continue  # taken before: its answer is sent or waits in the outbox, so it's never acted on twice
             try:
                 self.take_ask(ask)
+                if sealing and ask.get('id'):
+                    sealing.take(ask['id'])
             except (ValueError, KeyError, TypeError) as error:
                 LOG.error('fleet ask error=%s', type(error).__name__)
         acknowledged = {'answers': [], 'notices': []}
@@ -1851,7 +1880,25 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         if stamp - self.last['briefs'] > 60 or not wait:
             self.last['briefs'] = stamp
             self.brief_round()
+        if sealing and (stamp - self.last.get('delivery', 0.0) > DELIVERY_EVERY or not wait):
+            self.last['delivery'] = stamp
+            self.delivery_round()
+            sealing.tidy()
         return found
+
+    def delivery_round(self):
+        """Where this Machine's open questions are on the Network, so the owner sees "not delivered yet" (docs/network.md)."""
+        with self.connect() as db:
+            ids = [r['id'] for r in db.execute("SELECT id FROM fleet_out WHERE status IN ('asked','waiting') AND at>? ORDER BY at DESC LIMIT 200",
+                                               ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)).isoformat(timespec='seconds'),))]
+        if not ids:
+            return
+        try:
+            found = (self.relay.call('POST', '/delivery', {'ids': ids}, timeout=30) or {}).get('delivery', {})
+        except ValueError as error:  # an older Network without delivery state: nothing shown
+            LOG.info('network delivery unavailable error=%s', type(error).__name__)
+            return
+        self.set_meta('network_delivery', {i: bool(v.get('delivered')) for i, v in found.items() if isinstance(v, dict)})
 
     def run(self, stop):
         backoff = away = 0
@@ -1875,6 +1922,7 @@ class Fleet(fleet_requests.Requests, friends.Friends):
     # -- for the dashboard and preparations
     def view(self):
         fleets = self.fleets()
+        delivered = self.meta('network_delivery', {}) or {}
         with self.connect() as db:
             rules = {(r['fleet'], r['member_id'], r['kind']): {'rule': r['rule'], 'details': bool(r['details'])} for r in db.execute('SELECT * FROM fleet_rules')}
             scopes = {}
@@ -1886,7 +1934,8 @@ class Fleet(fleet_requests.Requests, friends.Friends):
             asked = [{**{k: r[k] for k in ('id', 'fleet', 'member_id', 'name', 'kind', 'context', 'status', 'at', 'answered_at')},
                       'question': question_text(r['kind'], json.loads(r['question'])),
                       'answer': answer_text(r['kind'], json.loads(r['answer'])) if r['answer'] else None,
-                      **({'busy': json.loads(r['answer']).get('busy', [])} if r['kind'] == 'availability' and r['answer'] else {})}
+                      **({'busy': json.loads(r['answer']).get('busy', [])} if r['kind'] == 'availability' and r['answer'] else {}),
+                      **({'delivered': delivered[r['id']]} if r['id'] in delivered and r['status'] in ('asked', 'waiting') else {})}
                      for r in db.execute("SELECT * FROM fleet_out WHERE (context IS NULL OR (context NOT LIKE 'card:%' AND context NOT LIKE 'brief:%' "
                                          "AND context NOT LIKE 'free:%')) ORDER BY at DESC LIMIT 60")]
             free = self.free_asked(db)
@@ -1905,7 +1954,7 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         return {'on': True, 'off': self.off, 'fleets': out, 'friends': self.friends_view(), 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
                 **self.requests_view(), 'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),
                 'kind_rules': {k: list(KIND_RULES.get(k, RULES)) for k in KIND_LABEL}, 'no_details': list(NO_DETAILS),
-                'scoped': list(SCOPED), 'scopes': scopes}
+                'scoped': list(SCOPED), 'scopes': scopes, 'sealing': self.relay.view() if isinstance(self.relay, network.Sealing) else None}
 
     def free_asked(self, db):
         """The owner's free questions to a Fleet, each with its teammates' answers as they arrive, attributed; "no
