@@ -1,0 +1,71 @@
+{
+ "note": "Counts only, from a real install; no content or identifiers.",
+ "signals_per_day": {
+  "gmail gmail.message": 32.8,
+  "android android.notification": 20.2,
+  "whatsapp whatsapp.message": 19.9,
+  "slack slack.message": 19.6,
+  "crm salesflare.email": 6.6,
+  "intercom intercom.conversation": 5.3,
+  "linkedin linkedin.message": 2.8,
+  "gateway gateway.alert": 2.6,
+  "calendar calendar.event": 1.5,
+  "x x.mention": 0.7,
+  "stripe stripe.event": 0.7,
+  "crm salesflare.meeting": 0.5,
+  "github github.notification": 0.3,
+  "x x.dm": 0.1,
+  "gateway machine.fault": 0.1,
+  "gateway assistant.test": 0.0,
+  "calendar fleet.request": 0.0,
+  "gmail fleet.request": 0.0
+ },
+ "accounts_per_service": {
+  "gmail": 2,
+  "calendar": 3,
+  "slack": 1,
+  "intercom": 1,
+  "whatsapp": 1,
+  "linkedin": 1,
+  "x": 3,
+  "crm": 1,
+  "stripe": 1,
+  "github": 1,
+  "android": 1,
+  "gateway": 1
+ },
+ "cards_by_status": {
+  "completed": 48,
+  "rejected": 18,
+  "snoozed": 11
+ },
+ "cards_with_draft": 22,
+ "promises": {
+  "mine carded": 1,
+  "mine kept": 1,
+  "mine open": 5,
+  "theirs carded": 1,
+  "theirs kept": 2,
+  "theirs open": 6
+ },
+ "decisions": {
+  "accept": 36,
+  "complete": 52,
+  "other": 68,
+  "prepare_ahead": 20,
+  "reject": 19,
+  "reopen": 1,
+  "retry": 15,
+  "send": 20,
+  "snooze": 35,
+  "undo": 3
+ },
+ "reviews": {
+  "error": 9,
+  "ok": 234
+ },
+ "thread_length": 1.2,
+ "projects": 52,
+ "people": 949,
+ "orgs": 540
+}
