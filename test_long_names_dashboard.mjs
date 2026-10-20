@@ -1,0 +1,48 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {createServer} from 'node:http';
+import {OPENCLAW} from './openclaw-root.mjs';
+const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs');
+
+// A very long address in the People lists is cut off with an ellipsis instead of widening the page.
+const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
+const long='someone.with.a.long.name@support-0123456789abcdef0123.helpdesk-mail.example';
+const today=new Date().toISOString().slice(0,10);
+const person={id:'email:'+long,kind:'person',name:long,strength:1,closeness:'regular',last_at:today,signals:2,ids:[long]};
+const org={id:'org:x',kind:'org',name:'averyveryverylongorganisationdomainwithoutanyspaces-0123456789.example',signals:3,last_at:today};
+const errors=[];
+const server=createServer((req,res)=>{
+ const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
+ if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
+ if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],connectors:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[]}));return}
+ if(url.pathname==='/api/graph'){res.end(JSON.stringify({projects:[],people:[],quiet:[],new:[person],orgs:[org]}));return}
+ if(url.pathname.startsWith('/brand/')||url.pathname.startsWith('/assets/')){res.statusCode=404;res.end();return}
+ res.end('{}');
+});
+await new Promise(r=>server.listen(0,'127.0.0.1',r));
+let browser;
+try{
+ browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+ const context=await browser.newContext({viewport:{width:390,height:844}}),page=await context.newPage();
+ await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
+ page.on('pageerror',e=>errors.push(e.message));
+ await page.goto('http://127.0.0.1:'+server.address().port);
+ await page.locator('nav [data-tab="people"]').click();
+ const row=page.locator(`#people-view article[data-node="email:${long}"]`);
+ await row.waitFor();
+ for(const width of [320,390]){
+  await page.setViewportSize({width,height:844});
+  const m=await page.evaluate(()=>({page:document.documentElement.scrollWidth,viewport:innerWidth}));
+  assert.ok(m.page<=m.viewport,`page wider than the screen at ${width}: ${m.page}`);
+  // The bar and the name stay on one row, and the name is cut off rather than wrapped.
+  const r=await row.evaluate(a=>{const bar=a.querySelector('.graph-bar').getBoundingClientRect(),node=a.querySelector('.node'),n=node.getBoundingClientRect(),sub=a.querySelector('.graph-sub');
+   return {sameRow:Math.abs((bar.top+bar.bottom)/2-(n.top+n.bottom)/2)<4,cut:node.scrollWidth>node.clientWidth,ellipsis:getComputedStyle(node).textOverflow,title:node.title,subLines:Math.round(sub.getBoundingClientRect().height/parseFloat(getComputedStyle(sub).lineHeight||'20')),subTitle:sub.title}});
+  assert.ok(r.sameRow,'bar and name on one row');
+  assert.ok(r.cut&&r.ellipsis==='ellipsis','long name cut off with an ellipsis');
+  assert.equal(r.title,long);
+  assert.ok(r.subTitle.includes(long));
+  if(process.env.LONG_SHOT)await page.screenshot({path:process.env.LONG_SHOT+'-'+width+'.png',fullPage:true});
+ }
+ assert.deepEqual(errors,[]);
+ console.log('long names ok');
+}finally{if(browser)await browser.close();await new Promise(r=>server.close(r))}

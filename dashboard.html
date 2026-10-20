@@ -329,10 +329,15 @@ dialog input{display:block;width:100%;margin-top:8px}
 @media(max-width:720px){.search{grid-template-columns:1fr}}
 /* People: the living graph of people and projects */
 .search.people-search{grid-template-columns:1fr auto}
-.graph-list{display:grid;gap:8px}
-.graph-list article{margin:0;padding:12px 16px}
+.graph-list{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+.graph-list article{margin:0;padding:12px 16px;min-width:0}
 .graph-row{display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap}
 .graph-row small,.graph-sub{color:var(--muted);font-size:.86rem}
+.graph-row.one{flex-wrap:nowrap}
+.graph-row>.node{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.graph-row.one>.node{flex:0 1 auto}
+.graph-row small{min-width:0;overflow-wrap:anywhere}
+.graph-sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .graph-sub{margin:4px 0 0}
 button.node{background:none;border:0;padding:0;border-radius:4px;font-weight:650;color:var(--text);text-align:left;min-height:0}
 button.node:hover{text-decoration:underline;background:none}
@@ -1323,14 +1328,14 @@ $('#people-view').addEventListener('click',async e=>{const b=e.target.closest('[
  try{await fleetPost('fleet_ask',{kind:'relationships',question:{about:b.dataset.fleetAsk}});toast('Asked your Fleet. The answers show in the Fleet tab.')}catch(err){b.disabled=false;toast(err.message,true)}});
 // Graph tab: projects heating up or cooling, who's closest, who has gone quiet; tap one for its links and events.
 const day=v=>v?new Date(String(v).length<=10?v+'T12:00':v).toLocaleDateString([],{weekday:'short',day:'numeric',month:'short'}):'never';
-const nodeButton=n=>`<button class="node" data-node="${esc(n.id)}">${esc(n.name)}</button>`;
+const nodeButton=n=>`<button class="node" data-node="${esc(n.id)}" title="${esc(n.name)}">${esc(n.name)}</button>`;
 const PROJECT_COLOR={'heating up':'var(--amber)','active':'var(--mint)','cooling':'var(--lavender)','dormant':'var(--faint)'};
 const bar=n=>`<span class="graph-bar" title="${esc(n.closeness||'')}"><i style="width:${Math.min(100,Math.round(100*Math.log1p(n.strength)/Math.log1p(12)))}%"></i></span>`;
 const cap=t=>t?t[0].toUpperCase()+t.slice(1):t;
 const personSub=p=>[cap(p.role||p.closeness),(p.seen_only?'last seen ':'last contact ')+day(p.last_at),p.usual_gap_days?(Math.round(p.usual_gap_days)<=1?'usually daily':'usually every '+Math.round(p.usual_gap_days)+' days'):'',p.next_meeting?'meeting '+day(p.next_meeting):''].filter(Boolean).join(' · ');
-const graphItem=n=>n.kind==='project'?`<article class="tap" data-node="${esc(n.id)}"><div class="graph-row">${nodeButton(n)}<span class="chip" style="--c:${PROJECT_COLOR[n.state]||'var(--muted)'}">${esc(n.state)}</span></div><p class="graph-sub">Last signal ${esc(day(n.last_at))} · ${n.signals} signal${n.signals===1?'':'s'}${n.people?.length?' · '+esc(n.people.join(', ')):''}</p></article>`
+const graphItem=n=>n.kind==='project'?`<article class="tap" data-node="${esc(n.id)}"><div class="graph-row">${nodeButton(n)}<span class="chip" style="--c:${PROJECT_COLOR[n.state]||'var(--muted)'}">${esc(n.state)}</span></div><p class="graph-sub" style="white-space:normal">Last signal ${esc(day(n.last_at))} · ${n.signals} signal${n.signals===1?'':'s'}${n.people?.length?' · '+esc(n.people.join(', ')):''}</p></article>`
  :n.kind==='org'?`<article class="tap" data-node="${esc(n.id)}"><div class="graph-row">${nodeButton(n)}<small>${n.role?esc(cap(n.role))+' · ':''}${n.profile?.industry?esc(n.profile.industry)+' · ':''}${n.signals} ${n.signals===1?'person':'people'} · last contact ${esc(day(n.last_at))}</small></div></article>`
- :`<article class="tap" data-node="${esc(n.id)}"><div class="graph-row">${bar(n)}${nodeButton(n)}${n.quiet?'<span class="chip" style="--c:var(--orange)">gone quiet</span>':''}</div><p class="graph-sub">${esc(personSub(n))}${n.ids?.length?' · <span class="mono">'+esc(n.ids.slice(0,2).join(', '))+'</span>':''}</p></article>`;
+ :`<article class="tap" data-node="${esc(n.id)}"><div class="graph-row one">${bar(n)}${nodeButton(n)}${n.quiet?'<span class="chip" style="--c:var(--orange)">gone quiet</span>':''}</div><p class="graph-sub" title="${esc(personSub(n)+(n.ids?.length?' · '+n.ids.slice(0,2).join(', '):''))}">${esc(personSub(n))}${n.ids?.length?' · <span class="mono">'+esc(n.ids.slice(0,2).join(', '))+'</span>':''}</p></article>`;
 const graphSection=(title,note,items)=>items?.length?`<div class="section-head"><h2>${title}</h2><span class="count">${items.length}</span>${note?`<p>${note}</p>`:''}</div><div class="graph-list">${items.map(graphItem).join('')}</div>`:'';
 // What someone (or an organisation) is to you: said by you, or read by a review in a message, shown with the line it came from.
 // ✓ makes a review's role yours; Edit sets it in your words.
