@@ -587,7 +587,7 @@ const steps=new Map(),openTech=new Set();
 const elapsed=v=>{const t=Math.max(0,Math.floor((Date.now()-new Date(v))/1000));return Math.floor(t/60)+':'+String(t%60).padStart(2,'0')};
 // A preparation that waits on the browser (a sign-in, a captcha, a code) offers it: the viewer when this install has one,
 // otherwise its tab brought to the front on this computer.
-const browserLink=(id,b)=>!b?'':`<button type="button" class="browser-link" data-signin>Sign in here</button> `+(b.link?`<a class="browser-link" href="${esc(b.link)}" target="_blank" rel="noopener">Open the browser</a>`:`<button type="button" class="browser-link" data-browser-focus="${esc(id)}" data-page="${esc(b.page||'')}">Open the browser</button>`);
+const browserLink=(id,b)=>!b?'':`<button type="button" class="browser-link" data-signin data-task="${esc(id)}" data-page="${esc(b.page||'')}">${b.sign_in?'Sign in':'Sign in here'}</button> `+(b.link?`<a class="browser-link" href="${esc(b.link)}" target="_blank" rel="noopener">Open the browser</a>`:`<button type="button" class="browser-link" data-browser-focus="${esc(id)}" data-page="${esc(b.page||'')}">Open the browser</button>`);
 function preparationNote(s){
 if(s.preparation_status==='queued')return `<p class="note">${s.preparation_retried?'That attempt didn’t finish, so I’m trying once more…':'I’ll start shortly.'}</p>`;
 if(s.preparation_status==='blocked')return `<p class="note">${esc(s.preparation_reason||'I couldn’t finish this. You can try again or change the request.')} ${browserLink(s.id,s.preparation_browser)}</p>${s.preparation_details?`<details class="tech" data-tech="${s.id}" ${openTech.has(s.id)?'open':''}><summary>Details</summary><pre>${esc(s.preparation_details)}</pre></details>`:''}`;
@@ -1072,25 +1072,29 @@ $('#signin-title').textContent='Sign in to '+page.site;$('#signin-form').dataset
 $('#signin-user-row').hidden=!page.username;$('#signin-pass-row').hidden=!page.password;$('#signin-code-row').hidden=!page.code;$('#signin-save-row').hidden=!(page.username||page.password);$('#signin-go').hidden=false;
 const saved=page.saved&&(page.username||page.password);$('#signin-saved').hidden=!saved;if(saved)$('#signin-use-saved').textContent='Sign in as '+(page.saved.username||'saved user');
 if(!d.open)d.showModal();(page.username&&!$('#signin-user').value?$('#signin-user'):page.password?$('#signin-pass'):page.code?$('#signin-code'):$('#signin-go')).focus()}
-async function openSignin(account,wait){const d=$('#signin-dialog');$('#signin-user').value='';$('#signin-save').checked=false;$('#signin-pick').hidden=true;signinShow(null,'Looking for the sign-in page…');if(!d.open)d.showModal();
+// `task`: the card waiting on this sign-in; once the page is past it, that task carries on by itself. `page`: its tab.
+let signinTask=null,signinTab=null;
+async function openSignin(account,wait,task,page){signinTask=task||null;signinTab=page||null;const d=$('#signin-dialog');$('#signin-user').value='';$('#signin-save').checked=false;$('#signin-pick').hidden=true;signinShow(null,'Looking for the sign-in page…');if(!d.open)d.showModal();
 for(let i=0;;i++){try{signinPages=(await signinPost('browser_login_pages',account?{account}:{})).pages}catch(err){signinShow(null,err.message);return}if(signinPages.length||i>=(wait?8:0)||!d.open)break;await new Promise(r=>setTimeout(r,2500))}
-$('#signin-page').innerHTML=signinPages.map((p,i)=>`<option value="${i}">${esc(p.site)}${p.title?' · '+esc(p.title):''}</option>`).join('');$('#signin-pick').hidden=signinPages.length<2;signinShow(signinPages[0])}
+$('#signin-page').innerHTML=signinPages.map((p,i)=>`<option value="${i}">${esc(p.site)}${p.title?' · '+esc(p.title):''}</option>`).join('');$('#signin-pick').hidden=signinPages.length<2;signinShow(signinPages[0],!signinPages.length&&signinTask?'There is nothing to type in here for this sign-in (it may want a passkey, an app or a card reader). Open the browser and sign in there; then tap Continue on the card.':'')}
 $('#signin-page').onchange=e=>signinShow(signinPages[Number(e.target.value)]);
 async function signinSend(args){const f=$('#signin-form'),go=$('#signin-go'),saved=$('#signin-use-saved');go.disabled=saved.disabled=true;$('#signin-error').textContent='Signing in…';
-try{const r=await signinPost('browser_login_fill',{page:f.dataset.page,host:f.dataset.host,...args});
-if(r.result==='done'){$('#signin-dialog').close();toast('Signed in. I’ll carry on.');refresh();return}
+try{const r=await signinPost('browser_login_fill',{page:f.dataset.page,host:f.dataset.host,...(signinTask?{suggestion_id:signinTask}:{}),...args});
+if(r.result==='done'){$('#signin-dialog').close();toast(r.resumed?.length?'Signed in. I’m carrying on with the task.':'Signed in. I’ll carry on.');refresh();return}
 if(r.result==='next')signinShow(r.page,'');else signinShow(r.page||null,'The site did not take that, or wants something else. Check and try again, or open the browser.')}
 catch(err){$('#signin-error').textContent=err.message}finally{go.disabled=saved.disabled=false;$('#signin-pass').value='';$('#signin-code').value=''}}
 $('#signin-form').onsubmit=e=>{e.preventDefault();const args={save:$('#signin-save').checked};
 if(!$('#signin-user-row').hidden&&$('#signin-user').value)args.username=$('#signin-user').value;if(!$('#signin-pass-row').hidden&&$('#signin-pass').value)args.password=$('#signin-pass').value;if(!$('#signin-code-row').hidden&&$('#signin-code').value.trim())args.code=$('#signin-code').value.trim();
 if(!args.username&&!args.password&&!args.code){$('#signin-error').textContent='Fill in what the site asks for.';return}signinSend(args)};
 $('#signin-use-saved').onclick=()=>signinSend({use_saved:true,...(!$('#signin-code-row').hidden&&$('#signin-code').value.trim()?{code:$('#signin-code').value.trim()}:{})});
-$('#signin-browser').onclick=async()=>{const link=state.browser_link;if(link){window.open(link,'_blank','noopener');return}try{const r=await signinPost('browser_focus',{page:null});toast(r.shown?'The browser is in front now.':'I couldn’t reach the browser on this computer.',!r.shown)}catch(err){toast(err.message,true)}};
+$('#signin-browser').onclick=async()=>{const link=state.browser_link;if(link){window.open(link,'_blank','noopener');return}try{const r=await signinPost('browser_focus',{page:signinTab});toast(r.shown?'The browser is in front now.':'I couldn’t reach the browser on this computer.',!r.shown)}catch(err){toast(err.message,true)}};
 $('#signin-dialog').addEventListener('close',()=>{$('#signin-pass').value='';$('#signin-code').value='';$('#signin-user').value=''});
-document.addEventListener('click',e=>{const b=e.target.closest('[data-signin]');if(b)openSignin(b.dataset.signin||null)});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-signin]');if(b)openSignin(b.dataset.signin||null,!!b.dataset.task,b.dataset.task||null,b.dataset.page||null)});
 async function savedLogins(){try{const r=await signinPost('browser_logins',{});$('#saved-logins-block').hidden=!r.logins.length;$('#saved-logins').innerHTML=r.logins.map(l=>`<div class="row saved-login"><span><strong>${esc(l.site)}</strong> <span class="muted">${esc(l.username)}</span></span><button type="button" class="ghost" data-forget-login="${esc(l.site)}">Forget</button></div>`).join('')}catch{}}
 $('#saved-logins').onclick=async e=>{const b=e.target.closest('[data-forget-login]');if(!b)return;b.disabled=true;try{await signinPost('browser_login_forget',{site:b.dataset.forgetLogin});toast('Forgotten.');savedLogins()}catch(err){b.disabled=false;toast(err.message,true)}};
 {const m=/^#signin(?:=([\w.@:-]{1,100}))?$/.exec(location.hash);if(m){history.replaceState(null,'',location.pathname);openSignin(m[1]?decodeURIComponent(m[1]):null,true)}}
+// Telegram's Sign in button on a card waiting on a sign-in: the same dialog, for that task.
+{const m=/^#signin-for=([a-f0-9]{16})$/.exec(location.hash);if(m){history.replaceState(null,'',location.pathname);openSignin(null,true,m[1])}}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-browser-focus]');if(!b)return;b.disabled=true;try{const r=await request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'browser_focus',args:{page:b.dataset.page||null}})});toast(r.shown?'The browser is in front now.':'I couldn’t reach the browser on this computer.',!r.shown)}catch(err){toast(err.message,true)}finally{b.disabled=false}});
 refresh();setInterval(()=>{if(!document.querySelector('textarea:focus')&&!$('#snooze-dialog').open&&!$('#result-dialog').open&&!$('#email-dialog').open&&!$('#send-dialog').open)refresh()},30000);
 </script></html>

@@ -1,0 +1,199 @@
+"""A task blocked on a sign-in reaches the owner as a Sign in prompt (dashboard card, Telegram button) and carries
+on by itself once the owner is signed in. Offline: no browser, no Telegram, no site is contacted."""
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('signin_assistant', Path(__file__).with_name('assistant.py'))
+a = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(a)
+
+HANDOFF = 'Example is signed out; sign in on the example login tab in the browser, then tap Continue.'
+SECRET = 'not-a-real-password-123'
+
+
+class SigninHandoff(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = a.Store(Path(self.temp.name) / 'events.sqlite')
+        self.store.commit_page('work', {}, [{'account_id': 'work', 'source_id': 'one', 'kind': 'gmail.message', 'occurred_at': a.now(),
+                                             'title': 'Evidence', 'body': 'Please confirm your details', 'metadata': {}, 'deleted': False}])
+        self.sid = self.store.suggest('task', 'Confirm your details', 'I can confirm them in your account.', [1])['id']
+        self.app = object.__new__(a.App)
+        self.app.store = self.store
+        self.app.config = {'accounts': [], 'database': str(Path(self.temp.name) / 'events.sqlite'), 'dashboard_host': 'machine.example'}
+        self.store.config = self.app.config
+        with self.store.connect() as db:
+            db.execute("UPDATE deliveries SET status='sent',message_id='100' WHERE suggestion_id=?", (self.sid,))
+        self.store.decide(self.sid, 'accept', '', 'click', 'telegram')
+        self.app.preparation_step(lambda req: {'status': 'admitted'})
+
+    def job(self):
+        with self.store.connect() as db:
+            return dict(db.execute('SELECT * FROM preparations WHERE suggestion_id=?', (self.sid,)).fetchone())
+
+    def steps(self, *calls):
+        with self.store.connect() as db:
+            for i, (tool, params) in enumerate(calls):
+                db.execute('INSERT INTO preparation_calls(job_id,call_id,tool,params,started_at) VALUES(?,?,?,?,?)',
+                           (self.job()['job_id'], str(i), tool, json.dumps(params), a.dt.datetime(2026, 10, 20, 8, 11, i, tzinfo=a.dt.timezone.utc).isoformat()))
+
+    def block(self, reason=HANDOFF):
+        # The handoff as the run makes it: the sign-in page, then releasing the browser lease, then saving the blocker.
+        self.steps(('browser', {'action': 'open', 'targetUrl': 'https://www.example.com/login'}),
+                   ('browser', {'action': 'act', 'kind': 'evaluate'}),
+                   ('exec', {'command': 'python3 browser-lease.py release'}),
+                   ('assistant_signals', {'action': 'status'}))
+        self.store.preparation_blocked(self.sid, self.job()['job_id'], reason)
+
+    def row(self):
+        with self.store.connect() as db:
+            row = dict(db.execute(a.EDIT_ROWS + ' AND s.id=?', (self.sid,)).fetchone())
+            row.update(self.store.suggestion_result(row, db))
+        return row
+
+    def test_a_sign_in_handoff_after_releasing_the_lease_still_offers_the_sign_in(self):
+        self.block()
+        waiting = self.row()['preparation_browser']
+        self.assertTrue(waiting['sign_in'])
+        self.assertEqual(waiting['page'], 'https://www.example.com/login')
+        self.assertEqual(waiting['signin_url'], 'https://machine.example/#signin-for=' + self.sid)
+
+    def test_another_blocker_after_a_command_does_not(self):
+        self.block('The export failed with an error; try again later.')
+        self.assertNotIn('preparation_browser', self.row())
+
+    def test_a_running_wait_no_longer_breaks_the_dashboard(self):
+        # Store had no config: every snapshot failed while a run waited on the browser (2026-10-20).
+        self.steps(('browser', {'action': 'open', 'targetUrl': 'https://www.example.com/login'}))
+        self.store.config = {}
+        with patch.object(a, 'BROWSER_WAIT', 0):
+            snapshot = self.store.snapshot([])
+        card = next(s for s in snapshot['suggestions'] if s['id'] == self.sid)
+        self.assertEqual(card['preparation_browser']['page'], 'https://www.example.com/login')
+        self.assertFalse(card['preparation_browser']['sign_in'])
+
+    def test_the_telegram_card_says_so_and_has_a_sign_in_button(self):
+        self.block()
+        row = self.row()
+        self.assertIn('Waiting for you to sign in', a.card(row))
+        buttons = [b for block in a.controls(row)['blocks'] for b in block['buttons']]
+        self.assertEqual(buttons[0], {'label': 'Sign in', 'action': {'type': 'url', 'url': 'https://machine.example/#signin-for=' + self.sid}})
+        self.assertIn('Continue', [b['label'] for b in buttons])  # tapping Continue still works too
+
+    def test_the_blocker_notifies_on_telegram_with_the_button(self):
+        self.block()
+        sent = []
+        with patch.object(a, 'telegram_request', side_effect=lambda config, args: (sent.append(args), {'messageId': '7'})[1]):
+            a.deliver_one(self.store, self.app.config, edit_cards=True)  # the card is redrawn
+            a.deliver_one(self.store, self.app.config, edit_cards=True)  # and a notification asks for the sign-in
+        edit, notice = sent[0], sent[-1]
+        self.assertEqual(edit['action'], 'edit')
+        self.assertIn('Sign in', [b['label'] for block in edit['presentation']['blocks'] for b in block['buttons']])
+        self.assertEqual((notice['action'], notice['replyTo']), ('send', '100'))
+        self.assertTrue(notice['message'].startswith('Needs you to sign in: '))
+        self.assertEqual(notice['presentation']['blocks'][0]['buttons'][0]['action']['url'], 'https://machine.example/#signin-for=' + self.sid)
+
+    def test_the_phone_notification_opens_the_sign_in_too(self):
+        self.block()
+        with self.store.connect() as db:
+            db.execute("INSERT INTO push_subscriptions VALUES('https://push.example.invalid/1','key','auth',?,NULL,NULL)", (a.now(),))
+        sent = []
+        row = {**self.row(), '_result_notice': True}
+        a.push_notify(self.store, self.app.config, row, sender=lambda request: (sent.append(request), {'results': []})[1])
+        payload = sent[0]['payload']
+        self.assertTrue(payload['title'].startswith('Needs you to sign in: '))
+        self.assertEqual(payload['url'], 'https://machine.example/#signin-for=' + self.sid)
+
+    def test_without_a_dashboard_address_there_is_no_dead_button(self):
+        self.app.config.pop('dashboard_host')
+        self.block()
+        labels = [b['label'] for block in a.controls(self.row())['blocks'] for b in block['buttons']]
+        self.assertNotIn('Sign in', labels)
+        self.assertIn('Continue', labels)
+
+    def test_signing_in_from_the_dialog_carries_the_task_on(self):
+        self.block()
+        blocked = self.job()['job_id']
+        with patch.object(a.browser_login, 'fill', return_value={'result': 'done', 'page': None}) as fill:
+            done = self.app.action('browser_login_fill', {'page': '0:tab', 'host': 'www.example.com', 'password': SECRET,
+                                                          'suggestion_id': self.sid}, owner_dashboard=True)
+        fill.assert_called_once()
+        self.assertEqual(done['resumed'], [self.sid])
+        self.assertNotIn(SECRET, json.dumps(done))
+        job = self.job()
+        self.assertEqual(job['status'], 'queued')
+        self.assertNotEqual(job['job_id'], blocked)
+        with self.store.connect() as db:
+            self.assertFalse(db.execute('SELECT 1 FROM decisions WHERE feedback LIKE ?', ('%' + SECRET + '%',)).fetchone())
+
+    def test_a_dialog_sign_in_on_another_site_or_unfinished_carries_nothing_on(self):
+        self.block()
+        with patch.object(a.browser_login, 'fill', return_value={'result': 'done', 'page': None}):
+            self.assertEqual(self.app.action('browser_login_fill', {'page': '0:tab', 'host': 'other.invalid', 'password': SECRET}, owner_dashboard=True)['resumed'], [])
+        with patch.object(a.browser_login, 'fill', return_value={'result': 'next', 'page': {'host': 'www.example.com'}}):
+            self.assertNotIn('resumed', self.app.action('browser_login_fill', {'page': '0:tab', 'host': 'www.example.com', 'code': '123456',
+                                                                                'suggestion_id': self.sid}, owner_dashboard=True))
+        self.assertEqual(self.job()['status'], 'blocked')
+
+    def test_the_same_site_by_host_alone(self):
+        self.block()
+        with patch.object(a.browser_login, 'fill', return_value={'result': 'done', 'page': None}):
+            done = self.app.action('browser_login_fill', {'page': '0:tab', 'host': 'login.example.com', 'password': SECRET}, owner_dashboard=True)
+        self.assertEqual(done['resumed'], [self.sid])
+
+    def test_signing_in_in_the_browser_itself_carries_on_once_the_form_is_gone(self):
+        self.block()
+        forms = [[{'host': 'www.example.com'}], [{'host': 'www.example.com'}], []]
+        with patch.object(a.browser_login, 'pages', side_effect=lambda config: forms.pop(0) if forms else []):
+            for _ in range(3):
+                self.app.watch_sign_ins(every=0)
+                if _ < 2:
+                    self.assertEqual(self.job()['status'], 'blocked')
+        self.assertEqual(self.job()['status'], 'queued')
+
+    def test_the_watcher_never_resumes_without_having_seen_the_form(self):
+        self.block()
+        with patch.object(a.browser_login, 'pages', return_value=[]):
+            for _ in range(3):
+                self.app.watch_sign_ins(every=0)
+        self.assertEqual(self.job()['status'], 'blocked')
+
+    def test_the_watcher_leaves_the_browser_alone_when_nothing_waits(self):
+        with patch.object(a.browser_login, 'pages') as pages:
+            self.app.watch_sign_ins(every=0)
+        pages.assert_not_called()
+
+    def test_a_blocked_sign_in_card_is_redrawn_once(self):
+        self.block()
+        with self.store.connect() as db:
+            db.execute('UPDATE deliveries SET needs_edit=0')
+        self.app.flag_browser_waits()
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT needs_edit FROM deliveries').fetchone()[0], 1)
+            db.execute('UPDATE deliveries SET needs_edit=0')
+        self.app.flag_browser_waits()
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT needs_edit FROM deliveries').fetchone()[0], 0)
+
+    def test_same_site(self):
+        self.assertTrue(a.same_site('login.wise.com', 'https://wise.com/home'))
+        self.assertTrue(a.same_site('www.example.com', 'example.com'))
+        self.assertFalse(a.same_site('example.com', 'https://other.invalid/login'))
+        self.assertFalse(a.same_site('', 'example.com'))
+
+
+class DashboardWiring(unittest.TestCase):
+    def test_the_card_and_the_telegram_link_open_the_dialog_for_the_task(self):
+        html = Path(__file__).with_name('dashboard.html').read_text()
+        self.assertIn('#signin-for=', html)
+        self.assertIn('data-task="${esc(id)}"', html)
+        self.assertIn('suggestion_id:signinTask', html)
+
+
+if __name__ == '__main__':
+    unittest.main()

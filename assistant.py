@@ -1489,6 +1489,7 @@ class Store:
     exclusions = {}  # account id -> owner exclude rules, set by App from config
     owner_user_ids = set()  # The owner's own chat user IDs (Slack), set by App from config
     accounts = []  # configured accounts with their boundaries, set by App (Work/Personal labels)
+    config = {}  # the service's config, set by App (browser and dashboard addresses for a card waiting on a sign-in)
 
     def __init__(self, path):
         self.path = Path(path).expanduser()
@@ -3735,9 +3736,11 @@ class Store:
             if shown and shown['full']:extra['card_send']=shown['action']['revision']
         prompt=db.execute('SELECT status,error FROM feedback_prompts WHERE request_id=?',(suggestion.get('feedback_request_id'),)).fetchone()
         if prompt:extra['change_prompt']=dict(prompt)
-        job=db.execute('SELECT job_id,status FROM preparations WHERE suggestion_id=?',(suggestion['id'],)).fetchone()
-        waiting=browser_wait(db,job['job_id'],job['status']) if job else None
-        if waiting:extra['preparation_browser']={**waiting,'link':browser_link(self.config)}
+        job=db.execute('SELECT job_id,status,reason FROM preparations WHERE suggestion_id=?',(suggestion['id'],)).fetchone()
+        waiting=browser_wait(db,job['job_id'],job['status'],reason=job['reason']) if job else None
+        if waiting:
+            extra['preparation_browser']={**waiting,'link':browser_link(self.config)}
+            if waiting.get('sign_in'):extra['preparation_browser']['signin_url']=signin_link(self.config,suggestion['id'])
         if self.accounts and suggestion.get('account_ids') is not None:
             extra['scope']=suggestion_scope(suggestion['account_ids'], self.accounts)
         return extra
@@ -4608,12 +4611,17 @@ STEP_NAMES = {'exec': 'Running a command', 'browser': 'Using the browser', 'read
 
 
 BROWSER_WAIT = 45  # seconds on the browser before a card offers it to the owner
+SIGNIN_WATCH = 20  # seconds between looks at the browser while a task waits on the owner's sign-in
 
 
-def browser_wait(db, job_id, status, at=None):
-    """The browser a preparation waits on, as {since, page}: it has been on the browser for BROWSER_WAIT seconds or
+def browser_wait(db, job_id, status, at=None, reason=None):
+    """The browser a preparation waits on, as {since, page, sign_in}: it has been on the browser for BROWSER_WAIT seconds or
     more (a sign-in, a captcha, a code or a page that does not load), or it stopped right after a browser step and
-    asks for help. None otherwise. `page` is the last address it opened, when it said one."""
+    asks for help. None otherwise. `page` is the last address it opened, when it said one.
+
+    A blocker that hands a sign-in to the owner (`reason`, see HANDOFF) counts whenever the run used the browser at
+    all: the handoff releases the browser lease (a command) after its last browser step, so the steps no longer end
+    on the browser. Then `sign_in` is True."""
     if status not in ('starting', 'running', 'blocked'):
         return None
     try:
@@ -4628,6 +4636,9 @@ def browser_wait(db, job_id, status, at=None):
         if call['tool'] != 'browser':
             break
         streak.append(call)
+    sign_in = status == 'blocked' and signin_handoff(reason)
+    if not streak and sign_in:
+        streak = [c for c in calls if c['tool'] == 'browser'][:1]
     if not streak:
         return None
     since = streak[-1]['started_at']
@@ -4643,7 +4654,27 @@ def browser_wait(db, job_id, status, at=None):
         if isinstance(found, str) and urllib.parse.urlsplit(found).scheme in ('http', 'https'):
             page = found
             break
-    return {'since': since, 'page': page}
+    return {'since': since, 'page': page, 'sign_in': bool(sign_in)}
+
+
+def signin_handoff(reason):
+    """A blocker that waits on the owner to sign in (a sign-in, a code, a passkey) rather than on something else."""
+    return bool(reason) and bool(HANDOFF.search(reason)) and 'try again' not in reason.lower()
+
+
+def signin_link(config, suggestion_id):
+    """The dashboard address that opens the sign-in for a card blocked on one (Telegram's Sign in button), or None
+    without a dashboard address."""
+    host = str(config.get('dashboard_host') or '')
+    return 'https://' + host + config.get('dashboard_path', '/') + '#signin-for=' + suggestion_id if host else None
+
+
+def same_site(a, b):
+    """Two hosts of one site: equal, one under the other, or the same last two labels (login.wise.com, wise.com)."""
+    a, b = (browser_login.site(urllib.parse.urlsplit(x).hostname if '//' in str(x or '') else x) for x in (a, b))
+    if not a or not b:
+        return False
+    return a == b or a.endswith('.' + b) or b.endswith('.' + a) or a.split('.')[-2:] == b.split('.')[-2:]
 
 
 def browser_link(config):
@@ -4862,6 +4893,8 @@ def card(row):
     if row.get('preparation_status') in ('starting','running'):
         status='Preparing… I’ve been in the browser a while; it may need you there (a sign-in or a check).' if row.get('preparation_browser') else 'Preparing…'
     elif row.get('preparation_status') == 'queued': status='Next up. I’ll start shortly.'
+    elif row.get('preparation_status') == 'blocked' and (row.get('preparation_browser') or {}).get('sign_in'):
+        status='Waiting for you to sign in: '+row['preparation_reason'].rstrip('.')+'. Sign in through Sign in and I carry on by myself.'
     elif row.get('preparation_status') == 'blocked': status='I’m stuck: '+(row.get('preparation_reason') or 'Preparation did not finish. I’ll keep this in your list.')
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed','undoing','undone')),None)
     if action_state and row['status']=='prepared':
@@ -4963,7 +4996,10 @@ def controls(row, root=''):
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
     buttons=[]
     link=(row.get('preparation_browser') or {}).get('link') or ''
-    if link.startswith('https://') and row['status'] in ('accepted','instructions'):
+    signin=(row.get('preparation_browser') or {}).get('signin_url') or ''
+    if signin.startswith('https://') and row['status'] in ('accepted','instructions'):
+        buttons.append({'label':'Sign in','action':{'type':'url','url':signin}})  # the dashboard's sign-in, which also opens the browser
+    elif link.startswith('https://') and row['status'] in ('accepted','instructions'):
         buttons.append({'label':'Open the browser','action':{'type':'url','url':link}})
     if row['status']=='prepared':
         shown=card_draft(row)
@@ -5122,9 +5158,10 @@ def push_notify(store, config, row, sender=None):
     root = 'https://' + config['dashboard_host'] + config.get('dashboard_path', '/')
     if row.get('_result_notice'):
         ready = row['status'] == 'prepared'
-        payload = {'title': ('Ready: ' if ready else 'Needs your help: ') + row['title'],
+        signin = not ready and (row.get('preparation_browser') or {}).get('signin_url')
+        payload = {'title': ('Ready: ' if ready else 'Needs you to sign in: ' if signin else 'Needs your help: ') + row['title'],
                    'body': plain(strip_result_links(row['body']) if ready else row.get('preparation_reason') or ''),
-                   'url': root + '#result=' + row['id']}
+                   'url': signin or root + '#result=' + row['id']}
     else:
         payload = {'title': ('Reminder: ' if row.get('reminder') else '') + row['title'],
                    'body': plain(row['body']), 'url': root + '#card=' + row['id']}
@@ -5175,11 +5212,14 @@ def telegram(config, row, action, message_id=None):
         title=re.sub(r'([\\`*_{}\[\]()#+.!>|~-])',r'\\\1',row['title'])
         ready=row['status']=='prepared'
         root='https://'+config['dashboard_host']+config.get('dashboard_path','/')
-        message=('Ready: ' if ready else 'Needs your help: ')+'**'+title+'**'
+        signin=not ready and (row.get('preparation_browser') or {}).get('signin_url')
+        message=('Ready: ' if ready else 'Needs you to sign in: ' if signin else 'Needs your help: ')+'**'+title+'**'
         message+='\n\n[View '+('result' if ready else 'task')+']('+root+'#result='+row['id']+')'
+        # A sign-in blocker opens the dashboard's sign-in for this task; once in, the task carries on by itself.
+        blocks=[{'type':'buttons','buttons':[{'label':'Sign in','action':{'type':'url','url':signin}}]}] if signin else []
         return telegram_request(config,{'action':'send','channel':'telegram','accountId':telegram_account(config),
             'target':config.get('telegram_owner'),'replyTo':str(row['message_id']),
-            'message':message,'presentation':{'blocks':[]},**({'silent':True} if row.get('_silent') else {})})
+            'message':message,'presentation':{'blocks':blocks},**({'silent':True} if row.get('_silent') else {})})
     body=dict(row)
     if row['status']=='prepared' and row.get('requested_feedback'):
         asked=re.sub(r'([\\`*_{}\[\]()#+.!>|~-])',r'\\\1',row['requested_feedback'][:500])
@@ -5783,6 +5823,7 @@ class App:
         self.store.exclusions = {a['id']: rules for a in config['accounts'] if (rules := (a.get('exclude') or []) + default_exclusions(config, a))}
         self.store.owner_user_ids = {a['user_id'] for a in config['accounts'] if a.get('service') == 'slack' and a.get('user_id')}
         self.store.accounts = config['accounts']
+        self.store.config = config
         self.token = credential(config, 'api-token')
         self.owner_token = owner_credential(config)
         self.stop = threading.Event()
@@ -6163,6 +6204,9 @@ class App:
             done = browser_login.fill(self.config, args.get('page'), host, username, password, code)
             if args.get('save') is True and args.get('use_saved') is not True and done['result'] != 'still_here' and (username or password):
                 logins.save(host, username, password)
+            if done['result'] == 'done':  # no sign-in form left: the task that waited on it carries on
+                task = args.get('suggestion_id') if isinstance(args.get('suggestion_id'), str) else None
+                done['resumed'] = self.resume_signed_in(host=host, suggestion_id=task)
             return done
         if name == 'graph_warmup':
             if not owner_dashboard:
@@ -6875,17 +6919,71 @@ class App:
             except Exception as error:LOG.error('browser lease error=%s',type(error).__name__)
             try:self.flag_browser_waits()
             except Exception as error:LOG.error('browser wait error=%s',type(error).__name__)
+            try:self.watch_sign_ins()
+            except Exception as error:LOG.error('sign-in watch error=%s',type(error).__name__)
 
     def flag_browser_waits(self):
         """A sent card is redrawn once when its running preparation starts waiting on the browser, so it says so and,
         with a viewer link, gets its Open the browser button. A blocked one is redrawn anyway."""
         flagged = self.__dict__.setdefault('browser_flagged', set())
         with self.store.connect() as db:
-            for job in db.execute("SELECT job_id,suggestion_id,status FROM preparations WHERE status IN ('starting','running')").fetchall():
-                if job['job_id'] in flagged or not browser_wait(db, job['job_id'], job['status']):
+            # A blocked sign-in is redrawn once too (once per start), so a card from before gets its Sign in button.
+            for job in db.execute("SELECT job_id,suggestion_id,status,reason FROM preparations WHERE status IN ('starting','running','blocked')").fetchall():
+                if job['job_id'] in flagged or (job['status'] == 'blocked' and not signin_handoff(job['reason'])) or not browser_wait(db, job['job_id'], job['status'], reason=job['reason']):
                     continue
                 flagged.add(job['job_id'])
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (job['suggestion_id'],))
+
+    def signin_waits(self):
+        """Blocked preparations of open tasks that wait on the owner to sign in: [(suggestion_id, job_id, page)]."""
+        found = []
+        with self.store.connect() as db:
+            for job in db.execute("SELECT p.suggestion_id,p.job_id,p.reason FROM preparations p JOIN suggestions s ON s.id=p.suggestion_id "
+                                  "WHERE p.status='blocked' AND s.status IN ('accepted','instructions')").fetchall():
+                waiting = signin_handoff(job['reason']) and browser_wait(db, job['job_id'], 'blocked', reason=job['reason'])
+                if waiting:
+                    found.append((job['suggestion_id'], job['job_id'], waiting.get('page')))
+        return found
+
+    def resume_signed_in(self, host=None, suggestion_id=None, source='signed_in'):
+        """Carries on the tasks blocked on a sign-in that is now done: the one named, and those waiting on `host`'s site.
+        The same as tapping Continue; nothing here signs in or touches the site. Returns the resumed task ids."""
+        resumed = []
+        for task, job, page in self.signin_waits():
+            if task != suggestion_id and not (host and page and same_site(host, page)):
+                continue
+            try:
+                self.store.decide(task, 'retry', '', 'signed-in:' + job, source)
+            except ValueError as error:
+                LOG.info('sign-in resume skipped suggestion=%s error=%s', task, error)
+                continue
+            LOG.info('sign-in resume suggestion=%s source=%s', task, source)
+            resumed.append(task)
+        return resumed
+
+    def watch_sign_ins(self, every=SIGNIN_WATCH):
+        """Signing in in the browser itself carries on too. While a task waits on a sign-in, look every `every` seconds
+        for the sign-in form on its site in the shared browser (read-only: which fields show, never what is in them).
+        Once one was seen and is gone, the owner got in: carry on, once per blocked run."""
+        state = self.__dict__.setdefault('signin_watch', {'next': 0.0, 'seen': set(), 'done': set()})
+        if time.monotonic() < state['next']:
+            return
+        state['next'] = time.monotonic() + every
+        waits = [(task, job, page) for task, job, page in self.signin_waits() if page and job not in state['done']]
+        if not waits:
+            state['seen'].clear()
+            return
+        try:
+            shown = [p['host'] for p in browser_login.pages(self.config)]
+        except Exception:  # no browser right now: look again later
+            return
+        for task, job, page in waits:
+            if any(same_site(host, page) for host in shown):
+                state['seen'].add(job)
+            elif job in state['seen']:
+                state['seen'].discard(job)
+                state['done'].add(job)
+                self.resume_signed_in(suggestion_id=task)
 
     def release_finished_browser_lease(self, lease_file=BROWSER_LEASE):
         """A Do it run holds the browser as `assistant-<first 8 of its job ID>`. Runs can end without
