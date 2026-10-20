@@ -192,20 +192,30 @@ class DesktopViewTest(unittest.TestCase):
             server.bind(path)
             server.listen(1)
             got = []
+            received = threading.Event()
 
             def vnc():
-                conn, _ = server.accept()
-                conn.sendall(b'RFB 003.008\n')
-                got.append(conn.recv(100))
-                conn.close()
-            threading.Thread(target=vnc, daemon=True).start()
+                with server.accept()[0] as conn:
+                    conn.sendall(b'RFB 003.008\n')
+                    got.append(conn.recv(100))
+                    received.set()
+            upstream = threading.Thread(target=vnc, daemon=True)
+            upstream.start()
             mask = b'\x01\x02\x03\x04'
             payload = b'RFB 003.008\n'
             client = bytes([0x82, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
             ours, theirs = socket.socketpair()
             headers = {'Sec-WebSocket-Key': base64.b64encode(b'the sample nonce').decode(),  # RFC 6455's example
                        'Sec-WebSocket-Protocol': 'binary'}
-            worker = threading.Thread(target=browser_viewer.bridge, args=(io.BytesIO(client), ours, path, headers), daemon=True)
+            class ClientInput(io.BytesIO):
+                def read(self, n=-1):
+                    data = super().read(n)
+                    if not data:
+                        # A real websocket blocks here, rather than immediately
+                        # racing EOF against the fake server's greeting/receipt.
+                        received.wait(5)
+                    return data
+            worker = threading.Thread(target=browser_viewer.bridge, args=(ClientInput(client), ours, path, headers), daemon=True)
             worker.start()
             theirs.settimeout(5)
             data = b''
@@ -216,7 +226,10 @@ class DesktopViewTest(unittest.TestCase):
             self.assertIn(b'Sec-WebSocket-Protocol: binary', data)
             self.assertIn(browser_viewer.ws_frame(b'RFB 003.008\n'), data)
             worker.join(5)
+            upstream.join(5)
             self.assertEqual(got, [payload])
+            ours.close()
+            theirs.close()
             server.close()
 
 

@@ -564,6 +564,18 @@ class CalendarInvariants(unittest.TestCase):
         self.assertEqual(calls[-1]['syncToken'], 'complete')
         self.assertNotIn('timeMin', calls[-1]); self.assertNotIn('timeMax', calls[-1])
 
+    def test_complete_calendar_scan_preserves_other_kinds_on_same_account(self):
+        other = {'account_id': self.account['id'], 'source_id': 'fleet-question',
+                 'kind': 'fleet.request', 'occurred_at': assistant.now(), 'title': 'Question',
+                 'body': 'Synthetic team request', 'metadata': {}, 'deleted': False}
+        self.store.commit_page(self.account['id'], {}, [other])
+        fake, _ = self.source([{'items': [appointment()], 'nextSyncToken': 'complete'}])
+        with fake:
+            assistant.sync_calendar(self.store, {}, self.account)
+        rows = self.store.events([self.account['id']])
+        self.assertEqual({r['kind'] for r in rows}, {'fleet.request', 'calendar.event'})
+        self.assertEqual(self.store.checkpoint(self.account['id'])['sync_token'], 'complete')
+
     def test_calendar_expired_token_does_not_delete_until_complete_scan(self):
         fake, _ = self.source([
             {'items': [appointment()], 'nextSyncToken': 'old'},

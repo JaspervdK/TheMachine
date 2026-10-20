@@ -4175,7 +4175,7 @@ def sync_calendar(store, config, account):
             # Only a COMPLETE window scan can establish absence. Never prune a partial
             # scan or clear historical evidence on expired tokens.
             with store.connect() as db:
-                old = db.execute("SELECT source_id,occurred_at,metadata FROM events WHERE account_id=? AND deleted=0",
+                old = db.execute("SELECT source_id,occurred_at,metadata FROM events WHERE account_id=? AND kind='calendar.event' AND deleted=0",
                                  (account['id'],)).fetchall()
             for row in old:
                 metadata = json.loads(row['metadata'])
