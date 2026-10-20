@@ -20,6 +20,7 @@ import logging
 import os
 from pathlib import Path
 from decimal import Decimal
+import random
 import re
 import secrets
 import shutil
@@ -1090,7 +1091,7 @@ def sync_android(store, config, account, source=None, reconcile=False):
 
 class Slack:
     METHODS = {'auth.test', 'users.info', 'users.conversations', 'conversations.history',
-               'conversations.replies'}
+               'conversations.replies', 'conversations.info'}
 
     def __init__(self, config, account, stop=None):
         self.config, self.account, self.stop = config, account, stop
@@ -1099,14 +1100,20 @@ class Slack:
         # Conservative non-Marketplace limits match this connection's observed
         # one-success-per-minute replies. Warm up after restart rather than
         # forgetting a request sent just before shutdown.
+        # Slack allows such an app about one history or replies read a minute per workspace, shared
+        # by every computer on the same connection (an own install and a hosted server, later a
+        # whole Fleet) and by anything else reading through it, like a scheduled post that checks
+        # the channel first. So this collector spends at most one of those reads every
+        # slack_read_seconds (default 3 minutes) and leaves the rest of the minute to others.
         self.limited_reads = {'conversations.history', 'conversations.replies'}
-        self.last_reads = dict.fromkeys(self.limited_reads, time.monotonic())
+        self.read_seconds = max(65, int(config.get('slack_read_seconds', 180)))
+        self.last_limited = time.monotonic()
 
     def pace(self, method):
         stamp = time.monotonic()
         delay = max(0, 2 - (stamp - self.last_call))
         if method in self.limited_reads:
-            delay = max(delay, 65 - (stamp - self.last_reads[method]))
+            delay = max(delay, self.read_seconds - (stamp - self.last_limited))
         if self.stop is not None:
             if self.stop.wait(delay):
                 raise SourceError('collector_stopped')
@@ -1114,7 +1121,7 @@ class Slack:
             time.sleep(delay)
         self.last_call = time.monotonic()
         if method in self.limited_reads:
-            self.last_reads[method] = self.last_call
+            self.last_limited = self.last_call
 
     def get(self, method, params=None):
         if method not in self.METHODS:
@@ -1141,6 +1148,9 @@ class Slack:
                 retry_after = max(60, min(3600, int(error.headers.get('Retry-After', '300'))))
             except ValueError:
                 retry_after = 300
+            if error.code == 429:
+                # Spread out computers that share the connection, so they don't all retry at once.
+                retry_after += random.randint(5, 60)
             raise SourceError('slack:' + method, error.code, retry_after) from None
         except (urllib.error.URLError, TimeoutError) as error:
             # Keep only the exception class and an allowlisted read method,
@@ -4033,6 +4043,8 @@ def sync_slack(store, config, account, source=None):
         state.update(mode='incremental', phase='discover')
         store.commit_page(account['id'], state, [], record_sync=False)
         return {'mode': 'incremental', 'events': 0, 'more': False}
+    if state['mode'] == 'incremental' and not state.get('scan') and not slack_next_due(store, config, account, source, state):
+        return {'mode': 'incremental', 'events': 0, 'more': False}
     channel = state['channels'][state['index']]
     scan = state.get('scan')
     if not scan:
@@ -4102,6 +4114,7 @@ def sync_slack(store, config, account, source=None):
         else:
             e = slack_event(account, channel, raw)
             ts = e['metadata']['message_ts']
+            channel['last_activity'] = max(float(channel.get('last_activity') or 0), float(ts))
             if e['metadata']['reply_count'] and ts not in scan['threads']:
                 scan['threads'].append(ts)
                 if 'known_threads' in scan and ts not in scan['known_threads']:
@@ -4151,6 +4164,8 @@ def sync_slack(store, config, account, source=None):
             if 'known_threads' in scan:
                 channel['next_thread_index'] = scan['thread_start'] + 1
             channel.pop('error', None)
+            # Thread replies held back on the first pass are read on the very next round.
+            channel['due'] = time.time() + (0 if scan.get('waiting') else slack_interval(config, channel))
             if scan['full']:
                 channel['next_full'] = time.time() + 86400
             state.pop('scan', None)
@@ -4164,6 +4179,51 @@ def sync_slack(store, config, account, source=None):
         remember_slack_names(store, source, events, state.get('channels') or ())
     more = state['mode'] != 'incremental' or state['index'] != 0 or bool(state.get('scan'))
     return {'mode': state['mode'], 'events': len(events), 'more': more}
+
+
+def slack_interval(config, channel):
+    """How long a conversation rests after a read, by how recently anyone wrote in it: busy ones
+    are read again within the hour, quiet ones once a day. Direct messages are checked more often,
+    with a cheap call that doesn't count toward Slack's one-read-a-minute limit."""
+    if channel.get('type') == 'dm':
+        return config.get('slack_dm_check_minutes', 10) * 60
+    age = time.time() - float(channel.get('last_activity') or 0)
+    if age < 86400:
+        return config.get('slack_active_minutes', 60) * 60
+    if age < 7 * 86400:
+        return config.get('slack_recent_hours', 6) * 3600
+    return config.get('slack_quiet_hours', 24) * 3600
+
+
+def slack_next_due(store, config, account, source, state):
+    """Moves state['index'] to the next conversation that is due for a read and returns True, or
+    returns False once the round is done with nothing due. Skipping costs no Slack call, except for
+    a direct message, where conversations.info shows its newest message: only a new one there
+    makes it worth a history read."""
+    moved = False
+    for _ in range(len(state['channels'])):
+        channel = state['channels'][state['index']]
+        due = time.time() >= channel.get('due', 0)
+        if due and channel.get('type') == 'dm' and channel.get('last_scan') and not channel.get('threads_waiting') \
+                and time.time() < channel.get('next_full', 0) and isinstance(source, Slack):
+            latest = (source.get('conversations.info', {'channel': channel['id']}).get('channel') or {}).get('latest') or {}
+            seen = max(float(channel.get('last_activity') or 0), float(channel['last_scan']))
+            if float(latest.get('ts') or 0) <= seen:
+                channel['due'] = time.time() + slack_interval(config, channel)
+                due, moved = False, True
+        if due:
+            if moved:
+                store.commit_page(account['id'], state, [], record_sync=False)
+            return True
+        state['index'], moved = state['index'] + 1, True
+        if state['index'] >= len(state['channels']):
+            state['index'] = 0
+            if time.time() >= state.get('next_discovery', 0):
+                state['phase'] = 'discover'
+            store.commit_page(account['id'], state, [])
+            return False
+    store.commit_page(account['id'], state, [])
+    return False
 
 
 def remember_slack_names(store, source, events, channels=(), per_page=3):

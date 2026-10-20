@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location('assistant_fairness',Path(__file__).with_name('assistant.py'))
@@ -75,8 +76,44 @@ class ReopenAndSlack(unittest.TestCase):
         self.assertEqual(cp['channels'][0]['threads'],channels[0]['threads'])
         a.sync_slack(self.store,config,account,source)
         self.assertEqual(self.store.events(['slack'])[0]['body'],'A newly arrived message')
+        # The round is done and both conversations rest: nothing is read until one is due again.
+        reads=len(calls)
+        self.assertFalse(a.sync_slack(self.store,config,account,source)['more'])
+        self.assertEqual(len(calls),reads)
+        cp=self.store.checkpoint('slack')
+        self.assertGreater(cp['channels'][1]['due'],a.time.time()+3000)  # C2 just had a message: within the hour
+        for c in cp['channels']:c['due']=0
+        self.store.commit_page('slack',cp,[])
         a.sync_slack(self.store,config,account,source)
         self.assertEqual(self.store.checkpoint('slack')['scan']['threads'],['1002.000001'])
+
+    def test_quiet_conversations_rest_and_dms_are_read_only_with_news(self):
+        account={'id':'slack','fair_incremental':True,'slack_host':'example.slack.com'}
+        now=a.time.time()
+        channels=[{'id':'D1','name':'DM U2','type':'dm','threads':[],'last_scan':f'{now-60:.6f}','next_full':now+86400,'last_activity':now-3600},
+                  {'id':'D2','name':'DM U3','type':'dm','threads':[],'last_scan':f'{now-60:.6f}','next_full':now+86400,'last_activity':now-3600},
+                  {'id':'C1','name':'quiet','type':'channel','threads':[],'last_scan':f'{now-60:.6f}','next_full':now+86400,'due':now+3600}]
+        self.store.commit_page('slack',{'mode':'incremental','phase':'scan','after':'1000.000000','channels':channels,'index':0,
+                                        'next_discovery':now+86400},[])
+        calls=[]
+        class Source(a.Slack):
+            def __init__(self):pass
+            def profile(self):pass
+            def get(self,method,params):
+                calls.append((method,params['channel']))
+                if method=='conversations.info':
+                    return {'channel':{'latest':{'ts':f'{now-3600:.6f}' if params['channel']=='D1' else f'{now-10:.6f}'}}}
+                return {'messages':[{'ts':f'{now-10:.6f}','text':'New','user':'U3'}]}
+        source=Source()
+        names=unittest.mock.patch.object(a,'remember_slack_names');names.start();self.addCleanup(names.stop)
+        a.sync_slack(self.store,{},account,source)  # D1 has nothing new; D2 does
+        self.assertEqual(calls,[('conversations.info','D1'),('conversations.info','D2'),('conversations.history','D2')])
+        while a.sync_slack(self.store,{},account,source)['more']:pass
+        self.assertNotIn(('conversations.history','D1'),calls)
+        self.assertNotIn(('conversations.history','C1'),calls)  # not due for another hour
+        cp=self.store.checkpoint('slack')
+        self.assertEqual(cp['index'],0)
+        self.assertAlmostEqual(cp['channels'][1]['last_activity'],now-10,places=3)
 
     def test_failed_thread_page_is_preserved_without_starving_other_channels(self):
         account={'id':'slack','fair_incremental':True,'slack_host':'example.slack.com'}

@@ -688,6 +688,10 @@ class CalendarInvariants(unittest.TestCase):
         self.assertEqual(self.store.checkpoint(self.account['id'])['mode'], 'bootstrap')
 
 
+# Conversations never rest between rounds here, as before slack_interval existed.
+RESTLESS = {'slack_active_minutes': 0, 'slack_recent_hours': 0, 'slack_quiet_hours': 0, 'slack_dm_check_minutes': 0}
+
+
 class SlackInvariants(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -720,11 +724,11 @@ class SlackInvariants(unittest.TestCase):
             {'messages': [parent], 'response_metadata': {'next_cursor': 'page2'}},
             assistant.SourceError('network'), {'messages': []},
             {'messages': [parent, reply]}, {'messages': [parent]}, {'messages': [parent, reply]}])
-        assistant.sync_slack(self.store, {}, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
         cp = self.store.checkpoint(self.account['id'])
-        with self.assertRaises(assistant.SourceError):assistant.sync_slack(self.store, {}, self.account, source)
+        with self.assertRaises(assistant.SourceError):assistant.sync_slack(self.store, RESTLESS, self.account, source)
         self.assertEqual(self.store.checkpoint(self.account['id']), cp)
-        for _ in range(4):assistant.sync_slack(self.store, {}, self.account, source)
+        for _ in range(4):assistant.sync_slack(self.store, RESTLESS, self.account, source)
         rows = self.store.events([self.account['id']]);self.assertEqual(len(rows), 2)
         self.assertTrue(all(r['version'] == 1 for r in rows))
         self.assertEqual(calls[3][0], 'conversations.replies')
@@ -739,15 +743,15 @@ class SlackInvariants(unittest.TestCase):
         reply = {'ts': f'{now - 1800:.6f}', 'thread_ts': parent['ts'], 'text': 'Updated deadline'}
         source, calls = self.source([{'messages': [parent]}, {'messages': [{'ts': f'{now - 60:.6f}', 'text': 'Hello'}]},
                                      {'messages': []}, {'messages': [parent, reply]}])
-        assistant.sync_slack(self.store, {}, self.account, source)
-        assistant.sync_slack(self.store, {}, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
         self.assertEqual([(m, p['channel']) for m, p in calls], [('conversations.history', 'C1'), ('conversations.history', 'C2')])
         cp = self.store.checkpoint(self.account['id'])
         self.assertEqual(cp['mode'], 'incremental')
         self.assertTrue(cp['channels'][0]['threads_waiting'])
         self.assertEqual(cp['channels'][0]['threads'], [parent['ts']])
-        assistant.sync_slack(self.store, {}, self.account, source)  # C1 again: its new messages, then the thread
-        assistant.sync_slack(self.store, {}, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)  # C1 again: its new messages, then the thread
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
         self.assertEqual(calls[3][0], 'conversations.replies')
         self.assertEqual(calls[3][1]['ts'], parent['ts'])
         self.assertLess(float(calls[3][1]['oldest']), float(parent['ts']))  # the whole window, not the overlap
@@ -756,7 +760,7 @@ class SlackInvariants(unittest.TestCase):
 
     def test_slack_missing_cursor_cannot_finish_a_scan(self):
         self.state();source, _ = self.source([{'messages': [{'ts': '2000.000001', 'text': 'Hello'}], 'has_more': True}])
-        with self.assertRaises(assistant.SourceError):assistant.sync_slack(self.store, {}, self.account, source)
+        with self.assertRaises(assistant.SourceError):assistant.sync_slack(self.store, RESTLESS, self.account, source)
         self.assertEqual(self.store.events([self.account['id']]), [])
         self.assertNotIn('last_scan', self.store.checkpoint(self.account['id'])['channels'][0])
 
@@ -765,18 +769,18 @@ class SlackInvariants(unittest.TestCase):
             {'messages': [{'ts': '2000.000001', 'text': 'Original'}]},
             {'messages': [{'ts': '2000.000001', 'text': 'Edited', 'edited': {'ts': '2001.000001'}}]},
             {'messages': [{'subtype': 'message_deleted', 'deleted_ts': '2000.000001'}]}])
-        assistant.sync_slack(self.store, {}, self.account, source)
-        assistant.sync_slack(self.store, {}, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
         self.assertEqual(self.store.events([self.account['id']])[0]['version'], 2)
-        assistant.sync_slack(self.store, {}, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
         self.assertEqual(self.store.events([self.account['id']]), [])
 
     def test_slack_membership_discovery_dedupes_and_does_not_open_dms(self):
         source, calls = self.source([
             {'channels': [{'id': 'D1', 'is_im': True, 'user': 'U1'}], 'response_metadata': {'next_cursor': 'more'}},
             {'channels': [{'id': 'D1', 'is_im': True, 'user': 'U1'}, {'id': 'C1', 'name': 'team'}]}])
-        assistant.sync_slack(self.store, {}, self.account, source)
-        assistant.sync_slack(self.store, {}, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
+        assistant.sync_slack(self.store, RESTLESS, self.account, source)
         cp=self.store.checkpoint(self.account['id'])
         self.assertEqual(len(cp['channels']), 2)
         self.assertEqual(cp['channels'][0]['name'], 'My notes')
@@ -785,7 +789,7 @@ class SlackInvariants(unittest.TestCase):
 
     def test_slack_unavailable_channel_is_visible_not_successful(self):
         self.state();source, _=self.source([assistant.SourceError('slack_not_in_channel')])
-        with self.assertRaises(assistant.SourceError):assistant.sync_slack(self.store, {}, self.account, source)
+        with self.assertRaises(assistant.SourceError):assistant.sync_slack(self.store, RESTLESS, self.account, source)
         health=self.store.snapshot([self.account])['connectors'][0]
         self.assertEqual(health['conversation_errors'], 1)
         self.assertEqual(health['conversations_collected'], 0)
@@ -802,12 +806,15 @@ class SlackInvariants(unittest.TestCase):
         with patch.object(assistant.time, 'monotonic', return_value=100), patch.object(assistant.time, 'sleep') as sleep:
             client = assistant.Slack({}, self.account)
             client.pace('conversations.replies')
-            sleep.assert_called_with(65)
+            sleep.assert_called_with(180)
         with patch.object(assistant.time, 'monotonic', return_value=110), patch.object(assistant.time, 'sleep') as sleep:
-            client.pace('conversations.replies')
-            sleep.assert_called_with(55)
+            client.pace('conversations.history')  # history and replies share one budget
+            sleep.assert_called_with(170)
+        with patch.object(assistant.time, 'monotonic', return_value=111), patch.object(assistant.time, 'sleep') as sleep:
+            client.pace('conversations.info')  # not limited to one a minute: only the 2-second spacing
+            sleep.assert_called_with(1)
         with patch.object(assistant.time, 'monotonic', return_value=200), patch.object(assistant.time, 'sleep') as sleep:
-            restarted = assistant.Slack({}, self.account)
+            restarted = assistant.Slack({'slack_read_seconds': 30}, self.account)  # never below Slack's own minute
             restarted.pace('conversations.history')
             sleep.assert_called_with(65)
 
@@ -837,7 +844,7 @@ class SlackInvariants(unittest.TestCase):
         with patch.object(client,'pace'),patch.object(assistant,'credential',return_value='KEY=fake'),patch.object(assistant.urllib.request,'urlopen',side_effect=error):
             with self.assertRaises(assistant.SourceError) as raised:client.get('conversations.replies')
         self.assertEqual(str(raised.exception),'slack:conversations.replies:HTTP_429')
-        self.assertEqual(raised.exception.retry_after,120)
+        self.assertTrue(125 <= raised.exception.retry_after <= 180)  # Slack's wait plus a spread so computers sharing the connection don't retry together
 
     def test_slack_old_known_thread_is_refreshed_after_overlap(self):
         self.channel.update(last_scan='40000.000001',next_full=assistant.time.time()+86400,threads=['1100.000001'])

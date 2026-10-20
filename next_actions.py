@@ -1040,12 +1040,16 @@ class SlackTransport:
         try:
             reply = self.call(action, 'chat.postMessage', {'channel': channel, 'text': slack_text(action['body']), 'unfurl_links': False})
         except urllib.error.HTTPError as error:
+            if error.code == 429:
+                return {'not_sent': True}  # Slack refused it for now and posted nothing: send it again shortly
             # A refused request (4xx) posted nothing; a server error might have.
             return {'rejected': error.code} if 400 <= error.code < 500 and error.code != 408 else {}
         except Exception:
             return {}  # unknown outcome: reconcile checks the conversation, never resends
         if reply.get('ok'):
             return {'message_id': f"slack:{channel}:{reply['ts']}", 'channel_id': channel, 'user_id': user_id}
+        if reply.get('error') == 'ratelimited':
+            return {'not_sent': True}
         return {'rejected': reply.get('error') or 'unknown'}
 
     def reconcile(self, action, job):

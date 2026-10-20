@@ -214,6 +214,14 @@ class SlackSender(unittest.TestCase):
         result, _ = self.run_with({'users.lookupByEmail': self.USER, 'conversations.open': {'ok': True, 'channel': {'id': 'D0SAM1'}},
                                    'chat.postMessage': Refused})
         self.assertEqual(result, {'rejected': 403})
+        class Limited(urllib.error.HTTPError):
+            def __init__(self): super().__init__('https://api.maton.ai', 429, 'Too Many Requests', {'Retry-After': '30'}, None)
+        result, _ = self.run_with({'users.lookupByEmail': self.USER, 'conversations.open': {'ok': True, 'channel': {'id': 'D0SAM1'}},
+                                   'chat.postMessage': Limited})
+        self.assertEqual(result, {'not_sent': True})  # waits and sends again, never dropped as refused
+        result, _ = self.run_with({'users.lookupByEmail': self.USER, 'conversations.open': {'ok': True, 'channel': {'id': 'D0SAM1'}},
+                                   'chat.postMessage': {'ok': False, 'error': 'ratelimited'}})
+        self.assertEqual(result, {'not_sent': True})
         sender = n.SlackTransport({'accounts': [SLACK]}, lambda config, name: 'KEY=secret')
         text = n.slack_text(self.action['body'])
         replies = {'users.lookupByEmail': self.USER, 'conversations.open': {'ok': True, 'channel': {'id': 'D0SAM1'}},
