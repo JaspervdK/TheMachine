@@ -57,6 +57,67 @@ class InstallerTest(unittest.TestCase):
             self.assertTrue(installer.install_plugin(facts, reload=False, stamp=stamp))
             self.assertNotIn(['plugins', 'reload'], calls)
 
+    def gateway(self, reload_code=1, health=(), unit='openclaw-gateway.service', restart_code=0):
+        """install_plugin against a fake OpenClaw whose reload fails and whose Gateway health answers `health` in turn."""
+        calls, answers = [], iter(health)
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[1:3] == ['plugins', 'reload']:
+                return subprocess.CompletedProcess(command, reload_code, '', '[openclaw] The CLI command failed.' if reload_code else '')
+            if command[1:3] == ['gateway', 'health']:
+                found = next(answers, None)
+                return subprocess.CompletedProcess(command, 0 if found else 1, json.dumps(found) if found else '', '')
+            if command[:3] == ['systemctl', '--user', 'restart']:
+                return subprocess.CompletedProcess(command, restart_code, '', 'Job failed' if restart_code else '')
+            return subprocess.CompletedProcess(command, 0, '', '')
+        said = []
+        tmp = Path(tempfile.mkdtemp(prefix='machine-plugin-'))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        stamp = tmp / 'plugin-installed'
+        with mock.patch.object(installer, 'run', side_effect=run), mock.patch.object(installer.time, 'sleep'), \
+                mock.patch.object(installer, 'say', side_effect=said.append), \
+                mock.patch.object(installer.onboarding, 'gateway_units', return_value=[unit] if unit else []), \
+                mock.patch.dict(os.environ, {'ASSISTANT_GATEWAY_WAIT': '60'}):
+            ok = installer.install_plugin({'openclaw': 'openclaw', 'openclaw_version': '2026.10.5'}, stamp=stamp)
+        return ok, calls, '\n'.join(said), stamp.exists()
+
+    def test_a_reload_without_a_running_gateway_starts_it_and_checks_the_bridge_loaded(self):
+        loaded = {'ok': True, 'plugins': {'loaded': ['telegram', installer.PLUGIN_ID], 'errors': []}}
+        ok, calls, said, stamped = self.gateway(health=[None, {'ok': True, 'plugins': {'loaded': ['telegram']}}, loaded])
+        self.assertTrue(ok, said)
+        self.assertTrue(stamped)
+        self.assertIn(['systemctl', '--user', 'reset-failed', 'openclaw-gateway.service'], calls)
+        self.assertIn(['systemctl', '--user', 'restart', 'openclaw-gateway.service'], calls)
+        self.assertIn('loaded', said)
+
+    def test_a_gateway_that_does_not_load_the_bridge_fails_with_its_reason(self):
+        broken = {'ok': True, 'plugins': {'loaded': ['telegram'], 'errors': [{'id': installer.PLUGIN_ID, 'error': 'entry not found'}]}}
+        ok, _, said, stamped = self.gateway(health=[broken])
+        self.assertFalse(ok)
+        self.assertFalse(stamped)
+        self.assertIn('did not load ' + installer.PLUGIN_ID + ': entry not found', said)
+
+    def test_a_gateway_that_does_not_start_fails_with_what_to_check(self):
+        ok, _, said, _ = self.gateway(health=[], restart_code=1)
+        self.assertFalse(ok)
+        self.assertIn('Could not start the OpenClaw Gateway', said)
+        with mock.patch.object(installer.time, 'time', side_effect=[0, 0, 100, 100]):
+            ok, _, said, _ = self.gateway(health=[])
+        self.assertFalse(ok)
+        self.assertIn('did not come up', said)
+
+    def test_without_a_gateway_service_the_saved_bridge_is_enough(self):
+        ok, calls, said, stamped = self.gateway(health=[], unit=None)
+        self.assertTrue(ok, said)
+        self.assertFalse(stamped)  # not live yet: the next install reloads it
+        self.assertNotIn('restart', [c[2] for c in calls if c[0] == 'systemctl'])
+        self.assertIn('loads when it starts', said)
+
+    def test_a_running_gateway_that_refuses_the_reload_without_a_service_fails(self):
+        ok, _, said, _ = self.gateway(health=[{'ok': True, 'plugins': {'loaded': []}}], unit=None)
+        self.assertFalse(ok)
+        self.assertIn('plugin reload failed', said)
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='machine-install-'))
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -326,7 +387,7 @@ class InstallerTest(unittest.TestCase):
                         '--user daemon-reload', '--user enable personal-assistant.service',
                         '--user restart personal-assistant.service'):
             with self.subTest(command=command):
-                result = self.install(ASSISTANT_TEST_FAIL=command)
+                result = self.install(ASSISTANT_TEST_FAIL=command, ASSISTANT_GATEWAY_WAIT='0')
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         result = self.install('--no-start', ASSISTANT_TEST_FAIL='--user daemon-reload')
         self.assertEqual(result.returncode, 1, result.stdout)

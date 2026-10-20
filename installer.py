@@ -720,17 +720,70 @@ def install_plugin(facts, reload=True, stamp=None):
         say('  could not allow the plugin\'s conversation hooks: ' + (result.stderr or result.stdout).strip()[:300]
             + f'\n  run it yourself: openclaw config set plugins.entries.{PLUGIN_ID}.hooks.allowConversationAccess true --strict-json')
         return False
+    applied = True
     if reload:
         result = run([openclaw, 'plugins', 'reload', PLUGIN_ID, '--wait'], timeout=300)
         if result.returncode != 0:
-            say('  plugin reload failed: ' + (result.stderr or result.stdout).strip()[:300])
-            return False
-    if stamp and reload:
+            # Reload only works in a running Gateway. One that is down (stopped, still starting, or given up by
+            # systemd after failed starts) has the bridge saved and loads it as it starts: start it and check.
+            applied = load_in_gateway(openclaw, (result.stderr or result.stdout).strip())
+            if applied is False:
+                return False
+    if stamp and reload and applied:
         stamp.parent.mkdir(parents=True, exist_ok=True)
         stamp.write_text(fingerprint + '\n')
     say(f'OpenClaw plugin {PLUGIN_ID}: linked and enabled'
-        + ('' if reload else ' (not reloaded: --no-start)'))
+        + ('' if reload else ' (not reloaded: --no-start)')
+        + (' (loads when the Gateway starts)' if applied is None else ''))
     return True
+
+
+def gateway_health(openclaw):
+    """The running Gateway's own health (with the plugins it loaded), or None when no Gateway answers."""
+    result = run([openclaw, 'gateway', 'health', '--json', '--timeout', '20000'], timeout=60)
+    try:
+        found = json.loads(result.stdout or '{}')
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) and found.get('ok') else None
+
+
+def load_in_gateway(openclaw, reload_error=''):
+    """After a failed reload: True once the Gateway runs with the bridge loaded, None when no Gateway service runs
+    here at all (the bridge is saved and loads when the owner starts one), False with the reason said otherwise."""
+    unit = (onboarding.gateway_units() or [None])[0]
+    if not unit:
+        if gateway_health(openclaw) is None:
+            say('  The OpenClaw Gateway is not running here; the bridge is saved and loads when it starts (openclaw gateway start).')
+            return None
+        say('  plugin reload failed: ' + reload_error[:300])
+        return False
+    say(f'  The OpenClaw Gateway did not take the bridge live; (re)starting {unit} so it loads it.')
+    run(['systemctl', '--user', 'reset-failed', unit], timeout=30)  # after repeated failed starts systemd stops trying
+    result = run(['systemctl', '--user', 'restart', unit], timeout=300)
+    if result.returncode != 0:
+        say(f'  Could not start the OpenClaw Gateway ({unit}): ' + (result.stderr or result.stdout).strip()[:300]
+            + f'\n  Check: systemctl --user status {unit}; journalctl --user -u {unit} -n 50; openclaw doctor')
+        return False
+    deadline = time.time() + float(os.environ.get('ASSISTANT_GATEWAY_WAIT', 300))  # a first start on 4 GB takes a minute or more
+    errors = []
+    while True:
+        live = gateway_health(openclaw)
+        plugins = (live or {}).get('plugins') or {}
+        if PLUGIN_ID in (plugins.get('loaded') or []):
+            say(f'  The Gateway is running with {PLUGIN_ID} loaded.')
+            return True
+        errors = [e.get('error') for e in plugins.get('errors') or [] if isinstance(e, dict) and e.get('id') == PLUGIN_ID]
+        if errors or time.time() >= deadline:
+            break
+        time.sleep(5)
+    if not live:
+        say('  The OpenClaw Gateway did not come up; the bridge is installed and loads when it starts.'
+            f'\n  Check: systemctl --user status {unit}; journalctl --user -u {unit} -n 50; openclaw doctor')
+        return False
+    say(f'  The Gateway is running but did not load {PLUGIN_ID}' + (': ' + str(errors[0])[:300] if errors else '')
+        + '\n  Check: openclaw plugins doctor')
+    return False
 
 
 def health(config, timeout):
