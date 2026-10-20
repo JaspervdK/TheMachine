@@ -334,7 +334,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief'}
+OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'model_usage_refresh', 'model_reset'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_split', 'fleet_split_dismiss', 'fleet_split_adjust'}
 OWNER_ACTIONS |= FLEET_REQUEST_ACTIONS
@@ -5344,16 +5344,23 @@ def dashboard_base(config, host):
     return config.get('dashboard_path', '/') if host == config.get('dashboard_host') else config.get('dashboard_alias_path', '/assistant/')
 
 
-def model_usage(config, run=subprocess.run):
-    """How much of its limits the AI sign-in reports used (ChatGPT: the 5-hour and weekly windows), as the running
-    OpenClaw Gateway reads it (`usage.status`): a short RPC client, not a second Gateway. Only names, labels,
-    percentages and reset times are kept; None when nothing is known."""
+def usage_status(config, run=subprocess.run):
+    """The running OpenClaw Gateway's own usage reading (`usage.status`): a short RPC client, not a second Gateway,
+    and no model call. The raw reply, or None."""
     try:
         result = run([str(config.get('openclaw') or 'openclaw'), 'gateway', 'call', 'usage.status', '--json',
                       '--timeout', '60000', '--params', '{}'], capture_output=True, text=True, timeout=90)
         data = json.loads(result.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def model_usage(config, run=subprocess.run, reply=None):
+    """How much of its limits the AI sign-in reports used (ChatGPT: the 5-hour and weekly windows), as the running
+    OpenClaw Gateway reads it (`usage.status`): a short RPC client, not a second Gateway. Only names, labels,
+    percentages and reset times are kept; None when nothing is known."""
+    data = usage_status(config, run) if reply is None else reply
     found = []
     for entry in (data.get('providers') or []) if isinstance(data, dict) else []:
         if not isinstance(entry, dict) or not isinstance(entry.get('provider'), str):
@@ -5366,6 +5373,147 @@ def model_usage(config, run=subprocess.run):
                           'windows': windows[:4]})
     return found or None
 
+
+# Where ChatGPT shows the Codex usage limits and the usage limit resets: the way to see or use one by hand.
+CHATGPT_USAGE_PAGE = 'https://chatgpt.com/codex/settings/usage'
+
+
+def openclaw_model(config):
+    """The model OpenClaw answers with by default (`agents.defaults.model` in openclaw.json); None when unknown."""
+    path = Path(config.get('openclaw_config') or Path.home() / '.openclaw' / 'openclaw.json')
+    try:
+        model = json.loads(path.read_text()).get('agents', {}).get('defaults', {}).get('model')
+    except (OSError, ValueError, AttributeError):
+        return None
+    model = model.get('primary') if isinstance(model, dict) else model
+    return model.strip()[:80] if isinstance(model, str) and model.strip() else None
+
+
+class CodexAppServer:
+    """The Codex CLI's own app-server (its supported JSON-RPC interface) with the Codex CLI's own ChatGPT sign-in:
+    it can read the usage limit resets and use one, which OpenClaw does not offer. No model call; nothing here sees a
+    token. Used only when that sign-in is the same ChatGPT account OpenClaw uses. A hard deadline stops it."""
+
+    def __init__(self, config, timeout=20, popen=subprocess.Popen):
+        binary = config.get('codex', shutil.which('codex'))
+        self.proc = None
+        if not binary:
+            return
+        try:
+            self.proc = popen([str(binary), 'app-server'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        except OSError:
+            return
+        self.timer = threading.Timer(timeout, self.close)
+        self.timer.daemon = True
+        self.timer.start()
+        self.next_id = 0
+        if self.call('initialize', {'clientInfo': {'name': 'the_machine', 'title': 'The Machine', 'version': '1'}}) is None:
+            self.close()
+        else:
+            self.send({'method': 'initialized'})
+
+    def send(self, message):
+        self.proc.stdin.write(json.dumps(message) + '\n')
+        self.proc.stdin.flush()
+
+    def call(self, method, params=None):
+        """One request's result, or None (no app-server, an error, or the deadline)."""
+        if not self.proc:
+            return None
+        self.next_id += 1
+        try:
+            self.send({'id': self.next_id, 'method': method, **({} if params is None else {'params': params})})
+            for line in self.proc.stdout:
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(message, dict) and message.get('id') == self.next_id:
+                    return message.get('result') if isinstance(message.get('result'), dict) else None
+        except (OSError, ValueError, AttributeError):
+            pass
+        return None
+
+    def close(self):
+        proc, self.proc = self.proc, None
+        if proc:
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
+            for sig in (signal.SIGTERM, signal.SIGKILL):  # its whole group: a child must not hold the pipe open
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, sig)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(3)
+                    break
+            with contextlib.suppress(OSError, ValueError):
+                proc.stdout.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+        if getattr(self, 'timer', None):
+            self.timer.cancel()
+
+
+def codex_same_account(server, reply):
+    """Is the Codex CLI signed in to the ChatGPT account OpenClaw uses? Same email and, when both say, same plan."""
+    account = (server.call('account/read', {'refreshToken': False}) or {}).get('account') or {}
+    entry = next((p for p in (reply or {}).get('providers') or [] if isinstance(p, dict) and p.get('provider') == 'openai'), {})
+    email, theirs = str(entry.get('accountEmail') or '').strip().lower(), str(account.get('email') or '').strip().lower()
+    plans = entry.get('plan'), account.get('planType')
+    return (account.get('type') == 'chatgpt' and bool(email) and email == theirs
+            and (not all(plans) or plans[0] == plans[1]))
+
+
+def model_resets(config, reply, server_factory=None):
+    """The ChatGPT usage limit resets available to the account OpenClaw uses, through the Codex CLI's own sign-in when
+    it is the same account; None when that cannot be known (no Codex CLI, another account, an older Codex)."""
+    with (server_factory or CodexAppServer)(config) as server:
+        if not codex_same_account(server, reply):
+            return None
+        limits = server.call('account/rateLimits/read')
+    resets = (limits or {}).get('rateLimitResetCredits')
+    if not isinstance(resets, dict) or not isinstance(resets.get('availableCount'), int):
+        return None
+    credits = [{'title': str(c.get('title') or '')[:80] or None,
+                'expires': int(c['expiresAt']) if isinstance(c.get('expiresAt'), (int, float)) else None}
+               for c in resets.get('credits') or [] if isinstance(c, dict) and c.get('status') in (None, 'available')]
+    return {'available': max(0, resets['availableCount']), 'credits': credits[:10],
+            'allowed': limits.get('ordinaryUsageAllowed') if isinstance(limits.get('ordinaryUsageAllowed'), bool) else None}
+
+
+def model_status(config, reply, usage, resets, checked_at=None):
+    """What Settings shows about the model: which one, through which sign-in and plan, how much of each limit is
+    used, whether a limit is reached and when it lifts, and the resets. No email, no account ids, no tokens."""
+    entry = next((p for p in (reply or {}).get('providers') or [] if isinstance(p, dict) and p.get('provider') == 'openai'), None)
+    model = openclaw_model(config)
+    windows = [w for p in usage or [] for w in p['windows']]
+    now_s = time.time()
+    full = [w for w in windows if w['used'] >= 100 and (w['reset'] or now_s + 1) > now_s]
+    reached = bool(full) or (resets or {}).get('allowed') is False
+    return {'model': model, 'provider': (model or '').split('/')[0] or (entry or {}).get('provider'),
+            'chatgpt': bool(entry and entry.get('accountEmail')),
+            'plan': re.sub(r'^self_serve_', '', str((entry or {}).get('plan') or ''))[:40].replace('_', ' ') or None,
+            'windows': windows, 'limit_reached': reached,
+            'limit_resets_at': max((w['reset'] for w in full if w['reset']), default=None) if reached else None,
+            'resets': resets, 'can_reset': bool(resets and resets['available'] > 0),
+            'usage_page': CHATGPT_USAGE_PAGE if entry else None, 'checked_at': checked_at or now()}
+
+
+def use_model_reset(config, reply, key, server_factory=None):
+    """Uses one ChatGPT usage limit reset through the Codex CLI's own app-server, only when it is signed in to the
+    account OpenClaw uses. `key` makes a repeated click the same request. Returns the outcome Codex reports."""
+    with (server_factory or CodexAppServer)(config) as server:
+        if not codex_same_account(server, reply):
+            raise ValueError('Use a reset in ChatGPT: this computer cannot check it is the same account')
+        result = server.call('account/rateLimitResetCredit/consume', {'idempotencyKey': key})
+    outcome = (result or {}).get('outcome')
+    if outcome not in ('reset', 'nothingToReset', 'noCredit', 'alreadyRedeemed'):
+        raise ValueError('ChatGPT did not confirm the reset; check it in ChatGPT')
+    return outcome
 
 def node_bin(config):
     """The Node binary for the helpers: config `node`, else the one next to the `openclaw` CLI, else PATH."""
@@ -6254,6 +6402,7 @@ class App:
             for connector in result['connectors']:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
             result['model_usage'] = getattr(self, 'model_usage', None)
+            result['model_status'] = getattr(self, 'model_status', None)
             result['review_live'] = self.review_live()
             result['reviews_on'] = bool((self.config.get('review_worker') or {}).get('enabled'))  # off until activated
             result['started_at'] = self.started_at()
@@ -6551,6 +6700,20 @@ class App:
             if not owner_dashboard:
                 raise ValueError('Only the owner changes work hours, on the dashboard or with: assistant hours')
             return self.set_hours(args)
+        if name in ('model_usage_refresh', 'model_reset'):
+            if not owner_dashboard:
+                raise ValueError('Only the owner can do this, on the dashboard')
+            if name == 'model_reset':
+                reply = getattr(self, 'model_usage_reply', None) or usage_status(self.config)
+                key = str(args.get('key') or '')
+                if not re.fullmatch(r'[A-Za-z0-9-]{8,80}', key):
+                    raise ValueError('Invalid request')
+                outcome = use_model_reset(self.config, reply, key)
+                LOG.info('model usage reset outcome=%s', outcome)
+            self.refresh_model_usage()
+            status = getattr(self, 'model_status', None)
+            return {'model_status': status, 'model_usage': getattr(self, 'model_usage', None),
+                    **({'outcome': outcome} if name == 'model_reset' else {})}
         if name == 'forget_fact':
             if not owner_dashboard:
                 raise ValueError('Only the owner can remove a fact, on the dashboard')
@@ -7554,6 +7717,7 @@ class App:
             if result == 'admitted':
                 db.execute("UPDATE review_runs SET status='running',updated_at=?,error=NULL,error_phase=NULL,retry_at=NULL,unavailable_since=NULL WHERE run_id=?", (now(), run['run_id']))
             elif result in REVIEW_TERMINAL:
+                getattr(self, 'model_usage_wake', threading.Event()).set()  # read the limits again after a run
                 fallback = {'error':'runtime_error','timed_out':'runtime_timeout','aborted':'runtime_aborted','lost':'runtime_lost'}
                 error = (receipt.get('error') if receipt.get('error') in REVIEW_FAILURES else fallback.get(result)) if result!='ok' else None
                 phase = receipt.get('error_phase') if receipt.get('error_phase') in REVIEW_FAILURE_PHASES else 'runtime' if error else None
@@ -7775,10 +7939,31 @@ class App:
                 return [(i,None) for i in embeddings.fts_ids(db,accounts,query,limit) if i not in {*map(int,event_ids),*map(int,exclude)}],False
 
     def model_usage_worker(self):
-        """Reads the AI sign-in's usage limits every five minutes; a failed read keeps the last one."""
+        """Reads the AI sign-in's usage limits every five minutes, and a minute after a run ends (OpenClaw makes the
+        model calls, so its usage reading is the one to ask; that reading never costs model usage). A failed read
+        keeps the last one. The resets come from the Codex CLI's own sign-in when it is the same account."""
+        self.model_usage_wake = getattr(self, 'model_usage_wake', None) or threading.Event()
         while not self.stop.is_set():
-            self.model_usage = model_usage(self.config) or getattr(self, 'model_usage', None)
-            self.stop.wait(300)
+            self.refresh_model_usage()
+            self.model_usage_wake.clear()
+            if self.stop.wait(60):
+                break
+            for _ in range(240):  # the rest of five minutes, or sooner when a run ended
+                if self.stop.is_set() or self.model_usage_wake.is_set():
+                    break
+                self.stop.wait(1)
+
+    def refresh_model_usage(self):
+        reply = usage_status(self.config)
+        if reply is None:
+            return
+        self.model_usage = model_usage(self.config, reply=reply) or getattr(self, 'model_usage', None)
+        self.model_usage_reply = reply
+        try:
+            resets = model_resets(self.config, reply) if self.config.get('codex') is not False else None
+        except (OSError, ValueError):
+            resets = None
+        self.model_status = model_status(self.config, reply, self.model_usage, resets)
 
     def graph_freshness(self):
         """What makes a rebuild worth it before the ten minutes are up: new organisation profiles (looked up by the
@@ -8157,7 +8342,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

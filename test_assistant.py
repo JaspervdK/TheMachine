@@ -881,6 +881,100 @@ class ModelUsage(unittest.TestCase):
         self.assertIsNone(assistant.model_usage({}, run=lambda command, **kw: types.SimpleNamespace(stdout='gateway timeout')))
 
 
+
+import os
+import time
+
+FAKE_CODEX = r"""#!/usr/bin/env python3
+import json, os, sys
+log = open(os.environ['FAKE_CODEX_LOG'], 'a')
+email = os.environ.get('FAKE_CODEX_EMAIL', 'someone@example.com')
+for line in sys.stdin:
+    msg = json.loads(line)
+    log.write(json.dumps(msg) + chr(10)); log.flush()
+    if 'id' not in msg:
+        continue
+    m = msg['method']
+    result = ({'userAgent': 'fake'} if m == 'initialize' else
+              {'account': {'type': 'chatgpt', 'email': email, 'planType': 'plus'}} if m == 'account/read' else
+              {'ordinaryUsageAllowed': False, 'rateLimitResetCredits': {'availableCount': 2, 'credits': [
+                  {'id': 'c1', 'status': 'available', 'title': 'Full reset', 'expiresAt': 1800000000},
+                  {'id': 'c0', 'status': 'redeemed'}]}} if m == 'account/rateLimits/read' else
+              {'outcome': 'reset'} if m == 'account/rateLimitResetCredit/consume' else None)
+    print(json.dumps({'id': msg['id'], 'result': result} if result else {'id': msg['id'], 'error': {'message': 'no'}}), flush=True)
+"""
+
+
+class ModelResets(unittest.TestCase):
+    """The resets come from the Codex CLI's own app-server (mocked here: a fake one speaking its JSON-RPC), only when
+    it is signed in to the account OpenClaw uses. Nothing reaches the network."""
+    reply = {'providers': [{'provider': 'openai', 'plan': 'plus', 'accountEmail': 'Someone@example.com',
+                            'windows': [{'label': '5h', 'usedPercent': 100, 'resetAt': (int(time.time()) + 3600) * 1000}]}]}
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.codex = Path(self.dir.name) / 'codex'
+        self.codex.write_text(FAKE_CODEX)
+        self.codex.chmod(0o755)
+        self.log = Path(self.dir.name) / 'log'
+        os.environ['FAKE_CODEX_LOG'] = str(self.log)
+        os.environ.pop('FAKE_CODEX_EMAIL', None)
+        self.config = {'codex': str(self.codex), 'openclaw_config': str(Path(self.dir.name) / 'openclaw.json')}
+        Path(self.config['openclaw_config']).write_text(json.dumps({'agents': {'defaults': {'model': {'primary': 'openai/example'}}}}))
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def sent(self):
+        return [json.loads(l)['method'] for l in self.log.read_text().splitlines()]
+
+    def test_reads_the_resets_from_the_same_account_and_keeps_no_ids(self):
+        resets = assistant.model_resets(self.config, self.reply)
+        self.assertEqual(resets, {'available': 2, 'credits': [{'title': 'Full reset', 'expires': 1800000000}], 'allowed': False})
+        self.assertEqual(self.sent(), ['initialize', 'initialized', 'account/read', 'account/rateLimits/read'])
+        usage = assistant.model_usage({}, reply=self.reply)
+        status = assistant.model_status(self.config, self.reply, usage, resets)
+        self.assertEqual((status['model'], status['provider'], status['plan'], status['chatgpt']), ('openai/example', 'openai', 'plus', True))
+        self.assertTrue(status['limit_reached'])
+        self.assertEqual(status['limit_resets_at'], usage[0]['windows'][0]['reset'])
+        self.assertTrue(status['can_reset'])
+        self.assertEqual(status['usage_page'], 'https://chatgpt.com/codex/settings/usage')
+        self.assertNotIn('example.com', json.dumps(status))
+
+    def test_another_account_is_not_read_and_cannot_be_reset(self):
+        os.environ['FAKE_CODEX_EMAIL'] = 'other@example.com'
+        self.assertIsNone(assistant.model_resets(self.config, self.reply))
+        self.assertNotIn('account/rateLimits/read', self.sent())
+        with self.assertRaisesRegex(ValueError, 'Use a reset in ChatGPT'):
+            assistant.use_model_reset(self.config, self.reply, 'same-click-0002')
+        self.assertNotIn('account/rateLimitResetCredit/consume', self.sent())
+        status = assistant.model_status(self.config, self.reply, assistant.model_usage({}, reply=self.reply), None)
+        self.assertFalse(status['can_reset'])
+        self.assertTrue(status['limit_reached'])
+
+    def test_using_a_reset_sends_the_idempotency_key(self):
+        click = 'same-click-0001'
+        self.assertEqual(assistant.use_model_reset(self.config, self.reply, click), 'reset')
+        consume = [json.loads(l) for l in self.log.read_text().splitlines() if 'consume' in l]
+        self.assertEqual(consume[0]['params']['idempotencyKey'], click)
+
+    def test_without_a_codex_cli_nothing_is_known(self):
+        self.assertIsNone(assistant.model_resets({'codex': str(Path(self.dir.name) / 'missing')}, self.reply))
+        self.assertIsNone(assistant.model_resets({'codex': False}, self.reply))
+        status = assistant.model_status({}, {'providers': []}, None, None)
+        self.assertFalse(status['limit_reached'])
+        self.assertIsNone(status['usage_page'])
+
+    def test_a_silent_app_server_hits_the_deadline(self):
+        self.codex.write_text('#!/bin/sh\nsleep 30\n')
+        started = time.time()
+        self.assertIsNone(assistant.model_resets(self.config, self.reply, server_factory=lambda c: assistant.CodexAppServer(c, timeout=1)))
+        self.assertLess(time.time() - started, 10)
+
+    def test_dashboard_only_actions(self):
+        self.assertIn('model_reset', assistant.OWNER_ACTIONS)
+        self.assertIn('model_usage_refresh', assistant.OWNER_ACTIONS)
+
 class NeedsYou(unittest.TestCase):
     def test_unfinished_sources_and_hosting_notes_show_on_the_dashboard(self):
         with tempfile.TemporaryDirectory() as folder:
