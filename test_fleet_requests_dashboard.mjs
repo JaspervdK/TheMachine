@@ -70,6 +70,8 @@ try{
  await offer.locator('input').fill('About the Q4 pilot');await offer.locator('button').click();await page.waitForTimeout(100);
  assert.deepEqual(calls.at(-1),{action:'fleet_intro',args:{fleet:FL,member_id:'p',about:'client.example',note:'About the Q4 pilot'}});
  assert.match(await page.locator('#fleet-view').innerText(),/intro email sent/);
+ // The rule for intros says in its own words what Ask me first does.
+ assert.match(await page.locator('#fleet-view').innerText(),/You see each intro Pat asks for, with Accept and Decline/);
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'scrolls sideways');
  assert.deepEqual(errors,[]);
  console.log('fleet requests dashboard: ok');
