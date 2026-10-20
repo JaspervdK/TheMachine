@@ -130,6 +130,8 @@ class OwnerBoundary(unittest.TestCase):
             conn.request('GET', path, headers=headers); r = conn.getresponse(); body = r.read(); conn.close(); return r.status, body
         owner = {'Host': 'machine.example:8443', 'Tailscale-User-Login': 'owner@example.com'}
         self.assertEqual(get('/browser/vnc.html', owner), (200, b'<html>viewer</html>'))
+        with patch.object(a.browser_viewer, 'window_region', return_value={'x': 0.5, 'y': 0, 'w': 0.5, 'h': 1}):
+            self.assertEqual(json.loads(get('/browser/region', owner)[1]), {'region': {'x': 0.5, 'y': 0, 'w': 0.5, 'h': 1}})
         self.assertEqual(get('/browser/vnc.html', {'Host': 'machine.example:8443', 'Tailscale-User-Login': 'other@example.com'})[0], 403)
         self.assertEqual(get('/browser/vnc.html', {'Authorization': 'Bearer ' + TOKEN})[0], 403)
         upgrade = {**owner, 'Upgrade': 'websocket', 'Connection': 'Upgrade', 'Sec-WebSocket-Key': base64.b64encode(b'the sample nonce').decode(), 'Sec-WebSocket-Version': '13'}

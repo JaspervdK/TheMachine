@@ -7945,6 +7945,9 @@ class App:
                 """This computer's screen in noVNC (`browser_vnc`): the viewer's files, and its websocket to the VNC
                 server. Only the owner, only from the dashboard's own page (a websocket ignores CORS, so another
                 site could otherwise use the owner's tailnet identity)."""
+                if rest == 'region':  # where the browser's window is, for the viewer to open on it
+                    self.output(200, {'region': browser_viewer.window_region(app.config.get('browser_cdp_url') or browser_viewer.CDP_URL)})
+                    return
                 if self.headers.get('Upgrade', '').lower() != 'websocket':
                     found = browser_viewer.view_file(app.config.get('browser_novnc') or browser_viewer.WEB, rest)
                     if not found:

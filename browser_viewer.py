@@ -49,7 +49,9 @@ def build_web(web=WEB, novnc=NOVNC):
     web.mkdir(parents=True, exist_ok=True)
     page = (novnc / 'vnc.html').read_text()
     page = page.replace('</head>', '    <script type="module" src="machine-clipboard.js"></script>\n</head>', 1)
-    for name, text in (('vnc.html', page), ('machine-clipboard.js', (UNITS / 'machine-clipboard.js').read_text())):
+    page = page.replace('</head>', '    <script type="module" src="machine-view.js"></script>\n</head>', 1)
+    for name, text in (('vnc.html', page), ('machine-clipboard.js', (UNITS / 'machine-clipboard.js').read_text()),
+                       ('machine-view.js', (UNITS / 'machine-view.js').read_text())):
         target = web / name
         if not target.exists() or target.is_symlink() or target.read_text() != text:
             target.unlink(missing_ok=True)
@@ -120,11 +122,72 @@ def focus(page=None, cdp_url=CDP_URL, timeout=5):
         urllib.request.urlopen(base + '/json/activate/' + urllib.parse.quote(tab['id'], safe=''), timeout=timeout).close()
     except OSError:
         return None
+    raise_window(base, tab.get('title') or '')
     return tab.get('url') or ''
 
 
+def debugs_on(pid, port):
+    """Whether process `pid` is a browser started with DevTools on `port` (its own command line says so)."""
+    try:
+        args = Path(f'/proc/{int(pid)}/cmdline').read_bytes().replace(b'\0', b' ').split()  # Chrome joins its own with spaces
+    except (OSError, ValueError):
+        return False
+    return f'--remote-debugging-port={port}'.encode() in args
+
+
+def hyprctl(*args, timeout=5):
+    """Hyprland's own command line as JSON (-i 0: the session's instance, also from a service without its
+    environment), or None when this isn't a Hyprland desktop."""
+    if not shutil.which('hyprctl') or not (Path(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}') / 'hypr').is_dir():
+        return None
+    try:
+        result = subprocess.run(['hyprctl', '-i', '0', *args], capture_output=True, text=True, timeout=timeout)
+        return json.loads(result.stdout) if '-j' in args else result.stdout
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def browser_windows(cdp_url):
+    port = urllib.parse.urlsplit(cdp_url).port
+    clients = hyprctl('clients', '-j') if port else None
+    return sorted((c for c in clients or [] if c.get('mapped') and not c.get('hidden') and debugs_on(c.get('pid'), port)),
+                  key=lambda c: c.get('focusHistoryID', 99))
+
+
+def raise_window(cdp_url, title=''):
+    """On Hyprland, also make the browser window showing that tab the focused one, so it is on screen."""
+    try:
+        windows = browser_windows(cdp_url)
+    except OSError:
+        return
+    window = next((w for w in windows if title and str(w.get('title', '')).startswith(title)), windows[0] if windows else None)
+    if window and window.get('address'):
+        hyprctl('dispatch', 'focuswindow', 'address:' + window['address'])
+
+
+def window_region(cdp_url):
+    """Where the browser's front window is on its screen, as fractions of that screen, for the viewer to frame it
+    (Hyprland only; None elsewhere or when it isn't on screen)."""
+    try:
+        windows = browser_windows(cdp_url)
+    except OSError:
+        return None
+    monitors = {m.get('id'): m for m in hyprctl('monitors', '-j') or []} if windows else {}
+    for window in windows:
+        monitor = monitors.get(window.get('monitor'))
+        if not monitor or (monitor.get('activeWorkspace') or {}).get('id') != (window.get('workspace') or {}).get('id'):
+            continue
+        scale = monitor.get('scale') or 1
+        width, height = monitor['width'] / scale, monitor['height'] / scale
+        if monitor.get('transform', 0) % 2:
+            width, height = height, width
+        (x, y), (w, h) = window['at'], window['size']
+        return {'x': (x - monitor['x']) / width, 'y': (y - monitor['y']) / height, 'w': w / width, 'h': h / height}
+    return None
+
+
 # ------------------------------------------------- the dashboard's own view of a desktop (browser_vnc, optional)
-VIEW_QUERY = 'autoconnect=1&reconnect=1&resize=scale'
+VIEW_QUERY = 'autoconnect=1&reconnect=1&resize=off&view_clip=1&frame=window'
 WS_GUID = b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 MAX_FRAME = 16 << 20
 

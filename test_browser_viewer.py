@@ -113,6 +113,8 @@ class FocusTest(unittest.TestCase):
             self.assertIn('src="machine-clipboard.js"', (web / 'vnc.html').read_text())
             self.assertIn("import UI from './app/ui.js'", (web / 'machine-clipboard.js').read_text())
             self.assertTrue((web / 'app').is_symlink())
+            self.assertIn('src="machine-view.js"', (web / 'vnc.html').read_text())
+            self.assertIn("params.get('frame') === 'window'", (web / 'machine-view.js').read_text())
 
     def test_units_listen_on_loopback_only(self):
         for unit in browser_viewer.UNITS.glob('machine-browser-*'):
@@ -146,6 +148,30 @@ class DesktopViewTest(unittest.TestCase):
         for bad in ('192.0.2.1:5900', '0.0.0.0:5900', 'example.com:5900', 'relative.sock', ''):
             with self.assertRaises(ValueError):
                 browser_viewer.vnc_target(bad)
+
+    def test_the_view_opens_on_the_browser_window_on_hyprland(self):
+        from unittest import mock
+        clients = [{'pid': 7, 'mapped': True, 'hidden': False, 'focusHistoryID': 3, 'monitor': 1, 'workspace': {'id': 2},
+                    'at': [0, 0], 'size': [100, 100], 'title': 'Other', 'address': '0xb'},
+                   {'pid': 5, 'mapped': True, 'hidden': False, 'focusHistoryID': 0, 'monitor': 1, 'workspace': {'id': 1},
+                    'at': [1280, 40], 'size': [1280, 1400], 'title': 'Wise - Login - Google Chrome', 'address': '0xa'},
+                   {'pid': 9, 'mapped': True, 'hidden': False, 'focusHistoryID': 1, 'monitor': 1, 'workspace': {'id': 1},
+                    'at': [0, 0], 'size': [10, 10], 'title': 'Not the browser', 'address': '0xc'}]
+        monitors = [{'id': 1, 'x': 0, 'y': 0, 'width': 3840, 'height': 2160, 'scale': 1.5, 'transform': 0, 'activeWorkspace': {'id': 1}}]
+        calls = []
+
+        def hypr(*args, **_):
+            calls.append(args)
+            return clients if args[0] == 'clients' else monitors if args[0] == 'monitors' else ''
+        with mock.patch.object(browser_viewer, 'hyprctl', side_effect=hypr), \
+                mock.patch.object(browser_viewer, 'debugs_on', side_effect=lambda pid, port: pid in (5, 7) and port == 9222):
+            self.assertEqual(browser_viewer.window_region('http://127.0.0.1:9222'), {'x': 0.5, 'y': 40 / 1440, 'w': 0.5, 'h': 1400 / 1440})
+            browser_viewer.raise_window('http://127.0.0.1:9222', 'Wise - Login')
+            self.assertEqual(calls[-1], ('dispatch', 'focuswindow', 'address:0xa'))
+            monitors[0]['activeWorkspace'] = {'id': 3}  # not on screen: the whole screen instead
+            self.assertIsNone(browser_viewer.window_region('http://127.0.0.1:9222'))
+        with mock.patch.object(browser_viewer, 'hyprctl', return_value=None):  # not Hyprland
+            self.assertIsNone(browser_viewer.window_region('http://127.0.0.1:9222'))
 
     def test_viewer_files_stay_inside_the_viewer(self):
         with tempfile.TemporaryDirectory() as tmp:
