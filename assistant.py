@@ -40,6 +40,7 @@ from zoneinfo import ZoneInfo
 import embeddings
 import graph
 import enrichment
+import fleet
 import google_api
 import next_actions
 import browser_login
@@ -220,7 +221,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong'}
+OWNER_ACTIONS = {'browser_focus', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -5701,6 +5702,8 @@ class App:
         self.stop = threading.Event()
         self.graph_dirty = threading.Event()
         self.model_usage = None
+        # The Fleet (fleet.py): only when the control plane put this Machine in one.
+        self.fleet = fleet.Fleet(self.store.connect, config, lambda: credential(config, 'fleet')) if fleet.settings(config) and config.get('credentials', {}).get('fleet') else None
 
     def gmail_message(self, account_id, message_id):
         account = next(a for a in self.config['accounts'] if a['id'] == account_id)
@@ -5827,7 +5830,16 @@ class App:
                 pass
             for suggestion in result.get('suggestions', []):
                 suggestion['snooze_choices'] = snooze_choices(self.is_work(suggestion.get('account_ids')))
+            if getattr(self, 'fleet', None):
+                try:
+                    result['fleet'] = self.fleet.summary()
+                    with self.store.connect() as db:
+                        self.fleet.annotate(db, result.get('suggestions', []))
+                except (sqlite3.Error, ValueError) as error:
+                    LOG.error('fleet status error=%s', type(error).__name__)
             return result if args.get('full') else compact_status(result)
+        if name.startswith('fleet_'):
+            return self.fleet_action(name, args, owner_dashboard)
         if name == 'related':
             if not embeddings.settings(self.config):
                 raise ValueError('Related signals by meaning are not set up; search with events and a query')
@@ -6232,6 +6244,30 @@ class App:
                 delay = 60
             self.stop.wait(delay)
 
+    def fleet_action(self, name, args, owner_dashboard):
+        """The owner's Fleet controls. Only from the owner's own dashboard: never Telegram, an agent or a teammate."""
+        if not owner_dashboard:
+            raise ValueError('The Fleet is set from the dashboard')
+        if not getattr(self, 'fleet', None):
+            raise ValueError('This Machine is not in a Fleet')
+        if name == 'fleet_ask':
+            kind = args.get('kind')
+            question = fleet.parse_question(kind, args.get('question'))
+            if not question:
+                raise ValueError('Ask about a company, a domain, an email address or a name')
+            return self.fleet.ask(kind, question, fleet=args.get('fleet') or 'work')
+        if name == 'fleet_decide':
+            return self.fleet.decide(args.get('id'), args.get('choice'))
+        if name == 'fleet_rule':
+            return self.fleet.set_rule(args.get('fleet') or 'work', str(args.get('member_id') or ''), args.get('kind'),
+                                       args.get('rule'), args.get('details'))
+        if name == 'fleet_take':
+            return self.fleet.take_over(str(args.get('suggestion_id') or ''))
+        if name == 'fleet_meetings':
+            self.fleet.set_meta('ask_meetings', bool(args.get('on')))
+            return {'ask_meetings': self.fleet.meetings_on()}
+        raise ValueError('Unknown Fleet action')
+
     def is_work(self, account_ids):
         if isinstance(account_ids, str):
             account_ids = json.loads(account_ids or '[]')
@@ -6635,6 +6671,11 @@ class App:
                 lines=self.graph_lines(job['suggestion_id'])
                 if len(request['message'])+len(lines)<19000:request['message']+=lines  # the runner refuses over 20,000
             except Exception as error:LOG.error('graph lines error=%s',type(error).__name__)
+            if getattr(self, 'fleet', None):
+                try:
+                    lines=self.fleet.lines(job['suggestion_id'])
+                    if len(request['message'])+len(lines)<19000:request['message']+=lines
+                except Exception as error:LOG.error('fleet lines error=%s',type(error).__name__)
             if embeddings.settings(self.config):
                 try:
                     lines=self.related_lines(job['suggestion_id'])
@@ -7214,6 +7255,16 @@ class App:
                         self.output(200, app.action('events', {'account_ids': args.get('account', []), 'query': query, 'semantic': bool(query.strip()), 'full': True}))
                     except (ValueError, sqlite3.OperationalError):
                         self.output(400, {'error': 'Select accounts and use a valid search'})
+                elif path.path == '/api/fleet':
+                    if not getattr(app, 'fleet', None):
+                        self.output(200, {'on': False})
+                    else:
+                        try:
+                            if urllib.parse.parse_qs(path.query).get('refresh'):
+                                app.fleet.directory(refresh=True)
+                        except (fleet.Off, ValueError, OSError):
+                            pass
+                        self.output(200, app.fleet.view())
                 elif path.path == '/api/graph':
                     node = urllib.parse.parse_qs(path.query).get('node', [''])[0]
                     query = urllib.parse.parse_qs(path.query).get('q', [''])[0]
@@ -7304,7 +7355,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','push_subscribe','push_unsubscribe','browser_focus','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_rule','fleet_take','fleet_meetings','push_subscribe','push_unsubscribe','browser_focus','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')
@@ -7330,6 +7381,8 @@ class App:
         threading.Thread(target=self.action_worker, daemon=True).start()
         threading.Thread(target=self.review_worker, daemon=True).start()
         threading.Thread(target=self.graph_worker, daemon=True).start()
+        if getattr(self, 'fleet', None):
+            threading.Thread(target=self.fleet.run, args=(self.stop,), daemon=True).start()
         threading.Thread(target=self.model_usage_worker, daemon=True).start()
         if embeddings.settings(self.config):
             threading.Thread(target=self.embedding_worker, daemon=True).start()
