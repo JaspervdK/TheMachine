@@ -1652,7 +1652,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         return {'rule': rule, 'details': details, 'scope': scope}
 
     # -- asking teammates
-    def ask(self, kind, question, context=None, fleet='work', to=None):
+    def ask(self, kind, question, context=None, fleet='work', to=None, context_key=None):
         """Asks one Fleet (its id). A kind ('work') asks each Fleet of that kind with teammates in it, one by one: the
         relay only ever asks one Fleet's people at a time."""
         if fleet in FLEET_NAMES:
@@ -1685,6 +1685,8 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
                            (ask_id, fleet, member_id, clean(label(teammate), 120) or 'A teammate', kind, json.dumps(question), context, 'asked', now()))
                 created = created or db.execute('SELECT changes()').fetchone()[0] > 0
             db.execute('DELETE FROM fleet_meta WHERE key=?', (pending_key,))
+            if context_key:
+                db.execute('DELETE FROM fleet_meta WHERE key=?', (context_key,))
             if created:
                 self.log(db, 'out', fleet, None, 'your Fleet', kind, question_text(kind, question), f"asked {len(sent.get('ids', {}))}")
         return sent
@@ -1696,8 +1698,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
             raise ValueError('Ask a question of at least a few words')
         if fleet in FLEET_NAMES and len([r for r in self.work_fleets() if self.teammates(r)]) > 1:
             raise ValueError('Pick the Fleet to ask')
-        return self.ask('anything', question, context='free:' + secrets.token_hex(8),
-                        fleet=fleet)
+        return self.ask_context('anything', question, 'free:', fleet)[0]
 
     def take_answer(self, item):
         receipt = item.get('receipt')

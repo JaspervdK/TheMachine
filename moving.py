@@ -33,7 +33,7 @@ OPENSSL = ['openssl', 'enc', '-aes-256-cbc', '-pbkdf2', '-iter', '600000', '-md'
 WORKSPACE_SKIP = {'tools'}
 SKIP_SUFFIXES = ('.bak', '.lock', '.tmp', '-wal', '-shm', '-journal')
 # Files in the data folder that are keys even when config.json does not point at them
-SECRET_NAMES = {'owner-token', 'api-token', 'vapid.json', 'gog-password', 'browser-logins.enc', 'browser-logins.key'}
+SECRET_NAMES = {'network-keys.json', 'owner-token', 'api-token', 'vapid.json', 'gog-password', 'browser-logins.enc', 'browser-logins.key'}
 # Folders that only hold keys (a copied gog keyring, OpenClaw's credentials), and copies of OpenClaw's own settings
 SECRET_DIRS = {'keyring', 'credentials', '.ssh', '.gnupg'}
 SECRET_FILE = re.compile(r'^openclaw.*\.json$')
@@ -125,6 +125,10 @@ def plan(config_path, workspace=None, openclaw_home=None, left_out=None):
     config = json.loads(config_path.read_text())
     data = config_path.parent
     keys = {Path(p).expanduser().resolve() for name, p in (config.get('credentials') or {}).items() if name not in HOSTED_ONLY}
+    from network import keys_path
+    network_key = keys_path(config)
+    if network_key:
+        keys.add(network_key.resolve())
     hosted = {Path(p).expanduser().resolve() for name, p in (config.get('credentials') or {}).items() if name in HOSTED_ONLY}
     items = [('file', config_path, 'config/config.json')]
     for path, relative in _files(data, left_out=left_out):
@@ -400,8 +404,18 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
             manifest = json.loads((unpacked / 'manifest.json').read_text())
         except (OSError, ValueError):
             raise MoveError('This archive has no manifest; it is not an export of The Machine') from None
+        if not isinstance(manifest, dict) or not isinstance(manifest.get('format', 0), int):
+            raise MoveError('The export manifest is invalid; nothing was imported')
         if manifest.get('format', 0) > FORMAT:
             raise MoveError('This export is newer than this install; update The Machine first')
+        try:
+            original_config = json.loads((unpacked / 'config/config.json').read_text())
+            if not isinstance(manifest, dict) or not isinstance(original_config, dict):
+                raise ValueError('not an object')
+            if not isinstance(original_config.get('accounts', []), list) or not isinstance(original_config.get('credentials', {}), dict):
+                raise ValueError('invalid configuration')
+        except (OSError, ValueError, TypeError):
+            raise MoveError('The exported configuration is invalid; nothing was imported') from None
         # Validate every database before replacing any live file.
         for root in (unpacked / 'data', unpacked / 'secrets/data'):
             for path in root.rglob('*') if root.is_dir() else []:
@@ -430,7 +444,7 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
                     os.chmod(temporary, mode)
                     temporary.replace(target)
                     restored.append(str(target))
-        config = _rebase(json.loads((unpacked / 'config/config.json').read_text()), manifest.get('data_dir'), str(data))
+        config = _rebase(original_config, manifest.get('data_dir'), str(data))
         config = _rebase(config, manifest.get('workspace_dir'), str(_workspace(workspace)))
         for key in HOSTED_KEYS:
             config.pop(key, None)

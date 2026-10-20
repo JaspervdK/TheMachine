@@ -22,6 +22,8 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
+from pathlib import Path
 
 VERSION = 1
 ALG = 'x25519-hkdf-sha256-hmacctr-ed25519'
@@ -88,7 +90,10 @@ def _x25519_py(k, u):
 
 def x25519(private, public):
     if _cx:
-        return _cx.X25519PrivateKey.from_private_bytes(private).exchange(_cx.X25519PublicKey.from_public_bytes(public))
+        try:
+            return _cx.X25519PrivateKey.from_private_bytes(private).exchange(_cx.X25519PublicKey.from_public_bytes(public))
+        except ValueError:
+            raise SealError('bad key') from None
     out = _x25519_py(private, public)
     if out == bytes(32):
         raise SealError('bad key')
@@ -201,6 +206,10 @@ def ed25519_sign(secret, message):
 def ed25519_verify(public, message, signature):
     if len(public) != 32 or len(signature) != 64:
         return False
+    # Small-order keys cannot establish a sender identity, even if a library accepts them.
+    point = _decompress(public)
+    if point is None or _equal(_mul(8, point), (0, 1, 1, 0)):
+        return False
     if _ced:
         try:
             _ced.Ed25519PublicKey.from_public_bytes(public).verify(signature, message)
@@ -254,20 +263,36 @@ def fingerprint(sign, box):
 
 
 def load_or_make(path):
-    """This Machine's private keys from `path`, made there (mode 600) on first use."""
-    try:
-        with open(path) as handle:
-            found = json.load(handle)
-        if isinstance(found, dict) and found.get('box') and found.get('sign'):
+    """Publish a complete key file once; concurrent first use reads the same winner."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    def read():
+        try:
+            found = json.loads(path.read_text())
+            if not isinstance(found, dict) or found.get('v') != VERSION:
+                raise SealError('invalid key file; do not rotate it automatically')
+            unb64(found.get('box'), 32)
+            unb64(found.get('sign'), 32)
             return found
+        except (json.JSONDecodeError, UnicodeError):
+            raise SealError('invalid key file; do not rotate it automatically') from None
+    try:
+        return read()
     except FileNotFoundError:
         pass
-    keys = new_keys()
-    fd = os.open(str(path) + '.tmp', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as handle:
-        json.dump(keys, handle)
-    os.replace(str(path) + '.tmp', path)
-    return keys
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            json.dump(new_keys(), handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)  # no replacement of a key published by another process
+        except FileExistsError:
+            pass
+        return read()
+    finally:
+        os.unlink(temporary)
 
 
 # ---------------------------------------------------------------- sealing
@@ -329,6 +354,10 @@ def open_sealed(env, private, from_public, context):
     """The body of a sealed message for us, from `from_public`, routed as `context`; SealError otherwise."""
     if not is_sealed(env) or env.get('v') != VERSION:
         raise SealError('not a sealed message')
+    for field, size in (('eph', 32), ('n', 16), ('mac', 32), ('sig', 64)):
+        unb64(env.get(field), size)
+    if len(unb64(env.get('ct'))) > MAX_BODY:
+        raise SealError('too big')
     sender = check_keys(from_public)
     if not sender:
         raise SealError('sender keys do not check out')

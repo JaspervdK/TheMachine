@@ -19,6 +19,7 @@ Do it runs on them; nothing is written anywhere until the owner accepts."""
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import re
 import secrets
@@ -72,8 +73,17 @@ def parse(kind, question):
         return {'title': title, **({'note': note} if note else {}), **({'due': due} if due else {})}
     if kind == 'event':
         start, end, place = _when(question.get('start')), _when(question.get('end')), _text(question.get('place'), PLACE)
-        if not start or (end and (len(end) != len(start) or end < start)):
+        if not start or (question.get('end') and not end):
             return None
+        if end:
+            if (len(start) == 10) != (len(end) == 10):
+                return None
+            a = dt.date.fromisoformat(start) if len(start) == 10 else dt.datetime.fromisoformat(start.replace('Z', '+00:00'))
+            b = dt.date.fromisoformat(end) if len(end) == 10 else dt.datetime.fromisoformat(end.replace('Z', '+00:00'))
+            if isinstance(a, dt.datetime) and bool(a.tzinfo) != bool(b.tzinfo):
+                return None
+            if b < a:
+                return None
         return {'title': title, 'start': start, **({'end': end} if end else {}), **({'place': place} if place else {}),
                 **({'note': note} if note else {})}
     return None
@@ -180,6 +190,21 @@ class Family:
             raise ValueError('Nobody else in your Family yet')
         return ref
 
+    def request_context(self, prefix, proposal):
+        """Keep a group token across a failed ask; clear it only after the local receipt is saved."""
+        key = 'pending_context:' + hashlib.sha256(json.dumps([prefix, proposal], sort_keys=True).encode()).hexdigest()
+        with self.connect() as db:
+            row = db.execute('SELECT value FROM fleet_meta WHERE key=?', (key,)).fetchone()
+            token = json.loads(row[0]) if row else secrets.token_hex(8)
+            if not row:
+                db.execute('INSERT INTO fleet_meta(key,value) VALUES(?,?)', (key, json.dumps(token)))
+        return key, prefix + token
+
+    def ask_context(self, kind, question, prefix, ref, to=None):
+        key, context = self.request_context(prefix, [ref, kind, question, sorted(to or [])])
+        sent = self.ask(kind, question, context=context, fleet=ref, to=to, context_key=key)
+        return sent, context
+
     def ask_family_free(self, start, days):
         """Ask everyone in the Family when they are busy; the common free times show once they answer."""
         import friends
@@ -187,9 +212,8 @@ class Family:
         question = friends.parse_availability({'start': start, 'days': days})
         if not question:
             raise ValueError(f'Pick a day and 1 to {friends.MAX_DAYS} days')
-        token = secrets.token_hex(8)
-        sent = self.ask('availability', question, context='family-free:' + token, fleet=ref)
-        return {**sent, 'id': token}
+        sent, context = self.ask_context('availability', question, 'family-free:', ref)
+        return {**sent, 'id': context.split(':', 1)[1]}
 
     def propose_todo(self, member_id, title, due=None, note=''):
         ref = self._family()
@@ -200,7 +224,7 @@ class Family:
             raise ValueError('Say what needs doing')
         if due and 'due' not in question:
             raise ValueError('Due: a date, or a date and time')
-        return self.ask('todo', question, context='family-todo:' + secrets.token_hex(8), fleet=ref, to=[member_id])
+        return self.ask_context('todo', question, 'family-todo:', ref, to=[member_id])[0]
 
     def propose_event(self, title, start, end=None, place='', note='', to=None):
         ref = self._family()
@@ -210,7 +234,7 @@ class Family:
         wanted = [m for m in (to or []) if self.member(ref, m)] or None
         if to and not wanted:
             raise ValueError('Not in your Family')
-        return self.ask('event', question, context='family-event:' + secrets.token_hex(8), fleet=ref, to=wanted)
+        return self.ask_context('event', question, 'family-event:', ref, to=wanted)[0]
 
     def family_card(self, row, question, sender):
         """The card for a to-do or plan the owner accepted: theirs now, made by plain code from the member's words."""

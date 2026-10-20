@@ -26,6 +26,7 @@ import os
 import re
 import secrets
 import shutil
+import tempfile
 from pathlib import Path
 
 LOG = logging.getLogger('personal-assistant')
@@ -77,7 +78,9 @@ def now():
 
 
 def ensure(db):
-    db.executescript(SCHEMA)
+    for statement in SCHEMA.split(';'):
+        if statement.strip():
+            db.execute(statement)
 
 
 def one_line(value, chars):
@@ -193,6 +196,9 @@ def sync(db, workspace):
     """Writes every skill that is on to the workspace and removes the rest of The Machine's own. Returns the slugs."""
     skills_dir = Path(workspace) / 'skills'
     root = skills_dir / FOLDER
+    if skills_dir.is_symlink() or root.is_symlink():
+        LOG.warning('skills sync skipped: managed folder is a symlink')
+        return []
     if root.exists() and any(root.iterdir()) and not (root / MARKER).exists():
         LOG.warning('skills sync skipped: %s is not The Machine\'s folder', root)
         return []
@@ -203,14 +209,24 @@ def sync(db, workspace):
         wanted[row['slug']] = render(row)
     for slug, text in wanted.items():
         target = root / slug / 'SKILL.md'
+        if target.parent.is_symlink() or target.is_symlink():
+            LOG.warning('skills sync skipped symlink slug=%s', slug)
+            continue
         if target.exists() and target.read_text(errors='replace') == text:
             continue
         target.parent.mkdir(exist_ok=True)
-        temporary = target.with_suffix('.tmp')
-        temporary.write_text(text)
-        os.replace(temporary, target)
+        fd, temporary = tempfile.mkstemp(prefix='.skill-', suffix='.tmp', dir=target.parent)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                stream.write(text)
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     for child in root.iterdir():
-        if child.is_dir() and child.name not in wanted:
+        if child.name not in wanted and child.is_symlink():
+            child.unlink()
+        elif child.is_dir() and child.name not in wanted:
             shutil.rmtree(child)
     return sorted(wanted)
 
@@ -367,6 +383,10 @@ class Skills:
             return 'declined'
         stamp = now()
         with self.connect() as db:
+            previous = db.execute('SELECT status FROM skills WHERE ask_id=? AND fleet=? AND member_id=?',
+                                  (str(ask.get('id') or ''), fleet_ref, teammate['member_id'])).fetchone()
+            if previous:
+                return 'waiting' if previous['status'] == 'incoming' else 'answered'
             if db.execute("SELECT COUNT(*) FROM skills WHERE status='incoming' AND fleet=? AND member_id=?",
                           (fleet_ref, teammate['member_id'])).fetchone()[0] >= OPEN_PER_SENDER:
                 return 'declined'
@@ -403,7 +423,7 @@ class Skills:
             else:
                 raise ValueError('Choose install or decline')
         if row['status'] == 'incoming' and row['ask_id'] and self.fleet:
-            installed = choice == 'install'
+            installed = choice in ('install', 'approve')
             try:
                 self.fleet.relay.call('POST', '/answer', {'id': row['ask_id'], 'status': 'answered' if installed else 'declined',
                                                           **({'answer': {'stage': 'installed'}} if installed else {})})

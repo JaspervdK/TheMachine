@@ -59,8 +59,13 @@ def ensure(db):
         wanted = {c.strip().split()[0] for c in statement.split('(', 1)[1].rsplit(')', 1)[0].split(',') if c.strip() and not c.strip()[0].isdigit()}
         found = {r[1] for r in db.execute(f'PRAGMA table_info({name})')}
         if found and not wanted <= found:
-            db.execute(f'ALTER TABLE {name} RENAME TO {name}_old')
-    db.executescript(SCHEMA)
+            old, number = name + '_old', 2
+            while db.execute('SELECT 1 FROM sqlite_master WHERE name=?', (old,)).fetchone():
+                old, number = name + '_old_' + str(number), number + 1
+            db.execute(f'ALTER TABLE {name} RENAME TO {old}')
+    for statement in SCHEMA.split(';'):
+        if statement.strip():
+            db.execute(statement)
 
 
 def keys_path(config):
@@ -202,19 +207,35 @@ class Sealing:
         return self.send_or_keep('POST', '/answer', body, 'answer:' + ask_id + ':' + str(body.get('status')), timeout)
 
     def send_or_keep(self, method, path, body, key, timeout=40):
-        """Send now; if the relay is away, keep it in the outbox (sent again with backoff) and say it's queued."""
+        """Commit intent before delivery. Keep the exact intent if delivery is uncertain."""
         import fleet as fleet_module
+        encoded = json.dumps(body, sort_keys=True)
+        with self.fleet.connect() as db:
+            # A final answer supersedes an unsent waiting acknowledgement, not the reverse.
+            if path == '/answer' and body.get('status') != 'waiting':
+                db.execute('DELETE FROM network_outbox WHERE key=?', ('answer:' + str(body.get('id')) + ':waiting',))
+            elif path == '/answer' and db.execute("SELECT 1 FROM network_outbox WHERE path='/answer' AND json_extract(body,'$.id')=? AND json_extract(body,'$.status')!='waiting'", (body.get('id'),)).fetchone():
+                return {'ok': True, 'queued': True}
+            db.execute('INSERT INTO network_outbox(key,method,path,body,tries,next_at,created_at) VALUES(?,?,?,?,0,?,?) '
+                       'ON CONFLICT(key) DO UPDATE SET method=excluded.method,path=excluded.path,body=excluded.body',
+                       (key, method, path, encoded, _later(30), now()))
         try:
-            return self.inner.call(method, path, body, timeout=timeout)
+            result = self.inner.call(method, path, body, timeout=timeout)
         except (fleet_module.Unavailable, OSError) as error:
             with self.fleet.connect() as db:
-                db.execute('INSERT OR REPLACE INTO network_outbox(key,method,path,body,tries,next_at,created_at,error) VALUES(?,?,?,?,0,?,?,?)',
-                           (key, method, path, json.dumps(body), _later(30), now(), type(error).__name__))
+                db.execute('UPDATE network_outbox SET error=? WHERE key=? AND body=?', (type(error).__name__, key, encoded))
             LOG.info('network kept for later path=%s error=%s', path, type(error).__name__)
             return {'ok': True, 'queued': True}
+        except (ValueError, fleet_module.Off):
+            with self.fleet.connect() as db:
+                db.execute('DELETE FROM network_outbox WHERE key=? AND body=?', (key, encoded))
+            raise
+        with self.fleet.connect() as db:
+            db.execute('DELETE FROM network_outbox WHERE key=? AND body=?', (key, encoded))
+        return result
 
     def flush(self):
-        """Send what waits in the outbox and is due; give up (logged) after OUTBOX_DAYS."""
+        """Retry committed intents with backoff; a stale retry never removes a newer one."""
         import fleet as fleet_module
         with self.fleet.connect() as db:
             rows = db.execute('SELECT * FROM network_outbox WHERE next_at<=? ORDER BY created_at LIMIT 20', (now(),)).fetchall()
@@ -227,16 +248,16 @@ class Sealing:
                 with self.fleet.connect() as db:
                     if row['created_at'] < (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=OUTBOX_DAYS)).isoformat(timespec='seconds'):
                         LOG.warning('network gave up path=%s after=%sd', row['path'], OUTBOX_DAYS)
-                        db.execute('DELETE FROM network_outbox WHERE key=?', (row['key'],))
+                        db.execute('DELETE FROM network_outbox WHERE key=? AND body=?', (row['key'], row['body']))
                     else:
-                        db.execute('UPDATE network_outbox SET tries=tries+1,next_at=?,error=? WHERE key=?',
-                                   (_later(min(3600, 30 * 2 ** min(row['tries'] + 1, 7))), type(error).__name__, row['key']))
-                break  # the relay is still away: the rest waits too
+                        db.execute('UPDATE network_outbox SET tries=tries+1,next_at=?,error=? WHERE key=? AND body=?',
+                                   (_later(min(3600, 30 * 2 ** min(row['tries'] + 1, 7))), type(error).__name__, row['key'], row['body']))
+                break
             except (ValueError, fleet_module.Off):
-                done = True  # it went through before (the question is closed there), or it can't go anymore
+                done = True  # closed/rejected by the relay; do not retry a terminal refusal
             if done:
                 with self.fleet.connect() as db:
-                    db.execute('DELETE FROM network_outbox WHERE key=?', (row['key'],))
+                    db.execute('DELETE FROM network_outbox WHERE key=? AND body=?', (row['key'], row['body']))
 
     def waiting(self):
         with self.fleet.connect() as db:

@@ -88,7 +88,7 @@ class SigninHandoff(unittest.TestCase):
     def test_the_blocker_notifies_on_telegram_with_the_button(self):
         self.block()
         sent = []
-        with patch.object(a, 'telegram_request', side_effect=lambda config, args: (sent.append(args), {'messageId': '7'})[1]):
+        with patch.object(a, 'in_hours', return_value=True), patch.object(a, 'telegram_request', side_effect=lambda config, args: (sent.append(args), {'messageId': '7'})[1]):
             a.deliver_one(self.store, self.app.config, edit_cards=True)  # the card is redrawn
             a.deliver_one(self.store, self.app.config, edit_cards=True)  # and a notification asks for the sign-in
         edit, notice = sent[0], sent[-1]

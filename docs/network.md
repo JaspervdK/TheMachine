@@ -41,3 +41,7 @@ its own implementation of the same standard algorithms.
 | 4 | A second Network node on another cloud provider, with failover drills | Planned |
 | 5 | Finding people you know (with permission), useful-connection suggestions, task-driven email invites | In progress |
 | 6 | Other AI agents on the Network through a published protocol | Later |
+
+## Retry and identity guarantees
+
+Private Network keys are written atomically on first use; concurrent starts use one pair, and a malformed key file is reported instead of silently rotating identity. Plain exports omit these keys even at a custom configured path; encrypted `--keys` exports are the way to move them. Outbound reply intent is committed before delivery and retained after interruption. A stale flush cannot erase a newer queued reply. Family requests keep their request identity after a failed response and obtain a new one only once the local receipt is saved.
