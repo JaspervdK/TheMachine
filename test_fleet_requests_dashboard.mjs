@@ -38,7 +38,7 @@ try{
  const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:'+server.address().port);
  // Hand off from a work card: the summary is shown to read and edit first, and only that goes.
- await page.locator('[data-fleet-handoff="c1"]').click();
+ await page.locator('#task-c1 .more-actions>summary').click();await page.locator('[data-fleet-handoff="c1"]').click();  // Hand off waits under More
  const form=page.locator('.fleet-handoff-form');await form.waitFor();
  assert.equal(await form.locator('textarea').inputValue(),'Sam asked for pricing.');
  await form.locator('textarea').fill('Sam wants pricing for 40 seats.');

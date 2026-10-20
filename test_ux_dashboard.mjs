@@ -7,6 +7,8 @@ import {OPENCLAW} from './openclaw-root.mjs';
 const {chromium}=await import(process.env.PLAYWRIGHT_CORE||OPENCLAW+'/node_modules/playwright-core/index.mjs');
 import {forceReplyPayload} from './openclaw-plugin/change-prompt.ts';
 // The Send preview's header rows as 'From: …' lines.
+// A card's rarer buttons wait under More: open it first when the button isn't in the row.
+const tap=async(card,name)=>{const b=card.getByRole('button',{name,exact:true});if(!await b.isVisible())await card.locator('.more-actions>summary').click();await b.click()};
 const sendHead=page=>page.evaluate(()=>[...document.querySelectorAll('#send-head>div')].map(d=>d.children[0].textContent+': '+d.children[1].textContent).join('\n'));
 const payload=forceReplyPayload('sendMessage',{chat_id:'1000001',text:'Change'},'123','1000001');
 assert.equal(payload.reply_markup.force_reply,true);assert.equal(payload.reply_parameters.message_id,123);
@@ -142,7 +144,7 @@ state=base;await page.evaluate(()=>refresh());}
 await running.getByRole('button',{name:'Open the browser'}).click();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('browser'));assert.deepEqual(posts.at(-1),{suggestion_id:ids[1]});delete suggestions[1].preparation_browser;
 const first=await running.locator('.elapsed').textContent();await page.waitForTimeout(2100);assert.notEqual(await running.locator('.elapsed').textContent(),first);
 await page.screenshot({path:'/tmp/261012-preparing-progress.png'});
-await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();const send=page.locator('#send-dialog');await send.waitFor({state:'visible'});
+await page.locator('#task-'+ids[2]).getByRole('button',{name:'Review and send',exact:true}).click();const send=page.locator('#send-dialog');await send.waitFor({state:'visible'});
 assert.match(await sendHead(page),/^From: owner@example.com\nTo: will@vendor.example\n/);
 await send.getByLabel('will@vendor.example').uncheck();assert.ok(await page.locator('#send-confirm').isDisabled());assert.match(await sendHead(page),/To: \(choose above\)/);
 await send.getByLabel('ann@example.com').check();assert.match(await sendHead(page),/To: ann@example.com\nSubject: Pick/);
@@ -179,19 +181,19 @@ assert.equal(layout.overflow,false,`Overflow at ${width}px: `+JSON.stringify(awa
 await page.setViewportSize({width:390,height:844});
 await page.screenshot({path:'/tmp/261011-assistant-scheduled-card.png',fullPage:true});
 assert.equal(await page.locator('#suggestions textarea').count(),0);
-await page.locator('#task-'+ids[0]).getByRole('button',{name:'Change',exact:true}).click();await page.locator('#feedback-'+ids[0]).fill('Please make this shorter');await page.getByRole('button',{name:'Save changes',exact:true}).click();await page.locator('#feedback-'+ids[0]).waitFor({state:'detached'});assert.equal(posts.at(-1).feedback,'Please make this shorter');
+await tap(page.locator('#task-'+ids[0]),'Change');await page.locator('#feedback-'+ids[0]).fill('Please make this shorter');await page.getByRole('button',{name:'Save changes',exact:true}).click();await page.locator('#feedback-'+ids[0]).waitFor({state:'detached'});assert.equal(posts.at(-1).feedback,'Please make this shorter');
 // Ctrl+Enter in the change box saves like the Save changes button; plain Enter adds a new line.
-{const card=page.locator('#task-'+ids[0]);await card.getByRole('button',{name:'Change',exact:true}).click();const box=card.locator('#feedback-'+ids[0]);
+{const card=page.locator('#task-'+ids[0]);await tap(card,'Change');const box=card.locator('#feedback-'+ids[0]);
 await box.fill('First line');await box.press('Enter');await box.pressSequentially('Second line');assert.equal(await box.inputValue(),'First line\nSecond line');
 const before=posts.length;await box.press('Control+Enter');await box.waitFor({state:'detached'});assert.equal(posts.length,before+1);assert.equal(posts.at(-1).feedback,'First line\nSecond line');}
-{const card=page.locator('#task-'+ids[1]);const before=posts.length;await card.getByRole('button',{name:'Not needed',exact:true}).click();assert.equal(posts.length,before);
+{const card=page.locator('#task-'+ids[1]);const before=posts.length;await tap(card,'Not needed');assert.equal(posts.length,before);
 await card.getByText('Why isn’t this needed?').waitFor();await card.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal(await card.getByText('Why isn’t this needed?').count(),0);
-await card.getByRole('button',{name:'Not needed',exact:true}).click();await card.locator('#dismiss-'+ids[1]).fill('Handled by Sam');await card.locator('[data-choice="dismiss-typed"]').click();
+await tap(card,'Not needed');await card.locator('#dismiss-'+ids[1]).fill('Handled by Sam');await card.locator('[data-choice="dismiss-typed"]').click();
 await page.waitForFunction(n=>true,before);assert.equal(posts.at(-1).choice,'reject');assert.equal(posts.at(-1).feedback,'Handled by Sam');suggestions[1].status='accepted';await page.evaluate(()=>refresh());}
 await page.locator('#task-'+ids[1]).getByRole('button',{name:'Try again',exact:true}).click();await page.locator('#task-'+ids[1]).getByText('I’ll start shortly.',{exact:true}).waitFor();assert.equal(posts.at(-1).choice,'retry');
 await page.locator('#task-'+ids[2]).getByRole('button',{name:'Read result',exact:true}).click();await page.getByText('Full draft with',{exact:false}).waitFor();assert.equal(await page.locator('#result-content script').count(),0);await page.locator('#result-copy').click();assert.ok((await page.evaluate(()=>window.copied)).includes('Full draft with'));await page.getByRole('button',{name:'Close result'}).click();
 suggestions[2].next_action={kind:'email',revision:'abcdef123456',from:'owner@example.com',to:['recipient@example.com'],cc:['cc@example.com'],bcc:[],subject:'Exact subject',body:'Exact email draft <script>not executable</script>',attachments:[{name:'credit <note>.pdf',sha256:'ab'.repeat(32),size:8754,type:'application/pdf'}]};
-await page.evaluate(()=>refresh());await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();
+await page.evaluate(()=>refresh());await page.locator('#task-'+ids[2]).getByRole('button',{name:'Review and send',exact:true}).click();
 await page.locator('#send-dialog').waitFor({state:'visible'});assert.match(await sendHead(page),/From: owner@example.com/);assert.match(await page.locator('#send-preview').textContent(),/Exact email draft/);assert.equal(await page.locator('#send-preview script').count(),0);
 {const link=page.locator('#send-files a.attachment');assert.equal(await link.count(),1);assert.equal(await link.getAttribute('href'),'api/draft-attachment?id='+suggestions[2].id+'&sha='+'ab'.repeat(32));assert.match(await link.textContent(),/credit <note>\.pdf9 KB/);}
 const beforeApproval=posts.length;await page.locator('#send-cancel').click();assert.equal(posts.length,beforeApproval);
@@ -199,26 +201,26 @@ const beforeApproval=posts.length;await page.locator('#send-cancel').click();ass
 {const href='api/draft-attachment?id='+ids[2]+'&sha='+'ab'.repeat(32);
 await page.evaluate(id=>openResult(id),ids[2]);const r=page.locator('#result-files .draft-files a.attachment');await r.waitFor();assert.equal(await r.getAttribute('href'),href);{const text=await page.locator('#result-content').textContent();assert.match(text,/All checked\./);assert.doesNotMatch(text,/Attachments|credit <note>/)}await page.getByRole('button',{name:'Close result'}).click();
 await page.evaluate(id=>openEmail(id),ids[2]);const e=page.locator('#email-content .draft-files a.attachment');await e.waitFor();assert.equal(await e.getAttribute('href'),href);await page.getByText('Original question').first().waitFor();await page.getByRole('button',{name:'Close email'}).click();}
-await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();await page.locator('#send-confirm').click();await page.locator('#send-dialog').waitFor({state:'hidden'});assert.equal(posts.at(-1).revision,'abcdef123456');assert.equal(posts.at(-1).suggestion_id,ids[2]);
+await page.locator('#task-'+ids[2]).getByRole('button',{name:'Review and send',exact:true}).click();await page.locator('#send-confirm').click();await page.locator('#send-dialog').waitFor({state:'hidden'});assert.equal(posts.at(-1).revision,'abcdef123456');assert.equal(posts.at(-1).suggestion_id,ids[2]);
 // Edit the draft yourself: Send saves the edit first, then sends that exact new revision.
-{await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();await page.locator('#send-edit').click();
+{await page.locator('#task-'+ids[2]).getByRole('button',{name:'Review and send',exact:true}).click();await page.locator('#send-edit').click();
 assert.equal(await page.locator('#send-body').inputValue(),suggestions[2].next_action.body);assert.doesNotMatch(await sendHead(page),/Subject:/);assert.ok(await page.locator('#send-preview').isHidden());
 await page.locator('#send-body').fill('My own words.');await page.locator('#send-confirm').click();await page.locator('#send-dialog').waitFor({state:'hidden'});
 assert.deepEqual([posts.at(-2).body,posts.at(-2).revision,posts.at(-2).subject],['My own words.','abcdef123456',suggestions[2].next_action.subject]);assert.equal(posts.at(-1).revision,'fedcba654321');
-await page.locator('#task-'+ids[2]).getByRole('button',{name:'Send',exact:true}).click();assert.equal(await page.locator('#send-editor').isHidden(),true);await page.locator('#send-cancel').click();}
+await page.locator('#task-'+ids[2]).getByRole('button',{name:'Review and send',exact:true}).click();assert.equal(await page.locator('#send-editor').isHidden(),true);await page.locator('#send-cancel').click();}
 suggestions[2].next_actions=[{...suggestions[2].next_action,label:'Send reply',state:{status:'blocked',error:'Gmail is connected read-only. Nothing was sent.'}},
  {kind:'prepare',revision:'fedcba654321',label:'Investigate further',instructions:'Check the field mapping'},
  {kind:'open',revision:'111111111111',label:'Open the Zap',url:'https://example.com/zap'}];
-await page.evaluate(()=>refresh());const smartCard=page.locator('#task-'+ids[2]);await smartCard.getByRole('button',{name:'Send reply',exact:true}).waitFor();
+await page.evaluate(()=>refresh());const smartCard=page.locator('#task-'+ids[2]);await smartCard.getByRole('button',{name:'Review and send reply',exact:true}).waitFor();
 assert.ok(await smartCard.getByRole('link',{name:'Open the Zap',exact:false}).isVisible());assert.ok(await smartCard.getByText('Send reply: Gmail is connected read-only. Nothing was sent.',{exact:true}).isVisible());
 assert.equal(await smartCard.getByRole('button',{name:'Investigate further',exact:true}).count(),0);
 suggestions[2].next_actions=suggestions[2].next_actions.slice(1);await page.evaluate(()=>refresh());
 await smartCard.getByRole('button',{name:'Investigate further',exact:true}).click();assert.equal(posts.at(-1).revision,'fedcba654321');assert.equal(posts.at(-1).suggestion_id,ids[2]);
 suggestions[2].next_actions=[{kind:'email_demo',label:'Send',revision:'abcdef123456',from:'the-machine@example.invalid',to:['alex@example.invalid'],subject:'Demo reply',body:'Thanks!'}];await page.evaluate(()=>refresh());
-await smartCard.getByRole('button',{name:'Send',exact:true}).click();await page.getByText('Demo only. Nothing will be sent.',{exact:true}).waitFor();assert.equal(await page.locator('#send-confirm').isVisible(),false);
+await smartCard.getByRole('button',{name:'Review and send',exact:true}).click();await page.getByText('Demo only. Nothing will be sent.',{exact:true}).waitFor();assert.equal(await page.locator('#send-confirm').isVisible(),false);
 const demoPosts=posts.length;await page.locator('#send-cancel').click();assert.equal(posts.length,demoPosts);
 assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
-await page.locator('#task-'+ids[2]).getByRole('button',{name:'Mark done',exact:true}).click();await page.locator('#toast [data-undo]').click();await page.locator('#task-'+ids[2]).getByRole('button',{name:'Read result',exact:true}).waitFor();assert.equal(posts.at(-1).choice,'undo');
+await tap(page.locator('#task-'+ids[2]),'Mark done');await page.locator('#toast [data-undo]').click();await page.locator('#task-'+ids[2]).getByRole('button',{name:'Read result',exact:true}).waitFor();assert.equal(posts.at(-1).choice,'undo');
 await page.getByRole('button',{name:'Connections',exact:false}).click();assert.equal(await page.locator('#connectors .state-dot.t-mint').count(),1);assert.equal(await page.locator('#connectors .state-dot.t-amber').count(),1);assert.equal(await page.getByText('32 failed syncs',{exact:false}).isVisible(),false);
 assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));assert.deepEqual(errors,[]);
 
