@@ -30,10 +30,10 @@ try {
  assert.equal(pending.length,1);
  view={...view,fleets:[{...view.fleets[0],name:'Latest name'}]};
  await page.evaluate(()=>{void fleetView(true);});for(let i=0;i<100&&pending.length<2;i++)await page.waitForTimeout(10);
- assert.equal(pending.length,2);pending[1]();await page.getByText('Your Work Fleet: Latest name',{exact:true}).waitFor();pending[0]();
+ assert.equal(pending.length,2);pending[1]();await page.locator('.fleet-pane-head h2',{hasText:/^Latest name$/}).waitFor();pending[0]();
  await page.waitForTimeout(50);
  assert.equal(await page.locator('.fleet-free-form input').inputValue(),'Anyone know a good notary?');
- assert.equal(await page.getByText('Your Work Fleet: Old name',{exact:true}).count(),0);
+ assert.equal(await page.locator('.fleet-pane-head h2',{hasText:/^Old name$/}).count(),0);
  hold=false;await page.locator('.fleet-free-form button').click();
  for(let i=0;i<100&&!calls.length;i++)await page.waitForTimeout(10);
  assert.deepEqual(calls,[{action:'fleet_free',args:{text:'Anyone know a good notary?',fleet:FL}}]);

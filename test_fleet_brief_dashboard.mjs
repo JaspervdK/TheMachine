@@ -66,6 +66,8 @@ try{
  await page.locator('nav [data-tab="fleet"]').click();
  calls.length=0;await page.locator('.fleet-free-form input').fill('Anyone know a good notary?');await page.locator('.fleet-free-form button').click();
  assert.deepEqual(await waitCall(page,'fleet_free'),{action:'fleet_free',args:{text:'Anyone know a good notary?',fleet:FL}});
+ // How often the brief comes sits under Sharing, with the meetings option.
+ await page.locator('[data-fleet-pane="sharing"]').click();
  calls.length=0;await page.locator('#fleet-brief-every').selectOption('day');
  assert.deepEqual(await waitCall(page,'fleet_brief'),{action:'fleet_brief',args:{every:'day'}});
  calls.length=0;await page.locator('#fleet-brief-tell').check();

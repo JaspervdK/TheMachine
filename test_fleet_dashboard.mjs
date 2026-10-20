@@ -43,10 +43,19 @@ try{
   const page=await (await browser.newContext({viewport:{width,height:900},colorScheme:scheme})).newPage();
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto('http://127.0.0.1:'+server.address().port);
-  await page.locator('nav [data-tab="fleet"]').click();await page.getByText('Your Work Fleet: Acme').waitFor();
+  await page.locator('nav [data-tab="fleet"]').click();await page.locator('.fleet-pane-head h2',{hasText:/^Acme$/}).waitFor();
   assert.deepEqual(errors,[]);
+  // One view at a time, picked with pills: the Fleet, Sharing (every rule), Activity.
+  assert.deepEqual(await page.locator('.fleet-tabs [data-fleet-pane]').allInnerTexts(),['Acme','Sharing','Activity']);
+  assert.equal(await page.locator('.fleet-pane:not([hidden])').count(),1);
   const people=await page.locator('.fleet-people li').allInnerTexts();
   assert.match(people[0],/\(you, this Machine\)/);assert.match(people[1],/Hosted: sam\.example\.test/);
+  assert.equal(await page.locator('.fleet-rule').evaluateAll(x=>x.filter(r=>r.checkVisibility()).length),0);
+  await page.locator('[data-fleet-pane="sharing"]').click();await page.locator('.fleet-rules-head').waitFor();
+  // What the three choices mean, once, short; each kind with its question in plain words; a hint on each choice.
+  assert.match(await page.locator('.fleet-legend').innerText(),/Ask me first\s+you choose each time/);
+  assert.equal(await page.locator('.fleet-rule[data-member="*"][data-kind="relationships"] .fleet-rule-kind small').innerText(),'“Who knows someone at Acme?”');
+  assert.equal(await page.locator('.fleet-rule[data-member="*"][data-kind="relationships"] label:has([data-fleet-rule][value="never"])').getAttribute('title'),'They get “no”');
   // One rule per kind for the whole Fleet, title on top and a short line under it.
   const head=page.locator('.fleet-rules-head');
   assert.equal(await head.locator('h3').innerText(),'What your Machine answers');

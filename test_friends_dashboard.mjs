@@ -33,7 +33,7 @@ try{
   const page=await (await browser.newContext({viewport:{width,height:900},colorScheme:scheme})).newPage();
   const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
   await page.goto('http://127.0.0.1:'+server.address().port);
-  await page.locator('nav [data-tab="fleet"]').click();await page.locator('#fleet-friends').waitFor();
+  await page.locator('nav [data-tab="fleet"]').click();await page.locator('[data-fleet-pane="friends"]').click();await page.locator('#fleet-friends').waitFor();
   assert.deepEqual(errors,[]);
   const friends=page.locator('#fleet-friends');
   assert.match(await friends.innerText(),/Your username: sam/);
@@ -41,8 +41,10 @@ try{
   assert.match(await friends.innerText(),/Lou \(@lou\)/);
   assert.match(await friends.innerText(),/Busy: /);
   assert.doesNotMatch(await friends.innerText(),/Work Fleet|Sam Doe/);  // nothing of the Work Fleet, not the owner as a friend
+  // The rules per friend live under Sharing, with the Fleets' rules.
+  const sharing=page.locator('[data-pane="sharing"]');assert.equal(await friends.locator('.fleet-rule').count(),0);
   for(const k of ['relationships','meeting','intro','availability'])
-   assert.equal(await friends.locator(`.fleet-rule[data-member="fp_lou"][data-kind="${k}"] [data-fleet-rule]`).count(),3,k);
+   assert.equal(await sharing.locator(`.fleet-rule[data-member="fp_lou"][data-kind="${k}"] [data-fleet-rule]`).count(),3,k);
   calls.length=0;
   await friends.locator('[data-friend-do="accept"]').click();await page.waitForFunction(()=>true);
   await page.waitForTimeout(200);

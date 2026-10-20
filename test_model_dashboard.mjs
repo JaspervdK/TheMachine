@@ -55,10 +55,10 @@ try{
  const reset=posts.find(p=>p.action==='model_reset');assert.match(reset.args.key,/^[0-9a-f-]{36}$/);
  assert.match(await page.locator('#model-panel').textContent(),/Resets available: 1/);
  assert.doesNotMatch(await page.locator('#model-panel').textContent(),/limit reached/);
- // Check now asks the server for a fresh reading.
- await page.locator('[data-model-refresh]').click();
- await page.waitForFunction(()=>true);await new Promise(r=>setTimeout(r,200));
- assert.ok(posts.some(p=>p.action==='model_usage_refresh'));
+ // The reading updates by itself (the server checks every few minutes); when, sits in the model row, not under the panel.
+ assert.equal(await page.locator('[data-model-refresh]').count(),0);
+ assert.match(await page.locator('#model-panel .settings-list').first().textContent(),/Updated /);
+ assert.doesNotMatch(await page.locator('#model-panel').textContent(),/Checked /);
  // No reset possible from here: the way to ChatGPT instead.
  status={...status,limit_reached:true,limit_resets_at:t+3600,can_reset:false,resets:null};
  await page.evaluate(()=>refresh());

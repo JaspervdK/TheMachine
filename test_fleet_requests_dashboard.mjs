@@ -82,6 +82,7 @@ try{
  assert.deepEqual(calls.at(-1),{action:'fleet_intro',args:{fleet:FL,member_id:'p',about:'client.example',note:'About the Q4 pilot'}});
  assert.match(await page.locator('#fleet-view').innerText(),/intro email sent/);
  // The rule for intros says in its own words what Ask me first does.
+ await page.locator('[data-fleet-pane="sharing"]').click();
  assert.match(await page.locator('#fleet-view').innerText(),/You see each intro asked of you; nothing is drafted or sent without you/);
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'scrolls sideways');
  assert.deepEqual(errors,[]);
