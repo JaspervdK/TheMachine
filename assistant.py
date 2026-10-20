@@ -6255,6 +6255,7 @@ class App:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
             result['model_usage'] = getattr(self, 'model_usage', None)
             result['review_live'] = self.review_live()
+            result['reviews_on'] = bool((self.config.get('review_worker') or {}).get('enabled'))  # off until activated
             result['started_at'] = self.started_at()
             result['hours'] = self.hours()
             # Read only the existing heartbeat's runtime facts, never conversation
