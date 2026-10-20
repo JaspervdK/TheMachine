@@ -4,8 +4,8 @@ import {createServer} from 'node:http';
 import {OPENCLAW} from './openclaw-root.mjs';
 const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs');
 
-// Work hours on Connections: shows the saved hours, toggles work days, saves through set_work_hours, and the
-// snooze dialog starts at the morning time. On a phone it fits the screen.
+// Settings (the gear in the header): Work hours show the saved hours, toggle work days and save through
+// set_work_hours; the device's theme and notifications sit there too. On a phone it fits the screen.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 let hours={days:[1,2,3,4,5],start:'08:00',end:'23:00',morning:'09:00',timezone:'Europe/Amsterdam',digest_at:'08:30',saveable:true};
 const saved=[];
@@ -27,8 +27,16 @@ try{
  await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
  page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:'+server.address().port);
- await page.locator('nav [data-tab="health"]').click();
+ assert.equal(await page.locator('#health #hours').count(),0);  // not on Connections any more
+ await page.locator('#open-settings').click();
  await page.locator('#hours').waitFor();
+ assert.equal(await page.locator('#open-settings').getAttribute('aria-current'),'page');
+ assert.equal(await page.locator('#inbox').isHidden(),true);
+ assert.equal(await page.locator('#open-settings .lbl').isHidden(),true);  // just the gear on a phone
+ assert.equal(await page.locator('#settings #theme-toggle').isVisible(),true);
+ assert.equal(await page.locator('#settings-fleet').isHidden(),true);  // no Fleet here
+ assert.match(await page.locator('#settings-more').textContent(),/assistant telegram/);
+ assert.equal(await page.locator('.site-footer #theme-toggle, .site-footer #push-toggle').count(),0);
  assert.deepEqual(await page.locator('#hours-days [aria-pressed="true"]').allTextContents(),['Mon','Tue','Wed','Thu','Fri']);
  assert.equal(await page.locator('#hours-start').inputValue(),'08:00');
  assert.equal(await page.locator('#hours-end').inputValue(),'23:00');
@@ -64,9 +72,19 @@ try{
  assert.equal(await page.locator('#hours-days [aria-pressed="true"]').count(),0);
  // Not saveable here (no config file): shown, read-only, with where to change it.
  hours={...hours,saveable:false};
- await page.reload();await page.locator('nav [data-tab="health"]').click();
+ await page.reload();await page.locator('#open-settings').click();
  assert.equal(await page.locator('#hours-save').isDisabled(),true);
  assert.match(await page.locator('#hours-error').textContent(),/config\.json/);
+ // Another tab clears the gear; the gear brings Settings back. Light mode reads well too.
+ await page.locator('nav [data-tab="events"]').click();
+ assert.equal(await page.locator('#open-settings').getAttribute('aria-current'),'false');
+ assert.equal(await page.locator('#settings').isHidden(),true);
+ await page.locator('#open-settings').click();const was=await page.evaluate(()=>document.documentElement.dataset.theme);
+ await page.locator('#theme-toggle').click();
+ assert.notEqual(await page.evaluate(()=>document.documentElement.dataset.theme),was);
+ assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ await page.setViewportSize({width:1100,height:900});
+ assert.equal(await page.locator('#open-settings .lbl').isVisible(),true);
  assert.deepEqual(errors,[]);
  console.log('hours dashboard ok');
 }finally{await browser?.close();server.close()}

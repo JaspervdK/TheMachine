@@ -242,7 +242,8 @@ await page.screenshot({path:'/tmp/261013-review-observability.png',fullPage:true
 await page.setViewportSize({width:390,height:844});
 reviewRuns=[];reviewHealth={};await page.evaluate(()=>refresh());
 await page.screenshot({path:'/tmp/261011-assistant-connections.png',fullPage:true});await page.getByRole('button',{name:'Suggestions',exact:false}).click();await page.screenshot({path:'/tmp/261011-assistant-inbox.png',fullPage:true});
-// Light mode: a sun/moon switch in the footer, remembered per browser; HTML emails keep their own colours in light.
+// Light mode: a sun/moon switch in Settings, remembered per browser; HTML emails keep their own colours in light.
+await page.locator('#open-settings').click();
 {const theme=()=>page.evaluate(()=>[document.documentElement.dataset.theme,document.documentElement.dataset.themeMode]);
 const toggle=page.locator('#theme-toggle');const size=()=>toggle.evaluate(el=>{const b=el.getBoundingClientRect();return b.width+'x'+b.height});
 assert.deepEqual(await theme(),['dark','auto']);assert.equal(await toggle.getAttribute('aria-checked'),'false');const before=await size();
@@ -265,7 +266,7 @@ await page.locator('#email-dialog iframe.email-frame').evaluate(fr=>new Promise(
 assert.equal(await f.locator('#box').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)');
 assert.equal(await f.locator('html').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)');
 await page.getByRole('button',{name:'Close email'}).click();
-await toggle.click();assert.deepEqual(await theme(),['dark','dark']);
+await page.locator('#open-settings').click();await toggle.click();assert.deepEqual(await theme(),['dark','dark']);
 // Picked in the app meanwhile (the shared cookie): coming back to the tab shows it.
 await page.evaluate(()=>{document.cookie='theme=light; Path=/';document.dispatchEvent(new Event('visibilitychange'))});
 assert.deepEqual(await theme(),['light','light']);assert.equal(await toggle.getAttribute('aria-checked'),'true');

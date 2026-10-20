@@ -179,7 +179,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 | `gog`, `wacli` | `gog`, `wacli` | Binaries for Google and WhatsApp |
 | `google_broker` | — | `url` of a Google token broker, for accounts with `"transport": "broker"` (below) |
 | `heartbeat_job_id` | `""` | Optional OpenClaw cron job ID of your main heartbeat, for its health line |
-| `manage_url` | `""` | Optional https page where this install is set up (a hosted machine); the dashboard links to it for Settings and Add a connection |
+| `manage_url` | `""` | Optional https page where this install is set up (a hosted machine); the dashboard links to it from Settings (Account) and Add a connection |
 | `needs_you_file` | unset | Optional JSON list of `{id, text, url, action}` notes from a hosting layer; the dashboard shows them under Needs you, with sources that are not fully set up and connections that need signing in again |
 | `browser_url` | unset | Optional page that shows the assistant's browser (a hosted machine's viewer, or `./install.sh --browser-viewer`'s); a card waiting on the browser links to it |
 | `browser_cdp_url` | `http://127.0.0.1:9222` | That browser's DevTools address on this machine; **Open the browser** brings the tab a task uses to the front through it (also when it opens a viewer) |
@@ -290,13 +290,13 @@ Your decisions and written reasons are summarised into every review prompt, and 
 ## Telegram and the dashboard
 
 **No Telegram?** Telegram is optional. Install the dashboard as an app and turn on its notifications: cards, reminders, results and the weekly recap arrive as phone notifications instead.
-- **Android (Chrome):** open the dashboard, tap ⋮ → **Add to Home screen** (or **Install app**), open The Machine from your home screen and tap the bell.
-- **iPhone/iPad (iOS 16.4 or newer, Safari):** open the dashboard, tap **Share** → **Add to Home Screen**, open The Machine from your Home Screen (notifications only work there, not in a Safari tab) and tap the bell.
+- **Android (Chrome):** open the dashboard, tap ⋮ → **Add to Home screen** (or **Install app**), open The Machine from your home screen, open **Settings** (the gear at the top) and tap the bell.
+- **iPhone/iPad (iOS 16.4 or newer, Safari):** open the dashboard, tap **Share** → **Add to Home Screen**, open The Machine from your Home Screen (notifications only work there, not in a Safari tab), open **Settings** (the gear) and tap the bell.
 - Turn Telegram off or back on any time: `assistant telegram off`, `assistant telegram on <your Telegram user ID>`. `--remove-bot` with off also deletes the bot and its token from OpenClaw. Without Telegram, **Change** is typed on the dashboard card.
 
 ### Work hours
 
-One setting for when The Machine works with you: on the dashboard under **Connections → Work hours** (phone-friendly), with `assistant hours`, or as `work_hours` in `config.json`.
+One setting for when The Machine works with you: on the dashboard under **Settings** (the gear at the top) → **Work hours** (phone-friendly), with `assistant hours`, or as `work_hours` in `config.json`.
 - **Work days** (default Monday–Friday): work cards (from `work:` sources) wait for a work day, and snoozed work and returning email threads come back on one. Personal cards keep their timing.
 - **Messages from / until** (default 08:00–23:00): nothing is sent outside these hours, to Telegram or the phone; it waits until they start. Reviews keep running in the background. A range like 20:00–04:00 wraps past midnight.
 - **Snoozes land at** (default 09:00): where Tomorrow, 3 days and 1 week land, and when a snoozed email thread comes back.
@@ -311,7 +311,7 @@ Saved from the dashboard, it takes effect at once and is written to `config.json
 - **Change** opens Telegram's native reply box. Only a reply to that exact prompt, within ten minutes, counts as instructions. `/assistant_feedback <id> <text>` is the fallback.
 - The weekly recap (`weekly_recap`, off by default) arrives once per week, Fridays from 16:00 local time. Short sections with one point per line, so it reads at a glance on a phone: the hit rate first, then cards and decisions, what it noticed about how you acted (including how many drafts went out as written since the writing rules last changed), busy sources without results, promises (kept, open, past their date), people and projects (heating up, cooling, gone quiet, new), and behind the scenes (reviews, backlog, token usage).
 
-**The dashboard** shows the same cards grouped as Needs your decision, Ready for you, Preparing and Coming back later, plus the open [promises](#promises), with Work/Personal filters, deadlines, sources and their health, review runs, feedback and learned facts. Any signal, on a card or in the Events and Graph tabs, opens in a built-in reader: the full email with its images and attachments (fetched read-only), or the chat, Slack or calendar text, so you don't need the original app. At inbox zero you can poke the sleeping robot; poke it a few times and it offers a 20-second mini game, Catch the Zzz. It can be installed as a phone app and sends a push notification for each card, with or without Telegram. It is served on `127.0.0.1:<port>` and reached through Tailscale Serve or Caddy; see [Security model](#security-model).
+**The dashboard** shows the same cards grouped as Needs your decision, Ready for you, Preparing and Coming back later, plus the open [promises](#promises), with Work/Personal filters, deadlines, sources and their health, review runs, feedback and learned facts. Any signal, on a card or in the Events and Graph tabs, opens in a built-in reader: the full email with its images and attachments (fetched read-only), or the chat, Slack or calendar text, so you don't need the original app. At inbox zero you can poke the sleeping robot; poke it a few times and it offers a 20-second mini game, Catch the Zzz. It can be installed as a phone app and sends a push notification for each card, with or without Telegram. **Settings** (the gear at the top right) holds your [work hours](#work-hours), this device's light mode and phone notifications, a link to your Fleet rules when you are in a Fleet, and on a hosted Machine the way to your account page; connections stay under Connections. It is served on `127.0.0.1:<port>` and reached through Tailscale Serve or Caddy; see [Security model](#security-model).
 
 ## Do it
 

@@ -569,7 +569,7 @@ def cmd_telegram(config, args):
         return out_json({'telegram': args.state == 'on', 'notes': notes})
     print('Telegram on: new cards go to Telegram again, next to the dashboard app.' if args.state == 'on' else
           'Telegram off: cards, reminders and the weekly recap reach you through the dashboard app.'
-          ' Add it to your home screen and turn on notifications (the bell). Back on any time: assistant telegram on <your Telegram user ID>')
+          ' Add it to your home screen and turn on notifications (Settings, the bell). Back on any time: assistant telegram on <your Telegram user ID>')
     for note in notes:
         print('  ' + note)
 
@@ -598,7 +598,7 @@ def cmd_hours(config, args):
         return out_json(hours)
     print(('Saved. ' if changes else '') + hours_text(hours))
     if not changes:
-        print('Change with e.g.: assistant hours --days mon-fri --start 08:00 --end 23:00 --morning 09:00 (or on the dashboard, Connections > Work hours)')
+        print('Change with e.g.: assistant hours --days mon-fri --start 08:00 --end 23:00 --morning 09:00 (or on the dashboard: Settings, the gear at the top)')
 
 
 def _passphrase(confirm):
