@@ -518,5 +518,61 @@ class WhoIsWho(unittest.TestCase):
                              'question': {'about': 'client.example'}})
         self.assertEqual(self.fleet.view()['waiting'][0]['name'], 'Sam Doe (sam.doe@mail.example)')
 
+
+class RelayRestart(unittest.TestCase):
+    """The control plane restarting for an update: its proxy answers the long poll 502. That is not a Fleet error."""
+    def test_a_502_is_the_relay_away_not_an_error(self):
+        import io
+        import threading
+        import urllib.error
+        from unittest.mock import patch
+
+        def opener(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 502, 'Bad Gateway', {}, io.BytesIO(b'<html>502</html>'))
+
+        relay = fleet.Relay('https://relay.example/api/fleet', lambda: 'fd_x')
+        with patch.object(fleet.urllib.request, 'urlopen', opener):
+            with self.assertRaises(fleet.Unavailable) as caught:
+                relay.call('GET', '/inbox?wait=25')
+        self.assertIsInstance(caught.exception, ValueError)  # callers showing a relay refusal still show this one
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = a.Store(str(Path(tmp) / 'events.sqlite'))
+            stop, steps, waits = threading.Event(), [], []
+            box = fleet.Fleet(store.connect, CONFIG, lambda: 'fd_x', relay=FakeRelay())
+
+            def step():
+                steps.append(1)
+                if len(steps) == 1:
+                    raise fleet.Unavailable('The Fleet relay is restarting')
+                if len(steps) == 2:
+                    raise ConnectionResetError()
+                stop.set()
+
+            box.step = step
+            stop.wait = lambda seconds: waits.append(seconds)
+            with self.assertLogs('personal-assistant', 'INFO') as logs:
+                box.run(stop)
+        self.assertEqual(waits, [5, 10])  # back in seconds, not minutes
+        self.assertFalse([line for line in logs.output if line.startswith('ERROR')])
+
+    def test_another_error_says_where_it_came_from(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            store = a.Store(str(Path(tmp) / 'events.sqlite'))
+            stop = threading.Event()
+            box = fleet.Fleet(store.connect, CONFIG, lambda: 'fd_x', relay=FakeRelay())
+
+            def step():
+                stop.set()
+                int('not a number')
+
+            box.step = step
+            stop.wait = lambda seconds: None
+            with self.assertLogs('personal-assistant', 'ERROR') as logs:
+                box.run(stop)
+        self.assertIn('fleet error=ValueError at=step:', logs.output[0])
+        self.assertNotIn('not a number', logs.output[0])
+
 if __name__ == '__main__':
     unittest.main()

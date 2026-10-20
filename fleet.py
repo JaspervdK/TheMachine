@@ -34,6 +34,7 @@ import json
 import logging
 import re
 import threading
+import traceback
 import urllib.error
 import urllib.request
 
@@ -83,6 +84,18 @@ DECIDED = {'once': 'Answered once', 'always': 'Answered, and always from now on'
 
 class Off(Exception):
     """Not in a Fleet (any more), or the Fleet is switched off: the relay said 404."""
+
+
+class Unavailable(ValueError):
+    """The relay is away for a moment: its proxy said 502, 503 or 504 (the control plane restarting for an update cuts
+    every long poll at once). A ValueError like any refusal, so a caller that shows the reason still does; the loop
+    just asks again in a few seconds instead of backing off and logging an error."""
+
+
+def where(error):
+    """Where an error came from, for the log: the innermost function and line, never the message (it may hold data)."""
+    frames = traceback.extract_tb(error.__traceback__)
+    return ' < '.join(f'{f.name}:{f.lineno}' for f in reversed(frames[-3:])) or '?'
 
 
 def reachable(url):
@@ -163,6 +176,8 @@ class Relay:
             with error:
                 if error.code == 404:
                     raise Off() from None
+                if error.code in (502, 503, 504):
+                    raise Unavailable('The Fleet relay is restarting; try again in a minute.') from None
                 try:
                     message = json.loads(error.read() or b'{}').get('error') or ''
                 except ValueError:
@@ -1002,17 +1017,22 @@ class Fleet:
         return found
 
     def run(self, stop):
-        backoff = 0
+        backoff = away = 0
         while not stop.is_set():
             try:
                 self.step()
-                self.off, backoff = False, 0
+                self.off, backoff, away = False, 0, 0
             except Off:
                 self.off = True
                 stop.wait(OFF_WAIT)
+            except (Unavailable, OSError) as error:
+                # The relay restarting (502) or the connection cut: normal for a moment, an error only once it lasts.
+                away += 1
+                (LOG.warning if away >= 6 else LOG.info)('fleet relay away error=%s tries=%s', type(error).__name__, away)
+                stop.wait(min(60, 5 * away))
             except Exception as error:
                 backoff = min(300, (backoff or 5) * 2)
-                LOG.error('fleet error=%s', type(error).__name__)
+                LOG.error('fleet error=%s at=%s', type(error).__name__, where(error))
                 stop.wait(backoff)
 
     # -- for the dashboard and preparations
