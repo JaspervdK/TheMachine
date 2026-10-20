@@ -215,8 +215,8 @@ hosted Machine it is your Machine's address name, and you can change it on your 
 paired with your account (see above) claims a username too.
 
 - **Adding someone.** In the Fleet tab under **Friends**, or on your account page, type their exact username and send a
-  request. There is no directory and no search, and a request looks the same whether or not that name exists. Nothing
-  connects until they accept.
+  request. There is no directory and no search by name, and a request looks the same whether or not that name exists.
+  Nothing connects until they accept. People you already know can also be found privately; see below.
 - **A request for you** shows in the Fleet tab and on your account page, as a Telegram message with Accept and Decline,
   and as a phone notification. Only you can answer it; a tap on an old message does nothing.
 - **Remove or block** a friend, or block a request, at any time. Blocking is silent: their requests are dropped from
@@ -238,6 +238,27 @@ friends, and your friends' rules don't apply to teammates. A friend's questions 
 to their fixed form, and never given to your AI, its tools or Do it.
 
 Friends are free, between hosted and self-hosted Machines alike.
+
+### Finding people you know
+
+Both switches are off until you turn them on, in the Fleet tab under **Network** (Suggestions asks once).
+
+- **Find people I know** checks, about once a week, which of your contacts are on the Network. Your Machine blinds each
+  address with a secret only it holds before anything leaves it (a private set intersection: H(x)^a over a 2048-bit
+  group); the Network raises those to its own secret and sends them back with the blinded addresses of people who let
+  themselves be found. Your Machine learns only which of its own contacts matched, the Network never sees your address
+  book, and only matches are then looked up by name. Lookups are rate-limited.
+- **Let people who have my email find me** makes your account email findable that way, and only by people who already
+  have it. It needs a username.
+
+A match becomes a card in Suggestions only when there is something concrete to do together: an open card that involves
+them, or a meeting with them in the next two weeks; the card says which. Someone at your own work domain is suggested
+as a colleague, anyone else as a friend or family, for you to pick; nothing is guessed from what you write. **Connect**
+sends an ordinary friend request, which they still accept, and sharing then follows the rules you set for that friend.
+**Not now** hides them for 30 days unless something new comes up; **Never suggest** hides them for good. What was
+checked, and every switch you flip, is kept in the Fleet activity history (see What happens in your Fleet).
+
+**Leave the Network** turns both switches off, removes every friend and withdraws open requests. Your Fleets stay.
 
 ## Delivery and retry
 

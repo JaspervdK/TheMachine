@@ -48,6 +48,7 @@ import urllib.request
 import graph
 import fleet_requests
 import friends
+import discovery
 
 LOG = logging.getLogger('personal-assistant')
 SCHEMA = '''
@@ -187,6 +188,7 @@ def now():
 def ensure(db):
     db.executescript(SCHEMA)
     fleet_requests.ensure(db)
+    discovery.ensure(db)
     have = {r[1] for r in db.execute('PRAGMA table_info(fleet_in)')}
     for column in ('notified_at TEXT', 'telegram_message_id TEXT', 'choice TEXT'):  # added 2026-10-20
         if column.split()[0] not in have:
@@ -960,7 +962,7 @@ def brief_text(view):
 
 # ---------------------------------------------------------------- the Fleet on this Machine
 
-class Fleet(fleet_requests.Requests, friends.Friends):
+class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery):
     def __init__(self, connect, config, token, relay=None):
         self.connect, self.config = connect, config
         self.relay = relay or Relay(settings(config)['url'], token)
@@ -1848,6 +1850,9 @@ class Fleet(fleet_requests.Requests, friends.Friends):
             self.last['requests'] = stamp
             self.requests_round()
             self.followup_round()
+        if stamp - self.last.get('network', 0.0) > MEETINGS_EVERY or not wait:
+            self.last['network'] = stamp
+            self.discovery_round()  # finding people you know on the Network (discovery.py), when the owner turned it on
         if stamp - self.last['briefs'] > 60 or not wait:
             self.last['briefs'] = stamp
             self.brief_round()
@@ -1902,7 +1907,7 @@ class Fleet(fleet_requests.Requests, friends.Friends):
                                      'rules': {k: (lambda r: r if r['rule'] in KIND_RULES.get(k, RULES) else {**r, 'rule': 'ask'})(
                                          rules.get((ref, m['member_id'], k)) or rules.get((ref, ALL, k), {'rule': 'ask', 'details': False})) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(ref)]})
-        return {'on': True, 'off': self.off, 'fleets': out, 'friends': self.friends_view(), 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
+        return {'on': True, 'off': self.off, 'fleets': out, 'friends': self.friends_view(), 'network': self.network_view(), 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
                 **self.requests_view(), 'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),
                 'kind_rules': {k: list(KIND_RULES.get(k, RULES)) for k in KIND_LABEL}, 'no_details': list(NO_DETAILS),
                 'scoped': list(SCOPED), 'scopes': scopes}
