@@ -20,7 +20,7 @@ case "${1:-}" in
       kill -0 "$pid" 2>/dev/null || { cat "$log"; exit 1; }
       sleep 0.5
     done
-    sleep 3  # the Network hands over its waiting questions
+    sleep 10  # the Network hands over its waiting questions, and teammates answer the owner's
     node "$here/sandbox/shots.mjs" --url "http://127.0.0.1:$port" --out "$out" "${@:5}"
     ;;
   check)

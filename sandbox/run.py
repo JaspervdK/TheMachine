@@ -4,7 +4,7 @@
     python3 sandbox/run.py --state fleet,friends --port 8880
 
 What runs: assistant.App from this checkout, on a fresh database in --dir (default /tmp/machine-sandbox-<port>) built
-from sandbox/fixture.json; sandbox/network.py as the Network when the state has a Fleet or friends; and a small proxy on
+from sandbox/fixture.json; sandbox/stub_network.py as the Network when the state has a Fleet or friends; and a small proxy on
 --port that signs every request in as the owner, so a browser (or Playwright) on this machine can click everything.
 
 What doesn't: no collector, review, preparation, delivery, model or enrichment worker runs. An approved send (email,
@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import guard  # noqa: E402
 import load  # noqa: E402
-import network  # noqa: E402
+import stub_network as network  # noqa: E402
 
 for name in ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY'):
     os.environ.pop(name, None)
@@ -141,7 +141,7 @@ def seed_network(app, net, fixture):
                     try:
                         app.fleet.directory(refresh=True)
                         return app.fleet.ask(asked['kind'], asked['question'])
-                    except (ValueError, OSError):
+                    except Exception:  # the Fleet still starting up
                         time.sleep(0.5)
             threading.Thread(target=ask, daemon=True).start()
 

@@ -32,7 +32,7 @@ The sandbox uses three ports: the dashboard on the given port, the Network on po
 - **Real:** `assistant.py`, `dashboard.html`, `fleet.py` and the rest of your checkout; the database schema; every dashboard action. A proxy on the dashboard port signs each request in as the owner, as Tailscale Serve does, so a browser on this machine can use everything.
 - **Off:** collectors, reviews, preparation, delivery, model usage, embeddings and enrichment. Nothing syncs and no model is called.
 - **Faked:** an approved send (email, Slack, WhatsApp, LinkedIn, X) is written to `sent.jsonl` in the data folder and shown as sent. Phone and Telegram notifications go there too.
-- **The Network** (`sandbox/network.py`) answers from memory. A teammate's Machine answers your question about three seconds after you ask it. Friend requests, accepting, blocking and seat decisions work.
+- **The Network** (`sandbox/stub_network.py`) answers from memory. A teammate's Machine answers your question about three seconds after you ask it. Friend requests, accepting, blocking and seat decisions work.
 - **Sealed:** `sandbox/guard.py` installs a Python audit hook that refuses any connection beyond 127.0.0.1, any name lookup and any program start, whatever code path tries. Each refusal is printed as `sandbox: refused …`. Some status checks start programs (for example the OpenClaw CLI), so a few refusals on startup are normal.
 
 ### Screenshots and layout checks
@@ -66,4 +66,4 @@ rm /tmp/copy.sqlite
 
 With `--db`, it collects every name, address, domain, company, chat and account id from that database (and the owner's name and accounts from the config), and fails if any of them appears in the fixture. It prints only how many matched and of what kind, never the values. Run it after changing `fixture.py`. `test_sandbox.py` runs the static rules and checks that the fixture is up to date.
 
-To add data, edit `sandbox/fixture.py`: new names come from its invented pools, and new addresses use `.example`. To add a state, extend `sandbox/load.py` (`STATES` and `load`) and, for the Network, `sandbox/network.py`.
+To add data, edit `sandbox/fixture.py`: new names come from its invented pools, and new addresses use `.example`. To add a state, extend `sandbox/load.py` (`STATES` and `load`) and, for the Network, `sandbox/stub_network.py`.

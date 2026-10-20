@@ -4,6 +4,7 @@ people; their Machines answer a question a few seconds after it is asked, so ask
 behave as they would. Nothing leaves this machine."""
 import json
 import secrets
+import sys
 import threading
 import time
 import urllib.parse
@@ -26,13 +27,15 @@ class Network:
         self.requests_in = [{'id': 'frq_in_0001', **self.net['friends']['request_in'], 'at': now()}]
         self.requests_out = [{'id': 'frq_out_0001', 'username': self.net['friends']['request_out'], 'at': now()}]
         self.blocked = []
+        self.undelivered = set()  # questions to a teammate without a Machine
+        self.keys = None  # this Machine's public keys, as it published them (POST /keys)
         self.notices = {n['id']: {**n, 'at': now()} for n in self.net['notices']}
 
     # -- what the app reads
     def me(self, emails=None):
         owner = self.net['owner']
         return {'member_id': owner['member_id'], 'name': owner['name'], 'role': 'owner', 'emails': [owner['email']], 'machine': True,
-                'account_email': owner['email'], 'label': owner['name'], 'me': True}
+                'account_email': owner['email'], 'label': owner['name'], 'me': True, **({'keys': self.keys} if self.keys else {})}
 
     def member(self, m):
         return {'member_id': m['member_id'], 'name': m['name'], 'role': m.get('role', 'member'), 'emails': [m['email']] if m.get('email') else [],
@@ -98,6 +101,9 @@ class Network:
             return self.directory()
         if method == 'POST' and path == '/me':
             return {}
+        if method == 'POST' and path == '/keys':  # teammates here have no keys, so they ask and answer in plaintext
+            self.keys = body
+            return {}
         if method == 'GET' and path == '/inbox':
             wait = min(int((query.get('wait') or ['0'])[0] or 0), 10)
             with self.lock:
@@ -113,7 +119,9 @@ class Network:
             fleet = body.get('fleet_id') or body.get('fleet') or 'work'
             team = [m for m in self.group_of(fleet) if not body.get('to') or m['member_id'] in body['to']]
             ids = {m['member_id']: 'fa_' + secrets.token_hex(8) for m in team}
-            self.answer_later(ids, body.get('kind'))
+            machine = {t['member_id']: t.get('machine', True) for t in team}
+            self.undelivered |= {i for m, i in ids.items() if not machine[m]}
+            self.answer_later({m: i for m, i in ids.items() if machine[m]}, body.get('kind'))
             return {'ids': ids}
         if method == 'POST' and path == '/decide':
             notice = self.notices.get(body.get('id'))
@@ -122,6 +130,8 @@ class Network:
             status = 'confirmed' if body.get('choice') == 'confirm' else 'declined'
             notice.update(status=status, version=notice['version'] + 1, buttons=[], outcome='Confirmed' if status == 'confirmed' else 'Declined')
             return {'status': status, 'notice': notice}
+        if method == 'POST' and path == '/delivery':  # a teammate without a Machine never gets the question
+            return {'delivery': {i: {'delivered': i not in self.undelivered} for i in body.get('ids', [])}}
         if method == 'POST' and path == '/claims':
             return {'claims': {}}
         if method == 'POST' and path == '/claim':
@@ -166,7 +176,10 @@ def serve(network, port):
             length = int(self.headers.get('Content-Length') or 0)
             body = json.loads(self.rfile.read(length) or b'{}') if length else {}
             found = network.handle(self.command, path, urllib.parse.parse_qs(url.query), body)
-            self.send(404, {'error': 'Not here'}) if found is None else self.send(200, found)
+            if found is None:
+                print(f'sandbox network: no stand-in for {self.command} {path}', file=sys.stderr, flush=True)
+                return self.send(404, {'error': 'Not here'})
+            self.send(200, found)
 
         def send(self, status, value):
             data = json.dumps(value).encode()
