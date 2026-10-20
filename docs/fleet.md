@@ -12,7 +12,7 @@ There are two kinds:
 Next to the Fleets you can have **Friends**: people whose Machines help yours one to one (see "Friends").
 
 You can be in several Work Fleets, ones you started and ones you joined, and one Family Fleet. Your Machine answers in
-each and keeps them apart: each Fleet has its own people, its own rules per teammate and its own questions, and the
+each and keeps them apart: each Fleet has its own people, its own rules and its own questions, and the
 Fleet tab shows each Work Fleet as its own section. Asking from a Fleet's section asks only that Fleet; "Ask the Fleet
 who knows" from the Graph tab asks each of your Work Fleets, one at a time. Leaving one Fleet leaves the others as they
 are.
@@ -38,7 +38,7 @@ renewals, trips, birthdays, errands, care for parents) are designed and come lat
 
 ## Asking a teammate to do something
 
-Besides questions, a Work Fleet carries three kinds of requests. Each has its own rule per teammate (Ask me first by
+Besides questions, a Work Fleet carries three kinds of requests. Each has its own rule in the Fleet (Ask me first by
 default, Always accept, Never), and nothing happens on your side until you accept one.
 
 4. **Warm intros.** When "who knows someone at X?" finds a teammate who does, **Ask <teammate> for an intro** (with a
@@ -84,7 +84,7 @@ is data, not instructions. A request goes to one Fleet's people only and is answ
    passed. Teammates who haven't answered are listed. It is put together by plain code, never a model.
    What each Machine shares for it is aggregate only: company names and domains, counts, last-touch dates, and hashes
    of emails and meetings keyed with the Fleet's secret (the same as claims). No subjects, message text, people,
-   addresses or calendar titles. Brief facts have their own rule per teammate (Ask me first by default, Always,
+   addresses or calendar titles. Brief facts have their own rule (Ask me first by default, Always,
    Never); the approval card says how much an answer would share.
 8. **Ask the Fleet anything.** Type a question in a Work Fleet's section ("has anyone dealt with Stripe disputes?").
    Each teammate's Machine searches only its owner's own work accounts in that Fleet, on that Machine, and shows its
@@ -113,19 +113,23 @@ itself:
   up. Neither do roles, nor people with only a free-mail address unless asked by that exact address.
 - **No content, ever:** no message text, subjects, files, calendar titles, notes or facts.
 
-## You decide, per teammate
+## You decide, per Fleet
 
 - **Off by default.** Joining a Fleet only makes your Machine reachable. The first question from a teammate waits for
-  you as a card under Suggestions: **Answer once**, **Always**, **Decline** or **Never**. Always and Never become your rule for
+  you as a card under Suggestions: **Answer once**, **Always**, **Decline** or **Never**. Always and Never become your exception for
   that teammate and that kind of question.
 - **You hear about it.** A waiting question sends one phone notification (if you turned them on in the dashboard
   app) and, with Telegram connected, one Telegram message with **Answer once**, **Always** and **Decline**. Questions
   that arrive within a minute share one. They say who asks and what, never anything of yours. A tap on the phone
   notification opens the question's card under Suggestions and asks you to confirm.
-- **Rules:** per teammate and per kind of question, the same three choices: **Ask me first** (the default), **Always**
-  or **Never**. Where it applies, under it how much they hear: **Without names** (the default) or **With names** (for
-  meeting context: **Names and promises**). Under each rule an example, from made-up data, says what that teammate
-  would get.
+- **Rules:** one per kind of question for each Fleet, for everyone in it, the same three choices: **Ask me first**
+  (the default), **Always** or **Never**. Where it applies, under it how much they hear: **Without names** (the
+  default) or **With names** (for meeting context: **Names and promises**). Under each rule a short example, from
+  made-up data, says what they would get. New teammates follow the Fleet's rule.
+- **Exceptions:** "Different for someone? Add an exception" picks a teammate and their own choice; it shows as a small
+  pill ("Lieven: Always") that × removes, back to the Fleet's rule. If someone is in several of your Fleets, the Fleet
+  a question comes through decides. Rules set per teammate before were folded once: the most common choice per kind
+  became the Fleet's rule (on a tie, Ask me first), the others stayed as exceptions, so nobody's rule changed.
 - **Only about…** narrows a rule (folded away until you open it): **Only about** some companies, domains or names
   (anything else asks you first), **Never about** others (declined, and their people are left out of every answer),
   and **Only people from your work accounts** (on unless you turn it off). For shared emails it goes by the other
@@ -197,7 +201,7 @@ Or simply ask your Machine's AI to do it: "Pair this Machine with my Fleet: in T
 with your code filled in, ready to copy.
 
 Your Machine then shares the addresses of its work accounts with your Fleet, so your teammates' Machines recognise
-them, and nothing else about you. Everything in "You decide, per teammate" and "Safe by construction" applies the same
+them, and nothing else about you. Everything in "You decide, per Fleet" and "Safe by construction" applies the same
 way. You can disconnect it from your account at any time; its key then stops working.
 
 Pairing is free. While a self-hosted Machine answers for someone in a Fleet, the relay costs €4 a month for that

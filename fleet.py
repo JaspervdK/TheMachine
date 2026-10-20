@@ -296,6 +296,7 @@ def _person(db, address):
 
 # -- a rule's scope: what it is about. Every kind can use it; a kind lists itself in SCOPED once its answers apply it.
 SCOPED = ['relationships', 'meeting', 'handling']
+ALL = '*'  # the member_id of a Fleet's own rule for a kind of question; a teammate's row is their exception
 SCOPE_TERMS, SCOPE_CHARS = 20, 80
 
 
@@ -1007,6 +1008,7 @@ class Fleet(fleet_requests.Requests, friends.Friends):
             self.set_meta('directory', self.relay.call('GET', '/directory', timeout=30))
             self.last['directory'] = stamp
             self.by_id()
+            self.fold_rules()
         return self.meta('directory', {'fleets': []})
 
     def fleets(self):
@@ -1052,13 +1054,65 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         return mine | {str(a.get('email') or '').lower() for a in self.config.get('accounts', []) if a.get('email')}
 
     def rule(self, db, fleet, member_id, kind):
-        row = db.execute('SELECT rule,details FROM fleet_rules WHERE fleet=? AND member_id=? AND kind=?', (fleet, member_id, kind)).fetchone()
+        """A teammate's rule for a kind of question: their exception if they have one, else the Fleet's rule (member ALL)."""
+        row = (db.execute('SELECT rule,details FROM fleet_rules WHERE fleet=? AND member_id=? AND kind=?', (fleet, member_id, kind)).fetchone()
+               or db.execute('SELECT rule,details FROM fleet_rules WHERE fleet=? AND member_id=? AND kind=?', (fleet, ALL, kind)).fetchone())
         found = (row['rule'], bool(row['details'])) if row else ('ask', False)
         return ('ask', found[1]) if found[0] not in KIND_RULES.get(kind, RULES) else found
 
     def scope(self, db, fleet, member_id, kind):
-        row = db.execute('SELECT scope FROM fleet_scopes WHERE fleet=? AND member_id=? AND kind=?', (fleet, member_id, kind)).fetchone()
+        row = (db.execute('SELECT scope FROM fleet_scopes WHERE fleet=? AND member_id=? AND kind=?', (fleet, member_id, kind)).fetchone()
+               or db.execute('SELECT scope FROM fleet_scopes WHERE fleet=? AND member_id=? AND kind=?', (fleet, ALL, kind)).fetchone())
         return scope_of(row['scope'] if row else None)
+
+    def fold_rules(self):
+        """Rules were per teammate; now there is one per kind of question for each Work Fleet, and a teammate's own choice
+        is an exception. Once per Fleet: the choice most of its teammates have becomes the Fleet's (a tie: Ask me first),
+        and whoever differs keeps theirs as an exception, so nobody's answers change. The same for Only about."""
+        with self.connect() as db:
+            for ref in self.work_fleets():
+                done = 'rules_per_fleet:' + ref
+                mates = [m['member_id'] for m in self.teammates(ref)]
+                if not mates or db.execute('SELECT 1 FROM fleet_meta WHERE key=?', (done,)).fetchone():
+                    continue
+                for kind in RULE_KINDS.get(self.kind_of(ref), ()):
+                    had = {m: self.rule(db, ref, m, kind) for m in mates}
+                    scoped = kind in SCOPED
+                    had_scope = {m: json.dumps(self.scope(db, ref, m, kind), sort_keys=True) for m in mates} if scoped else {}
+                    common = collections.Counter(had.values()).most_common()
+                    wide = common[0][0] if len(common) == 1 or common[0][1] > common[1][1] else ('ask', False)
+                    db.execute('INSERT OR REPLACE INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
+                               (ref, ALL, kind, wide[0], int(wide[1]), now()))
+                    for m, value in had.items():
+                        db.execute('DELETE FROM fleet_rules WHERE fleet=? AND member_id=? AND kind=?', (ref, m, kind))
+                        if value != wide:
+                            db.execute('INSERT INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
+                                       (ref, m, kind, value[0], int(value[1]), now()))
+                    if scoped:
+                        common = collections.Counter(had_scope.values()).most_common()
+                        wide_scope = (common[0][0] if len(common) == 1 or common[0][1] > common[1][1]
+                                      else json.dumps(scope_of(None), sort_keys=True))
+                        db.execute('INSERT OR REPLACE INTO fleet_scopes(fleet,member_id,kind,scope,updated_at) VALUES(?,?,?,?,?)',
+                                   (ref, ALL, kind, wide_scope, now()))
+                        for m, value in had_scope.items():
+                            db.execute('DELETE FROM fleet_scopes WHERE fleet=? AND member_id=? AND kind=?', (ref, m, kind))
+                            if value != wide_scope:
+                                db.execute('INSERT INTO fleet_scopes(fleet,member_id,kind,scope,updated_at) VALUES(?,?,?,?,?)',
+                                           (ref, m, kind, value, now()))
+                db.execute('INSERT OR REPLACE INTO fleet_meta(key,value) VALUES(?,?)', (done, now()))
+
+    def rules_view(self, ref, kind, rules, scopes):
+        """A Fleet's rule per kind of question, and the teammates whose own choice differs (their exceptions)."""
+        out, exceptions = {}, {}
+        for k in RULE_KINDS.get(kind, ()):
+            wide = rules.get((ref, ALL, k), {'rule': 'ask', 'details': False})
+            out[k] = {**wide, 'rule': wide['rule'] if wide['rule'] in KIND_RULES.get(k, RULES) else 'ask'}
+            for m in self.teammates(ref):
+                own, own_scope = rules.get((ref, m['member_id'], k)), scopes.get(ref, {}).get(m['member_id'], {}).get(k)
+                if own or own_scope:
+                    exceptions.setdefault(k, []).append({'member_id': m['member_id'], 'name': label(m), **(own or out[k]),
+                                                         'own_scope': bool(own_scope)})
+        return {'rules': out, 'exceptions': exceptions}
 
     # -- the owner's hours
     def local_now(self):
@@ -1355,13 +1409,18 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         rows = db.execute("SELECT * FROM fleet_in WHERE status='waiting' AND notified_at IS NULL ORDER BY at,id").fetchall()
         return rows if self.working() else [r for r in rows if r['kind'] not in ('brief', 'anything')]
 
-    def set_rule(self, fleet, member_id, kind, rule=None, details=None, scope=None):
+    def set_rule(self, fleet, member_id, kind, rule=None, details=None, scope=None, clear=False):
         fleet = self.ref(fleet)
         if kind not in RULE_KINDS.get(self.kind_of(fleet), ()):
             raise ValueError('Unknown kind of question')
-        if not self.member(fleet, member_id):
+        if member_id != ALL and not self.member(fleet, member_id):
             raise ValueError('Not in your Fleet')
         with self.connect() as db:
+            if clear and member_id != ALL:  # an exception goes: they follow the Fleet's rule again
+                db.execute('DELETE FROM fleet_rules WHERE fleet=? AND member_id=? AND kind=?', (fleet, member_id, kind))
+                db.execute('DELETE FROM fleet_scopes WHERE fleet=? AND member_id=? AND kind=?', (fleet, member_id, kind))
+                rule, details = self.rule(db, fleet, member_id, kind)
+                return {'rule': rule, 'details': details, 'scope': self.scope(db, fleet, member_id, kind)}
             current, current_details = self.rule(db, fleet, member_id, kind)
             rule = current if rule is None else rule
             if rule not in KIND_RULES.get(kind, RULES):
@@ -1375,6 +1434,9 @@ class Fleet(fleet_requests.Requests, friends.Friends):
                 scope = scope_of(scope if isinstance(scope, dict) else None)
                 db.execute('INSERT OR REPLACE INTO fleet_scopes(fleet,member_id,kind,scope,updated_at) VALUES(?,?,?,?,?)',
                            (fleet, member_id, kind, json.dumps(scope), now()))
+            if member_id == ALL:  # an exception that now says what the Fleet's rule says is no exception any more
+                db.execute('DELETE FROM fleet_rules WHERE fleet=? AND kind=? AND member_id!=? AND rule=? AND details=? AND member_id NOT IN '
+                           '(SELECT member_id FROM fleet_scopes WHERE fleet=? AND kind=?)', (fleet, kind, ALL, rule, int(details), fleet, kind))
             scope = self.scope(db, fleet, member_id, kind)
         return {'rule': rule, 'details': details, 'scope': scope}
 
@@ -1643,8 +1705,8 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         with self.connect() as db:
             teams, offers = {}, {}
             for ref in self.work_fleets():
-                said = {r['member_id']: r['rule'] for r in db.execute("SELECT member_id,rule FROM fleet_rules WHERE fleet=? AND kind='handling'", (ref,))}
-                members = [(m, said.get(m['member_id'], 'ask'), self.scope(db, ref, m['member_id'], 'handling')) for m in self.teammates(ref)]
+                members = [(m, self.rule(db, ref, m['member_id'], 'handling')[0], self.scope(db, ref, m['member_id'], 'handling'))
+                           for m in self.teammates(ref)]
                 members = [x for x in members if x[1] in ('always', 'ask') and x[0].get('emails')]
                 if members:
                     teams[ref] = members
@@ -1808,10 +1870,10 @@ class Fleet(fleet_requests.Requests, friends.Friends):
         for ref, found in fleets.items():
             kind = found['kind']
             out.append({'id': ref, 'kind': kind, 'label': FLEET_NAMES.get(kind, kind), 'name': found.get('name'), 'asks': list(ASKS.get(kind, ())),
-                        'people': [person(m) for m in found.get('members', [])],
+                        'people': [person(m) for m in found.get('members', [])], **self.rules_view(ref, kind, rules, scopes),
                         'members': [{'member_id': m['member_id'], 'name': label(m), 'machine': m.get('machine'),
                                      'rules': {k: (lambda r: r if r['rule'] in KIND_RULES.get(k, RULES) else {**r, 'rule': 'ask'})(
-                                         rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False})) for k in RULE_KINDS.get(kind, ())}}
+                                         rules.get((ref, m['member_id'], k)) or rules.get((ref, ALL, k), {'rule': 'ask', 'details': False})) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(ref)]})
         return {'on': True, 'off': self.off, 'fleets': out, 'friends': self.friends_view(), 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
                 **self.requests_view(), 'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),

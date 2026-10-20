@@ -130,7 +130,7 @@ class Fleet(unittest.TestCase):
         self.assertEqual(self.ask('relationships', {'about': 'client.example'}, 'q4', fleet_kind='family'), 'declined')
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM suggestions').fetchone()[0], 0)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM fleet_rules WHERE rule!='always'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM fleet_rules WHERE rule!='always' AND member_id!='*'").fetchone()[0], 0)
 
     def test_answers_from_teammates_are_kept_to_the_fixed_form(self):
         sent = self.fleet.ask('relationships', {'about': 'client.example'})
@@ -515,6 +515,87 @@ class RuleScopes(unittest.TestCase):
             self.assertEqual(self.fleet.rule(db, self.fleet.ref('work'), 'pat1', 'handling')[0], 'ask')
 
 
+class FleetWideRules(unittest.TestCase):
+    """One rule per kind of question for each Work Fleet; a teammate's own choice is an exception. Rules kept per
+    teammate before fold into that without changing what anyone gets."""
+    setUp_fleet, ask, answered = Fleet.setUp, Fleet.ask, Fleet.answered
+
+    def setUp(self):
+        self.setUp_fleet()
+        self.relay.directory['fleets'][0]['members'] += [
+            {'member_id': 'lee1', 'name': 'Lee', 'role': 'member', 'emails': ['lee@acme.example']},
+            {'member_id': 'kit1', 'name': 'Kit', 'role': 'member', 'emails': ['kit@acme.example']}]
+        self.fleet.directory(refresh=True)
+        self.ref = self.fleet.ref('work')
+
+    def effective(self):
+        with self.store.connect() as db:
+            return {(m, k): (self.fleet.rule(db, self.ref, m, k), self.fleet.scope(db, self.ref, m, k))
+                    for m in ('pat1', 'lee1', 'kit1') for k in fleet.RULE_KINDS['work']}
+
+    def old_rules(self, rows, scopes=()):
+        """Rules as a Machine kept them before: per teammate only, nothing for the Fleet."""
+        with self.store.connect() as db:
+            db.execute('DELETE FROM fleet_rules'); db.execute('DELETE FROM fleet_scopes')
+            db.execute("DELETE FROM fleet_meta WHERE key LIKE 'rules_per_fleet:%'")
+            for member, kind, rule, details in rows:
+                db.execute('INSERT INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
+                           (self.ref, member, kind, rule, int(details), NOW.isoformat()))
+            for member, kind, scope in scopes:
+                db.execute('INSERT INTO fleet_scopes(fleet,member_id,kind,scope,updated_at) VALUES(?,?,?,?,?)',
+                           (self.ref, member, kind, json.dumps(scope), NOW.isoformat()))
+
+    def test_folding_keeps_every_teammates_rule_and_the_most_common_becomes_the_fleets(self):
+        self.old_rules([('pat1', 'relationships', 'always', True), ('kit1', 'relationships', 'always', True),  # lee1: nothing, so Ask me first
+                        ('pat1', 'meeting', 'always', False), ('lee1', 'meeting', 'never', False),  # a tie (kit1 asks): Ask me first
+                        ('pat1', 'handling', 'never', False), ('lee1', 'handling', 'never', False), ('kit1', 'handling', 'never', False)],
+                       [('pat1', 'relationships', {'never': ['initech'], 'only': [], 'work_only': True})])
+        before = self.effective()
+        self.fleet.fold_rules()
+        self.assertEqual(self.effective(), before)
+        rules = self.fleet.view()['fleets'][0]
+        self.assertEqual(rules['rules']['relationships'], {'rule': 'always', 'details': True})
+        self.assertEqual(rules['rules']['meeting']['rule'], 'ask')
+        self.assertEqual(rules['rules']['handling']['rule'], 'never')
+        self.assertEqual(rules['exceptions'].get('handling'), None)  # everyone the same: no exceptions
+        self.assertEqual({(e['member_id'], e['rule']) for e in rules['exceptions']['relationships']}, {('lee1', 'ask'), ('pat1', 'always')})
+        self.assertTrue(next(e for e in rules['exceptions']['relationships'] if e['member_id'] == 'pat1')['own_scope'])
+        self.assertEqual({(e['member_id'], e['rule']) for e in rules['exceptions']['meeting']}, {('pat1', 'always'), ('lee1', 'never')})
+        self.fleet.fold_rules()  # once
+        self.assertEqual(self.effective(), before)
+
+    def test_the_fleets_rule_applies_to_everyone_but_an_exception_and_new_teammates_follow_it(self):
+        self.fleet.set_rule('work', fleet.ALL, 'relationships', 'always')
+        self.fleet.set_rule('work', 'lee1', 'relationships', 'never')
+        self.assertEqual(self.ask('relationships', {'about': 'client.example'}), 'answered')
+        self.assertEqual(self.ask('relationships', {'about': 'client.example'}, 'q2', sender='lee1'), 'declined')
+        self.relay.directory['fleets'][0]['members'].append({'member_id': 'new1', 'name': 'Neo', 'role': 'member', 'emails': ['neo@acme.example']})
+        self.fleet.directory(refresh=True)
+        self.assertEqual(self.ask('relationships', {'about': 'client.example'}, 'q3', sender='new1'), 'answered')
+        self.assertEqual(self.fleet.set_rule('work', 'lee1', 'relationships', clear=True)['rule'], 'always')  # the exception goes
+        self.assertEqual(self.ask('relationships', {'about': 'client.example'}, 'q4', sender='lee1'), 'answered')
+        self.fleet.set_rule('work', 'kit1', 'relationships', 'never')
+        self.fleet.set_rule('work', fleet.ALL, 'relationships', 'never')  # kit1's exception now says the same: it goes
+        self.assertNotIn('relationships', self.fleet.view()['fleets'][0]['exceptions'])
+        with self.assertRaises(ValueError):
+            self.fleet.set_rule('work', 'stranger', 'relationships', 'always')
+
+    def test_several_fleets_each_decide_by_the_fleet_a_question_comes_through(self):
+        B = 'fl_' + 'b' * 16
+        acme = dict(self.relay.directory['fleets'][0], id='fl_' + 'a' * 16)
+        beta = {'id': B, 'kind': 'work', 'name': 'Beta', 'secret': 't' * 64, 'asks': ['relationships', 'meeting'], 'members': [
+            {'member_id': 'me2', 'name': 'Owner', 'role': 'member', 'me': True, 'emails': ['owner@acme.example']},
+            {'member_id': 'pat2', 'name': 'Pat', 'role': 'member', 'emails': [TEAM]}]}
+        self.relay.directory = {'fleets': [acme, beta]}
+        self.fleet.directory(refresh=True)
+        self.fleet.set_rule(acme['id'], fleet.ALL, 'relationships', 'always')
+        self.fleet.set_rule(B, fleet.ALL, 'relationships', 'never')
+        self.assertEqual(self.fleet.take_ask({'id': 'a1', 'fleet_id': acme['id'], 'from': 'pat1', 'kind': 'relationships',
+                                              'question': {'about': 'client.example'}}), 'answered')
+        self.assertEqual(self.fleet.take_ask({'id': 'b1', 'fleet_id': B, 'from': 'pat2', 'kind': 'relationships',
+                                              'question': {'about': 'client.example'}}), 'declined')
+
+
 class SeveralFleets(unittest.TestCase):
     """Two Work Fleets, each with its own id from the relay: each on its own, asked and answered one at a time."""
 
@@ -531,7 +612,8 @@ class SeveralFleets(unittest.TestCase):
 
     def test_kept_by_kind_moves_to_the_fleets_id_and_each_fleet_has_its_own_people(self):
         with self.store.connect() as db:
-            self.assertEqual([tuple(r) for r in db.execute('SELECT fleet, member_id FROM fleet_rules')], [(A, 'pat1')])
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM fleet_rules WHERE fleet NOT IN (?,?)', (A, B)).fetchone()[0], 0)
+            self.assertEqual(self.fleet.rule(db, A, 'pat1', 'relationships'), ('always', False))  # Pat alone: now the Fleet's rule
         self.assertEqual([m['name'] for m in self.fleet.teammates(A)], ['Pat'])
         self.assertEqual([m['name'] for m in self.fleet.teammates(B)], ['Lee'])
         self.assertIsNone(self.fleet.member(B, 'pat1'))

@@ -7012,7 +7012,7 @@ class App:
             return self.fleet.decide_request(str(args.get('id') or ''), 'adjust', text=str(args.get('text') or ''))
         if name == 'fleet_rule':
             return self.fleet.set_rule(args.get('fleet') or 'work', str(args.get('member_id') or ''), args.get('kind'),
-                                       args.get('rule'), args.get('details'), args.get('scope'))
+                                       args.get('rule'), args.get('details'), args.get('scope'), bool(args.get('clear')))
         if name == 'fleet_take':
             return self.fleet.take_over(str(args.get('suggestion_id') or ''))
         if name == 'fleet_friend':  # add by username; withdraw, accept, decline or block a request; remove, block or unblock a friend
