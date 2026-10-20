@@ -3804,7 +3804,8 @@ class Store:
                                              'poll_seconds':account.get('poll_seconds',300),
                                              'display_name': account.get('display_name') or account.get('email') or account['id'],
                                              **(dict(row) if row else {}), **dict(counts), **channel_health})
-            result['deliveries'] = [dict(r) for r in db.execute('SELECT * FROM deliveries')]
+            # Newest first: the dashboard shows the top few and says when each happened.
+            result['deliveries'] = [dict(r) for r in db.execute('SELECT * FROM deliveries ORDER BY updated_at DESC,rowid DESC')]
             jobs={r['suggestion_id']:dict(r) for r in db.execute('SELECT * FROM preparations')}
             for suggestion in result['suggestions']:
                 job=jobs.get(suggestion['id'])

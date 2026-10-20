@@ -216,6 +216,13 @@ class Invariants(unittest.TestCase):
             assistant.deliver(self.store,{'telegram_owner':'owner'});self.assertEqual(send.call_count,3)
         self.assertEqual({r['status'] for r in self.store.snapshot([])['deliveries']},{'sent'})
 
+    def test_deliveries_list_newest_first(self):
+        self.store.commit_page('work',{},[event()])
+        ids=[self.store.suggest('order'+str(i),'Card'+str(i),'Prepare',[1])['id'] for i in range(3)]
+        with self.store.connect() as db:
+            for i,sid in enumerate(ids):db.execute('UPDATE deliveries SET updated_at=? WHERE suggestion_id=?',(f'2026-10-0{i+1}T09:00:00+00:00',sid))
+        self.assertEqual([d['suggestion_id'] for d in self.store.snapshot([])['deliveries']],ids[::-1])
+
     def test_bounded_review_is_fair_across_accounts(self):
         self.store.commit_page('work',{},[event(source=str(i)) for i in range(8)])
         self.store.commit_page('work2',{},[event('work2',source=str(i)) for i in range(8)])
