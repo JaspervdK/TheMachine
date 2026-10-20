@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+// The header tagline only jokes about sources this install has connected.
+const html=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
+const block=html.slice(html.indexOf('// taglines:start'),html.indexOf('// taglines:end'));
+const {TAGLINES,taglinePool}=new Function(block+';return {TAGLINES,taglinePool}')();
+const generic=TAGLINES.filter(([,s])=>!s).map(([t])=>t);
+assert.ok(generic.length>=15);
+for(const [text,src] of TAGLINES){assert.ok(!/[—–]/.test(text),text);if(src)assert.ok(Array.isArray(src)&&src.length,text)}
+// Not loaded yet, or nothing connected: generic only, so no wrong joke flashes.
+assert.deepEqual(taglinePool(TAGLINES,undefined),generic);
+assert.deepEqual(taglinePool(TAGLINES,[]),generic);
+const slack=taglinePool(TAGLINES,[{service:'slack'}]);
+assert.ok(slack.includes('I’ve seen your Slack. We should talk.'));
+assert.ok(!slack.includes('I found the email you were avoiding.'));
+assert.equal(slack.length,generic.length+TAGLINES.filter(([,s])=>s?.includes('slack')).length);
+const mail=taglinePool(TAGLINES,[{service:'gmail'},{service:'calendar'}]);
+assert.ok(mail.includes('I found the email you were avoiding.')&&mail.includes('Your calendar called. I took notes.'));
+assert.ok(!mail.some(t=>/Slack/.test(t)));
+// Every tagged source is one the dashboard knows.
+const known=new Set(['gmail','calendar','slack','salesflare','whatsapp','linkedin','android','github','stripe','rss','x','trello']);
+for(const [,src] of TAGLINES)for(const s of src||[])assert.ok(known.has(s),s);
+console.log('taglines ok');
