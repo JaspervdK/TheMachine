@@ -54,12 +54,21 @@ class Brief(unittest.TestCase):
                   mail('work', 1, 'Friend <friend@gmail.com>', 'owner@acme.example'),
                   mail('home', 1, 'Dana Roe <dana@family.example>', 'owner@gmail.com'),  # personal: never shared
                   mail('work', 60, 'Lou <lou@quiet.example>', 'owner@acme.example'),
+                  reply('work', 59, 'lou@quiet.example', 'tq', '<rq@acme.example>'),
+                  # noise: a one-off vendor and a receipt nobody ever wrote back to, from addresses that look like people
+                  mail('work', 3, 'Robin from Vendor <robin@vendor.example>', 'owner@acme.example', message_id='<pitch@vendor.example>'),
+                  mail('work', 2, 'Billing <billing@receipts.example>', 'owner@acme.example', message_id='<receipt@receipts.example>'),
+                  # a new lead: never written to, but the review made a card of their email
+                  mail('work', 2, 'Ari <ari@prospect.example>', 'owner@acme.example', message_id='<lead-1@prospect.example>'),
                   meeting('work', 2, ['sam@client.example'], 'ev-shared'),
                   meeting('home', 2, ['dana@family.example'], 'ev-home')]
         for e in events:
             self.store.commit_page(e['account_id'], {}, [e])
         with self.store.connect() as db:
             db.isolation_level = None
+            lead = db.execute("SELECT id FROM events WHERE instr(metadata,'lead-1@prospect.example')>0").fetchone()[0]
+            db.execute("INSERT INTO suggestions(id,dedupe_key,title,body,event_ids,account_ids,created_at) VALUES('s1','d1','Reply to Ari','',?,'[\"work\"]',?)",
+                       (json.dumps([lead]), NOW.isoformat()))
             graph.build(db, CONFIG, NOW.isoformat())
             db.execute("UPDATE graph_nodes SET quiet=1 WHERE id='email:lou@quiet.example'")
         self.relay = FakeRelay()
@@ -76,10 +85,10 @@ class Brief(unittest.TestCase):
         said = json.dumps(facts)
         for secret in ('Sam', 'sam@', 'Kim', 'kim@', 'Mail ', '40k', 'Secret', 'pricing', 'family.example', 'gmail.com', 'acme.example', 'shop.example', 'Dana'):
             self.assertNotIn(secret, said)
-        self.assertEqual({t['domain'] for t in facts['touched']}, {'client.example', 'globex.example'})
+        self.assertEqual({t['domain'] for t in facts['touched']}, {'client.example', 'globex.example'})  # not vendor, receipts or the lead
         self.assertTrue(all(set(t) == {'org', 'domain', 'count', 'last'} for t in facts['touched']))
         # unanswered and answered inbound as the same hash a claim on it uses; nothing else of the email
-        self.assertEqual([u['key'] for u in facts['unanswered']], [key('open-1@client.example')])
+        self.assertEqual({u['key'] for u in facts['unanswered']}, {key('open-1@client.example'), key('lead-1@prospect.example')})
         self.assertEqual(facts['replied'], [key('done-1@globex.example')])
         self.assertEqual(set(facts['unanswered'][0]), {'org', 'domain', 'key', 'at'})
         self.assertEqual([(m['domain'], len(m['key'])) for m in facts['meetings']], [('client.example', 64)])
@@ -98,10 +107,11 @@ class Brief(unittest.TestCase):
         self.assertEqual(self.relay.sent('/answer')[-1], {'id': 'q1', 'status': 'waiting'})
         waiting = self.fleet.view()['waiting'][0]
         self.assertIn('2 companies', waiting['draft']['preview'])
+        self.assertIn('2 unanswered', waiting['draft']['preview'])
         self.assertNotIn('note', waiting['question'])
         self.fleet.decide('q1', 'always')
         sent = self.relay.sent('/answer')[-1]
-        self.assertEqual((sent['status'], [t['domain'] for t in sent['answer']['touched']][:1]), ('answered', ['client.example']))
+        self.assertEqual((sent['status'], sorted(t['domain'] for t in sent['answer']['touched'])), ('answered', ['client.example', 'globex.example']))
         self.assertEqual(self.fleet.take_ask({**ask, 'id': 'q2'}), 'answered')  # Always: by itself from now on
         self.fleet.set_rule('work', 'pat1', 'brief', 'never')
         self.assertEqual(self.fleet.take_ask({**ask, 'id': 'q3'}), 'declined')
@@ -124,7 +134,7 @@ class Brief(unittest.TestCase):
 
     def test_the_brief_is_assembled_by_code_and_cross_checked_with_answers_and_claims(self):
         own = self.facts()
-        mine = own['unanswered'][0]['key']
+        mine = key('open-1@client.example')
         pat = {'touched': [{'org': 'Client', 'domain': 'client.example', 'count': 2, 'last': '2026-10-19'},
                            {'org': 'Quiet Co', 'domain': 'quiet.example', 'count': 1, 'last': '2026-10-19'}],
                'quiet': [{'org': 'Old Co', 'domain': 'old.example', 'last': '2026-08-01'}],
@@ -135,11 +145,11 @@ class Brief(unittest.TestCase):
         self.assertEqual([x['domain'] for x in view['several']], ['client.example'])
         self.assertEqual({w['name'] for w in view['several'][0]['who']}, {'You', 'Pat'})
         self.assertEqual([x['domain'] for x in view['quiet']], ['old.example'])  # quiet.example: Pat was in touch
-        self.assertEqual([x['domain'] for x in view['unanswered']], ['lead.example'])  # Pat answered mine; one is claimed
+        self.assertEqual([x['domain'] for x in view['unanswered']], ['prospect.example', 'lead.example'])  # Pat answered mine; one is claimed
         self.assertEqual([(m['domain'], m['who'], m['same']) for m in view['meetings']], [('client.example', ['You', 'Pat'], True)])
         text = fleet.brief_text({**view, 'every': 'week', 'fleet_name': 'Acme'})
-        self.assertIn('Several of you were in touch:', text)
-        self.assertIn('Nobody answered yet:', text)
+        self.assertIn('You and Pat are both in touch with Client', text)
+        self.assertIn('Lead is waiting for a reply', text)
         self.assertNotIn('Secret', text)
 
     def test_asked_once_per_period_within_hours_and_told_once_everyone_answered(self):
@@ -171,13 +181,17 @@ class Brief(unittest.TestCase):
         self.fleet.brief_round()
         self.fleet.brief_round()
         self.assertEqual(len(told), 1)
-        self.assertIn('client.example', told[0])
-        self.assertIn('lead.example', told[0])
-        self.assertNotIn('taken.example', told[0])  # a teammate claimed it
+        self.assertIn('You and Pat are both in touch with Client', told[0])
+        self.assertIn('Lead is waiting for a reply', told[0])
+        self.assertNotIn('Taken', told[0])  # a teammate claimed it
         self.assertNotIn('Ignore', told[0])
-        self.assertIn('From you, Pat.', told[0])
+        self.assertNotIn('.example', told[0])  # company names, not domains
+        self.assertIn('From you and Pat.', told[0])
         brief = self.fleet.view()['briefs']['work']
         self.assertEqual(brief['from'], ['Pat'])
+        self.assertIn('unanswered:lead.example', [i['key'] for i in brief['items']])
+        self.fleet.hide_brief_item('work', 'unanswered:lead.example')  # Not needed
+        self.assertNotIn('unanswered:lead.example', [i['key'] for i in self.fleet.view()['briefs']['work']['items']])
         self.assertNotIn(ask_id, [a['id'] for a in self.fleet.view()['asked']])
 
     def test_off_by_default_and_a_brief_question_tells_the_owner_only_in_their_hours(self):
@@ -198,6 +212,44 @@ class Brief(unittest.TestCase):
         self.assertEqual(told, [['brief']])
 
 
+class Items(unittest.TestCase):
+    """The brief as people read it: a few ranked lines, human dates, company names, nothing from today, Not needed."""
+    TODAY = dt.date(2026, 10, 22)  # a Thursday
+    VIEW = {'every': 'day', 'fleet_name': 'Acme', 'from': ['Lieven', 'Pat'],
+            'unanswered': [{'org': 'scribbl.co', 'domain': 'scribbl.co', 'count': 1, 'since': '2026-10-21', 'who': ['You']},  # yesterday, only you
+                           {'org': 'Globex', 'domain': 'globex.example', 'count': 2, 'since': '2026-10-17', 'who': ['You', 'Lieven']},
+                           {'org': 'Initech', 'domain': 'initech.example', 'count': 1, 'since': '2026-10-19', 'who': ['Pat']},
+                           {'org': 'Today Co', 'domain': 'today.example', 'count': 1, 'since': '2026-10-22', 'who': ['Pat']}],
+            'several': [{'org': 'Umbrella', 'domain': 'umbrella.example', 'last': '2026-10-20', 'who': [{'name': 'You', 'count': 3}, {'name': 'Pat', 'count': 1}]}],
+            'meetings': [{'org': 'Hooli', 'domain': 'hooli.example', 'day': '2026-10-23', 'who': ['You', 'Lieven'], 'same': True}],
+            'quiet': [{'org': 'Old Co', 'domain': 'old.example', 'last': '2026-08-01', 'who': ['Pat']}]}
+
+    def test_ranked_human_and_without_noise(self):
+        items = fleet.brief_items(self.VIEW, self.TODAY)
+        self.assertEqual([i['key'] for i in items], ['unanswered:globex.example', 'unanswered:initech.example', 'meeting:hooli.example:2026-10-23',
+                                                     'several:umbrella.example', 'quiet:old.example'])
+        globex = items[0]
+        self.assertEqual(globex['title'], 'Globex is waiting for a reply (2 emails)')
+        self.assertEqual(globex['why'], '5 days, sent to you and Lieven, and nobody answered or took it')
+        self.assertTrue(globex['ask'] and globex['open'])
+        self.assertEqual(items[1]['why'], '3 days, sent to Pat')
+        self.assertFalse(items[1]['open'])  # not in your mail
+        self.assertEqual(items[2]['title'], 'You and Lieven meet Hooli tomorrow')
+        self.assertEqual(items[3]['title'], 'You and Pat are both in touch with Umbrella')
+        self.assertIn('last contact Tue', items[3]['why'])
+        text = fleet.brief_text(self.VIEW, self.TODAY)
+        self.assertNotRegex(text, r'\d{4}-\d{2}-\d{2}|To You|\(to |scribbl|Today Co')
+        self.assertTrue(text.startswith('Your Fleet today · Acme\n• Globex is waiting for a reply (2 emails). 5 days, sent to you and Lieven'))
+        self.assertTrue(text.endswith('From you, Lieven and Pat.'))
+
+    def test_quiet_when_nothing_matters_and_not_needed_hides_one_line(self):
+        self.assertIn('Nothing that needs the team.', fleet.brief_text({'unanswered': [self.VIEW['unanswered'][0]]}, self.TODAY))
+        hidden = fleet.brief_items(self.VIEW, self.TODAY, hidden={'unanswered:globex.example'})
+        self.assertEqual(hidden[0]['key'], 'unanswered:initech.example')
+        many = {'quiet': [{'org': f'Co {n}', 'domain': f'c{n}.example', 'last': '2026-09-01', 'who': ['Pat']} for n in range(8)]}
+        self.assertIn('…and 3 more in the Fleet tab.', fleet.brief_text(many, self.TODAY))
+
+
 class SeveralFleets(unittest.TestCase):
     """Someone in two Work Fleets: each Fleet's brief only hears of that company's accounts."""
     def test_each_fleet_hears_only_its_own_accounts(self):
@@ -205,7 +257,9 @@ class SeveralFleets(unittest.TestCase):
         beta = {'id': 'beta', 'email': 'owner@beta.example', 'service': 'gmail', 'boundary': 'work:Beta'}
         config = {**CONFIG, 'accounts': CONFIG['accounts'] + [beta]}
         store = a.Store(Path(temp.name) / 'events.sqlite')
-        for e in [mail('work', 1, 'Sam <sam@client.example>', 'owner@acme.example'), mail('beta', 1, 'Vic <vic@supplier.example>', 'owner@beta.example')]:
+        for e in [mail('work', 1, 'Sam <sam@client.example>', 'owner@acme.example'), mail('beta', 1, 'Vic <vic@supplier.example>', 'owner@beta.example'),
+                  {**mail('work', 1, 'owner@acme.example', 'sam@client.example'), 'metadata': {**mail('work', 1, 'x', 'y')['metadata'], 'from': 'owner@acme.example', 'to': 'sam@client.example', 'labels': ['SENT']}},
+                  {**mail('beta', 1, 'owner@beta.example', 'vic@supplier.example'), 'metadata': {**mail('beta', 1, 'x', 'y')['metadata'], 'from': 'owner@beta.example', 'to': 'vic@supplier.example', 'labels': ['SENT']}}]:
             store.commit_page(e['account_id'], {}, [e])
         with store.connect() as db:
             db.isolation_level = None

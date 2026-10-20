@@ -11,6 +11,7 @@ What doesn't: no collector, review, preparation, delivery, model or enrichment w
 Slack, WhatsApp, LinkedIn, X) goes to <dir>/sent.jsonl instead, and the phone and Telegram notifications too. guard.py
 refuses any connection beyond 127.0.0.1 and any program start, whatever the code path."""
 import argparse
+import datetime as dt
 import http.client
 import http.server
 import json
@@ -144,6 +145,42 @@ def seed_network(app, net, fixture):
                     except Exception:  # the Fleet still starting up
                         time.sleep(0.5)
             threading.Thread(target=ask, daemon=True).start()
+        threading.Thread(target=seed_brief, args=(app, fixture), daemon=True).start()
+
+
+def seed_brief(app, fixture):
+    """This morning's team brief: this Machine's own facts from the sandbox mail, and two teammates' answers made of the
+    fixture's companies (a customer waiting on one of them, one you both write to, a shared meeting, one gone quiet)."""
+    import fleet
+    for _ in range(20):
+        try:
+            app.fleet.directory(refresh=True)
+            refs = app.fleet.work_fleets()
+            break
+        except Exception:  # the Fleet still starting up
+            time.sleep(0.5)
+    else:
+        return
+    today = dt.date.today()
+    ago = lambda days: (today - dt.timedelta(days=days)).isoformat()
+    company = lambda n: {'org': fixture['companies'][n]['name'], 'domain': fixture['companies'][n]['domain']}
+    team = [m['name'] for m in fixture['network']['work']['team'] if m['machine']]
+    for ref in refs:
+        since = ago(1)
+        with app.fleet.connect() as db:
+            own = app.fleet.compute(db, 'brief', {'since': since}, False, ref)
+        touched = own['touched'][:1] or [{**company(0), 'count': 3, 'last': ago(1)}]
+        first = {'touched': [{**t, 'count': 2, 'last': ago(2)} for t in touched] + [{**company(2), 'count': 4, 'last': ago(1)}],
+                 'quiet': [], 'replied': [], 'meetings': [{**company(6), 'day': (today + dt.timedelta(days=1)).isoformat(), 'key': 'b' * 64}],
+                 'unanswered': [{**company(3), 'key': 'c' * 64, 'at': ago(3)}, {**company(3), 'key': 'd' * 64, 'at': ago(2)}]}
+        second = {'touched': [{**company(2), 'count': 1, 'last': ago(4)}], 'replied': [],
+                  'quiet': [{**company(7), 'last': ago(40)}], 'unanswered': [{**company(5), 'key': 'e' * 64, 'at': ago(4)}],
+                  'meetings': [{**company(6), 'day': (today + dt.timedelta(days=1)).isoformat(), 'key': 'f' * 64}]}
+        view = fleet.assemble_brief(own, [(team[0], fleet.clean_brief(first)), (team[1], fleet.clean_brief(second))])
+        view.update(period=today.isoformat(), every='day', since=since, fleet=ref, fleet_name=fixture['network']['work']['name'], asked=2, missing=[], declined=[])
+        with app.fleet.connect() as db:
+            db.execute('INSERT OR REPLACE INTO fleet_briefs(fleet,period,every,view,answers,built_at) VALUES(?,?,?,?,?,?)',
+                       (ref, today.isoformat(), 'day', json.dumps(view), 2, dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')))
 
 
 def main():

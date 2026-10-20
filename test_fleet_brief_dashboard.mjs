@@ -13,7 +13,11 @@ const rules={relationships:{rule:'ask',details:false},meeting:{rule:'ask',detail
 const view={on:true,kinds:{relationships:'who knows someone',meeting:'meeting context',handling:'who handles shared emails',brief:'brief facts',anything:'free questions'},
  ask_meetings:false,kind_rules:{relationships:['ask','always','never'],meeting:['ask','always','never'],handling:['ask','always','never'],brief:['ask','always','never'],anything:['ask','never']},
  no_details:['handling','brief','anything'],brief:{every:'week',tell:false},
- briefs:{[FL]:{text:'Your Fleet this week\n\nWent quiet:\n- Globex (globex.example): last touch 2026-09-01 (You)',built_at:'2026-10-20T08:00:00+00:00'}},
+ briefs:{[FL]:{text:'Your Fleet this week',built_at:'2026-10-20T08:00:00+00:00',shown:5,items:[
+  {key:'unanswered:globex.example',title:'Globex is waiting for a reply (2 emails)',why:'5 days, sent to you and Pat, and nobody answered or took it',ask:'Who is answering Globex?',open:'https://mail.google.com/mail/#search/from%3Aglobex.example'},
+  {key:'meeting:hooli.example:2026-10-21',title:'You and Pat meet Hooli tomorrow',why:'the same meeting, so agree who leads',ask:'Who leads with Hooli?',open:''},
+  {key:'several:umbrella.example',title:'You and Pat are both in touch with <b>Umbrella</b>',why:'last contact Mon, so keep it to one thread',ask:'Who leads with Umbrella?',open:''},
+  ...[1,2,3,4].map(n=>({key:'quiet:c'+n+'.example',title:'Co '+n+' went quiet',why:'last contact 1 Sep',ask:'',open:''}))]}},
  free:[{id:'abc',fleet:FL,at:'2026-10-20T08:00:00+00:00',question:'Anyone dealt with Stripe disputes?',
   answers:[{name:'Pat',state:'answered',text:'Yes, <b>twice</b>'},{name:'Kim',state:'no answer',text:null}]}],
  fleets:[{id:FL,kind:'work',label:'Work Fleet',name:'Acme',asks:['relationships','meeting','brief','anything'],
@@ -38,7 +42,20 @@ try{
  await page.goto('http://127.0.0.1:'+server.address().port);
  await page.locator('nav [data-tab="fleet"]').click();await page.getByText('What the Fleet saw').waitFor();
  assert.deepEqual(errors,[]);
- assert.match(await page.locator('.fleet-brief-text').innerText(),/Went quiet:\n- Globex/);
+ // The brief: ranked lines with human dates, 5 shown, the rest behind Show more; no inner scroll box, no markup from names
+ const brief=page.locator('.fleet-brief');
+ assert.equal(await brief.locator('.fleet-brief-item:visible').count(),5);
+ assert.match(await brief.locator('.fleet-brief-item').first().innerText(),/Globex is waiting for a reply \(2 emails\)\n5 days, sent to you and Pat/);
+ assert.equal(await brief.locator('b').count(),0);
+ assert.equal(await brief.locator('pre').count(),0);
+ assert.equal(await brief.locator('.fleet-brief-item').first().locator('a[target=_blank]').innerText(),'Open');
+ await brief.locator('[data-brief-more]').click();
+ assert.equal(await brief.locator('.fleet-brief-item:visible').count(),7);
+ await brief.locator('[data-brief-ask]').first().click();
+ assert.equal(await page.locator('.fleet-free-form input').inputValue(),'Who is answering Globex?');
+ await page.locator('.fleet-free-form input').fill('');
+ calls.length=0;await brief.locator('[data-brief-hide="several:umbrella.example"]').click();
+ assert.deepEqual(await waitCall(page,'fleet_brief_hide'),{action:'fleet_brief_hide',args:{fleet:FL,key:'several:umbrella.example'}});
  // Free questions: no Always, no "how much" choice; the brief has no "how much" either
  const values=await page.evaluate(()=>[...document.querySelectorAll('[data-fleet-rule="*"][data-kind="anything"]')].flatMap(e=>e.tagName==='SELECT'?[...e.options].map(o=>o.value):[e.value]));
  assert.deepEqual(values,['ask','never']);
