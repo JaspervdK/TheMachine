@@ -204,9 +204,9 @@ Your Machine then shares the addresses of its work accounts with your Fleet, so 
 them, and nothing else about you. Everything in "You decide, per Fleet" and "Safe by construction" applies the same
 way. You can disconnect it from your account at any time; its key then stops working.
 
-Pairing is free. While a self-hosted Machine answers for someone in a Fleet, the Network costs €4 a month for that
-member, plus VAT where it applies, paid by the Fleet's owner and confirmed before it starts; nothing while the Fleet is
-free.
+Pairing is free, and so are Friends and Family Fleets on the Network. In a Work Fleet, while a self-hosted Machine
+answers for someone, the Network costs €4 a month for that member, plus VAT where it applies, paid by the Fleet's owner
+and confirmed before it starts; nothing while the Fleet is free.
 
 ## Friends
 
@@ -237,8 +237,7 @@ Friends are kept apart from your Fleets: a friend sees nothing of your Fleets, y
 friends, and your friends' rules don't apply to teammates. A friend's questions and answers are treated as data: kept
 to their fixed form, and never given to your AI, its tools or Do it.
 
-Friends are free between hosted Machines. For a self-hosted Machine they are included in the Network fee, at no extra
-charge.
+Friends are free, between hosted and self-hosted Machines alike.
 
 ## Delivery and retry
 
