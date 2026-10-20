@@ -5,8 +5,8 @@ import {OPENCLAW} from './openclaw-root.mjs';
 const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs');
 
 // Reviews while they happen: a running review sits at the top of Connections with its progress and its own steps
-// (latest visible, earlier ones folded), updates live, and only once finished shows under Recent runs. The first look
-// shows on Suggestions too. Nothing is sent anywhere: the fixture server answers everything.
+// (latest visible, earlier ones folded), updates live, and once finished becomes the review's own row (a run that saved
+// its review cleanly is not repeated under Recent runs). The first look is the Suggestions empty state while no cards exist. Nothing is sent anywhere: the fixture server answers everything.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const started=new Date(Date.now()-3*60e3).toISOString();
 let run={run_id:'r1',status:'running',started_at:started,preview:1,auto:1,planned:40,done_count:12,claimed_count:20,account_ids:['gmail'],
@@ -33,9 +33,11 @@ try{
  await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
  page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:'+server.address().port);
- const banner=page.locator('#first-look');
+ const banner=page.locator('#suggestions .first-look-empty');
  await banner.waitFor();
- assert.match(await banner.textContent(),/Reviewing your last 7 days: 12 of 40 signals\. .*nothing is sent/);
+ assert.match(await banner.textContent(),/Taking a first look at your last 7 days.*12 of 40 signals.*Nothing is sent/);
+ assert.equal(await page.locator('#suggestions').textContent().then(t=>t.includes('All clear')),false);
+ assert.equal(await page.locator('#first-look').isHidden(),true);
  const top=page.locator('#review-live .review-live');
  assert.equal(await top.count(),1);
  const text=await top.textContent();
@@ -54,9 +56,10 @@ try{
  run=null;
  for(let i=0;i<80&&await page.locator('#review-live .review-live').count();i++)await page.waitForTimeout(100);
  assert.equal(await page.locator('#review-live .review-live').count(),0);
- assert.equal(await page.locator('#review-runs > div:not(.muted)').count(),1);
+ assert.equal(await page.locator('#review-runs > div:not(.muted)').count(),0);  // saved cleanly: only the review row
  assert.ok((await page.locator('#analyses').textContent()).includes('Reviewed'));
- assert.equal(await banner.isHidden(),true);
+ assert.equal(await banner.count(),0);
+ assert.ok((await page.locator('#suggestions').textContent()).includes('All clear'));
  // Waiting: the next review and the first look say when they start
  live=()=>({runs:[],queue:{waiting:23,planned:23,starts_at:new Date(Date.now()+9*60e3).toISOString(),why:'gap'},first_look:null});
  await page.evaluate(()=>refresh());
@@ -64,7 +67,7 @@ try{
  live=()=>({runs:[],queue:null,first_look:{state:'waiting',why:'settling',days:7,waiting:30}});
  await page.evaluate(()=>refresh());
  assert.ok((await page.locator('#review-live').textContent()).includes('as soon as the first import has settled'));
- assert.ok((await banner.textContent()).includes('about to start'));
+ assert.ok((await banner.textContent()).includes('starts soon')&&(await banner.textContent()).includes('first import has settled'));
  assert.deepEqual(errors,[]);
  console.log(JSON.stringify({live_polls:polls,page_errors:errors}));
 }finally{
