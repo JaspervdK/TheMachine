@@ -493,6 +493,17 @@ def metadata_page(row, offset):
 REVIEW_SESSION_PREFIX = 'agent:main:assistant-review-signals-'
 REVIEW_TERMINAL = ('ok', 'error', 'aborted', 'lost', 'timed_out')
 PREVIEW_DAYS = 7  # what `assistant preview` reviews on a new install
+GRAPH_CHECK_SECONDS = 60  # how often the graph worker looks for new organisation profiles
+# The first look (App.first_look): starts once no new signal came in for this long, tried at most this often, this far apart
+FIRST_LOOK_SETTLE_SECONDS, FIRST_LOOK_TRIES, FIRST_LOOK_RETRY_SECONDS = 180, 3, 1800
+SYSTEM_SERVICES = {'gateway'}  # The Machine's own logs: not a source of the owner's
+
+
+def has_model():
+    """Whether OpenClaw has a default model to review with."""
+    import onboarding
+    model = ((onboarding.openclaw_settings().get('agents') or {}).get('defaults') or {}).get('model')
+    return bool(model.get('primary') if isinstance(model, dict) else model)
 
 
 def active_preview(db):
@@ -1750,6 +1761,10 @@ class Store:
                     db.execute('ALTER TABLE review_runs ADD COLUMN ' + column + ' TEXT')
             if 'preview' not in worker_columns:
                 db.execute('ALTER TABLE review_runs ADD COLUMN preview INTEGER NOT NULL DEFAULT 0')
+            if 'auto' not in worker_columns:  # a preview The Machine started by itself: the first look
+                db.execute('ALTER TABLE review_runs ADD COLUMN auto INTEGER NOT NULL DEFAULT 0')
+            if 'planned' not in worker_columns:  # how many signals the run set out to review, for its progress
+                db.execute('ALTER TABLE review_runs ADD COLUMN planned INTEGER')
             if 'due' not in columns:
                 db.execute('ALTER TABLE suggestions ADD COLUMN due TEXT')
             if 'handled_hint' not in columns:
@@ -3870,6 +3885,29 @@ class Store:
             raise ValueError('This result is too large to preview')
         return candidate
 
+    def review_run_view(self, db, run):
+        """A review run with how far it got: what it claimed, saved (done_count of planned) and from which accounts."""
+        claims = db.execute('SELECT status,items FROM analyses WHERE owner_run=? AND owner_session=?',
+                            (run['run_id'],REVIEW_SESSION_PREFIX+run['run_id'])).fetchall()
+        run['review_saved'] = bool(claims) and all(c['status']=='complete' for c in claims)
+        run['checked_count'] = sum(sum(not i.get('excluded') and not i.get('deferred') for i in json.loads(c['items']))
+                                   for c in claims if c['status']=='complete')
+        run['done_count'] = sum(len(json.loads(c['items'])) for c in claims if c['status']=='complete')
+        items = [i for c in claims for i in json.loads(c['items'])]
+        ids = list({i['id'] for i in items})
+        versions, accounts = {}, set()
+        for n in range(0, len(ids), 500):
+            chunk = ids[n:n+500]
+            for r in db.execute(f"SELECT id,analyzed_version,account_id FROM events WHERE id IN ({','.join('?'*len(chunk))})", chunk):
+                versions[r['id']] = r['analyzed_version']
+                accounts.add(r['account_id'])
+        run['account_ids'] = sorted(accounts)
+        run['pending_count'] = sum(i['id'] in versions and versions[i['id']] < i['version'] for i in items)
+        run['claimed_count'] = sum(len(json.loads(c['items'])) for c in claims)
+        run['duration_seconds'] = max(0,int((dt.datetime.fromisoformat(run['finished_at'] or now())-
+                                             dt.datetime.fromisoformat(run['started_at'])).total_seconds()))
+        return run
+
     def snapshot(self, accounts):
         promises = self.promises()
         with self.connect() as db:
@@ -3936,23 +3974,7 @@ class Store:
             result['review_health'] = {**dict(counts), 'last_completed': db.execute("SELECT max(finished_at) FROM analyses WHERE status='complete'").fetchone()[0]}
             result['review_runs'] = []
             for row in db.execute('SELECT * FROM review_runs ORDER BY started_at DESC LIMIT 20'):
-                run = dict(row)
-                claims = db.execute('SELECT status,items FROM analyses WHERE owner_run=? AND owner_session=?',
-                                    (run['run_id'],REVIEW_SESSION_PREFIX+run['run_id'])).fetchall()
-                run['review_saved'] = bool(claims) and all(c['status']=='complete' for c in claims)
-                run['checked_count'] = sum(sum(not i.get('excluded') and not i.get('deferred') for i in json.loads(c['items']))
-                                           for c in claims if c['status']=='complete')
-                items = [i for c in claims for i in json.loads(c['items'])]
-                ids = list({i['id'] for i in items})
-                versions = {}
-                for n in range(0, len(ids), 500):
-                    chunk = ids[n:n+500]
-                    versions.update(db.execute(f"SELECT id,analyzed_version FROM events WHERE id IN ({','.join('?'*len(chunk))})", chunk).fetchall())
-                run['pending_count'] = sum(i['id'] in versions and versions[i['id']] < i['version'] for i in items)
-                run['claimed_count'] = sum(len(json.loads(c['items'])) for c in claims)
-                run['duration_seconds'] = max(0,int((dt.datetime.fromisoformat(run['finished_at'] or now())-
-                                                     dt.datetime.fromisoformat(run['started_at'])).total_seconds()))
-                result['review_runs'].append(run)
+                result['review_runs'].append(self.review_run_view(db, dict(row)))
             result['review_health']['worker'] = result['review_runs'][0] if result['review_runs'] else None
             for review in result['analyses']:
                 items = json.loads(review['items'])
@@ -4833,24 +4855,23 @@ def browser_link(config):
     return None
 
 
-def preparation_steps(job_id, agent_db=None, limit=4):
-    """The latest step titles of a running preparation, read from the agent's own transcript (read-only).
-
-    Best effort: a missing or busy transcript simply shows no steps."""
+def transcript_tool_calls(session_key, agent_db=None, limit=4, scan=60):
+    """[(at, tool name, arguments)] of the latest tool calls in an agent session, newest first, read from the
+    agent's own transcript (read-only). Best effort: a missing or busy transcript gives none."""
     path = agent_db or AGENT_DB
-    if not re.fullmatch(r'[a-f0-9]{32}', job_id or '') or not Path(path).exists():
+    if not Path(path).exists():
         return []
     try:
         with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)) as db:
             session = db.execute('SELECT session_id FROM session_windows WHERE session_key=? ORDER BY created_at DESC LIMIT 1',
-                                 ('agent:main:assistant-review-preparation-' + job_id,)).fetchone()
+                                 (session_key,)).fetchone()
             if not session:
                 return []
-            rows = db.execute('SELECT created_at,event_json,event_zstd FROM transcript_events WHERE session_id=? ORDER BY seq DESC LIMIT 60',
-                              (session[0],)).fetchall()
+            rows = db.execute('SELECT created_at,event_json,event_zstd FROM transcript_events WHERE session_id=? ORDER BY seq DESC LIMIT ?',
+                              (session[0], scan)).fetchall()
     except sqlite3.Error:
         return []
-    steps = []
+    calls = []
     for created_at, text, packed in rows:
         if text is None and packed is not None:
             try:
@@ -4870,12 +4891,79 @@ def preparation_steps(job_id, agent_db=None, limit=4):
         for part in reversed(message['content']):
             if isinstance(part, dict) and part.get('type') == 'toolCall':
                 arguments = part.get('arguments') if isinstance(part.get('arguments'), dict) else {}
-                title = arguments.get('title') if isinstance(arguments.get('title'), str) else ''
-                title = ' '.join(title.split())[:120] or STEP_NAMES.get(part.get('name'), 'Working')
-                steps.append({'title': title, 'at': dt.datetime.fromtimestamp(created_at / 1000, dt.timezone.utc).isoformat()})
-        if len(steps) >= limit:
+                calls.append((dt.datetime.fromtimestamp(created_at / 1000, dt.timezone.utc).isoformat(), part.get('name'), arguments))
+        if len(calls) >= limit:
             break
-    return steps[:limit][::-1]
+    return calls[:limit]
+
+
+def preparation_steps(job_id, agent_db=None, limit=4):
+    """The latest step titles of a running preparation, read from the agent's own transcript (read-only).
+
+    Best effort: a missing or busy transcript simply shows no steps."""
+    if not re.fullmatch(r'[a-f0-9]{32}', job_id or ''):
+        return []
+    steps = []
+    for at, name, arguments in transcript_tool_calls('agent:main:assistant-review-preparation-' + job_id, agent_db, limit):
+        title = arguments.get('title') if isinstance(arguments.get('title'), str) else ''
+        steps.append({'title': ' '.join(title.split())[:120] or STEP_NAMES.get(name, 'Working'), 'at': at})
+    return steps[::-1]
+
+
+# What a review's own tool calls say it is doing, in the owner's words. Only names and card titles (what a card already
+# shows) come from the call itself; never message text or search words.
+REVIEW_STEPS = {'begin_analysis': 'Taking the next signals to review', 'analysis_page': 'Reading the signals',
+                'events': 'Looking through earlier messages', 'finish_analysis': 'Saving what it found',
+                'promise': 'Noting a promise', 'promise_close': 'Closing a promise that was kept',
+                'remember_fact': 'Remembering something about you', 'status': 'Checking open cards',
+                'preferences': 'Checking what you liked before', 'feedback': 'Checking what you liked before'}
+
+
+def review_step_title(name, arguments, names=None):
+    if name != 'assistant_signals':
+        return STEP_NAMES.get(name, 'Working')
+    action = arguments.get('action') if isinstance(arguments.get('action'), str) else ''
+    args = arguments.get('args') if isinstance(arguments.get('args'), dict) else {}
+    if action == 'suggest' and isinstance(args.get('title'), str) and args['title'].strip():
+        return 'Suggesting: ' + clamp(' '.join(args['title'].replace('**', '').split()), 90)
+    if action == 'graph':
+        node = (names or {}).get(str(args.get('node_id') or ''))
+        return 'Looking up ' + clamp(node, 60) if node else 'Checking who is who'
+    if action == 'analysis_page' and isinstance(args.get('page'), int):
+        return f"Reading the signals, part {args['page'] + 1}"
+    return REVIEW_STEPS.get(action, 'Working')
+
+
+def review_steps(db, run, agent_db=None, limit=8):
+    """The latest steps of a running review, newest first: what it took to review (how many, from which
+    accounts), its own tool calls, and how many cards it made so far."""
+    steps = []
+    labels = {}
+    for claim in db.execute('SELECT started_at,items FROM analyses WHERE owner_run=? AND owner_session=?',
+                            (run['run_id'], REVIEW_SESSION_PREFIX + run['run_id'])):
+        ids = [i['id'] for i in json.loads(claim['items'])]
+        kinds = collections.Counter()
+        for n in range(0, len(ids), 500):
+            chunk = ids[n:n + 500]
+            kinds.update(r[0] for r in db.execute(f"SELECT kind FROM events WHERE id IN ({','.join('?' * len(chunk))})", chunk))
+        what = ', '.join(f'{count} {KIND_WORDS.get(kind, ("signal", "signals"))[count != 1]}' for kind, count in kinds.most_common(3))
+        if what:
+            steps.append({'at': claim['started_at'], 'title': 'Reading ' + what})
+    calls = transcript_tool_calls(REVIEW_SESSION_PREFIX + run['run_id'], agent_db, limit=limit, scan=120)
+    wanted = [str((c[2].get('args') or {}).get('node_id')) for c in calls if isinstance(c[2].get('args'), dict) and (c[2]['args'].get('node_id'))]
+    if wanted:
+        labels = {r['id']: r['name'] for r in db.execute(f"SELECT id,name FROM graph_nodes WHERE id IN ({','.join('?' * len(wanted))})", wanted)}
+    steps += [{'at': at, 'title': review_step_title(name, arguments, labels)} for at, name, arguments in calls]
+    steps.sort(key=lambda x: x['at'], reverse=True)
+    cards = db.execute('SELECT count(*) FROM suggestions WHERE created_at>=?', (run['started_at'],)).fetchone()[0]
+    if cards:
+        steps.insert(0, {'at': now(), 'title': f"{cards} suggestion{'s' if cards != 1 else ''} so far", 'count': True})
+    return steps[:limit]
+
+
+KIND_WORDS = {'gmail.message': ('email', 'emails'), 'calendar.event': ('meeting', 'meetings'), 'slack.message': ('Slack message', 'Slack messages'),
+              'whatsapp.message': ('WhatsApp message', 'WhatsApp messages'), 'linkedin.message': ('LinkedIn message', 'LinkedIn messages'),
+              'android.notification': ('phone notification', 'phone notifications'), 'x.message': ('X message', 'X messages')}
 
 
 NOT_A_PERSON = re.compile(r'(?i)^(?:no-?reply|do-?not-?reply|mailer-daemon|postmaster|notifications?|bounces?)[@+.-]')
@@ -6127,6 +6215,7 @@ class App:
             for connector in result['connectors']:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
             result['model_usage'] = getattr(self, 'model_usage', None)
+            result['review_live'] = self.review_live()
             result['started_at'] = self.started_at()
             result['hours'] = self.hours()
             # Read only the existing heartbeat's runtime facts, never conversation
@@ -7231,9 +7320,17 @@ class App:
         settings = self.config.get('review_worker') or {}
         enabled = settings.get('enabled')
         if not enabled:
-            # Reviews off: only the owner's one-off preview runs (and is monitored) here.
+            # Reviews off: only a preview runs (and is monitored) here: the owner's, or the first look
+            # The Machine starts by itself once a model and a source are there.
             with self.store.connect() as db:
-                if not active_preview(db):
+                running = active_preview(db)
+                due = not running and (self.first_look(db) or {}).get('state') == 'due'
+            if not running and not due:
+                return None
+            if due:
+                try:
+                    self.start_preview(auto=True)
+                except ValueError:  # nothing from the last week after all, or another review just started
                     return None
         runner = runner or self.preparation_gateway
         stamp = dt.datetime.fromisoformat(now())
@@ -7277,8 +7374,8 @@ class App:
                                    oldest > (stamp - dt.timedelta(minutes=settings.get('max_wait_minutes', 60))).isoformat())):
                     return None
                 run = {'run_id': uuid.uuid4().hex, 'status': 'starting', 'started_at': now(), 'attempts': 0}
-                db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at) VALUES(?,?,?,?)",
-                           (run['run_id'], 'starting', run['started_at'], run['started_at']))
+                db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,planned) VALUES(?,?,?,?,?)",
+                           (run['run_id'], 'starting', run['started_at'], run['started_at'], min(waiting, RUN_SIGNAL_BUDGET)))
             if run['status'] == 'starting':
                 db.execute('UPDATE review_runs SET attempts=attempts+1,updated_at=? WHERE run_id=?', (now(), run['run_id']))
         expired = (stamp - dt.datetime.fromisoformat(run['started_at'])).total_seconds() > (
@@ -7319,7 +7416,64 @@ class App:
                            (int(action == 'stop'), 'completion_unconfirmed' if action == 'stop' else None, now(), run['run_id']))
         return result
 
-    def start_preview(self):
+    def first_look(self, db, current=None):
+        """The first look: on a new install with reviews still off, one preview of the last week starts by itself
+        once a model and a source are connected and the first import has settled. Read-only like any preview: its
+        cards show on the dashboard, nothing is sent, nothing is prepared, nothing is done in any account; turning
+        reviews on stays the owner's choice. None when it is not (or no longer) for this install, else its state:
+        'due', or 'waiting' with why (model, sources, settling, retry)."""
+        settings = self.config.get('review_worker') or {}
+        if settings.get('enabled') or settings.get('first_look') is False:
+            return None
+        runs = db.execute('SELECT status,auto,finished_at FROM review_runs ORDER BY started_at').fetchall()
+        if any(not r['auto'] or r['status'] == 'ok' for r in runs) or len(runs) >= FIRST_LOOK_TRIES:
+            return None  # reviewed before, or the owner ran their own preview; or tried enough
+        if any(r['status'] in ('starting', 'running', 'recovering') for r in runs):
+            return None
+        current = current or dt.datetime.fromisoformat(now())
+        sources = [a['id'] for a in self.config.get('accounts', []) if a.get('service') not in SYSTEM_SERVICES]
+        since = (current - dt.timedelta(days=PREVIEW_DAYS)).isoformat()
+        marks = ','.join('?' for _ in sources)
+        waiting, newest = db.execute(f'SELECT count(*),max(ingested_at) FROM events WHERE analyzed_version<version AND deferrals<? AND occurred_at>=? '
+                                     f'AND account_id IN ({marks})', (SET_ASIDE_AFTER, since, *sources)).fetchone() if sources else (0, None)
+        out = {'waiting': min(waiting, RUN_SIGNAL_BUDGET), 'days': PREVIEW_DAYS}
+        if not has_model():
+            return {**out, 'state': 'waiting', 'why': 'model'}
+        if not waiting:
+            return {**out, 'state': 'waiting', 'why': 'sources'}
+        if waiting < RUN_SIGNAL_BUDGET and newest > (current - dt.timedelta(seconds=FIRST_LOOK_SETTLE_SECONDS)).isoformat():
+            return {**out, 'state': 'waiting', 'why': 'settling'}
+        if runs and (runs[-1]['finished_at'] or '') > (current - dt.timedelta(seconds=FIRST_LOOK_RETRY_SECONDS)).isoformat():
+            return {**out, 'state': 'waiting', 'why': 'retry'}
+        return {**out, 'state': 'due'}
+
+    def review_queue(self, db, current=None):
+        """With reviews on and none running: how many signals wait for the next review and about when it starts."""
+        settings = self.config.get('review_worker') or {}
+        if not settings.get('enabled') or db.execute("SELECT 1 FROM review_runs WHERE status IN ('starting','running','recovering')").fetchone():
+            return None
+        waiting, oldest = db.execute('SELECT count(*),min(ingested_at) FROM events WHERE analyzed_version<version AND deferrals<?',
+                                     (SET_ASIDE_AFTER,)).fetchone()
+        if not waiting:
+            return None
+        current = current or dt.datetime.fromisoformat(now())
+        last = db.execute('SELECT finished_at FROM review_runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1').fetchone()
+        after_gap = dt.datetime.fromisoformat(last[0]) + dt.timedelta(seconds=settings.get('gap_seconds', 600)) if last else current
+        full = waiting >= settings.get('min_signals', 40)
+        batch = current if full else dt.datetime.fromisoformat(oldest) + dt.timedelta(minutes=settings.get('max_wait_minutes', 60))
+        return {'waiting': waiting, 'planned': min(waiting, RUN_SIGNAL_BUDGET), 'starts_at': max(after_gap, batch, current).isoformat(),
+                'why': 'batch' if batch >= after_gap and not full else 'gap'}
+
+    def review_live(self):
+        """What the dashboard shows of reviews while they happen: runs in progress, the next one, the first look."""
+        with self.store.connect() as db:
+            runs = [self.store.review_run_view(db, dict(r)) for r in
+                    db.execute("SELECT * FROM review_runs WHERE status IN ('starting','running','recovering') ORDER BY started_at DESC")]
+            for run in runs:
+                run['steps'] = review_steps(db, run, self.config.get('agent_db'))
+            return {'runs': runs, 'queue': self.review_queue(db), 'first_look': self.first_look(db)}
+
+    def start_preview(self, auto=False):
         """`assistant preview`: one regular review run (same session, prompt and tool) over the last
         week's signals, for a new install with reviews still off. Its cards are shown on the dashboard
         only (see Store.suggest); review_step monitors the run. Config stays as it is."""
@@ -7340,7 +7494,8 @@ class App:
             if not waiting:
                 raise ValueError(f'No unreviewed signals from the last {PREVIEW_DAYS} days yet. Check assistant sources; the first import can take a few minutes.')
             run_id, started = uuid.uuid4().hex, now()
-            db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,preview) VALUES(?,'starting',?,?,1)", (run_id, started, started))
+            db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,preview,auto,planned) VALUES(?,'starting',?,?,1,?,?)",
+                       (run_id, started, started, int(auto), min(waiting, RUN_SIGNAL_BUDGET)))
         return {'run_id': run_id, 'started_at': started, 'waiting': waiting, 'signals': min(waiting, RUN_SIGNAL_BUDGET)}
 
     def recap_push(self, message, week):
@@ -7466,16 +7621,35 @@ class App:
             self.model_usage = model_usage(self.config) or getattr(self, 'model_usage', None)
             self.stop.wait(300)
 
+    def graph_freshness(self):
+        """What makes a rebuild worth it before the ten minutes are up: new organisation profiles (looked up by the
+        enrichment worker, or by a hosting agent writing straight into the database), and, while the graph has no
+        organisations yet (the first import), new signals."""
+        with self.store.connect() as db:
+            profiles = tuple(db.execute("SELECT count(*),max(fetched_at) FROM org_profiles WHERE status!='error'").fetchone())
+            empty = not db.execute("SELECT 1 FROM graph_nodes WHERE kind='org' LIMIT 1").fetchone()
+            signals = tuple(db.execute('SELECT count(*),max(ingested_at) FROM events').fetchone()) if empty else None
+        return profiles, signals
+
     def graph_worker(self):
-        """Rebuilds the people and projects graph every ten minutes, and soon after a label or merge."""
-        wait = 30
+        """Rebuilds the people and projects graph every ten minutes, soon after a label or merge, and within a minute
+        of new organisation profiles or, on a new install, of new signals: so enriched details show right away."""
+        wait, built, seen = 30, 0.0, None
         while not self.stop.is_set():
-            self.graph_dirty.wait(wait)
+            dirty = self.graph_dirty.wait(min(wait, GRAPH_CHECK_SECONDS))
             if self.stop.is_set():
                 return
+            try:
+                fresh = self.graph_freshness()
+            except Exception:
+                fresh = seen
+            if not dirty and time.monotonic() - built < wait and fresh == seen:
+                continue
             self.graph_dirty.clear()
+            built, seen = time.monotonic(), fresh  # a failing build is not retried every minute
             try:
                 self.graph_build()
+                seen = self.graph_freshness()
                 wait = 600
             except Exception as error:
                 LOG.error('graph error=%s', type(error).__name__)
@@ -7709,6 +7883,8 @@ class App:
                             self.output(200, app.graph_action({'limit': 15}))
                     except (ValueError, sqlite3.OperationalError):
                         self.output(404, {'error': 'Not in the graph'})
+                elif path.path == '/api/reviews/live':  # polled while a review runs: small, unlike /api/status
+                    self.output(200, app.review_live())
                 elif path.path == '/api/progress':
                     try:
                         self.output(200, app.preparation_progress(urllib.parse.parse_qs(path.query).get('id', [''])[0]))
