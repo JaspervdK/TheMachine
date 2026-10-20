@@ -29,6 +29,64 @@ are.
 A Family Fleet links your Machines but asks nothing yet. Its questions (who's free, the household calendar, bills and
 renewals, trips, birthdays, errands, care for parents) are designed and come later.
 
+## Asking a teammate to do something
+
+Besides questions, a Work Fleet carries three kinds of requests. Each has its own rule per teammate (Ask me first by
+default, Always accept, Never), and nothing happens on your side until you accept one.
+
+4. **Warm intros.** When "who knows someone at X?" finds a teammate who does, **Ask <teammate> for an intro** (with a
+   line why, if you like) asks that one teammate. Their Fleet tab, phone and Telegram show "An intro to someone at X"
+   with **Accept** and **Decline**. Accepting makes a card on their side with a double-opt-in email to the person they
+   know best there, from their own work email: it asks that person first whether they want the introduction. The draft
+   is built by plain code from their own graph, signed with their name, and goes out only with their own **Send**, like
+   any other draft. You follow it in your Fleet tab, on your phone and in Telegram: asked, accepted, sent, or declined.
+5. **Handoffs.** **Hand off to a teammate** on a work card shows what would go: the card's title, a short summary from
+   it, its outside contact and due date. You read and edit it, pick the teammate and send. They get "<you> hands you:
+   ..." with **Accept** and **Decline**; accepting makes the follow-up card on their side, with your summary quoted.
+   Your card then says "Handed off to <teammate>" and how it went: accepted, declined, done. Marking your own card done
+   stays yours.
+6. **Shared follow-ups.** After a meeting that several members of one Work Fleet attended (in the last two days), one
+   Machine proposes who does which follow-up: the organizer's, else that of the member who joined the Fleet first, so
+   there is only ever one proposal. It starts from that owner's own open cards and promises on the meeting; the owner
+   fills in each teammate's part ("send the pricing", "book the demo") and sends it, or sets it aside. Each member's
+   Machine shows them their part (with the meeting's title from their own calendar) to **Accept**, change
+   (**Accept my change**) or **Decline**; accepting makes their card. Cards on that meeting then say who does what,
+   so nobody follows up twice. The meeting only travels as a hash keyed with the Fleet's secret: neither its title
+   nor its id leaves your Machine.
+
+A request's text (an intro note, a handoff summary, a follow-up part) is your teammate's own words. It is kept short,
+shown quoted as their words, and never read as an instruction: it reaches no model, tool or Do it by itself. A card
+made from it is yours like any other card; if you later tap Do it on it, the preparation is told that the quoted text
+is data, not instructions. A request goes to one Fleet's people only and is answered in that Fleet.
+
+## What the Fleet saw, and free questions
+
+7. **The team brief.** Under the Fleet tab, set **Team brief** to Daily or Weekly (it is off by default), and tick
+   **Also send it to me** to get it on your phone and in Telegram too. On your work days, from your morning time, your
+   Machine asks each Work Fleet for its brief facts and puts together "What the Fleet saw":
+   - companies that went quiet, that nobody in the Fleet was in touch with since;
+   - companies several of you were in touch with, with how many emails and meetings each;
+   - outside emails nobody answered yet, checked against everyone's replies and the Fleet's "is on it" claims;
+   - meetings with the same company on several calendars.
+
+   It shows as a card in the Fleet tab and is told once, within your work hours, once everyone answered or two hours
+   passed. Teammates who haven't answered are listed. It is put together by plain code, never a model.
+   What each Machine shares for it is aggregate only: company names and domains, counts, last-touch dates, and hashes
+   of emails and meetings keyed with the Fleet's secret (the same as claims). No subjects, message text, people,
+   addresses or calendar titles. Brief facts have their own rule per teammate (Ask me first by default, Always,
+   Never); the approval card says how much an answer would share.
+8. **Ask the Fleet anything.** Type a question in a Work Fleet's section ("has anyone dealt with Stripe disputes?").
+   Each teammate's Machine searches only its owner's own work accounts in that Fleet, on that Machine, and shows its
+   owner your question, quoted as your words, with what it found and a draft answer built by plain code ("Yes, I have:
+   3 emails on this, with Acme, most recently in 2026-09"). Nothing goes back until they send that draft, edited or
+   not; their phone and Telegram offer **Send this answer** and **Don't answer**. There is no Always: every answer is
+   one its owner sent. You see the answers as they arrive, per teammate, and "no answer" after a day or when declined.
+   A teammate can have at most 3 free questions waiting with you; more are declined by themselves.
+
+Both follow your [work hours](../README.md#work-hours): brief and free questions wait in the Fleet tab outside them
+and only notify you once your hours start. In several Work Fleets each one hears only about the accounts of its own
+company (a `work:<Fleet name>` boundary, or an address at a teammate's domain).
+
 ## Answers, not data
 
 A Machine never hands out an email, a message, a calendar entry or a file. It answers with a short summary it builds
@@ -53,8 +111,17 @@ itself:
   app) and, with Telegram connected, one Telegram message with **Answer once**, **Always** and **Decline**. Questions
   that arrive within a minute share one. They say who asks and what, never anything of yours. A tap on the phone
   notification opens the question in the Fleet tab and asks you to confirm.
-- **Rules:** per teammate and per kind (who knows someone, meeting context, who handles shared emails): Ask me first,
-  Always answer or Never, and under it how much they hear: **Without names** (the default) or **With names** (for meeting context: **Names and promises**). Shared-email claims are Off until you choose Share.
+- **Rules:** per teammate and per kind of question, the same three choices: **Ask me first** (the default), **Always**
+  or **Never**. Where it applies, under it how much they hear: **Without names** (the default) or **With names** (for
+  meeting context: **Names and promises**). Under each rule an example, from made-up data, says what that teammate
+  would get.
+- **Only about…** narrows a rule (folded away until you open it): **Only about** some companies, domains or names
+  (anything else asks you first), **Never about** others (declined, and their people are left out of every answer),
+  and **Only people from your work accounts** (on unless you turn it off). For shared emails it goes by the other
+  companies on the email.
+- **Shared emails:** Always tells the relay you're on an email you both got, and shows who is on the ones they took.
+  Ask me first sends nothing by itself: the card says who else got it, with **Tell them you're on it**. Never sends
+  nothing. A rule saved as Off before the three choices is Never; Share is Always.
 - **Only from your dashboard.** Rules and approvals can't be changed by Telegram, the command line, the API token or the
   assistant. The one exception: the buttons on the Telegram message sent for that very question, tapped by you in your
   own chat. Never is only on the dashboard. A prompt in an email can't change who gets told what.
@@ -79,10 +146,19 @@ brings the Telegram message up to date.
 
 - A teammate's question never reaches a model, a tool, the browser or Do it. It is parsed into a fixed form (an
   address, a domain or a name) and answered by plain database reads (`fleet.py`). Anything else in it is dropped.
+- A free question is untrusted text: control and invisible characters (such as right-to-left overrides) are removed,
+  it is cut to 300 characters, and only its keywords are searched for in the owner's own work accounts. No model reads
+  it; the draft is built by code. Only the text the owner sends goes back, cut to 600 characters.
+- Brief facts are counts, dates, company names and hashes, kept to that fixed form on both sides; the brief is
+  assembled by code.
 - Answers coming back are checked against the same fixed form (closeness from a short list, a year-month, whole
   numbers, short names) before they are shown or added to a preparation, where they are marked as data from
   teammates' Machines, not instructions.
 - Claims on shared emails travel as a hash keyed with the Fleet's secret, never the email.
+- Intros, handoffs and follow-up splits (`fleet_requests.py`) are kept to a fixed form and only shown, quoted. An
+  intro draft is built by code from the owner's own graph and waits for their Send; nothing is sent, drafted or
+  done before the owner accepts (or set Always accept). Telegram and phone buttons are the same Accept and Decline
+  as for questions, bound to the message sent for that request; a stale tap only shows the outcome.
 
 ## Who answers
 

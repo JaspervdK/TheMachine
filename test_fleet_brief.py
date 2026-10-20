@@ -228,6 +228,8 @@ class SeveralFleets(unittest.TestCase):
             beta_facts = machine.compute(db, 'brief', {'since': since}, False, 'fl_' + 'b' * 16)
         self.assertEqual([t['domain'] for t in acme['touched']], ['client.example'])
         self.assertEqual([t['domain'] for t in beta_facts['touched']], ['supplier.example'])
+        with self.assertRaises(ValueError):
+            machine.ask_free('has anyone dealt with Stripe disputes?', 'work')  # say which Fleet
 
 
 if __name__ == '__main__':

@@ -334,7 +334,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_brief'}
+OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief'}
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
@@ -6118,9 +6118,10 @@ class App:
             self.fleet.notify_notice = self.fleet_notify_notice
             self.fleet.retell_notice = lambda message_id, message: threading.Thread(
                 target=self.fleet_retell, args=(message_id, message), daemon=True).start()
-            # Briefs keep to the owner's hours.
+            # Briefs and free questions keep to the owner's hours; a free question is searched with the Machine's own search.
             self.fleet.hours = {'local_now': lambda: dt.datetime.now(local_tz()), 'work_day': is_work_day, 'in_hours': in_hours,
                                 'morning': lambda: WORK_HOURS['morning']}
+            self.fleet.search = lambda accounts, query, limit: self.related(accounts, query=query, limit=limit)[0]
             self.fleet.notify_brief = self.fleet_notify_brief
 
     def gmail_message(self, account_id, message_id):
@@ -6762,8 +6763,10 @@ class App:
             if not question:
                 raise ValueError('Ask about a company, a domain, an email address or a name')
             return self.fleet.ask(kind, question, fleet=args.get('fleet') or 'work')
-        if name == 'fleet_decide':
-            return self.fleet.decide(args.get('id'), args.get('choice'))
+        if name == 'fleet_decide':  # text: a free question's answer as the owner edited it
+            return self.fleet.decide(args.get('id'), args.get('choice'), text=args.get('text') if isinstance(args.get('text'), str) else None)
+        if name == 'fleet_free':
+            return self.fleet.ask_free(str(args.get('text') or ''), args.get('fleet') or 'work')
         if name == 'fleet_brief':
             return self.fleet.set_brief(args.get('every'), args.get('tell'))
         if name == 'fleet_rule':
@@ -8094,7 +8097,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

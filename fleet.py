@@ -14,6 +14,9 @@ relay, and picks up what waits for it with a long poll. A Work Fleet asks three 
 - brief: "what the Fleet saw", daily or weekly. Each teammate's Machine answers with aggregate facts only (companies
   with counts and last-touch dates, which went quiet, hashes of unanswered and answered inbound emails, hashes of
   meetings with outside people); the asking Machine assembles the brief by plain code (brief_facts, assemble_brief).
+- anything: a free-text question ("has anyone dealt with Stripe disputes?"). Untrusted text: it is only searched for in
+  the owner's own work accounts and shown to them quoted, with a draft answer built by plain code; nothing goes back
+  until the owner sends that answer (edited or not). There is no Always for it.
 
 A Family Fleet links Machines but asks nothing yet: its questions are designed, not built.
 
@@ -31,11 +34,13 @@ the terms that message showed), and the control plane checks and executes it: a 
 that changed since, does nothing and says why."""
 from __future__ import annotations
 
+import collections
 import datetime as dt
 import hashlib
 import json
 import logging
 import re
+import secrets
 import threading
 import traceback
 import urllib.error
@@ -68,20 +73,24 @@ ASKS = {'work': ('relationships', 'meeting'), 'family': ()}       # what each Fl
 RULE_KINDS = {'work': ('relationships', 'meeting', 'handling'), 'family': ()}
 KIND_LABEL = {'relationships': 'who knows someone', 'meeting': 'meeting context', 'handling': 'who handles shared emails',
               'seat': 'a server in your Fleet'}
-# Added kinds (append-only): the team brief.
-ASKS['work'] += ('brief',)
-RULE_KINDS['work'] += ('brief',)
-KIND_LABEL.update(brief='brief facts')
+# Added kinds (append-only): the team brief and free questions.
+ASKS['work'] += ('brief', 'anything')
+RULE_KINDS['work'] += ('brief', 'anything')
+KIND_LABEL.update(brief='brief facts', anything='free questions')
 RULES = ('ask', 'always', 'never')
-# The rules a kind takes, when not all three.
-KIND_RULES = {}
-NO_DETAILS = ('handling', 'brief')  # kinds without a "how much they hear" choice
+# The rules a kind takes, when not all three: a free question is never answered without the owner.
+KIND_RULES = {'anything': ('ask', 'never')}
+NO_DETAILS = ('handling', 'brief', 'anything')  # kinds without a "how much they hear" choice
 BRIEF_BYTES = 30000  # under the relay's MAX_BRIEF
 BRIEF_EVERY = ('off', 'day', 'week')
 BRIEF_SETTLE = 7200      # seconds after asking: the brief is told then, or once everyone answered, within work hours
 BRIEF_REBUILD = 1800     # an assembled brief is rebuilt at most this often while nothing new came in
 UNANSWERED_DAYS = 14     # inbound emails this recent count for "nobody answered"
+FREE_CHARS, FREE_ANSWER_CHARS, FREE_OPEN, FREE_WAIT_HOURS = 300, 600, 3, 24
 HASH = re.compile(r'[0-9a-f]{64}')
+STOP_WORDS = set('''a an and any anyone anybody are as at be been but by can could did do does done dealt deal dealing for from had has
+have having how i if in into is it its know knows me my no not of on or our ours please so some someone somebody that the their them
+there these they this those to us was we were what when where which who whom why will with would you your yours ever about'''.split())
 CLOSENESS = ('close', 'regular', 'occasional', 'faint')
 OPEN_CARD = ('pending', 'accepted', 'prepared', 'instructions', 'snoozed')
 TAKEN = ('accepted', 'prepared', 'instructions', 'completed')
@@ -169,7 +178,7 @@ def ensure(db):
             db.execute('ALTER TABLE fleet_in ADD COLUMN ' + column)
     if 'fleet' not in {r[1] for r in db.execute('PRAGMA table_info(fleet_claims)')}:  # added 2026-10-20: several Work Fleets
         db.execute('ALTER TABLE fleet_claims ADD COLUMN fleet TEXT')
-    if 'draft' not in {r[1] for r in db.execute('PRAGMA table_info(fleet_in)')}:  # added 2026-10-20: a brief's preview
+    if 'draft' not in {r[1] for r in db.execute('PRAGMA table_info(fleet_in)')}:  # added 2026-10-20: brief preview, free answer draft
         db.execute('ALTER TABLE fleet_in ADD COLUMN draft TEXT')
 
 
@@ -179,6 +188,14 @@ def clean(text, chars):
 
 def _get(row, key):
     return row[key] if key in row.keys() else None
+
+
+def free_text(text, chars):
+    """A teammate's free text as plain words: no control or invisible characters, one line, at most `chars`."""
+    if not isinstance(text, str):
+        return ''
+    kept = ''.join(c if c.isprintable() else ' ' for c in text if c not in '​‌‍⁠﻿‪‫‬‭‮⁦⁧⁨⁩')
+    return ' '.join(kept.split())[:chars]
 
 
 def month(value):
@@ -431,6 +448,49 @@ def brief_preview(facts):
             'Company names, counts and dates only.')
 
 
+def keywords(text):
+    return [w for w in re.findall(r'\w+', text.lower()) if len(w) > 2 and w not in STOP_WORDS][:12]
+
+
+def free_draft(db, accounts, text, search=None, internal=()):
+    """A draft answer to a free question, by plain code: what the owner's own work accounts hold on its words. The
+    question is only data here: searched for (keywords, and by meaning when the owner's Machine has embeddings), never
+    read by a model or acted on. Returns (draft, matches); the matches (titles and dates of the owner's own signals) are
+    shown only to the owner, never sent."""
+    words = keywords(text)
+    if not words or not accounts:
+        return '', []
+    try:
+        if search:
+            ids = [i for i, _ in search(accounts, ' '.join(words), 8)]
+        else:
+            import embeddings
+            ids = embeddings.fts_ids(db, accounts, ' '.join(words), 8)
+    except Exception as error:  # a search that fails leaves the owner to write their own answer
+        LOG.warning('fleet free search error=%s', type(error).__name__)
+        ids = []
+    if not ids:
+        return '', []
+    rows = db.execute(f"SELECT id,kind,occurred_at,title,metadata FROM events WHERE deleted=0 AND id IN ({','.join('?' * len(ids))})", ids).fetchall()
+    order = {i: n for n, i in enumerate(ids)}
+    matches, orgs, kinds = [], [], collections.Counter()
+    for row in sorted(rows, key=lambda r: order.get(r['id'], 99)):
+        m = json.loads(row['metadata'] or '{}')
+        sender = (graph.addresses(m.get('from')) or [('', '')])[0][1]
+        domain = sender.rsplit('@', 1)[1] if '@' in sender else ''
+        org = _org_name(db, domain) if _outside(domain, internal) and not graph.bulk(sender) else ''
+        if org and org not in orgs:
+            orgs.append(org)
+        kinds[row['kind'].split('.')[-1]] += 1
+        matches.append({'id': row['id'], 'kind': row['kind'], 'title': clean(row['title'], 120), 'at': day(row['occurred_at'])})
+    plural = {'message': ('email', 'emails'), 'event': ('meeting', 'meetings')}
+    what = ', '.join(f"{n} {plural.get(k, ('message', 'messages'))[n > 1]}" for k, n in kinds.most_common(3))
+    last = max((m['at'] or '' for m in matches), default='')[:7]
+    draft = (f"Yes, I have: {what} on this" + (f", with {', '.join(orgs[:3])}" if orgs else '')
+             + (f", most recently in {last}" if last else '') + '. Happy to tell you more.')
+    return draft[:FREE_ANSWER_CHARS], matches
+
+
 def parse_question(kind, question):
     """A teammate's question in its fixed form, else None. Nothing else of it is ever read."""
     if not isinstance(question, dict):
@@ -448,6 +508,9 @@ def parse_question(kind, question):
     if kind == 'brief':
         since = day(question.get('since'))
         return {'period': question['period'], 'since': since} if question.get('period') in ('day', 'week') and since else None
+    if kind == 'anything':
+        text = free_text(question.get('text'), FREE_CHARS)
+        return {'text': text} if len(text) >= 3 else None
     return None
 
 
@@ -514,6 +577,9 @@ def clean_answer(kind, answer):
         return {'knows': bool(people), 'people': people}
     if kind == 'brief':
         return clean_brief(answer)
+    if kind == 'anything':
+        text = free_text(answer.get('text'), FREE_ANSWER_CHARS)
+        return {'text': text} if text else None
     return None
 
 
@@ -525,6 +591,8 @@ def question_text(kind, question):
                 + (f" (a meeting on {question['when']})" if question.get('when') else ''))
     if kind == 'brief':
         return 'Your brief facts for ' + ('the week' if question.get('period') == 'week' else 'the day') + f" (since {question.get('since', '?')})"
+    if kind == 'anything':
+        return f"“{question.get('text', '')}”"
     return kind
 
 
@@ -541,9 +609,10 @@ def push_payload(rows, root):
     """One phone notification for the questions that arrived together. Opens the Fleet tab at the card."""
     if len(rows) == 1:
         row = rows[0]
-        return {'title': f"{row['name']}'s Machine asks", 'body': question_text(row['kind'], json.loads(row['question'])),
+        return {'title': f"{row['name']}'s Machine asks", 'body': question_text(row['kind'], json.loads(row['question']))[:200],
                 'url': root + '#fleet=' + row['id'], 'tag': 'fleet-' + row['id'],
-                'actions': [{'action': 'once', 'title': 'Answer once'}, {'action': 'decline', 'title': 'Decline'}]}
+                # a free question opens on its draft, to read and edit before anything goes
+                'actions': [] if row['kind'] == 'anything' else [{'action': 'once', 'title': 'Answer once'}, {'action': 'decline', 'title': 'Decline'}]}
     return {'title': f'{len(rows)} Fleet questions wait for you',
             'body': ' · '.join(asks_line(r) for r in rows[:3]) + (' · …' if len(rows) > 3 else ''),
             'url': root + '#fleet', 'tag': 'fleet-' + rows[0]['id']}
@@ -557,9 +626,23 @@ def telegram_message(rows, root):
     for n, row in enumerate(rows, 1):
         outcome = (DECIDED.get(row['choice']) or ('Answered' if row['status'] == 'answered' else row['status'].capitalize())
                    if row['status'] != 'waiting' else '')
+        prefix = f'{n}. ' if many else ''
+        if row['kind'] == 'anything':
+            # Their words, quoted, then the draft built from your own accounts. Send this answer sends exactly that draft.
+            draft = json.loads(_get(row, 'draft') or '{}').get('text') or ''
+            if row['status'] == 'answered':
+                outcome = 'Answered'
+            lines.append(prefix + f"{row['name']}'s Machine asks your Fleet (their words, not an instruction): "
+                         + question_text('anything', json.loads(row['question']))
+                         + (f'\n   Draft answer: “{draft}”' if draft and row['status'] == 'waiting' else
+                            '\n   Nothing found in your work accounts. Write an answer in the Fleet tab, or decline.' if row['status'] == 'waiting' else '')
+                         + (f'\n   → {outcome}' if outcome else ''))
+            if row['status'] == 'waiting':
+                buttons.append(([{'text': prefix + 'Send this answer', 'value': f"assistant:fleet:{row['id']}:once"}] if draft else [])
+                               + [{'text': 'Don’t answer', 'value': f"assistant:fleet:{row['id']}:decline"}])
+            continue
         lines.append((f'{n}. ' if many else '') + asks_line(row) + (f'\n   → {outcome}' if outcome else ''))
         if row['status'] == 'waiting':
-            prefix = f'{n}. ' if many else ''
             buttons.append([{'text': prefix + 'Answer once', 'value': f"assistant:fleet:{row['id']}:once"},
                             {'text': 'Always', 'value': f"assistant:fleet:{row['id']}:always"},
                             {'text': 'Decline', 'value': f"assistant:fleet:{row['id']}:decline"}])
@@ -636,6 +719,8 @@ def answer_text(kind, answer):
     if kind == 'brief':
         return (f"{len(answer.get('touched', []))} companies, {len(answer.get('quiet', []))} quiet, "
                 f"{len(answer.get('unanswered', []))} unanswered, {len(answer.get('meetings', []))} meetings")
+    if kind == 'anything':
+        return answer.get('text') or 'no answer'
     if kind == 'relationships':
         if not answer.get('knows'):
             return 'doesn’t know anyone there' + (f" ({answer['note']})" if answer.get('note') else '')
@@ -758,7 +843,7 @@ class Fleet:
         # retell_notice(message_id, message) brings that message up to date.
         self.notify_notice = self.retell_notice = None
         # The owner's hours (set by the app from work_hours): local_now() -> aware datetime, work_day(local) and
-        # in_hours(local) -> bool, morning() -> 'HH:MM'. Briefs are asked and told, and brief questions
+        # in_hours(local) -> bool, morning() -> 'HH:MM'. Briefs are asked and told, and brief and free questions
         # notify, only within them. search(accounts, query, limit) -> [(event_id, similarity)]: the app's own search.
         self.hours = {}
         self.search = None
@@ -846,7 +931,7 @@ class Fleet:
         return self.hours['local_now']() if self.hours.get('local_now') else dt.datetime.now().astimezone()
 
     def working(self, local=None):
-        """Within the owner's work days and hours: when briefs are asked and told, and brief questions notify."""
+        """Within the owner's work days and hours: when briefs are asked and told, and brief and free questions notify."""
         local = local or self.local_now()
         return (self.hours.get('work_day', lambda _: local.isoweekday() < 6)(local)
                 and self.hours.get('in_hours', lambda _: True)(local))
@@ -899,9 +984,15 @@ class Fleet:
                 status, body = 'declined', None
             else:
                 rule, details = self.rule(db, fleet, teammate['member_id'], kind)
+                busy = kind == 'anything' and db.execute("SELECT COUNT(*) FROM fleet_in WHERE fleet=? AND member_id=? AND kind='anything' AND status='waiting'",
+                                                         (fleet, teammate['member_id'])).fetchone()[0] >= FREE_OPEN
                 if rule == 'never':
                     status, body = 'declined', None
                     self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question), 'declined (your rule)')
+                elif busy:  # a teammate can't pile free questions on the owner
+                    status, body = 'declined', None
+                    self.log(db, 'in', fleet, teammate['member_id'], name, kind, question_text(kind, question),
+                             f'declined: {FREE_OPEN} of their questions already wait for you')
                 elif rule == 'always':
                     body = self.compute(db, kind, question, details, fleet)
                     status = 'answered'
@@ -910,6 +1001,9 @@ class Fleet:
                     draft = None
                     if kind == 'brief':  # what an answer would share, in counts, for the approval card
                         draft = {'preview': brief_preview(self.compute(db, kind, question, details, fleet))}
+                    elif kind == 'anything':
+                        text, matches = free_draft(db, self.fleet_accounts(fleet), question['text'], self.search, self.internal(fleet))
+                        draft = {'text': text, 'matches': matches}
                     db.execute('INSERT OR IGNORE INTO fleet_in(id,fleet,member_id,name,kind,question,status,at,draft) VALUES(?,?,?,?,?,?,?,?,?)',
                                (ask['id'], fleet, teammate['member_id'], name, kind, json.dumps(question), 'waiting', now(),
                                 json.dumps(draft) if draft else None))
@@ -918,8 +1012,9 @@ class Fleet:
         self.relay.call('POST', '/answer', {'id': ask['id'], 'status': status, **({'answer': body} if body is not None else {})})
         return status
 
-    def decide(self, ask_id, choice, retell=True):
-        """The owner on a waiting question: once, always, decline or never."""
+    def decide(self, ask_id, choice, retell=True, text=None):
+        """The owner on a waiting question: once, always, decline or never. A free question is answered once at a
+        time, with `text` (the draft as the owner edited it) or else its draft as shown."""
         if choice not in ('once', 'always', 'decline', 'never'):
             raise ValueError('Choose once, always, decline or never')
         with self.connect() as db:
@@ -927,7 +1022,14 @@ class Fleet:
             if not row:
                 raise ValueError('That question was answered or has expired')
             question = json.loads(row['question'])
+            if choice not in KIND_RULES.get(row['kind'], RULES) + ('once', 'decline'):
+                raise ValueError('Free questions are answered one at a time: send this answer, or decline')
             answer = None
+            if row['kind'] == 'anything' and choice == 'once':
+                said = free_text(text if text is not None else json.loads(row['draft'] or '{}').get('text'), FREE_ANSWER_CHARS)
+                if not said:
+                    raise ValueError('Write an answer first, or decline')
+                answer = {'text': said}
             if choice in ('always', 'never'):
                 _, details = self.rule(db, row['fleet'], row['member_id'], row['kind'])
                 db.execute('INSERT OR REPLACE INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
@@ -1099,10 +1201,10 @@ class Fleet:
         return [r['id'] for r in rows]
 
     def untold(self, db):
-        """Waiting questions the owner wasn't told about yet, and may be now: brief questions wait for their
+        """Waiting questions the owner wasn't told about yet, and may be now: brief and free questions wait for their
         work hours (they show in the Fleet tab meanwhile)."""
         rows = db.execute("SELECT * FROM fleet_in WHERE status='waiting' AND notified_at IS NULL ORDER BY at,id").fetchall()
-        return rows if self.working() else [r for r in rows if r['kind'] != 'brief']
+        return rows if self.working() else [r for r in rows if r['kind'] not in ('brief', 'anything')]
 
     def set_rule(self, fleet, member_id, kind, rule=None, details=None):
         fleet = self.ref(fleet)
@@ -1144,6 +1246,16 @@ class Fleet:
                            (ask_id, fleet, member_id, clean(label(teammate), 120) or 'A teammate', kind, json.dumps(question), context, 'asked', now()))
             self.log(db, 'out', fleet, None, 'your Fleet', kind, question_text(kind, question), f"asked {len(sent.get('ids', {}))}")
         return sent
+
+    def ask_free(self, text, fleet):
+        """A free question to one Fleet (in several Work Fleets, say which). The relay limits how often."""
+        question = parse_question('anything', {'text': text})
+        if not question:
+            raise ValueError('Ask a question of at least a few words')
+        if fleet in FLEET_NAMES and len([r for r in self.work_fleets() if self.teammates(r)]) > 1:
+            raise ValueError('Pick the Fleet to ask')
+        return self.ask('anything', question, context='free:' + secrets.token_hex(8),
+                        fleet=fleet)
 
     def take_answer(self, item):
         with self.connect() as db:
@@ -1479,8 +1591,9 @@ class Fleet:
             asked = [{**{k: r[k] for k in ('id', 'fleet', 'member_id', 'name', 'kind', 'context', 'status', 'at', 'answered_at')},
                       'question': question_text(r['kind'], json.loads(r['question'])),
                       'answer': answer_text(r['kind'], json.loads(r['answer'])) if r['answer'] else None}
-                     for r in db.execute("SELECT * FROM fleet_out WHERE (context IS NULL OR (context NOT LIKE 'card:%' AND context NOT LIKE 'brief:%')) "
-                                         "ORDER BY at DESC LIMIT 60")]
+                     for r in db.execute("SELECT * FROM fleet_out WHERE (context IS NULL OR (context NOT LIKE 'card:%' AND context NOT LIKE 'brief:%' "
+                                         "AND context NOT LIKE 'free:%')) ORDER BY at DESC LIMIT 60")]
+            free = self.free_asked(db)
             log = [dict(r) for r in db.execute('SELECT at,direction,fleet,name,kind,what,outcome FROM fleet_log ORDER BY id DESC LIMIT 100')]
             notices = [{**json.loads(r['view']), 'reason': r['reason'] or ''}
                        for r in db.execute('SELECT * FROM fleet_notices ORDER BY at DESC LIMIT 30')]
@@ -1494,8 +1607,23 @@ class Fleet:
                                          rules.get((ref, m['member_id'], k), {'rule': 'ask', 'details': False})) for k in RULE_KINDS.get(kind, ())}}
                                     for m in self.teammates(ref)]})
         return {'on': True, 'off': self.off, 'fleets': out, 'waiting': waiting, 'asked': asked, 'log': log, 'notices': notices,
-                'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'briefs': self.briefs(), 'brief': self.brief_settings(),
+                'ask_meetings': self.meetings_on(), 'kinds': KIND_LABEL, 'free': free, 'briefs': self.briefs(), 'brief': self.brief_settings(),
                 'kind_rules': {k: list(KIND_RULES.get(k, RULES)) for k in KIND_LABEL}, 'no_details': list(NO_DETAILS)}
+
+    def free_asked(self, db):
+        """The owner's free questions to a Fleet, each with its teammates' answers as they arrive, attributed; "no
+        answer" once declined, expired, or FREE_WAIT_HOURS passed without one. Answers are a teammate's plain text."""
+        late = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=FREE_WAIT_HOURS)).isoformat(timespec='seconds')
+        out = {}
+        for r in db.execute("SELECT * FROM fleet_out WHERE context LIKE 'free:%' ORDER BY at DESC LIMIT 200"):
+            item = out.setdefault(r['context'], {'id': r['context'][5:], 'fleet': r['fleet'], 'at': r['at'],
+                                                 'question': json.loads(r['question']).get('text', ''), 'answers': []})
+            answer = json.loads(r['answer']) if r['answer'] else None
+            state = ('answered' if r['status'] == 'answered' and answer else 'no answer' if r['status'] in ('declined', 'expired') or r['at'] < late
+                     else 'waiting')
+            item['answers'].append({'name': r['name'], 'state': state, 'text': (answer or {}).get('text') if state == 'answered' else None,
+                                    'at': r['answered_at']})
+        return list(out.values())[:20]
 
     def summary(self):
         with self.connect() as db:
