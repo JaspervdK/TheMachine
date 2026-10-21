@@ -319,6 +319,37 @@ class Protected(unittest.TestCase):
         key.rename(key.with_name('elsewhere'))
         self.assertEqual([p[0] for p in message_seal.problems(self.path)], ['message-key-missing'])
 
+    def test_a_key_the_host_keeps_off_the_disk_is_waited_for_and_never_made_anew(self):
+        self.fill(assistant.Store(self.path, protect=True))
+        key = message_seal.key_path(self.path)
+        memory = Path(self.temp.name) / 'run' / message_seal.KEY_NAME  # the host's copy in memory (/run)
+        memory.parent.mkdir()
+        key.rename(memory)
+        key.symlink_to(memory)
+        self.assertTrue(message_seal.held_elsewhere(self.path))
+        store = assistant.Store(self.path, protect=True)  # read through the link, as before
+        self.assertEqual(len(store.events(['acct'], query=CANARY.lower())), len(SOURCES))
+        self.assertEqual(message_seal.problems(self.path), [])
+        saved = memory.read_bytes()
+        memory.unlink()  # a restart: /run is empty until the host puts the key back
+        self.assertEqual([p[0] for p in message_seal.problems(self.path)], ['message-key-waiting'])
+        with self.assertRaises(message_seal.SealError):
+            assistant.Store(self.path, protect=True)
+        with self.assertRaises(message_seal.SealError):
+            message_seal.load_key(self.path, create=True)
+        self.assertFalse(memory.exists())  # no new key that would leave the messages unreadable
+        said = []
+        self.assertFalse(message_seal.wait_for_key(self.path, say=said.append, every=0.01, limit=0.03))
+        self.assertIn('Waiting for the message key', said[0])
+        memory.write_bytes(saved)
+        self.assertTrue(message_seal.wait_for_key(self.path, say=said.append, every=0.01, limit=0.03))
+        self.assertTrue(assistant.Store(self.path).protected)
+        import work_removal
+        config = Path(self.temp.name) / 'config.json'
+        config.write_text(json.dumps({'database': str(self.path), 'accounts': []}))
+        folder = work_removal.backup(config, {'database': str(self.path), 'accounts': []})
+        self.assertFalse((folder / message_seal.KEY_NAME).exists())  # its own copy would put the key back on the disk
+
     def test_an_export_moves_over_and_is_sealed_again_with_the_new_machines_key(self):
         config = Path(self.temp.name) / 'config.json'
         config.write_text(json.dumps({'database': str(self.path), 'accounts': []}))

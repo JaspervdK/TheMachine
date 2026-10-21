@@ -126,7 +126,7 @@ def backup(config_path, config):
             source.backup(target)  # a consistent copy while the service keeps writing
         import message_seal
         key = message_seal.key_path(db_path)
-        if Path(key).is_file():
+        if Path(key).is_file() and not message_seal.held_elsewhere(db_path):  # a hosted key stays off the disk
             shutil.copy2(key, folder / Path(key).name)
     for item in folder.iterdir():
         os.chmod(item, 0o600)

@@ -85,6 +85,11 @@ uses a keyed hash of each word.
 key, the messages in the database and its copies can't be read by anyone, you included. `assistant doctor` and the
 dashboard say when the key is missing or readable by others.
 
+A hosting layer can keep the key off the disk: `message-content.key` is then a link to a file in memory (under
+`/run`) that the host puts there at each start. Hosted Machines work this way: the control plane keeps the key,
+so the disk and its backups never hold it, and deleting the Machine deletes the key, which leaves those backups'
+messages unreadable. Until the key arrives the service waits, and says so; it never makes a new one.
+
 What stays readable, for support and to improve The Machine: feedback, facts and rules, skills, profile and notes,
 card states and times, errors, sync health and logs. `python3 learnings.py --database ... --workspace ...` exports
 exactly that, without the key.

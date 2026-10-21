@@ -9764,6 +9764,7 @@ def main():
         service.trim_log()
         with lock.open('w') as handle:
             portable.lock(handle, blocking=False)
+            message_seal.wait_for_key(config['database'], say=LOG.warning, protect=message_seal.wanted(config))  # a hosted key comes after a restart
             App(config, args.config).serve()
     elif args.command == 'status':
         app = App(config)

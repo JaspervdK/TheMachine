@@ -22,6 +22,10 @@ file, someone signed in as another user. It does not protect against root on the
 or the running app's memory; nor against what other programs keep (OpenClaw's session transcripts, a chat bridge's
 own store). A phone notification waiting for the app (android_inbox) is sealed by the Gateway's plugin (INBOX). Backups and exports carry the key with the database, so they stay readable for the owner.
 
+A hosting layer may keep the key off the disk instead (`held_elsewhere`): `message-content.key` is then a link to a file
+in memory (under /run) that the host puts there at every start. Backups of the disk then don't hold the key, and a
+missing key is waited for (`wait_for_key`), never made anew: a new key would leave the messages unreadable.
+
 Sealing: a fresh 16-byte nonce; the keystream is SHAKE256(key, nonce); a 16-byte BLAKE2b MAC over all of it
 (encrypt-then-MAC); keys for sealing, MAC and the index are derived from the stored key with BLAKE2b. Standard
 library only, as in network_crypto.py."""
@@ -36,6 +40,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 import unicodedata
 from contextlib import closing
 from pathlib import Path
@@ -106,7 +111,10 @@ def problems(database):
     path = Path(database).expanduser()
     sealed, has_key = state(path)
     key, out = key_path(path), []
-    if sealed and not has_key:
+    if sealed and not has_key and held_elsewhere(path):
+        out.append(('message-key-waiting', 'Your messages are encrypted and their key is kept off this server\'s disk by your hosting. '
+                    'It has not arrived yet, so the app waits for it.', 'it comes once this Machine reaches its hosting; check the connection'))
+    elif sealed and not has_key:
         out.append(('message-key-missing', f'Your messages are encrypted, but their key {key} is missing. Without it they can\'t be read.',
                     f'put {KEY_NAME} back from your backup, next to {path.name}'))
     elif has_key and key.stat().st_mode & 0o077:
@@ -135,6 +143,11 @@ def key_path(database):
     return Path(database).expanduser().parent / KEY_NAME
 
 
+def held_elsewhere(database):
+    """The key is kept off the disk by a hosting layer: the key file is a link to where the host puts it at each start."""
+    return key_path(database).is_symlink()
+
+
 def load_key(database, create=False):
     path = key_path(database)
     try:
@@ -142,6 +155,8 @@ def load_key(database, create=False):
     except FileNotFoundError:
         if not create:
             return None
+        if path.is_symlink():  # the host's key has not arrived: never a new one here, it would orphan what it sealed
+            raise SealError(f'{path} is kept by the hosting and has not arrived yet') from None
         raw = base64.b64encode(secrets.token_bytes(32))
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -153,6 +168,21 @@ def load_key(database, create=False):
     if len(key) != 32:
         raise SealError(f'{path} is not a message key')
     return key
+
+
+def wait_for_key(database, say=print, every=5, limit=None, protect=False):
+    """At the service's start: a database whose key the host keeps (`held_elsewhere`) waits until the key is there when
+    it is sealed (or is to be, `protect`), saying so once a minute, rather than starting without it. True when the key
+    is there (or not needed)."""
+    path, waited = Path(database).expanduser(), 0
+    while held_elsewhere(path) and not key_path(path).is_file() and (protect or state(path)[0]):
+        if limit is not None and waited >= limit:
+            return False
+        if waited % 60 == 0:
+            say(f'Waiting for the message key from the hosting ({key_path(path)}); the messages stay encrypted until it comes')
+        time.sleep(every)
+        waited += every
+    return True
 
 
 class Sealer:
