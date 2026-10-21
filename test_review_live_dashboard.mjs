@@ -66,8 +66,8 @@ try{
  assert.match(await page.locator('#review-live').textContent(),/23 signals waiting for the next review.*Starts in 9 minutes/);
  live=()=>({runs:[],queue:null,first_look:{state:'waiting',why:'settling',days:7,waiting:30}});
  await page.evaluate(()=>refresh());
- assert.ok((await page.locator('#review-live').textContent()).includes('as soon as the first import has settled'));
- assert.ok((await banner.textContent()).includes('starts soon')&&(await banner.textContent()).includes('first import has settled'));
+ assert.ok((await page.locator('#review-live').textContent()).includes('once the first import settles'));
+ assert.ok((await banner.textContent()).includes('starts soon')&&(await banner.textContent()).includes('first import settles'));
  assert.deepEqual(errors,[]);
  console.log(JSON.stringify({live_polls:polls,page_errors:errors}));
 }finally{

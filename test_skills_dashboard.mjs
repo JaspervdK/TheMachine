@@ -54,7 +54,7 @@ try{
  // Read: their words shown as text, with who sent it; Install from the dialog.
  await row.locator('[data-skill-read]').click();
  await page.locator('#skill-read[open]').waitFor();
- assert.match(await page.locator('#skill-read-from').textContent(),/Their words: read them before you install/);
+ assert.match(await page.locator('#skill-read-from').textContent(),/Read it before you install/);
  assert.match(await page.locator('#skill-read-body').textContent(),/<b>email<\/b>/);  // shown, not rendered
  assert.equal(await page.locator('#skill-read-body b').count(),0);
  assert.ok(await fits(page));
