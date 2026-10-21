@@ -991,7 +991,7 @@ class ModelResets(unittest.TestCase):
         self.assertTrue(status['limit_reached'])
         self.assertEqual(status['limit_resets_at'], usage[0]['windows'][0]['reset'])
         self.assertTrue(status['can_reset'])
-        self.assertEqual(status['usage_page'], 'https://chatgpt.com/codex/settings/usage')
+        self.assertEqual(status['usage_page'], 'https://chatgpt.com/codex/cloud/settings/usage')
         self.assertNotIn('example.com', json.dumps(status))
 
     def test_another_account_is_not_read_and_cannot_be_reset(self):

@@ -10,7 +10,7 @@ const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8
 const t=Date.now()/1000|0;
 let status={model:'openai/example-model',provider:'openai',chatgpt:true,plan:'pro',limit_reached:true,limit_resets_at:t+2*3600+14*60,
  windows:[{label:'5h',used:100,reset:t+2*3600+14*60+20},{label:'Week',used:40,reset:t+3*86400+3700}],
- resets:{available:2,credits:[{title:'Full reset',expires:t+20*86400}],allowed:false},can_reset:true,usage_page:'https://chatgpt.com/codex/settings/usage',checked_at:new Date().toISOString()};
+ resets:{available:2,credits:[{title:'Full reset',expires:t+20*86400}],allowed:false},can_reset:true,usage_page:'https://chatgpt.com/codex/cloud/settings/usage',checked_at:new Date().toISOString()};
 const posts=[];
 const server=createServer((req,res)=>{
  const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
@@ -63,19 +63,22 @@ try{
  // No reset possible from here: the way to ChatGPT instead.
  status={...status,limit_reached:true,limit_resets_at:t+3600,can_reset:false,resets:null};
  await page.evaluate(()=>refresh());
- await page.locator('#model-panel a',{hasText:'Open ChatGPT to use a reset'}).first().waitFor();
+ await page.locator('#model-panel a',{hasText:'See resets in ChatGPT'}).first().waitFor();
  // A link that looks like a button: no underline, its text centred in it, as tall as a button.
- {const a=await page.locator('#model-panel a',{hasText:'Open ChatGPT to use a reset'}).first().evaluate(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect(),t=document.createRange();t.selectNodeContents(el);const q=t.getBoundingClientRect();
+ {const a=await page.locator('#model-panel a',{hasText:'See resets in ChatGPT'}).first().evaluate(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect(),t=document.createRange();t.selectNodeContents(el);const q=t.getBoundingClientRect();
   return {line:s.textDecorationLine,h:r.height,dx:Math.abs((q.left-r.left)-(r.right-q.right)),dy:Math.abs((q.top-r.top)-(r.bottom-q.bottom))}});
   assert.equal(a.line,'none');assert.ok(a.h>=30&&a.dx<=2&&a.dy<=2,JSON.stringify(a))}
  assert.equal(await page.evaluate(()=>[modelName('acme/lm-2.5-swift'),modelName('example-model'),modelName('')].join('|')),'LM-2.5 Swift|Example Model|');
- assert.equal(await page.locator('#model-panel a').first().getAttribute('href'),'https://chatgpt.com/codex/settings/usage');
- assert.match(await page.locator('#model-panel').textContent(),/Resets available: unknown/);
+ assert.equal(await page.locator('#model-panel a').first().getAttribute('href'),'https://chatgpt.com/codex/cloud/settings/usage');
+ assert.doesNotMatch(await page.locator('#model-panel').textContent(),/unknown|cannot read/);
+ assert.match(await page.locator('#model-panel').textContent(),/Usage limit resetsChatGPT shows them\./);
+ status={...status,plan:'team'};await page.evaluate(()=>refresh());
+ await page.locator('#model-panel',{hasText:'ChatGPT shows them under your team workspace.'}).waitFor();
  // Where a run failed on the limit, Connections says so and offers the same way out.
  await page.evaluate(()=>{for(const x of document.querySelectorAll('main>section'))x.hidden=x.id!=='health';document.querySelector('#review-run-history').open=true});
  const runs=await page.locator('#review-runs').textContent();
  assert.match(runs,/ChatGPT limit reached, resets at/);
- assert.equal(await page.locator('#review-runs a',{hasText:'Open ChatGPT'}).count(),1);
+ assert.equal(await page.locator('#review-runs a',{hasText:'See resets in ChatGPT'}).count(),1);
  // A Claude plan through Claude Code says so, and offers no ChatGPT reset.
  status={model:'anthropic/claude-sonnet-9-1',provider:'anthropic',chatgpt:false,claude_plan:true,windows:[],resets:null,can_reset:false,usage_page:null,checked_at:new Date().toISOString()};
  await page.evaluate(()=>refresh());

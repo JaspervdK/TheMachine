@@ -5537,7 +5537,7 @@ def model_usage(config, run=subprocess.run, reply=None):
 
 
 # Where ChatGPT shows the Codex usage limits and the usage limit resets: the way to see or use one by hand.
-CHATGPT_USAGE_PAGE = 'https://chatgpt.com/codex/settings/usage'
+CHATGPT_USAGE_PAGE = 'https://chatgpt.com/codex/cloud/settings/usage'
 
 
 def openclaw_model(config):

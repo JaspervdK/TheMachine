@@ -272,6 +272,25 @@ class OpenClawSkills(unittest.TestCase):
         self.keeper.installed(refresh=True)
         self.assertEqual(self.oc.calls.count(['skills', 'list', '--json']), 2)
 
+    def test_a_notice_openclaw_prints_around_the_list_doesnt_hide_it(self):
+        # A hosted Machine's OpenClaw printed a line before the JSON: the list still shows, and a really unreadable
+        # answer says so (and logs only its shape).
+        real = self.oc.run
+
+        def noisy(argv, **kw):
+            done = real(argv, **kw)
+            self.assertIs(kw.get('stdin'), skills.subprocess.DEVNULL)
+            self.assertEqual(kw['env'].get('NO_COLOR'), '1')
+            done.stdout = '\x1b[36m[plugins] codex: loaded from npm\x1b[39m\n[skills] note\n' + done.stdout + '\nDone.\n'
+            return done
+        self.keeper.catalog.run = noisy
+        self.assertIn('trello', {i['name'] for i in self.keeper.installed(refresh=True)['installed']})
+        self.keeper.catalog.run = lambda argv, **kw: skills.subprocess.CompletedProcess(argv, 0, 'Gateway busy, try later\n', '')
+        with self.assertLogs(skills.LOG, 'WARNING') as logs:
+            view = self.keeper.installed(refresh=True)
+        self.assertEqual(view['error'], 'OpenClaw gave an answer The Machine could not read')
+        self.assertIn("first='Gateway busy, try later'", logs.output[0])
+
     def test_reading_and_turning_on_is_openclaws_own_and_writes_no_files(self):
         read = self.keeper.installed_get('crm-notes')
         self.assertIn('Theirs.', read['body'])

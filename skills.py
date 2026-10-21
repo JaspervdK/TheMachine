@@ -554,6 +554,26 @@ REF = re.compile(r'@([A-Za-z0-9][A-Za-z0-9_.-]{0,63})/([a-z0-9][a-z0-9-]{0,79})'
 VERSION = re.compile(r'[0-9A-Za-z][0-9A-Za-z.+-]{0,39}')
 KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}')
 ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+
+
+def json_in(text):
+    """The JSON object in a CLI's output, also when OpenClaw printed a notice or a warning before or after it (a plugin
+    being loaded, a config note): the first line that starts a whole JSON object. None when there is none."""
+    text = ANSI.sub('', text or '')
+    try:
+        found = json.loads(text)
+        return found if isinstance(found, (dict, list)) else None
+    except ValueError:
+        pass
+    decoder = json.JSONDecoder()
+    for start in re.finditer(r'^[ \t]*\{', text, re.M):
+        try:
+            found, _ = decoder.raw_decode(text, start.end() - 1)
+        except ValueError:
+            continue
+        if isinstance(found, dict):
+            return found
+    return None
 TEXT_FILES = ('.md', '.txt', '.json', '.yaml', '.yml', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp')
 OS_NAMES = {'darwin': 'macOS', 'linux': 'Linux', 'win32': 'Windows'}
 SOURCES = {'openclaw-workspace': 'Workspace', 'openclaw-bundled': 'Bundled with OpenClaw', 'openclaw-workshop': 'Learned by OpenClaw',
@@ -622,8 +642,11 @@ class Catalog:
         self.raw, self.at, self.error, self.searches = None, 0.0, '', {}
 
     def _cli(self, args, timeout=60):
+        # No terminal and no colours: OpenClaw's own notices stay plain, and nothing waits on input
+        env = {**os.environ, 'NO_COLOR': '1', 'FORCE_COLOR': '0'}
         try:
-            done = self.run([self.binary, *args], capture_output=True, text=True, timeout=timeout)
+            done = self.run([self.binary, *args], capture_output=True, text=True, errors='replace', timeout=timeout,
+                            stdin=subprocess.DEVNULL, env=env)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise ValueError('OpenClaw did not answer' + (' in time' if isinstance(error, subprocess.TimeoutExpired) else '')) from None
         return done
@@ -636,10 +659,15 @@ class Catalog:
 
     def _json(self, args, timeout=60):
         done = self._cli([*args, '--json'], timeout)
-        try:
-            data = json.loads(done.stdout or '')
-        except ValueError:
-            raise ValueError(self._reason(done) if done.returncode else 'OpenClaw gave an answer The Machine could not read') from None
+        data = json_in(done.stdout)
+        if data is None and not done.returncode:
+            data = json_in(done.stderr)
+        if data is None:
+            if not done.returncode:  # what it looked like, for support: sizes and the first line, never the whole answer
+                first = next((ANSI.sub('', line).strip() for line in (done.stdout or '').splitlines() if line.strip()), '')
+                LOG.warning('openclaw %s unreadable stdout=%d stderr=%d first=%r', ' '.join(args[:2]), len(done.stdout or ''),
+                            len(done.stderr or ''), first[:120])
+            raise ValueError(self._reason(done) if done.returncode else 'OpenClaw gave an answer The Machine could not read')
         return data
 
     def load(self):
