@@ -158,6 +158,37 @@ class Protected(unittest.TestCase):
             pass
         self.assertEqual(sqlite3.connect(self.path).execute("SELECT count(*) FROM network_replies WHERE typeof(body)='blob'").fetchone()[0], 2)
 
+    def test_role_quotes_promises_and_run_evidence_sealed_in_place_and_promises_still_dedupe(self):
+        store = assistant.Store(self.path, protect=True)
+        self.fill(store)
+        columns = (('person_roles', 'quote'), ('promises', 'what'), ('promises', 'note'), ('profile_runs', 'evidence'))
+        with sqlite3.connect(self.path) as raw:  # a database sealed before these columns were: no guards, plain text
+            for table, column in columns:
+                for when in ('insert', 'update'):
+                    raw.execute(f'DROP TRIGGER mc_{table}_{column}_{when}')
+            raw.execute("INSERT INTO person_roles(identifier,role,source,created_at,event_id,quote) VALUES('email:pat@example.com','lawyer','review','t',1,?)",
+                        (f'{CANARY} counsel',))
+            raw.execute("INSERT INTO promises(direction,who,what,check_at,event_id,account_id,status,note,created_at,updated_at) "
+                        "VALUES('theirs','Pat',?,'2026-10-20',1,'acct','answered',?,'t','t')", (f'send the {CANARY} contract', f'They wrote again: {CANARY}'))
+            raw.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind) VALUES('r','ok','t','t',?,'profile')",
+                        (json.dumps({'messages': [CANARY]}),))
+        self.assertIn(CANARY.encode(), files(self.path))
+        store = assistant.Store(self.path, protect=True)
+        with store.connect() as db:
+            self.assertEqual(db.execute('SELECT quote FROM person_roles').fetchone()[0], f'{CANARY} counsel')
+            self.assertEqual(json.loads(db.execute('SELECT evidence FROM profile_runs').fetchone()[0]), {'messages': [CANARY]})
+        raw = sqlite3.connect(self.path)
+        for table, column in columns:
+            self.assertEqual(raw.execute(f'SELECT typeof({column}) FROM {table}').fetchone()[0], 'blob', f'{table}.{column}')
+        raw.close()
+        first = store.promise({'direction': 'theirs', 'who': 'Pat', 'what': f'send the {CANARY} contract', 'event_id': 1})
+        self.assertTrue(first['duplicate'])
+        other = store.promise({'direction': 'theirs', 'who': 'Pat', 'what': 'confirm the seat count', 'event_id': 1})
+        self.assertEqual(store.promise({'direction': 'theirs', 'who': 'Pat', 'what': 'confirm the seat count', 'event_id': 1}),
+                         {'id': other['id'], 'status': 'open', 'duplicate': True})
+        self.assertEqual(sorted(p['what'] for p in store.promises()), ['confirm the seat count', f'send the {CANARY} contract'])
+        self.assertNotIn(CANARY.encode(), files(self.path))
+
     def test_migration_seals_existing_messages_and_rolls_back(self):
         plain = assistant.Store(self.path)
         self.fill(plain)
@@ -324,8 +355,7 @@ class NothingOutsideTheSealedFields(unittest.TestCase):
             'skills.note': 'a skill', 'skill_hints.summary': 'a skill hint', 'tool_approval_proposals.title': 'a proposal',
             'tool_approval_proposals.detail': 'a proposal', 'checkpoints.state': 'a sync cursor (MESSAGE_SEAL_AUDIT checks)',
             'analyses.items': 'ids and versions', 'preparations.details': 'why a preparation stopped',
-            'preparations.reason': 'a reason code', 'promises.what': 'matched in SQL (unique per message); a known gap',
-            'promises.note': 'a known gap, with promises.what',
+            'preparations.reason': 'a reason code',
             'android_inbox.payload': "written by the Gateway's plugin without the key; deleted once read (a known gap)",
             'network_outbox.body': 'matched in SQL until sent; sealed end to end in transit (network_crypto)',
             'fleet_log.what': "a log of what was shared, by kind", 'fleet_out.context': 'matched in SQL: an id',
@@ -336,7 +366,7 @@ class NothingOutsideTheSealedFields(unittest.TestCase):
         sealed = {f'{t}.{c}' for t, cs in message_seal.DERIVED.items() for c in cs} | {f'{t}.{c}' for t, c, _ in message_seal.DERIVED_JSON}
         sealed |= {'events.title', 'events.body', 'events.metadata'}
         words = re.compile(r'title|body|subject|text|snippet|question|answer|summary|draft|what|payload|params|result|preview|'
-                           r'description|note|content|feedback|reason|detail|view|info|items|context|rule|state|transcript|message$')
+                           r'description|note|content|feedback|reason|detail|view|info|items|context|rule|state|transcript|quote|evidence|message$')
         with tempfile.TemporaryDirectory() as temp:
             store = assistant.Store(Path(temp) / 'events.sqlite')
             import discovery, fleet, fleet_requests, network, skills

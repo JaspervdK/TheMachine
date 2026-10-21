@@ -2127,7 +2127,10 @@ class Store:
                 # a table made since (a migration, joining a Fleet): its guards, and anything it got meanwhile
                 with db:
                     message_seal.ensure_triggers(db)
-                    message_seal.leftovers(db, seal=True)
+                    sealed_now = message_seal.leftovers(db, seal=True)
+                if sealed_now:  # their plain text leaves the log too (secure_delete already cleared the old cells)
+                    LOG.info('message contents sealed in place: %s values', sealed_now)
+                    db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
                 self._sealed_schema = db.execute('PRAGMA schema_version').fetchone()[0]
         db.execute('PRAGMA foreign_keys=ON')
         try:
@@ -2970,6 +2973,7 @@ class Store:
             except ValueError:
                 raise ValueError('due must be the promised date as YYYY-MM-DD, or left out when none was said') from None
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             event = db.execute('SELECT id,account_id,kind,occurred_at,metadata FROM events WHERE id=? AND deleted=0', (args.get('event_id'),)).fetchone()
             if not event or event['kind'] not in OWN_KINDS:
                 raise ValueError('event_id is the email, Slack, WhatsApp, LinkedIn or X message with the promise')
@@ -2981,12 +2985,15 @@ class Store:
             watch = awaiting_key(dict(event), self.owner_user_ids) if direction == 'theirs' and event['kind'] == 'gmail.message' else None
             check_at = promise_check_at(direction, due, event['occurred_at'], digest_at)
             stamp = now()
+            # `what` is sealed under message protection (a fresh nonce each time), so the same promise is found by
+            # opening this message's promises here, not by the UNIQUE constraint, which then never matches
+            row = next((r for r in db.execute('SELECT id,status,what FROM promises WHERE event_id=? AND direction=? AND who=?',
+                                              (event['id'], direction, who)) if r['what'] == what), None)
+            if row:
+                return {'id': row['id'], 'status': row['status'], 'duplicate': True}
             cursor = db.execute('INSERT INTO promises(direction,who,what,due,check_at,event_id,account_id,watch,status,created_at,updated_at) '
                                 "VALUES(?,?,?,?,?,?,?,?,'open',?,?) ON CONFLICT(event_id,direction,who,what) DO NOTHING",
                                 (direction, who, what, due, check_at, event['id'], event['account_id'], encoded({**watch, 'promise': True}) if watch else None, stamp, stamp))
-            if not cursor.rowcount:
-                row = db.execute('SELECT id,status FROM promises WHERE event_id=? AND direction=? AND who=? AND what=?', (event['id'], direction, who, what)).fetchone()
-                return {'id': row['id'], 'status': row['status'], 'duplicate': True}
         return {'id': cursor.lastrowid, 'status': 'open', 'check_at': check_at,
                 'note': 'Recorded, no card. It is checked when due; if still open then, a card comes.'}
 

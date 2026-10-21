@@ -76,7 +76,8 @@ Every account has `id`, `service`, `transport` and `boundary`, plus optional `sc
 By default the service encrypts what messages say, from every source, in its database:
 subjects, bodies, attachments' names, quoted text and other metadata of email, chats, notifications, tickets,
 transcripts and calendar events, plus the text derived from them (card text, drafts and their edits, preparation
-tool calls and results, Fleet and Network questions and answers). The key is `message-content.key`, next to the
+tool calls and results, Fleet and Network questions and answers, promises, the line a role was read from, and
+the messages a profile or roles run reads). The key is `message-content.key`, next to the
 database, readable only by the service user. The dashboard, search, embeddings and reviews work as before: search
 uses a keyed hash of each word.
 
@@ -95,6 +96,5 @@ Installs from before it was the default are encrypted this way at their first st
 set `"message_protection": false`. Exports open the messages and leave the key out; an import is encrypted again
 with the new Machine's own key at its next start, so moving between your computer and hosted keeps working. The key does not stop someone with root on the machine, who can
 read it; it stops the database file, its copies and tools without the key. Not covered: OpenClaw's own session
-transcripts and caches, WhatsApp's `wacli` store, browser profiles, promises' text and Network replies waiting to
-go out.
+transcripts and caches, WhatsApp's `wacli` store, browser profiles and Network replies waiting to go out.
 

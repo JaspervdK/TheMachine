@@ -8,7 +8,8 @@ calendar descriptions, and any connector added later):
 - `metadata` keeps in the clear only the keys the app looks up in SQL (PLAIN_METADATA: thread and chat ids, sender
   and recipients, labels); every other key, including any a new connector adds, is sealed with the rest;
 - the keyword index (`event_search`) holds keyed hashes of the words instead of the words;
-- text the app derives from messages (card text, drafts, edits, prepared tool results) is sealed too (DERIVED).
+- text the app derives from messages (card text, drafts, edits, prepared tool results, role quotes,
+  promises) is sealed too (DERIVED).
 
 The app itself reads everything as before: its connections open sealed values as they are read (`attach`). A
 connection without the key (sqlite3 on the command line, a support tool) sees only blobs, and its writes to these
@@ -47,10 +48,12 @@ SEALED_KEY = 'mc1_sealed'
 PLAIN_METADATA = frozenset({'thread_id', 'from', 'to', 'labels', 'notification_key_hash', 'user_id', 'from_me',
                             'channel_id', 'chat_id', 'conversation_id'})
 # Text the app derives from messages: card text and the drafts behind it, edits, what a preparation's tools returned,
-# a review's own summary, and what teammates' Machines asked and answered. JSON columns keep the named keys in the clear.
-# Not here, on purpose: columns the app matches in SQL (promises.what is unique per message), and what the Machine
-# learned (facts, rules, feedback, skills, profile), which support may read (docs/security.md).
+# a review's own summary, what teammates' Machines asked and answered, the line a role was read from, promises (what
+# and the note closing one), and the messages a profile, roles or skills run was given. JSON columns keep the named
+# keys in the clear. Not here, on purpose: columns the app matches in SQL, and what the Machine learned (facts, rules,
+# feedback, skills, profile, roles), which support may read (docs/configuration.md).
 DERIVED = {'suggestions': ('title', 'body', 'handled_hint'), 'feedback_prompts': ('title',),
+           'person_roles': ('quote',), 'promises': ('what', 'note'), 'profile_runs': ('evidence',),
            'draft_edits': ('before_subject', 'before_body', 'after_subject', 'after_body'),
            'graph_unnamed': ('titles',), 'preparation_calls': ('params', 'result'), 'analyses': ('summary',),
            'fleet_in': ('question', 'draft'), 'fleet_out': ('question', 'answer'), 'network_replies': ('body',)}
