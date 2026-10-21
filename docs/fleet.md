@@ -267,7 +267,8 @@ way. You can disconnect it from your account at any time; its key then stops wor
 
 Pairing is free, and so are Friends and Family Fleets on the Network. In a Work Fleet, while a self-hosted Machine
 answers for someone, the Network costs €4 a month for that member, plus VAT where it applies, paid by the Fleet's owner
-and confirmed before it starts; nothing while the Fleet is free.
+and confirmed before it starts; nothing while the Fleet is free. Each Fleet is billed on its own, with its own card,
+invoices and cancel, apart from your own plan.
 
 ## Friends
 
