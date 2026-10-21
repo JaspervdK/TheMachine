@@ -1,12 +1,14 @@
 """Recent Network/Family/Skills/export regressions, with disposable files and fake peers."""
 import concurrent.futures
 import json
+import shutil
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 import network
+import moving
 import network_crypto as nc
 import test_network as tn
 import test_family as tf
@@ -120,3 +122,54 @@ class Moving(tm.Moving):
         import zipfile
         with zipfile.ZipFile(archive) as z:
             self.assertFalse(any('network-keys.json' in n or 'peer-identity.json' in n for n in z.namelist()))
+
+    def network_keys(self, where=None):
+        keys = nc.new_keys()
+        path = where or self.data / 'network-keys.json'
+        path.write_text(json.dumps(keys))
+        if where:
+            config = json.loads(self.config.read_text()); config['network_keys'] = str(where); self.config.write_text(json.dumps(config))
+        return nc.public_keys(keys)
+
+    def moved(self, passphrase):
+        archive, manifest = self.export(passphrase=passphrase)
+        shutil.rmtree(self.tmp / 'elsewhere', ignore_errors=True)  # another computer: the folder outside isn't there
+        config_path, space, claw = self.target()
+        with patch.dict('os.environ', {moving.PASSPHRASE_ENV: passphrase} if passphrase else {}):
+            moving.import_(archive, config_path, passphrase=passphrase, workspace=space, openclaw_home=claw)
+        config = json.loads(config_path.read_text())
+        found = network.keys_path(config)
+        return manifest, config_path, (nc.public_keys(json.loads(found.read_text())) if found and found.is_file() else None)
+
+    def test_an_export_with_keys_keeps_the_network_identity(self):
+        public = self.network_keys()
+        manifest, config_path, moved = self.moved('a long passphrase')
+        self.assertEqual(moved, public)  # same Machine on the Network: no key-change notice for teammates
+        self.assertEqual(manifest['network_identity'], 'kept')
+        self.assertEqual(network.keys_path(json.loads(config_path.read_text())), config_path.parent / 'network-keys.json')
+        self.assertEqual((config_path.parent / 'network-keys.json').stat().st_mode & 0o777, 0o600)
+
+    def test_network_keys_kept_outside_the_data_folder_come_along_too(self):
+        public = self.network_keys(Path(self.temp_outside()) / 'peer-identity.json')
+        manifest, config_path, moved = self.moved('a long passphrase')
+        self.assertEqual(moved, public)
+        self.assertIn('secrets/network/peer-identity.json', manifest['files'])
+        self.assertEqual(json.loads(config_path.read_text())['network_keys'], str(config_path.parent / 'peer-identity.json'))
+
+    def test_an_export_without_keys_says_a_new_network_identity_will_be_made(self):
+        self.network_keys(Path(self.temp_outside()) / 'peer-identity.json')
+        manifest, config_path, moved = self.moved(None)
+        self.assertEqual(manifest['network_identity'], 'new')
+        self.assertTrue(any('a new Network identity will be made' in line for line in manifest['reconnect']))
+        self.assertIsNone(moved)
+        self.assertNotIn('network_keys', json.loads(config_path.read_text()))  # the old folder isn't here: new keys go next to the database
+
+    def test_no_network_line_for_a_machine_that_never_joined(self):
+        _, manifest = self.export()
+        self.assertIsNone(manifest['network_identity'])
+        self.assertFalse(any('Network' in line for line in manifest['reconnect']))
+
+    def temp_outside(self):
+        folder = self.tmp / 'elsewhere'
+        folder.mkdir(exist_ok=True)
+        return folder

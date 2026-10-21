@@ -628,8 +628,11 @@ def cmd_export(config, args):
         raise CliError(str(error)) from None
     if args.json:
         return out_json({'file': str(path), 'bytes': path.stat().st_size, 'includes_keys': manifest['includes_keys'],
-                         'left_out': manifest['left_out']})
+                         'left_out': manifest['left_out'], 'network_identity': manifest.get('network_identity')})
     print(f'Wrote {path} ({path.stat().st_size / 1e6:.1f} MB)' + (', keys included and encrypted' if args.keys else ', without keys'))
+    if manifest.get('network_identity') == 'new':
+        print('Without keys, a new Network identity will be made after the import; teammates and friends see a '
+              'key-change notice once. Export with --keys to keep it.')
     if manifest['left_out']:
         print('Left out (a computer rebuilds these): ' + moving.left_out_text(manifest['left_out']))
     print('Put it back on another computer with:  assistant import ' + path.name)

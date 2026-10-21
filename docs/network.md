@@ -16,6 +16,14 @@ how messages stay reliable, and where it's going.
   answered, and clears answers once your Machine acknowledges them.
 - **What isn't sealed:** who is in which Fleet or friends group, who asks whom, the kind of question, its status and
   times. The Network needs those to route messages.
+- **Handling claims** (who of you handles an email several teammates got) are hashes of the Fleet's secret and the
+  email's Message-ID. The Network hands out that secret, so it knows it, but it never sees a Message-ID, an address or
+  an email, so it can only tell that two teammates hold the same email, which it could tell without the secret too.
+  The secret can't open a sealed message or sign as anyone; those keys never leave your Machine. A Fleet secret the
+  Network doesn't know is on the roadmap.
+- **Moving your Machine.** `assistant export --keys` carries `network-keys.json` (encrypted with your passphrase) and
+  `assistant import` puts it back, so your teammates and friends see the same Machine. An export without keys leaves
+  them out: the import makes a new Network identity, and your teammates and friends see a key-change notice once.
 - **Upgrading.** A Machine from before this version gets plaintext until 31 December 2026; after that it needs an
   update to receive questions.
 
@@ -50,4 +58,4 @@ tried when the new one can't be reached, so Machines from before the rename carr
 
 ## Retry and identity guarantees
 
-Private Network keys are written atomically on first use; concurrent starts use one pair, and a malformed key file is reported instead of silently rotating identity. Plain exports omit these keys even at a custom configured path; encrypted `--keys` exports are the way to move them. Outbound reply intent is committed before delivery and retained after interruption. A stale flush cannot erase a newer queued reply. Family requests keep their request identity after a failed response and obtain a new one only once the local receipt is saved.
+Private Network keys are written atomically on first use; concurrent starts use one pair, and a malformed key file is reported instead of silently rotating identity. Plain exports omit these keys even at a custom configured path; encrypted `--keys` exports carry them (also from a custom path) and the import restores them next to the database. Outbound reply intent is committed before delivery and retained after interruption. A stale flush cannot erase a newer queued reply. Family requests keep their request identity after a failed response and obtain a new one only once the local receipt is saved.
