@@ -600,6 +600,31 @@ class OwnApp(unittest.TestCase):
         self.assertTrue(caught.exception.category.startswith('outlook:microsoft_signin_expired'))
         self.assertEqual(caught.exception.retry_after, 3600)
 
+    def test_owner_reconnect_wins_over_inflight_refresh(self):
+        ms_graph.save_signin(self.path, 'old-refresh', ['User.Read'])
+        started, finished = threading.Event(), threading.Event()
+        blocked, workers = [], []
+        def reconnect():
+            started.set()
+            ms_graph.save_signin(self.path, 'owner-reconnect', ['User.Read'])
+            finished.set()
+        def answer(*args, **kwargs):
+            worker = threading.Thread(target=reconnect)
+            workers.append(worker)
+            worker.start()
+            self.assertTrue(started.wait(1))
+            blocked.append(not finished.wait(.05))
+            return {'access_token': 'test-access', 'refresh_token': 'late-rotation'}
+        try:
+            with mock.patch.object(ms_graph, '_post_form', side_effect=answer):
+                ms_graph._direct(self.config, self.account, 'User.Read')
+        finally:
+            for worker in workers:
+                worker.join(2)
+        self.assertEqual(blocked, [True])
+        self.assertTrue(finished.is_set())
+        self.assertEqual(ms_graph._saved(self.path)['refresh_token'], 'owner-reconnect')
+
     def test_signin_save_does_not_follow_an_old_temporary_symlink(self):
         elsewhere = Path(self.temp.name) / 'unrelated'
         elsewhere.write_text('leave me')

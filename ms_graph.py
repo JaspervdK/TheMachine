@@ -187,6 +187,13 @@ def save_signin(path, refresh_token, scopes):
     """Write the sign-in (mode 600, atomically): the refresh token and the scopes Microsoft granted."""
     path = Path(path).expanduser()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(str(path) + '.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _write_signin(path, refresh_token, scopes)
+
+
+def _write_signin(path, refresh_token, scopes):
+    """Atomic write while the caller holds the credential lock (including owner reconnects)."""
     fd, temp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
     try:
         with os.fdopen(fd, 'w') as handle:
@@ -229,7 +236,7 @@ def _direct(config, account, scope):
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             raise GraphError('microsoft_signin_unreachable') from None
         if answer.get('refresh_token') and answer['refresh_token'] != saved.get('refresh_token'):
-            save_signin(path, answer['refresh_token'], short_scopes(answer.get('scope')) or granted)
+            _write_signin(path, answer['refresh_token'], short_scopes(answer.get('scope')) or granted)
     return answer, granted
 
 

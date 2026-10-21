@@ -28,6 +28,7 @@ const server=createServer(async(req,res)=>{
  if(url.pathname==='/api/action'){let body='';for await(const b of req)body+=b;const call=JSON.parse(body);calls.push(call);
   if(call.action==='graph_role'){whos=whos.filter(w=>w.id!==call.args.node_id);if(call.args.node_id===pat.id)pat={...pat,role:call.args.role,role_by:'owner'}}
   if(call.action==='graph_relation')pat={...pat,relations:[]};
+  if(call.action==='graph_org_edit')await new Promise(r=>setTimeout(r,150));  // the owner can tap before a save replies
   if(call.action==='graph_warmup')warmup=warmup.filter(w=>w.domain!==call.args.domain);
   res.end('{}');return}
  if(url.pathname.startsWith('/brand/')||url.pathname.startsWith('/assets/')){res.statusCode=404;res.end();return}
@@ -100,7 +101,8 @@ try{
  await page.locator('.org-form button:not([type])').click();
  for(let i=0;i<100&&calls.length<=mark;i++)await page.waitForTimeout(20);
  assert.deepEqual(calls.at(-1),{action:'graph_org_edit',args:{node_id:org.id,fields:{industry:'Freight'},name:'Client Group'}});
- await page.locator('.graph-detail h3',{hasText:'Client Ltd'}).waitFor();
+ assert.equal(await page.locator('[data-org-edit]').isDisabled(),true);
+ await page.locator('[data-org-edit]:not(:disabled)').waitFor();
  await page.locator('[data-org-edit]').click();
  page.once('dialog',d=>{assert.ok(d.message().startsWith('Clear the looked-up details?'));d.accept()});
  mark=calls.length;
