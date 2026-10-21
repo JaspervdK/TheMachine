@@ -97,7 +97,7 @@ function sendReview(item:any,draft:any,dashboardBase=''){
  const lines=[demo?'Demo email preview · nothing will be sent':options.length?'Who should get this email?':`Send this email?`,`From: ${draft.from}`,`To: ${options.length?'you choose below':draft.to.join(', ')}`];
  for(const key of ['cc','bcc'])if(draft[key]?.length)lines.push(`${key.toUpperCase()}: ${draft[key].join(', ')}`);
  lines.push(`Subject: ${draft.subject}`,'',draft.body);
- if(draft.signature)lines.push('','+ your Gmail signature');
+ if(draft.signature)lines.push('','+ your signature');
  if(draft.attachments?.length)lines.push('',`Attachments: ${draft.attachments.map((a:any)=>`${a.name} (${a.size<1024?a.size+' B':a.size<1048576?Math.round(a.size/1024)+' KB':(a.size/1048576).toFixed(1)+' MB'})`).join(', ')}`);
  if(draft.snooze_days)lines.push(`After sending, the thread leaves your inbox for ${draft.snooze_days} day${draft.snooze_days>1?'s':''} (a weekday morning; a reply brings it back sooner).`);
  lines.push(...waits);

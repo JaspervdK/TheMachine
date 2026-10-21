@@ -47,6 +47,7 @@ import urllib.parse
 import urllib.request
 
 import graph
+import ms_graph
 import fleet_requests
 import family
 import friends
@@ -1257,10 +1258,16 @@ def _cap(text):
     return text[:1].upper() + text[1:]
 
 
-def brief_items(view, today=None, hidden=()):
+def gmail_search(domain):
+    return 'https://mail.google.com/mail/#search/' + urllib.parse.quote(f"from:{domain} in:inbox")
+
+
+def brief_items(view, today=None, hidden=(), opener=None):
     """The brief as a few ranked lines worth reading: who is waiting on the team and for how long, where several of you
     are on the same company or meeting, and companies that went quiet that a teammate knows. Each item has a stable key
-    (for Not needed), a title, why it matters and, where the Fleet can help, a question to ask it. Plain code."""
+    (for Not needed), a title, why it matters and, where the Fleet can help, a question to ask it. `opener(domain)` links
+    the owner's own waiting mail (a Gmail search by default). Plain code."""
+    opener = opener or gmail_search
     today = today or dt.datetime.now(dt.timezone.utc).date()
     short = _first_names(view)
     people = lambda who: _people(who, short)
@@ -1276,7 +1283,7 @@ def brief_items(view, today=None, hidden=()):
                       'title': f"{company(x)} is waiting for a reply" + (f" ({count} emails)" if count > 1 else ''),
                       'why': f"{waited}, sent to {people(x['who'])}" + (', and nobody answered or took it' if several else ''),
                       'ask': f"Who is answering {company(x)}?" if several or team else '',
-                      'open': ('https://mail.google.com/mail/#search/' + urllib.parse.quote(f"from:{x['domain']} in:inbox")) if 'You' in (x.get('who') or []) else ''})
+                      'open': opener(x['domain']) if 'You' in (x.get('who') or []) else ''})
     for x in view.get('meetings') or []:
         d = _brief_date(x.get('day'))
         soon = d is not None and 0 <= (d - today).days <= 3
@@ -2066,8 +2073,27 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
                 view = json.loads(row['view'])
                 hidden = self.brief_hidden(row['fleet'], row['period'])
                 out[row['fleet']] = {**view, 'text': brief_text(view, self.local_now().date(), hidden), 'built_at': row['built_at'],
-                                     'items': brief_items(view, self.local_now().date(), hidden), 'shown': BRIEF_SHOWN}
+                                     'items': brief_items(view, self.local_now().date(), hidden, self.brief_opener()), 'shown': BRIEF_SHOWN}
         return out
+
+    def brief_opener(self):
+        """Links to the owner's waiting mail from a company: a Gmail search, or for an Outlook mailbox the newest such
+        message in Outlook on the web (Outlook has no search link)."""
+        accounts = {a['id']: a for a in self.config.get('accounts', []) if a['id'] in work_accounts(self.config)}
+        if not any(a.get('service') == 'outlook' for a in accounts.values()):
+            return gmail_search
+        marks = ','.join('?' * len(accounts))
+
+        def opener(domain):
+            with self.connect() as db:
+                row = db.execute(f"SELECT account_id,source_id,metadata FROM events WHERE kind='gmail.message' AND deleted=0 AND account_id IN ({marks}) "
+                                 "AND instr(metadata,'\"SENT\"')=0 AND instr(lower(json_extract(metadata,'$.from')),?)>0 ORDER BY occurred_at DESC LIMIT 1",
+                                 (*accounts, '@' + domain.lower())).fetchone()
+            account = accounts.get(row['account_id']) if row else None
+            if not account or account.get('service') != 'outlook':
+                return gmail_search(domain)
+            return ms_graph.open_link(account, row['source_id'], json.loads(row['metadata'] or '{}').get('source_url'))
+        return opener
 
     def brief_hidden(self, fleet, period):
         return set(((self.meta('brief_hidden') or {}).get(fleet) or {}).get(period) or [])

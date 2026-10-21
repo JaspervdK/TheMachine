@@ -463,7 +463,7 @@ class EmailFormat(unittest.TestCase):
     def test_blank_line_before_name_and_signature_on_by_default(self):
         action=self.email()
         self.assertTrue(action['body'].endswith('Cheers,\n\nAlex'));self.assertTrue(action['signature'])
-        self.assertTrue(n.email_preview(action).endswith('Alex\n\n+ your Gmail signature'))
+        self.assertTrue(n.email_preview(action).endswith('Alex\n\n+ your signature'))
         self.assertEqual(self.email(body='Cheers,\n\nAlex')['body'],'Cheers,\n\nAlex')
         self.assertEqual(self.email(body='Thanks, see you.\nAnyway this is long')['body'],'Thanks, see you.\nAnyway this is long')
         with self.assertRaises(ValueError):self.email(signature='yes')

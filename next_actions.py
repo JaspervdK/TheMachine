@@ -9,6 +9,7 @@ from email.utils import format_datetime
 import hashlib
 import google_api
 import ms_graph
+import signatures
 import html
 from html.parser import HTMLParser
 import json
@@ -293,7 +294,7 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
         if set(value) - fields:
             raise ValueError('Unsupported email fields')
         if not isinstance(value.get('signature', True), bool):
-            raise ValueError('signature is true (default: the Gmail signature is added) or false')
+            raise ValueError('signature is true (default: your signature is added) or false')
         # Any of the owner's Gmail or Outlook accounts for the same company (or the same address) as the task's signals: a task
         # that came from a calendar or Slack still sends from that company's mailbox.
         task_accounts = [a for a in config['accounts'] if a['id'] in allowed_accounts]
@@ -328,8 +329,8 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
             if field == 'subject' and ('\r' in text or '\n' in text):
                 raise ValueError('Subject cannot contain another header')
             result[field] = closing_spaced(text) if field == 'body' else text
-        # The real Gmail signature is added at send time; the body ends at the name.
-        result['signature'] = value.get('signature', True) and not outlook(account)  # Graph can't read Outlook's signature
+        # The real signature (Gmail's own, or the one set or found for this account) is added at send time; the body ends at the name.
+        result['signature'] = value.get('signature', True)
         if value.get('attachments'):
             result['attachments'] = store_attachments(value['attachments'], config)
         for field in ('thread_id', 'in_reply_to', 'references'):
@@ -592,7 +593,7 @@ def email_preview(action):
         if action.get(field):
             lines.append(field.upper() + ': ' + ', '.join(action[field]))
     return ('\n'.join(lines) + '\nSubject: ' + action['subject'] + '\n\n' + action['body']
-            + ('\n\n+ your Gmail signature' if action.get('signature') else '')
+            + ('\n\n+ your signature' if action.get('signature') else '')
             + ('\n\nAttachments: ' + attachment_list(action) if action.get('attachments') else '')
             + ('\n' + snooze_note(action) if action.get('snooze_days') else '') + delegate_note(action))
 
@@ -619,7 +620,7 @@ def mime_bytes(action, job, signature='', config=None):
     signature = signature if action.get('signature') else ''
     text = body_text(action['body']) + ('\n\n' + signature_text(signature) if signature else '')
     message.set_content(text, charset='utf-8')
-    # Links behind their text, then a blank line and the real Gmail signature.
+    # Links behind their text, then a blank line and the real signature.
     page = '<div dir="ltr">' + body_html(action['body']) + '<br>\n<br>\n'
     if signature:
         page += '<div class="gmail_signature">' + signature + '</div>'
@@ -675,6 +676,7 @@ class EmailTransport:
             except OSError:
                 raise ValueError(f"The attachment {record['name']} is missing. Nothing was sent.")
         if action.get('signature'):
+            self.signatures.pop(action['from'].lower(), None)  # read fresh: the owner may have changed it
             try:
                 self.signature(action, account)
             except Exception:
@@ -685,10 +687,29 @@ class EmailTransport:
             return ''
         key = action['from'].lower()
         if key not in self.signatures:  # Loaded by preflight, before the send is admitted.
-            send_as = self.read(self.config, account, 'gmail', 'v1', 'gmail.users.settings.sendAs.get',
-                                {'userId': 'me', 'sendAsEmail': action['from']}, 'https://www.googleapis.com/auth/gmail.readonly')
-            self.signatures[key] = send_as.get('signature') or ''
+            own = signatures.get(self.config, account['id'])
+            if outlook(account):
+                # Graph has no signature API: the one the owner set, else the one their sent mail ends with.
+                self.signatures[key] = (own or self.detect_signature(account) or {}).get('html', '')
+            elif own and own.get('source') == 'owner' and own['html'].strip():
+                self.signatures[key] = own['html']  # the owner's override of Gmail's own
+            else:
+                send_as = self.read(self.config, account, 'gmail', 'v1', 'gmail.users.settings.sendAs.get',
+                                    {'userId': 'me', 'sendAsEmail': action['from']}, 'https://www.googleapis.com/auth/gmail.readonly')
+                self.signatures[key] = send_as.get('signature') or ''
         return self.signatures[key]
+
+    def detect_signature(self, account):
+        """Find an Outlook signature in the last sent messages and keep it; None when Outlook can't be read now."""
+        try:
+            found = signatures.detect(ms_graph.sent_bodies(self.config, self.credential, account),
+                                      (str(self.config.get('owner_name') or '').split() or [''])[0])
+        except ms_graph.GraphError:
+            return None
+        try:
+            return signatures.save(self.config, account['id'], found, 'detected')
+        except (OSError, ValueError):
+            return {'html': found}
 
     def outlook_preflight(self, action, account):
         if 'Mail.Send' not in granted_scopes(self.config, self.credential, account):
@@ -701,11 +722,14 @@ class EmailTransport:
                 attachment_bytes(record, self.config)
             except OSError:
                 raise ValueError(f"The attachment {record['name']} is missing. Nothing was sent.")
+        if action.get('signature'):
+            self.signatures.pop(action['from'].lower(), None)
+            self.signature(action, account)  # set or found now; none found means none added
 
     def outlook_send(self, action, job, account):
         """A draft from the exact MIME (so the Message-ID and reply headers stay ours), then that draft is sent: its
         immutable ID is the sent message's. Without Mail.ReadWrite, sendMail with the MIME, then Sent Items."""
-        mime = base64.b64encode(mime_bytes(action, job, '', self.config))
+        mime = base64.b64encode(mime_bytes(action, job, self.signature(action, account), self.config))
         call = lambda *args, **kwargs: ms_graph.call(self.config, self.credential, account, *args, **kwargs)
         rejected = lambda error: error.category == 'outlook' and error.status and 400 <= error.status < 500 and error.status not in (408, 429)
         try:

@@ -46,6 +46,7 @@ import skills
 import task_invites
 import google_api
 import ms_graph
+import signatures
 import next_actions
 import browser_login
 import browser_viewer
@@ -342,7 +343,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset'}
+OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_split', 'fleet_split_dismiss',
                          'fleet_split_adjust', 'task_import'}
@@ -5318,7 +5319,7 @@ def card_draft(row):
     else:
         head = [{'linkedin': 'LinkedIn', 'slack': 'Slack', 'whatsapp': 'WhatsApp'}[a['kind']] + ' message to ' + a.get('to_name', '')]
     tail = []
-    if a.get('signature'): tail.append('+ your Gmail signature')  # never set for Outlook: Graph can't read its signature
+    if a.get('signature'): tail.append('+ your signature')
     if a.get('attachments'): tail.append('Attachments: ' + ', '.join(x.get('name', '') for x in a['attachments']))
     if a.get('delegate') and a.get('wait_days'):
         tail.append(f"After sending, this card waits {a['wait_days']} day{'s' if a['wait_days'] > 1 else ''} for {a['to_name'] + '’s' if a.get('to_name') else 'a'} reply.")
@@ -6446,6 +6447,78 @@ class App:
                                             'https://www.googleapis.com/auth/gmail.readonly').get('data', '')
         return base64.urlsafe_b64decode(data + '=' * (-len(data) % 4)), node.get('mimeType', 'application/octet-stream'), node.get('filename') or 'image'
 
+    def mail_attachment(self, args):
+        """An Outlook message's attachments for a preparation, read-only: a list, or one saved in the job's attachments
+        folder (the same one, and the same size limit, as Gmail attachments fetched with gog). Gmail stays with gog."""
+        account = next((a for a in self.config['accounts'] if a['id'] == args.get('account_id')), None)
+        message_id = str(args.get('message_id') or '')
+        if args.get('event_id') is not None:
+            with self.store.connect() as db:
+                row = db.execute("SELECT account_id,source_id FROM events WHERE id=? AND kind='gmail.message'", (int(args['event_id']),)).fetchone()
+            if not row:
+                raise ValueError('No collected email with that event_id')
+            account = next((a for a in self.config['accounts'] if a['id'] == row['account_id']), None)
+            message_id = row['source_id']
+        if not account or account.get('service') != 'outlook':
+            raise ValueError('Give an Outlook account_id (Gmail attachments: gog gmail attachment)')
+        if not message_id:
+            raise ValueError('Give the message_id or event_id of the email')
+        try:
+            found = ms_graph.attachments(self.config, credential, account, message_id)
+            if not args.get('save'):
+                return {'attachments': [{k: a[k] for k in ('id', 'name', 'mime', 'size', 'inline', 'kind')}
+                                        | ({'note': 'a link to a cloud file: open it in the browser'} if a['kind'] == 'link' else
+                                           {'note': 'an attached email or event: not saved; read the message itself'} if a['kind'] == 'item' else {})
+                                        for a in found]}
+            chosen = next((a for a in found if args['save'] in (a['id'], a['name'])), None)
+            if not chosen:
+                raise ValueError('No attachment with that id or name')
+            if chosen['kind'] != 'file':
+                raise ValueError('Only file attachments can be saved; ' + ('open this cloud link in the browser' if chosen['kind'] == 'link' else 'this is an attached email or event'))
+            if chosen['size'] > next_actions.MAX_ATTACHMENT_BYTES:
+                raise ValueError('That attachment is larger than 18 MB')
+            data = ms_graph.attachment(self.config, credential, account, message_id, chosen['id'])
+        except ms_graph.GraphError as error:
+            raise ValueError(f'Outlook could not give the attachment ({error})') from None
+        if len(data) > next_actions.MAX_ATTACHMENT_BYTES:
+            raise ValueError('That attachment is larger than 18 MB')
+        job = str(args.get('job_id') or '')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job):
+            raise ValueError('Give the job_id of this preparation')
+        folder = Path(args.get('_folder') or WORKSPACE / 'data/assistant-attachments') / job
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        name = re.sub(r'[^\w. -]+', '_', chosen['name']).strip(' .') or 'attachment'
+        path = folder / name
+        path.write_bytes(data)
+        return {'saved': str(path), 'name': name, 'mime': chosen['mime'], 'size': len(data)}
+
+    def signature_view(self):
+        """Each mailbox's signature for Settings: the one set or found (cleaned HTML), and where it came from."""
+        return [{'account_id': a['id'], 'email': a.get('email', ''), 'service': a.get('service', 'gmail'),
+                 'html': (entry or {}).get('html', ''), 'source': (entry or {}).get('source', ''),
+                 'saveable': bool(signatures.path(self.config))}
+                for a in self.config.get('accounts', []) if next_actions.mail_account(a)
+                for entry in [signatures.get(self.config, a['id'])]]
+
+    def signature_action(self, name, args):
+        account = next((a for a in self.config.get('accounts', []) if a['id'] == args.get('account_id') and next_actions.mail_account(a)), None)
+        if not account:
+            raise ValueError('Choose one of your Gmail or Outlook accounts')
+        if name == 'detect_signature':
+            if account.get('service') != 'outlook':
+                raise ValueError('Gmail keeps its own signature; leave this empty to use it')
+            try:
+                found = signatures.detect(ms_graph.sent_bodies(self.config, credential, account),
+                                          (str(self.config.get('owner_name') or '').split() or [''])[0])
+            except ms_graph.GraphError as error:
+                raise ValueError(f'Outlook could not be read now ({error})') from None
+            return {'html': found, 'found': bool(found)}
+        value = str(args.get('html') or '')
+        if len(value) > signatures.MAX_HTML:
+            raise ValueError('That signature is too long')
+        signatures.save(self.config, account['id'], value, 'owner')
+        return self.signature_view()
+
     def hours(self):
         """Work hours as the dashboard shows and edits them."""
         return {**WORK_HOURS, 'timezone': getattr(local_tz(), 'key', str(local_tz())), 'digest_at': self.config.get('digest_at', '08:30'),
@@ -6493,6 +6566,8 @@ class App:
             selected = accounts  # search everything, asked for explicitly
         if name in ['events', 'begin_analysis', 'related'] and (not selected or not set(selected) <= set(accounts)):
             raise ValueError('Choose explicit configured account_ids (or ["all"] to search every account with events or related); cross-account reads must be intentional')
+        if name == 'mail_attachment':
+            return self.mail_attachment({k: v for k, v in args.items() if k != '_folder'})
         if name == 'status':
             result = self.store.snapshot(self.config['accounts'])
             # `manage_url`: where this install is set up when that is a web page (a hosted machine); the dashboard links to it.
@@ -6515,6 +6590,7 @@ class App:
             result['reviews_on'] = bool((self.config.get('review_worker') or {}).get('enabled'))  # off until activated
             result['started_at'] = self.started_at()
             result['hours'] = self.hours()
+            result['signatures'] = self.signature_view()
             # Read only the existing heartbeat's runtime facts, never conversation
             # content or scheduler configuration. Missing evidence stays unknown.
             try:
@@ -6808,6 +6884,10 @@ class App:
             if not owner_dashboard or args.get('status') not in ('kept', 'dropped'):
                 raise ValueError('Only the owner closes a promise, on the dashboard')
             return self.store.update_promise({'id': args.get('id'), 'status': args['status']}, source='dashboard')
+        if name in ('set_signature', 'detect_signature'):
+            if not owner_dashboard:
+                raise ValueError('Only the owner sets a signature, on the dashboard (Settings, Signatures)')
+            return self.signature_action(name, args)
         if name == 'set_work_hours':
             if not owner_dashboard:
                 raise ValueError('Only the owner changes work hours, on the dashboard or with: assistant hours')

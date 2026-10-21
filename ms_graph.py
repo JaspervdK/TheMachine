@@ -54,6 +54,8 @@ READ = {
     'messages.list': ('GET', '/me/messages', 'Mail.Read'),
     'messages.get': ('GET', '/me/messages/{id}', 'Mail.Read'),
     'messages.mime': ('GET', '/me/messages/{id}/$value', 'Mail.Read'),
+    'attachments.list': ('GET', '/me/messages/{id}/attachments', 'Mail.Read'),
+    'attachments.value': ('GET', '/me/messages/{id}/attachments/{attachment}/$value', 'Mail.Read'),
     'folders.get': ('GET', '/me/mailFolders/{id}', 'Mail.Read'),
     'folders.list': ('GET', '/me/mailFolders', 'Mail.Read'),
     'folders.messages': ('GET', '/me/mailFolders/{id}/messages', 'Mail.Read'),
@@ -61,6 +63,7 @@ READ = {
     'calendars.get': ('GET', '/me/calendars/{id}', 'Calendars.Read'),
     'calendar.delta': ('GET', '/me/calendarView/delta', 'Calendars.Read'),
     'calendars.view': ('GET', '/me/calendars/{id}/calendarView', 'Calendars.Read'),
+    'calendars.delta': ('GET', '/me/calendars/{id}/calendarView/delta', 'Calendars.Read'),
 }
 WRITE = {
     'messages.create': ('POST', '/me/messages', 'Mail.ReadWrite'),        # a draft from MIME (never sent by itself)
@@ -295,9 +298,55 @@ def folders(config, credential, account):
     return found
 
 
+CONSUMER_TENANT = '9188040d-6c67-4c5b-b112-36a304b66dad'  # Microsoft's own tenant for Outlook.com accounts
+
+
+def personal(account):
+    """An Outlook.com account (not Microsoft 365): the consumer tenant when known, else a consumer domain such as
+    outlook.com, hotmail.co.uk or live.be."""
+    if account.get('tenant_id'):
+        return account['tenant_id'] == CONSUMER_TENANT
+    domain = str(account.get('email') or '').lower().rsplit('@', 1)[-1]
+    return bool(re.fullmatch(r'(outlook|hotmail|live|msn|passport)\.[a-z]{2,3}(\.[a-z]{2})?', domain))
+
+
+def open_link(account, message_id, link=None):
+    """Where the owner opens one message: its own webLink, else Outlook on the web's read deeplink."""
+    if web_link(link):
+        return link
+    base = 'https://outlook.live.com/mail/0/deeplink/read/' if personal(account) else 'https://outlook.office.com/mail/deeplink/read/'
+    return base + urllib.parse.quote(str(message_id), safe='')
+
+
 def web_link(url):
     parts = urllib.parse.urlsplit(str(url or ''))
     return url if parts.scheme == 'https' and parts.hostname in LINK_HOSTS else None
+
+
+def attachments(config, credential, account, message_id):
+    """A message's attachments: files can be saved; links to cloud files and attached emails or events can't."""
+    page = call(config, credential, account, 'attachments.list', {'id': message_id, '$select': 'id,name,contentType,size,isInline'})
+    kinds = {'#microsoft.graph.fileAttachment': 'file', '#microsoft.graph.itemAttachment': 'item', '#microsoft.graph.referenceAttachment': 'link'}
+    return [{'id': a.get('id'), 'name': str(a.get('name') or 'attachment')[:200], 'mime': str(a.get('contentType') or 'application/octet-stream')[:100],
+             'size': int(a.get('size') or 0), 'inline': bool(a.get('isInline')), 'kind': kinds.get(a.get('@odata.type'), 'file')}
+            for a in page.get('value', [])]
+
+
+def sent_bodies(config, credential, account, count=10):
+    """The HTML of the last sent messages, without what they quote (uniqueBody) where Graph has it."""
+    page = call(config, credential, account, 'folders.messages', {'id': 'sentitems', '$top': count, '$orderby': 'sentDateTime desc',
+                                                                  '$select': 'uniqueBody,body'})
+    out = []
+    for message in page.get('value', []):
+        part = message.get('uniqueBody') or message.get('body') or {}
+        if part.get('contentType', 'html').lower() == 'html' and part.get('content'):
+            out.append(part['content'])
+    return out
+
+
+def attachment(config, credential, account, message_id, attachment_id):
+    """One file attachment's bytes, whatever its size (the raw $value, not base64 contentBytes)."""
+    return call(config, credential, account, 'attachments.value', {'id': message_id, 'attachment': attachment_id}, raw=True, timeout=120)
 
 
 # ------------------------------------------------------------------------------------------- Gmail shapes
@@ -488,33 +537,41 @@ def calendar_call(config, credential, account, method, params):
         return {'id': address, 'timeZone': 'UTC'}
     if method != 'events.list':
         raise GraphError('unsupported_calendar_method')
-    if calendar_id != 'primary':
-        # Graph has delta only for the default calendar: a shared one is read whole each round, without a sync token.
-        if params.get('syncToken'):
-            raise GraphError('outlook', 410)
-        query = {'id': calendar_id, '$link': params['pageToken']} if params.get('pageToken') else {
-            'id': calendar_id, 'startDateTime': params['timeMin'], 'endDateTime': params['timeMax'], '$top': 100}
-        page = call(config, credential, account, 'calendars.view', query, headers={'Prefer': ['outlook.timezone="UTC"']})
-        out = {'items': [calendar_item(e, owner) for e in page.get('value', [])]}
-        if page.get('@odata.nextLink'):
-            out['nextPageToken'] = page['@odata.nextLink']
-        else:
-            out['nextSyncToken'] = 'none'
-        return out
+    # Each calendar has its own delta (its links are its sync tokens); the default one is /me/calendarView.
+    method, where = ('calendar.delta', {}) if calendar_id == 'primary' else ('calendars.delta', {'id': calendar_id})
+    if params.get('syncToken') == 'none':
+        raise GraphError('outlook', 410)  # an earlier whole read without delta: start a delta now
     link = params.get('pageToken') or params.get('syncToken')
-    query = {'$link': link} if link else {'startDateTime': params['timeMin'], 'endDateTime': params['timeMax']}
+    if link and calendar_id != 'primary' and urllib.parse.urlsplit(link).path.endswith('/calendarView'):
+        return _calendar_view(config, credential, account, owner, calendar_id, params)  # a whole-read page
+    query = {**where, '$link': link} if link else {**where, 'startDateTime': params['timeMin'], 'endDateTime': params['timeMax']}
     try:
-        page = call(config, credential, account, 'calendar.delta', query,
+        page = call(config, credential, account, method, query,
                     headers={'Prefer': ['odata.maxpagesize=100', 'outlook.timezone="UTC"']})
     except GraphError as error:
         if params.get('syncToken') and error.status in (400, 404, 410):
             raise GraphError('outlook', 410) from None  # the delta expired: Google's word for that
+        if not link and calendar_id != 'primary' and error.status in (400, 404, 501):
+            return _calendar_view(config, credential, account, owner, calendar_id, params)  # no delta for this one
         raise
     out = {'items': [calendar_item(e, owner) for e in page.get('value', [])]}
     if page.get('@odata.nextLink'):
         out['nextPageToken'] = page['@odata.nextLink']
     if page.get('@odata.deltaLink'):
         out['nextSyncToken'] = page['@odata.deltaLink']
+    return out
+
+
+def _calendar_view(config, credential, account, owner, calendar_id, params):
+    """A calendar without delta (some shared ones), read whole each round: no sync token, so the window is read again."""
+    query = {'id': calendar_id, '$link': params['pageToken']} if params.get('pageToken') else {
+        'id': calendar_id, 'startDateTime': params['timeMin'], 'endDateTime': params['timeMax'], '$top': 100}
+    page = call(config, credential, account, 'calendars.view', query, headers={'Prefer': ['outlook.timezone="UTC"']})
+    out = {'items': [calendar_item(e, owner) for e in page.get('value', [])]}
+    if page.get('@odata.nextLink'):
+        out['nextPageToken'] = page['@odata.nextLink']
+    else:
+        out['nextSyncToken'] = 'none'
     return out
 
 

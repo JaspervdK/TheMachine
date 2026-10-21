@@ -12,6 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 import ms_graph
+import fleet
+import signatures
+import types
 import next_actions as n
 import onboarding
 import test_ux as ux
@@ -46,6 +49,9 @@ class FakeGraph:
         self.snoozed = False
         self.messages = {}
         self.delta = []
+        self.sent_html = []
+        self.files = {}
+        self.calendars = {}
 
     def add(self, mid, folder, received, modified, body=b'', conversation='conv-1', read=True, internet_id='<x@acme.test>'):
         self.messages[mid] = {'id': mid, 'conversationId': conversation, 'internetMessageId': internet_id, 'parentFolderId': folder,
@@ -83,6 +89,19 @@ class FakeGraph:
         if path == '/me/mailFolders' and verb == 'POST':
             self.snoozed = True
             return {'id': SNOOZED}
+        if path == '/me/mailFolders/sentitems/messages' and '$filter' not in query:
+            return {'value': [{'uniqueBody': {'contentType': 'html', 'content': h}} for h in self.sent_html]}
+        if path.endswith('/attachments') and verb == 'GET':
+            return {'value': [{k: v for k, v in f.items() if k != 'data'} for f in self.files.values()]}
+        if '/attachments/' in path and path.endswith('/$value'):
+            return self.files[urllib.parse.unquote(path.split('/')[5])]['data']
+        if path.startswith('/me/calendars/') and path.endswith('/calendarView/delta'):
+            answer = self.calendars[urllib.parse.unquote(path.split('/')[3])].pop(0)
+            if isinstance(answer, int):
+                raise http_error(path, answer)
+            return answer
+        if path.startswith('/me/calendars/') and path.endswith('/calendarView'):
+            return {'value': [], 'note': 'whole'}
         if path == '/me/mailFolders/sentitems/messages':
             wanted = query['$filter'][0].split("'")[1]
             return {'value': [{k: v for k, v in m.items() if k != '_mime'} for m in self.messages.values()
@@ -129,6 +148,10 @@ class FakeGraph:
         raise AssertionError('unexpected call ' + verb + ' ' + path)
 
 
+SENT_SIGNED = ('<html><body><div>Reply number {}.</div><div>Cheers,</div><div>Alex</div><div id="Signature"><p><b>Alex Smith</b><br>'
+               'Acme | <a href="https://acme.test" onclick="steal()">acme.test</a></p></div></body></html>')
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         ms_graph._tokens.clear(); ms_graph._folders.clear()
@@ -138,7 +161,7 @@ class Base(unittest.TestCase):
         self.cal = {'id': 'acme-outlook-calendar', 'service': 'outlook_calendar', 'transport': 'broker', 'email': 'alex@acme.test',
                     'calendar_id': 'primary', 'boundary': 'work:Acme'}
         self.config = {'microsoft_broker': {'url': BROKER}, 'credentials': {'microsoft-broker': str(token)},
-                       'accounts': [self.mail, self.cal], 'bootstrap_days': 7}
+                       'accounts': [self.mail, self.cal], 'bootstrap_days': 7, 'database': str(Path(self.temp.name) / 'events.sqlite')}
         self.fake = FakeGraph()
         patcher = mock.patch.object(ms_graph.urllib.request, 'urlopen', self.fake); patcher.start(); self.addCleanup(patcher.stop)
         self.store = a.Store(Path(self.temp.name) / 'events.sqlite')
@@ -243,7 +266,8 @@ class Sending(Base):
 
     def test_an_outlook_reply_validates_without_a_signature_and_goes_out_from_a_draft(self):
         action = self.action()
-        self.assertEqual((action['from'], action['signature'], action['snooze_days']), ('alex@acme.test', False, 3))
+        self.assertEqual((action['from'], action['signature'], action['snooze_days']), ('alex@acme.test', True, 3))
+        self.fake.sent_html = [SENT_SIGNED.format(n) for n in range(4)]
         email = n.EmailTransport(self.config, a.credential, a.gog_read)
         with self.assertRaisesRegex(ValueError, 'Outlook is connected read-only'):
             email.preflight(action)
@@ -256,6 +280,8 @@ class Sending(Base):
         sent = base64.b64decode(next(c[3] for c in self.fake.calls if c[0] == 'POST' and c[1] == G + '/me/messages')).decode()
         self.assertIn('In-Reply-To: <m1@client.test>', sent)
         self.assertIn('Message-ID: <job-1@acme.test>', sent)
+        self.assertIn('Alex Smith', sent)  # the signature found in the sent mail, below the body
+        self.assertEqual(signatures.get(self.config, 'acme-outlook')['source'], 'detected')
         self.assertEqual(email.reconcile(action, job), {'message_id': result['message_id']})
         self.fake.fail['POST /me/messages'] = 400
         self.assertEqual(email.send(action, job), {'rejected': 400})
@@ -301,6 +327,102 @@ class Snooze(Base):
         self.fake.add('reply', INBOX, '2099-01-02T10:00:00Z', '2099-01-02T10:00:00Z')
         snooze.wake('acme-outlook', 'conv-1')
         self.assertEqual((self.fake.messages['in1']['parentFolderId'], self.fake.messages['in1']['isRead']), (INBOX, True))
+
+
+class Signatures(Base):
+    def test_cleaning_keeps_formatting_and_drops_anything_active(self):
+        cleaned = signatures.clean('<script>alert(1)</script><b onclick="x()">Alex</b><a href="javascript:x()">a</a>'
+                                   '<img src="http://plain.test/t.png"><img src="cid:logo"><div style="background:url(x)">t</div><iframe>in</iframe>')
+        self.assertEqual(cleaned, '<b>Alex</b><a>a</a><img><img src="cid:logo"><div>t</div>')
+
+    def test_found_only_when_it_repeats_and_without_the_closing(self):
+        plain = [f'<div>Note {n}.</div><div>Cheers,</div><div>Alex</div><div><b>Alex Smith</b></div><div>Acme</div>'
+                 '<div id="appendonsend"></div><div>quoted <b>Someone Else</b></div>' for n in range(3)]
+        self.assertEqual(signatures.detect(plain, 'Alex'), '<div><b>Alex Smith</b></div><div>Acme</div>')
+        self.assertEqual(signatures.detect(plain[:2], 'Alex'), '')  # twice is not enough
+        self.assertIn('Alex Smith', signatures.detect([SENT_SIGNED.format(n) for n in range(3)], 'Alex'))
+        self.assertNotIn('steal', signatures.detect([SENT_SIGNED.format(n) for n in range(3)], 'Alex'))
+
+    def test_the_owners_own_is_never_replaced_and_overrides_gmail(self):
+        signatures.save(self.config, 'acme-outlook', '<b>Mine</b>', 'owner')
+        self.assertEqual(signatures.save(self.config, 'acme-outlook', '<b>Found</b>', 'detected')['html'], '<b>Mine</b>')
+        gmail = {'id': 'acme-gmail', 'service': 'gmail', 'transport': 'broker', 'email': 'alex@acme.test', 'boundary': 'work:Acme'}
+        self.config['accounts'].append(gmail)
+        reads = []
+        email = n.EmailTransport(self.config, a.credential, lambda *args: reads.append(args) or {'signature': '<i>Gmail</i>'})
+        action = {'kind': 'email', 'account_id': 'acme-gmail', 'from': 'alex@acme.test', 'signature': True}
+        self.assertEqual(email.signature(action, gmail), '<i>Gmail</i>')  # empty: Gmail's own
+        signatures.save(self.config, 'acme-gmail', '<b>Override</b>', 'owner')
+        email.signatures.clear()
+        self.assertEqual(email.signature(action, gmail), '<b>Override</b>')
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(email.signature({**action, 'signature': False}, gmail), '')
+
+
+class Attachments(Base):
+    def test_a_preparation_lists_and_saves_outlook_attachments(self):
+        self.fake.add('m4', INBOX, '2099-01-01T08:00:00Z', '2099-01-01T08:00:00Z', mime('Invoice', 'bo@client.test', 'alex@acme.test', 'Attached', '<m4@client.test>'))
+        self.fake.files = {'a1': {'@odata.type': '#microsoft.graph.fileAttachment', 'id': 'a1', 'name': '../inv.pdf', 'contentType': 'application/pdf',
+                                  'size': 6, 'isInline': False, 'data': b'%PDF-1'},
+                           'a2': {'@odata.type': '#microsoft.graph.referenceAttachment', 'id': 'a2', 'name': 'Deck', 'size': 0},
+                           'a3': {'@odata.type': '#microsoft.graph.itemAttachment', 'id': 'a3', 'name': 'Fwd: older mail', 'size': 900}}
+        a.sync_gmail(self.store, self.config, self.mail)
+        with self.store.connect() as db:
+            event = db.execute("SELECT id FROM events WHERE source_id='m4'").fetchone()[0]
+        app = types.SimpleNamespace(config=self.config, store=self.store)
+        listed = a.App.mail_attachment(app, {'event_id': event})['attachments']
+        self.assertEqual([(x['name'], x['kind']) for x in listed], [('../inv.pdf', 'file'), ('Deck', 'link'), ('Fwd: older mail', 'item')])
+        self.assertIn('browser', listed[1]['note'])
+        folder = Path(self.temp.name) / 'attachments'
+        saved = a.App.mail_attachment(app, {'event_id': event, 'save': 'a1', 'job_id': 'job-1', '_folder': str(folder)})
+        self.assertEqual(Path(saved['saved']), folder / 'job-1' / '_inv.pdf')  # no way out of the folder
+        self.assertEqual(Path(saved['saved']).read_bytes(), b'%PDF-1')
+        with self.assertRaisesRegex(ValueError, 'Only file attachments'):
+            a.App.mail_attachment(app, {'event_id': event, 'save': 'a2', 'job_id': 'job-1', '_folder': str(folder)})
+        with self.assertRaisesRegex(ValueError, 'job_id'):
+            a.App.mail_attachment(app, {'event_id': event, 'save': 'a1', 'job_id': '../x', '_folder': str(folder)})
+        self.fake.files['a1']['size'] = n.MAX_ATTACHMENT_BYTES + 1
+        with self.assertRaisesRegex(ValueError, '18 MB'):
+            a.App.mail_attachment(app, {'event_id': event, 'save': 'a1', 'job_id': 'job-1', '_folder': str(folder)})
+        with self.assertRaisesRegex(ValueError, 'Outlook account'):
+            a.App.mail_attachment(app, {'account_id': 'acme-outlook-calendar', 'message_id': 'm4'})
+
+
+class BriefLinks(Base):
+    def test_outlook_mail_opens_in_outlook_on_the_web(self):
+        self.assertEqual(ms_graph.open_link(self.mail, 'AA/k='), 'https://outlook.office.com/mail/deeplink/read/AA%2Fk%3D')
+        self.assertEqual(ms_graph.open_link({'email': 'sam@hotmail.co.uk'}, 'AA'), 'https://outlook.live.com/mail/0/deeplink/read/AA')
+        self.assertEqual(ms_graph.open_link(self.mail, 'AA', 'https://outlook.office365.com/owa/?ItemID=AA'), 'https://outlook.office365.com/owa/?ItemID=AA')
+        self.assertFalse(ms_graph.personal({'email': 'sam@live.nation.test'}))
+        self.fake.add('m1', INBOX, '2099-01-01T08:00:00Z', '2099-01-01T08:00:00Z', mime('Quote', 'Bo <bo@client.test>', 'alex@acme.test', 'Hi', '<m1@client.test>'))
+        a.sync_gmail(self.store, self.config, self.mail)
+        opener = fleet.Fleet.brief_opener(types.SimpleNamespace(config=self.config, connect=self.store.connect))
+        self.assertEqual(opener('client.test'), 'https://outlook.office365.com/owa/?ItemID=m1')
+        self.assertTrue(opener('other.test').startswith('https://mail.google.com/'))
+        view = {'unanswered': [{'org': 'Client', 'domain': 'client.test', 'count': 1, 'since': '2099-01-01', 'who': ['You']}]}
+        items = fleet.brief_items(view, fleet.dt.date(2099, 1, 5), (), opener)
+        self.assertEqual(items[0]['open'], 'https://outlook.office365.com/owa/?ItemID=m1')
+        self.assertTrue(fleet.brief_items(view, fleet.dt.date(2099, 1, 5))[0]['open'].startswith('https://mail.google.com/'))
+
+
+class OtherCalendars(Base):
+    def test_a_shared_calendar_has_its_own_delta_or_is_read_whole(self):
+        shared = {**self.cal, 'id': 'acme-team-calendar', 'calendar_id': 'team'}
+        self.fake.calendars = {'team': [{'value': [], '@odata.deltaLink': G + '/me/calendars/team/calendarView/delta?$deltatoken=t1'},
+                                        {'value': [], '@odata.deltaLink': G + '/me/calendars/team/calendarView/delta?$deltatoken=t2'}],
+                               'other': [404]}
+        first = ms_graph.calendar_call(self.config, a.credential, shared, 'events.list', {'timeMin': '2099-01-01T00:00:00Z', 'timeMax': '2099-02-01T00:00:00Z'})
+        self.assertEqual(first['nextSyncToken'], G + '/me/calendars/team/calendarView/delta?$deltatoken=t1')
+        again = ms_graph.calendar_call(self.config, a.credential, shared, 'events.list', {'syncToken': first['nextSyncToken']})
+        self.assertEqual(again['nextSyncToken'], G + '/me/calendars/team/calendarView/delta?$deltatoken=t2')
+        with self.assertRaises(ms_graph.GraphError):  # another calendar's link is never followed
+            ms_graph.calendar_call(self.config, a.credential, {**shared, 'calendar_id': 'other'}, 'events.list', {'syncToken': first['nextSyncToken']})
+        whole = ms_graph.calendar_call(self.config, a.credential, {**shared, 'calendar_id': 'other'}, 'events.list',
+                                       {'timeMin': '2099-01-01T00:00:00Z', 'timeMax': '2099-02-01T00:00:00Z'})
+        self.assertEqual(whole['nextSyncToken'], 'none')  # no delta for this one: read whole each round
+        with self.assertRaises(ms_graph.GraphError) as caught:
+            ms_graph.calendar_call(self.config, a.credential, shared, 'events.list', {'syncToken': 'none'})
+        self.assertEqual(caught.exception.status, 410)
 
 
 class OwnApp(unittest.TestCase):

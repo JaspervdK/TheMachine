@@ -231,6 +231,19 @@ def cmd_events(config, args):
         print()
 
 
+def cmd_attachment(config, args):
+    request = {'event_id': args.event} if args.event is not None else {'account_id': args.account, 'message_id': args.message}
+    if args.save:
+        request.update(save=args.save, job_id=args.job)
+    result = call(config, 'mail_attachment', request)
+    if args.json or args.save:
+        return out_json(result)
+    for a in result['attachments']:
+        print(f"{a['name']}  ({a['mime']}, {a['size']:,} bytes, id {a['id']})" + (f" - {a['note']}" if a.get('note') else ''))
+    if not result['attachments']:
+        print('No attachments.')
+
+
 def cmd_sources(config, args):
     connectors = call(config, 'status', {'full': True})['connectors']
     if args.json:
@@ -737,6 +750,12 @@ def parser():
     c.add_argument('--query')
     c.add_argument('--limit', type=int, default=20)
     c.add_argument('--full', action='store_true')
+    c = add('attachment', "An Outlook email's attachments, read-only: list them, or save one for a preparation", cmd_attachment)
+    c.add_argument('--event', type=int, help="the collected email's event id")
+    c.add_argument('--account', help='Outlook account id (with --message)')
+    c.add_argument('--message', help='Outlook message id (with --account)')
+    c.add_argument('--save', help='attachment id or name to save')
+    c.add_argument('--job', help='the preparation job id: saves under its attachments folder')
     add('sources', 'Connection health per source', cmd_sources)
     c = add('reviews', 'Review backlog and recent review runs', cmd_reviews)
     c.add_argument('--limit', type=int, default=10)
