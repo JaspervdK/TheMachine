@@ -2,6 +2,8 @@
 
 A private assistant inbox for [OpenClaw](https://docs.openclaw.ai). It collects your email, calendar, chats and phone notifications, and lets your own agent find useful next steps. Cards reach the dashboard app and, optionally, Telegram. Tap **Do it** and the agent carries out the offered task.
 
+Website: [themachine.computer](https://themachine.computer). Rather not run it yourself? The same Machine is also [hosted for you](https://themachine.computer/pricing) on a private server in the EU (beta); export and import move everything between the two.
+
 **Early release.** One owner per installation. Linux/systemd for managed installs. Your core assistant needs no cloud account; the optional Fleet and Friends connections use The Machine Network.
 
 ## Quick start
