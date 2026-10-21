@@ -142,7 +142,7 @@ Do it authorizes the offered task end to end; verified written instructions auth
 
 In plain words: [themachine.computer/security](https://themachine.computer/security). The details:
 
-- Keep the local API on loopback and the dashboard behind the owner identity check; authenticated cloud hosting uses its own gate.
+- Keep the local API on loopback and the dashboard behind the owner identity check; authenticated cloud hosting uses its own gate (Google or Microsoft plus an authenticator code, or a passkey). A self-hosted dashboard has no sign-in of its own: your tailnet login is the identity, so a passkey goes on that account (Tailscale's identity provider).
 - The CLI/agent key cannot invent owner decisions. Telegram/dashboard owner controls share one store.
 - Reviews only read. Do it permits broad task execution; plugin guards are not an OS sandbox and differ by runtime.
 - Credentials must not enter model context; the owner's dashboard sign-in facility handles them separately.
