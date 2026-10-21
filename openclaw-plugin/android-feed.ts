@@ -1,10 +1,31 @@
 // Reuse the Gateway's existing phone feed. No calls to the phone, no queue drain.
 import { peekSystemEventEntries } from 'openclaw/plugin-sdk/system-event-runtime';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+
+// A notification's text waits in android_inbox sealed with the app's message key (message_seal.py, INBOX), unless
+// message protection is off or the key isn't made yet. Read each time: tiny, and the app may make it after we start.
+export function messageKey(config: any): Buffer | null {
+  if (config?.message_protection === false || !config?.database) return null;
+  try {
+    const key = Buffer.from(readFileSync(join(dirname(config.database), 'message-content.key'), 'utf8').trim(), 'base64');
+    return key.length === 32 ? key : null;
+  } catch { return null; }
+}
+
+export function sealText(key: Buffer, text: string): string {
+  if (!text) return text;
+  const derive = (name: string) => createHmac('sha256', key).update(name).digest();
+  const nonce = randomBytes(16), data = Buffer.from(text, 'utf8');
+  const stream = createHash('shake256', {outputLength: data.length}).update(derive('mc1-inbox-seal')).update(nonce).digest();
+  const sealed = Buffer.from(data.map((b, i) => b ^ stream[i]));
+  const tag = createHmac('sha256', derive('mc1-inbox-mac')).update('mci1:').update(nonce).update(sealed).digest().subarray(0, 16);
+  return 'mci1:' + Buffer.concat([nonce, sealed, tag]).toString('base64');
+}
 
 // nodeId: the paired phone's OpenClaw node id (the Android account's `node_id` in config).
 export function notificationEnvelope(entry: any, nodeId: string) {
@@ -48,7 +69,8 @@ export function registerAndroidFeed(api: any) {
         db.exec('PRAGMA busy_timeout=2000; BEGIN IMMEDIATE');
         db.exec('CREATE TABLE IF NOT EXISTS android_receipts(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,processed_at TEXT NOT NULL)');
         const insert = db.prepare('INSERT OR IGNORE INTO android_inbox(id,payload,received_at) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM android_receipts WHERE id=? AND account_id=?)');
-        for (const entry of entries) insert.run(entry.id, JSON.stringify(entry), new Date().toISOString(), entry.id, account.id);
+        const key = entries.length ? messageKey(config) : null;
+        for (const entry of entries) insert.run(entry.id, JSON.stringify(key ? {...entry, text: sealText(key, entry.text)} : entry), new Date().toISOString(), entry.id, account.id);
         const meta = db.prepare('INSERT INTO android_feed_health(id,last_checked,last_recorded,error) VALUES(1,?,?,NULL) ON CONFLICT(id) DO UPDATE SET last_checked=excluded.last_checked,last_recorded=coalesce(excluded.last_recorded,android_feed_health.last_recorded),error=NULL');
         if (entries.length) lastRecorded = new Date(Math.max(...entries.map((e: any) => e.at_ms))).toISOString();
         meta.run(new Date().toISOString(), lastRecorded);

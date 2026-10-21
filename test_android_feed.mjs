@@ -42,6 +42,24 @@ try {
   db.exec("DELETE FROM android_inbox; INSERT INTO android_receipts VALUES('one','personal-android','2026-10-10')");
   await start();assert.equal(db.prepare('SELECT count(*) n FROM android_inbox').get().n,0);
   assert.equal(db.prepare('SELECT error FROM android_feed_health').get().error,null);
+  // With the app's message key next to the database, the waiting text is sealed, and the app opens it.
+  const {writeFile}=await import('node:fs/promises');
+  const {execFileSync}=await import('node:child_process');
+  const key=Buffer.alloc(32,7).toString('base64');
+  await writeFile(join(directory,'message-content.key'),key+'\n',{mode:0o600});
+  db.exec('DELETE FROM android_receipts');
+  globalThis.__feedTest.entries=[{...event(`Notification posted (node=${node} key=k2 package=com.example): Zanzibar quill contract ready`),id:'two'}];
+  await start();
+  const payload=JSON.parse(db.prepare("SELECT payload FROM android_inbox WHERE id='two'").get().payload);
+  assert.ok(payload.text.startsWith('mci1:'));assert.ok(!JSON.stringify(payload).includes('Zanzibar'));
+  assert.equal(payload.notification_key_hash.length,64);
+  const opened=execFileSync('python3',['-c','import base64,sys,message_seal as m;print(m.Sealer(base64.b64decode(sys.argv[1])).open_inbox(sys.argv[2]),end="")',key,payload.text],
+    {cwd:new URL('.',import.meta.url),encoding:'utf8'});
+  assert.equal(opened,'Zanzibar quill contract ready');
+  globalThis.__feedTest.config={...globalThis.__feedTest.config,message_protection:false};
+  globalThis.__feedTest.entries=[{...event(`Notification posted (node=${node} key=k3 package=com.example): Plain on purpose`),id:'three'}];
+  await start();
+  assert.equal(JSON.parse(db.prepare("SELECT payload FROM android_inbox WHERE id='three'").get().payload).text,'Plain on purpose');
   db.close();
-  console.log('Android bridge restart replay protection and scoped prompt hook passed.');
+  console.log('Android bridge restart replay protection, scoped prompt hook and sealed waiting text passed.');
 } finally {delete globalThis.__feedTest;await rm(directory,{recursive:true,force:true});}

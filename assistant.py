@@ -2200,6 +2200,8 @@ class Store:
         groups = {}
         for row in rows:
             raw = json.loads(row['payload'])
+            if 'text' in raw:  # sealed by the Gateway's plugin
+                raw['text'] = message_seal.open_inbox(self.sealer, raw['text'])
             groups.setdefault(raw['notification_key_hash'], []).append((row, raw))
         events, consumed = {}, []
         current = dt.datetime.fromisoformat(now())

@@ -35,7 +35,8 @@ Never include actual tokens, messages or a production database.
 - Message contents from every source are encrypted in the database by default, on every install, with a key
   next to it for the service user ([configuration](docs/configuration.md#message-protection)). It protects
   copies of the database and tools without the key, not against root on the machine. Back the key up with the
-  database: without it the messages are lost. `"message_protection": false` turns it off.
+  database: without it the messages are lost. `"message_protection": false` turns it off. Stores other
+  programs own are not covered: OpenClaw's session transcripts and WhatsApp's `wacli` store.
 - Backups contain private evidence and may include secrets. Protect them like the live data.
 - Keep the operating system patched. On a dedicated Ubuntu server, let `unattended-upgrades` install the
   `-security` pockets daily, and reboot when `/run/reboot-required` appears, at a quiet hour, then check that

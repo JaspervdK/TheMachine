@@ -63,6 +63,20 @@ class Sealer(unittest.TestCase):
         with self.assertRaises(message_seal.SealError):
             message_seal.Sealer(os.urandom(32)).open(self.sealer.seal('pay the invoice'))
 
+    def test_text_the_gateway_plugin_seals_opens_here_and_fails_loudly_otherwise(self):
+        sealed = self.sealer.seal_inbox(CANARY + ' Grüße 👋')
+        self.assertTrue(sealed.startswith(message_seal.INBOX))
+        self.assertNotIn(CANARY, sealed)
+        self.assertEqual(message_seal.open_inbox(self.sealer, sealed), CANARY + ' Grüße 👋')
+        self.assertNotEqual(self.sealer.seal_inbox('same'), self.sealer.seal_inbox('same'))
+        for value in ['plain, from before', '', None]:
+            self.assertEqual(message_seal.open_inbox(self.sealer, value), value)
+            self.assertEqual(message_seal.open_inbox(None, value), value)
+        with self.assertRaises(message_seal.SealError):
+            message_seal.Sealer(os.urandom(32)).open_inbox(sealed)
+        with self.assertRaises(message_seal.SealError):
+            message_seal.open_inbox(None, sealed)
+
     def test_metadata_keeps_only_lookup_keys_in_the_clear_new_keys_sealed(self):
         text = assistant.encoded(event(1, 'gmail.message')['metadata'])
         sealed = self.sealer.seal_json(text)
@@ -157,6 +171,21 @@ class Protected(unittest.TestCase):
         with store.connect():
             pass
         self.assertEqual(sqlite3.connect(self.path).execute("SELECT count(*) FROM network_replies WHERE typeof(body)='blob'").fetchone()[0], 2)
+
+    def test_a_phone_notification_waits_sealed_and_arrives_readable(self):
+        store = assistant.Store(self.path, protect=True)
+        account = {'id': 'phone', 'service': 'android'}
+        key = 'a' * 64
+        for i, text in enumerate([store.sealer.seal_inbox(CANARY + ' sealed'), CANARY + ' from before the update']):
+            envelope = {'id': f'n{i}', 'at_ms': 1000 + i, 'change': 'posted', 'package_name': 'com.example',
+                        'notification_key_hash': key + str(i), 'text': text}
+            with sqlite3.connect(self.path) as raw:  # as the Gateway's plugin writes it: no key on that connection
+                raw.execute('INSERT INTO android_inbox VALUES(?,?,?)', (envelope['id'], json.dumps(envelope), '2020-01-01T00:00:00+00:00'))
+        with store.connect() as db:
+            rows = db.execute('SELECT * FROM android_inbox ORDER BY id').fetchall()
+        events, consumed = store.android_feed_batch(account, rows)
+        self.assertEqual(sorted(e['body'] for e in events), [CANARY + ' from before the update', CANARY + ' sealed'])
+        self.assertEqual(sorted(consumed), ['n0', 'n1'])
 
     def test_role_quotes_promises_and_run_evidence_sealed_in_place_and_promises_still_dedupe(self):
         store = assistant.Store(self.path, protect=True)
@@ -356,7 +385,7 @@ class NothingOutsideTheSealedFields(unittest.TestCase):
             'tool_approval_proposals.detail': 'a proposal', 'checkpoints.state': 'a sync cursor (MESSAGE_SEAL_AUDIT checks)',
             'analyses.items': 'ids and versions', 'preparations.details': 'why a preparation stopped',
             'preparations.reason': 'a reason code',
-            'android_inbox.payload': "written by the Gateway's plugin without the key; deleted once read (a known gap)",
+            'android_inbox.payload': "its text sealed by the Gateway's plugin (message_seal.INBOX); deleted once read",
             'network_outbox.body': 'matched in SQL until sent; sealed end to end in transit (network_crypto)',
             'fleet_log.what': "a log of what was shared, by kind", 'fleet_out.context': 'matched in SQL: an id',
             'fleet_rules.rule': 'a sharing rule', 'fleet_briefs.view': 'counts and dates (fleet brief)',

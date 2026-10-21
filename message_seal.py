@@ -20,7 +20,7 @@ On by default, on every Machine: only `"message_protection": false` in config.js
 protects against reading the database without that account: a copied database file, a support tool that opens the
 file, someone signed in as another user. It does not protect against root on the same server, which can read the key
 or the running app's memory; nor against what other programs keep (OpenClaw's session transcripts, a chat bridge's
-own store). Backups and exports carry the key with the database, so they stay readable for the owner.
+own store). A phone notification waiting for the app (android_inbox) is sealed by the Gateway's plugin (INBOX). Backups and exports carry the key with the database, so they stay readable for the owner.
 
 Sealing: a fresh 16-byte nonce; the keystream is SHAKE256(key, nonce); a 16-byte BLAKE2b MAC over all of it
 (encrypt-then-MAC); keys for sealing, MAC and the index are derived from the stored key with BLAKE2b. Standard
@@ -59,6 +59,11 @@ DERIVED = {'suggestions': ('title', 'body', 'handled_hint'), 'feedback_prompts':
            'fleet_in': ('question', 'draft'), 'fleet_out': ('question', 'answer'), 'network_replies': ('body',)}
 DERIVED_JSON = (('action_jobs', 'payload', frozenset({'kind'})), ('suggestions', 'next_action', frozenset({'kind'})),
                 ('suggestions', 'outcome', frozenset({'state'})))
+# The phone's notifications reach the app through android_inbox, written by the Gateway's plugin
+# (openclaw-plugin/android-feed.ts), which reads the key but has no BLAKE2b with a key in Node: their text is sealed
+# with HMAC-SHA256 derived keys instead, the same SHAKE256 keystream and a 16-byte HMAC-SHA256 tag, as
+# INBOX + base64(nonce, sealed, tag). Deleted once the app has read it.
+INBOX = 'mci1:'
 WORD = re.compile(r'[^\W_]+')
 # The Machine's own signals (its Gateway's log, its own faults): logs, not anyone's message
 SYSTEM_KINDS = ('gateway.', 'machine.')
@@ -154,6 +159,8 @@ class Sealer:
     def __init__(self, key):
         derive = lambda name: hashlib.blake2b(key=key, person=name, digest_size=32).digest()
         self._enc, self._mac, self._index = derive(b'mc1-seal'), derive(b'mc1-mac'), derive(b'mc1-index')
+        inbox = lambda name: hmac.new(key, name, hashlib.sha256).digest()  # what Node's crypto can do too (INBOX)
+        self._inbox_enc, self._inbox_mac = inbox(b'mc1-inbox-seal'), inbox(b'mc1-inbox-mac')
         self._word = functools.lru_cache(maxsize=100_000)(self._word)  # a mailbox's words repeat a lot
 
     def _stream(self, nonce, size):
@@ -179,6 +186,26 @@ class Sealer:
             raise SealError('A sealed message did not open: wrong key or a damaged database')
         data = (int.from_bytes(sealed, 'little') ^ int.from_bytes(self._stream(nonce, len(sealed)), 'little')).to_bytes(len(sealed), 'little')
         return data.decode('utf-8')
+
+    def seal_inbox(self, text):
+        """Text the Gateway's plugin writes for the app to read (INBOX), as the plugin seals it; for tests."""
+        if not isinstance(text, str) or not text:
+            return text
+        data, nonce = text.encode('utf-8'), os.urandom(NONCE)
+        sealed = bytes(a ^ b for a, b in zip(data, hashlib.shake_256(self._inbox_enc + nonce).digest(len(data))))
+        return INBOX + base64.b64encode(nonce + sealed + self._inbox_tag(nonce, sealed)).decode()
+
+    def _inbox_tag(self, nonce, sealed):
+        return hmac.new(self._inbox_mac, INBOX.encode() + nonce + sealed, hashlib.sha256).digest()[:TAG]
+
+    def open_inbox(self, value):
+        if not is_sealed_inbox(value):
+            return value
+        raw = base64.b64decode(value[len(INBOX):])
+        nonce, sealed, tag = raw[:NONCE], raw[NONCE:-TAG], raw[-TAG:]
+        if len(nonce) != NONCE or len(tag) != TAG or not hmac.compare_digest(tag, self._inbox_tag(nonce, sealed)):
+            raise SealError('A sealed notification did not open: wrong key or damaged')
+        return bytes(a ^ b for a, b in zip(sealed, hashlib.shake_256(self._inbox_enc + nonce).digest(len(sealed)))).decode('utf-8')
 
     def seal_json(self, text, plain=PLAIN_METADATA):
         """A JSON object keeps `plain` keys in the clear; the rest goes into one sealed member."""
@@ -225,6 +252,17 @@ class Sealer:
 
 def is_sealed(value):
     return type(value) is bytes and value.startswith(MAGIC)
+
+
+def is_sealed_inbox(value):
+    return type(value) is str and value.startswith(INBOX)
+
+
+def open_inbox(sealer, value):
+    """Opens text the Gateway's plugin sealed (INBOX); plain text passes. Sealed text without the key is an error."""
+    if is_sealed_inbox(value) and not sealer:
+        raise SealError(f'A sealed notification waits but {KEY_NAME} is missing')
+    return sealer.open_inbox(value) if sealer else value
 
 
 def is_sealed_json(value):

@@ -95,6 +95,11 @@ change fails; then the rewrite in one step, a check that every message opens, an
 Installs from before it was the default are encrypted this way at their first start after the upgrade. To opt out,
 set `"message_protection": false`. Exports open the messages and leave the key out; an import is encrypted again
 with the new Machine's own key at its next start, so moving between your computer and hosted keeps working. The key does not stop someone with root on the machine, who can
-read it; it stops the database file, its copies and tools without the key. Not covered: OpenClaw's own session
-transcripts and caches, WhatsApp's `wacli` store, browser profiles and Network replies waiting to go out.
+read it; it stops the database file, its copies and tools without the key. Also sealed: a phone notification waiting
+for the app (the Gateway's plugin seals it with the same key) and Network replies (one waiting to go out is sealed end
+to end for the asking Machine). The live look at a preparing card's browser stays in memory only.
+
+Not covered, because other programs own them: OpenClaw's session transcripts and caches (review and preparation turns
+include message text; OpenClaw's `session.maintenance` settings, such as `pruneAfter` and `maxDiskBytes`, bound what it
+keeps), WhatsApp's `wacli` store (`wacli store cleanup --days N` drops chats quiet that long) and browser profiles.
 
