@@ -119,9 +119,7 @@ class Moving(tm.Moving):
         custom=self.data/'peer-identity.json';custom.write_text(json.dumps(nc.new_keys()))
         config=json.loads(self.config.read_text());config['network_keys']=str(custom);self.config.write_text(json.dumps(config))
         archive,_=self.export()
-        import zipfile
-        with zipfile.ZipFile(archive) as z:
-            self.assertFalse(any('network-keys.json' in n or 'peer-identity.json' in n for n in z.namelist()))
+        self.assertFalse(any('network-keys.json' in n or 'peer-identity.json' in n for n in self.files(archive)))
 
     def network_keys(self, where=None):
         keys = nc.new_keys()
@@ -136,7 +134,7 @@ class Moving(tm.Moving):
         shutil.rmtree(self.tmp / 'elsewhere', ignore_errors=True)  # another computer: the folder outside isn't there
         config_path, space, claw = self.target()
         with patch.dict('os.environ', {moving.PASSPHRASE_ENV: passphrase} if passphrase else {}):
-            moving.import_(archive, config_path, passphrase=passphrase, workspace=space, openclaw_home=claw)
+            moving.import_(archive, config_path, passphrase=passphrase or manifest['code'], workspace=space, openclaw_home=claw)
         config = json.loads(config_path.read_text())
         found = network.keys_path(config)
         return manifest, config_path, (nc.public_keys(json.loads(found.read_text())) if found and found.is_file() else None)

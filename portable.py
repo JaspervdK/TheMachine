@@ -87,3 +87,42 @@ def home_of_user():
         return pwd.getpwuid(os.getuid()).pw_dir
     except (ImportError, KeyError, AttributeError):
         return os.path.expanduser('~')
+
+
+def shred(path):
+    """Overwrite a file with zeros, then remove it. Best effort: a copy-on-write file system or an SSD can keep the
+    old blocks, so this is for files that should never stay readable after they are gone, not a guarantee."""
+    try:
+        size = os.lstat(path).st_size
+        if os.path.isfile(path) and not os.path.islink(path):
+            with open(path, 'r+b', buffering=0) as handle:
+                block, done = b'\0' * (1 << 20), 0
+                while done < size:
+                    done += handle.write(block[:min(len(block), size - done)])
+                os.fsync(handle.fileno())
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+
+
+def shred_tree(folder):
+    """shred() every file in a folder, then remove the folder."""
+    import shutil
+    if not os.path.lexists(folder):
+        return
+    if os.path.islink(folder) or not os.path.isdir(folder):
+        return shred(folder)
+    for root, _, files in os.walk(folder, followlinks=False):
+        for name in files:
+            shred(os.path.join(root, name))
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def private_dir(parent, prefix):
+    """A new folder only this account can open (700), inside `parent`: on the same file system as what it is for."""
+    import tempfile
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    return tempfile.mkdtemp(prefix=prefix, dir=parent)

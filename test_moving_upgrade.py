@@ -53,7 +53,7 @@ class NetworkImport(Moving):
         key = self.external_keys()
         archive, _ = self.export()
         target, space, claw = self.target()
-        moving.import_(archive, target, workspace=space, openclaw_home=claw)
+        moving.import_(archive, target, passphrase=self.code, workspace=space, openclaw_home=claw)
         restored = json.loads(target.read_text())
         self.assertNotEqual(network.keys_path(restored), key)
         self.assertNotIn('network_keys', restored)
@@ -80,6 +80,6 @@ class NetworkImport(Moving):
         unrelated = self.tmp / 'unrelated.txt'
         unrelated.write_text('keep this file')
         (target.parent / 'notes.txt.import-new').symlink_to(unrelated)
-        moving.import_(archive, target, workspace=space, openclaw_home=claw)
+        moving.import_(archive, target, passphrase=self.code, workspace=space, openclaw_home=claw)
         self.assertEqual(unrelated.read_text(), 'keep this file')
         self.assertEqual((target.parent / 'notes.txt').read_text(), 'kept as data')

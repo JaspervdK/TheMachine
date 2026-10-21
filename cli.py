@@ -622,8 +622,8 @@ def _passphrase(confirm):
     if os.environ.get(moving.PASSPHRASE_ENV):
         return os.environ[moving.PASSPHRASE_ENV]
     if not sys.stdin.isatty():
-        raise CliError(f'give the passphrase in {moving.PASSPHRASE_ENV}, or run this in a terminal')
-    value = getpass.getpass('Passphrase: ')
+        raise CliError(f'give the {"passphrase" if confirm else "export code or passphrase"} in {moving.PASSPHRASE_ENV}, or run this in a terminal')
+    value = getpass.getpass('Passphrase: ' if confirm else 'Export code or passphrase: ')
     if confirm and getpass.getpass('Same passphrase again: ') != value:
         raise CliError('the two passphrases differ; nothing was written')
     return value
@@ -644,8 +644,11 @@ def cmd_export(config, args):
         raise CliError(str(error)) from None
     if args.json:
         return out_json({'file': str(path), 'bytes': path.stat().st_size, 'includes_keys': manifest['includes_keys'],
-                         'left_out': manifest['left_out'], 'network_identity': manifest.get('network_identity')})
-    print(f'Wrote {path} ({path.stat().st_size / 1e6:.1f} MB)' + (', keys included and encrypted' if args.keys else ', without keys'))
+                         'left_out': manifest['left_out'], 'network_identity': manifest.get('network_identity'),
+                         **({'code': manifest['code']} if manifest.get('code') else {})})
+    print(f'Wrote {path} ({path.stat().st_size / 1e6:.1f} MB), encrypted' + (', keys included' if args.keys else ', without keys'))
+    if manifest.get('code'):
+        print(f'Export code: {manifest["code"]}\nSave it now: the import asks for it, and it is not kept anywhere.')
     if manifest.get('network_identity') == 'new':
         print('Without keys, a new Network identity will be made after the import; teammates and friends see a '
               'key-change notice once. Export with --keys to keep it.')
@@ -832,12 +835,12 @@ def parser():
     c.add_argument('--digest', help='morning digest time, like 08:30')
     c.add_argument('--timezone', help='IANA time zone, like Europe/Brussels')
     c.add_argument('--no-restart', action='store_true', help='save only; the service picks it up at its next restart')
-    c = add('export', 'Everything The Machine knows and how it is set up, in one archive to move to another computer', cmd_export)
-    c.add_argument('--keys', action='store_true', help='include keys and tokens, encrypted with a passphrase you pick')
+    c = add('export', 'Everything The Machine knows and how it is set up, in one encrypted archive to move to another computer', cmd_export)
+    c.add_argument('--keys', action='store_true', help='include keys and tokens, with a passphrase you pick (without: an export code is made for you)')
     c.add_argument('--out', default='.', help='folder to write the archive to (default: here)')
     c.add_argument('--estimate', action='store_true', help='only say how big it would be')
     c = add('import', 'Put an export back on this computer (a fresh install)', cmd_import)
-    c.add_argument('archive', help='the .tar.gz or .tar.gz.enc file')
+    c.add_argument('archive', help='the .tar.gz.enc file (older .zip and .tar.gz exports too)')
     c.add_argument('--force', action='store_true', help='replace a setup that already has sources (a copy of it is kept)')
     c = add('fleet-pair', 'Pair this Machine with your account for a Fleet, with a code from that account', cmd_fleet_pair)
     c.add_argument('code', help='the pairing code, like ABCD-EFGH')

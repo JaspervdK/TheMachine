@@ -2,14 +2,16 @@
 
 An export holds the databases (signals, suggestions, people and organisations with your own edits, promises),
 config.json, connectors you built yourself, your OpenClaw workspace files (AGENTS.md, USER.md, memory and the like)
-and who may talk to your Telegram bot. Keys and tokens only come along when you pick a passphrase: then the whole
-archive is encrypted with it (AES-256, the passphrase stretched with PBKDF2), and nothing in it can be read without
-that passphrase. Without one, keys stay behind and the import lists what to connect again; that archive is a plain
-.zip, which Windows, macOS and Linux open without extra tools. The encrypted one is a .tar.gz.enc: only openssl (and
-so `assistant import`) opens it, because a zip that Windows opens on its own can only use weak encryption.
+and who may talk to your Telegram bot. It is always encrypted as a whole (AES-256, stretched with PBKDF2, through
+openssl, so only `assistant import` or openssl opens it), with a passphrase you pick or, without one, an export code
+made for it and shown once (CODE). Keys and tokens come along only with a passphrase you pick (or `keys=True`);
+without them the import lists what to connect again. The archive is packed straight into openssl, so no unencrypted
+archive is written; the database copies it needs on the way sit in a private folder (700) next to the archive and
+are overwritten before they are removed, as is what an import unpacks.
 """
 import datetime as dt
 import io
+import secrets
 import json
 import os
 import re
@@ -30,6 +32,8 @@ FORMAT = 1
 APP = Path(__file__).resolve().parent
 PASSPHRASE_ENV = 'THE_MACHINE_EXPORT_PASSPHRASE'
 MIN_PASSPHRASE = 10
+# An export code: 20 characters that can't be mistaken for one another (no 0/O, 1/I/L), about 99 bits, in groups of 4
+CODE = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 # openssl is on every Linux and macOS; the passphrase reaches it through its environment, never its arguments
 OPENSSL = ['openssl', 'enc', '-aes-256-cbc', '-pbkdf2', '-iter', '600000', '-md', 'sha256']
 # Workspace parts that are not yours to move: the app itself (git's bookkeeping is in REBUILDABLE)
@@ -235,63 +239,79 @@ def _add_bytes(archive, name, data):
     archive.addfile(info, io.BytesIO(data))
 
 
-def _pack(target, entries, zipped):
-    """Write (name in the archive, bytes or a file path) entries as a .zip or a .tar.gz."""
-    if zipped:
-        with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
-            for name, source in entries:
-                archive.writestr(name, source) if isinstance(source, bytes) else archive.write(source, name)
-        return
-    with tarfile.open(target, 'w:gz') as archive:
-        for name, source in entries:
-            _add_bytes(archive, name, source) if isinstance(source, bytes) else archive.add(source, name)
+def new_code():
+    """A fresh export code, like ABCD-EFGH-JKMN-PQRS-TUVW."""
+    raw = ''.join(secrets.choice(CODE) for _ in range(20))
+    return '-'.join(raw[i:i + 4] for i in range(0, 20, 4))
 
 
-def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=None, source='local', now=None):
-    """Write the archive into out_dir and return (path, manifest). With a passphrase the archive includes keys and is
-    encrypted as a whole (name ends in .tar.gz.enc); without one, keys stay out and it is a plain .zip."""
+def _code_form(text):
+    """What was typed, as an export code is written (upper case, groups of 4), or None when it can't be one."""
+    raw = re.sub(r'[\s-]', '', text or '').upper()
+    if len(raw) != 20 or any(c not in CODE for c in raw):
+        return None
+    return '-'.join(raw[i:i + 4] for i in range(0, 20, 4))
+
+
+def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=None, source='local', now=None, keys=None):
+    """Write the encrypted archive (name ends in .tar.gz.enc) into out_dir and return (path, manifest). Without a
+    passphrase an export code is made and returned as manifest['code'] (never written into the archive): show it,
+    the import needs it. Keys and tokens come along when `keys` is true, by default only with a passphrase."""
     if passphrase is not None and len(passphrase) < MIN_PASSPHRASE:
         raise MoveError(f'Pick a passphrase of at least {MIN_PASSPHRASE} characters')
     config_path = Path(config_path).expanduser()
     config = json.loads(config_path.read_text())
-    secrets = passphrase is not None
+    secrets_too = passphrase is not None if keys is None else bool(keys)
+    code = None if passphrase is not None else new_code()
     left_out = {}
-    items = [i for i in plan(config_path, workspace, openclaw_home, left_out) if secrets or i[0] != 'secret']
+    items = [i for i in plan(config_path, workspace, openclaw_home, left_out) if secrets_too or i[0] != 'secret']
     now = now or dt.datetime.now(dt.timezone.utc)
     manifest = {'format': FORMAT, 'created_at': now.isoformat(timespec='seconds'), 'source': source,
-                'data_dir': str(config_path.parent), 'workspace_dir': str(_workspace(workspace)), 'includes_keys': secrets,
+                'data_dir': str(config_path.parent), 'workspace_dir': str(_workspace(workspace)), 'includes_keys': secrets_too,
                 'files': sorted(name for _, _, name in items), 'telegram': telegram(openclaw_home),
-                'reconnect': reconnect(config, secrets), 'left_out': left_out,
-                'network_identity': ('kept' if secrets else 'new') if network_identity(config) else None}
+                'reconnect': reconnect(config, secrets_too), 'left_out': left_out,
+                'network_identity': ('kept' if secrets_too else 'new') if network_identity(config) else None}
     out_dir = Path(out_dir)
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    stem = f'the-machine-export-{now:%Y-%m-%d}'
-    plain = out_dir / (f'{stem}.tar.gz' if secrets else f'{stem}.zip')
-    with tempfile.TemporaryDirectory() as temp:
-        def entries():
-            yield 'manifest.json', json.dumps(manifest, indent=2).encode()
-            yield 'README.txt', readme(manifest).encode()
-            for kind, path, name in items:
-                if kind == 'db':
-                    copy = Path(temp) / 'copy.sqlite'
-                    copy.unlink(missing_ok=True)
+    name = f'the-machine-export-{now:%Y-%m-%d}.tar.gz.enc'
+    work = Path(portable.private_dir(out_dir, '.the-machine-export-'))
+    try:
+        sealed = work / name
+        env = {**os.environ, PASSPHRASE_ENV: passphrase or code}
+        try:
+            proc = subprocess.Popen(OPENSSL + ['-salt', '-out', str(sealed), '-pass', f'env:{PASSPHRASE_ENV}'], env=env,
+                                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            raise MoveError('openssl is needed for an export; install it and try again') from None
+        try:
+            with tarfile.open(fileobj=proc.stdin, mode='w|gz') as archive:
+                _add_bytes(archive, 'manifest.json', json.dumps(manifest, indent=2).encode())
+                _add_bytes(archive, 'README.txt', readme(manifest).encode())
+                for kind, path, entry in items:
+                    if kind != 'db':
+                        archive.add(path, entry)
+                        continue
+                    copy = work / 'copy.sqlite'
                     with closing(sqlite3.connect(path, timeout=30)) as source_db, closing(sqlite3.connect(copy)) as target:
                         source_db.backup(target)  # a consistent copy while the service keeps writing
-                    _open_messages(copy, path)
-                    yield name, copy
-                else:
-                    yield name, path
-        _pack(plain, entries(), zipped=not secrets)
-        os.chmod(plain, 0o600)
-        if not secrets:
-            return plain, manifest
-        sealed = out_dir / f'{stem}.tar.gz.enc'
-        try:
-            _openssl(['-salt', '-in', str(plain), '-out', str(sealed)], passphrase)
-        finally:
-            plain.unlink(missing_ok=True)
+                    try:
+                        _open_messages(copy, path)
+                        archive.add(copy, entry)
+                    finally:
+                        portable.shred(copy)
+            proc.stdin.close()
+            if proc.wait(timeout=600):
+                raise MoveError('Could not encrypt the export')
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
         os.chmod(sealed, 0o600)
-        return sealed, manifest
+        target = out_dir / name
+        os.replace(sealed, target)
+    finally:
+        portable.shred_tree(work)
+    return target, ({**manifest, 'code': code} if code else manifest)
 
 
 def _open_messages(copy, original):
@@ -314,9 +334,9 @@ def _openssl(args, passphrase, decrypt=False):
         result = subprocess.run(OPENSSL + (['-d'] if decrypt else []) + args + ['-pass', f'env:{PASSPHRASE_ENV}'],
                                 env=env, capture_output=True, text=True, timeout=600)
     except FileNotFoundError:
-        raise MoveError('openssl is needed for an export with keys; install it and try again') from None
+        raise MoveError('openssl is needed to open an export; install it and try again') from None
     if result.returncode:
-        raise MoveError('Wrong passphrase, or the file is damaged' if decrypt else 'Could not encrypt the export')
+        raise MoveError('Wrong export code or passphrase, or the file is damaged' if decrypt else 'Could not encrypt the export')
 
 
 def readme(manifest):
@@ -437,14 +457,20 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
         if existing.get('accounts'):
             raise MoveError(f'{config_path} already has connected sources; import into a fresh install, '
                             'or pass --force to replace it (the current data folder is kept as a copy first)')
-    with tempfile.TemporaryDirectory() as temp:
-        temp = Path(temp)
+    data = config_path.parent
+    temp = Path(portable.private_dir(data.parent, f'.{data.name}.import-'))  # what it unpacks: private, overwritten after
+    try:
         plain = archive_path
         if archive_path.name.endswith('.enc'):
             if not passphrase:
-                raise MoveError('This export is encrypted; give its passphrase')
+                raise MoveError('This export is encrypted; give its export code or passphrase')
             plain = temp / 'export.tar.gz'
-            _openssl(['-in', str(archive_path), '-out', str(plain)], passphrase, decrypt=True)
+            try:
+                _openssl(['-in', str(archive_path), '-out', str(plain)], passphrase, decrypt=True)
+            except MoveError:
+                if _code_form(passphrase) in (None, passphrase):
+                    raise
+                _openssl(['-in', str(archive_path), '-out', str(plain)], _code_form(passphrase), decrypt=True)
         unpacked = temp / 'export'
         try:
             with (zipfile.ZipFile(plain) if zipfile.is_zipfile(plain) else tarfile.open(plain, 'r:gz')) as archive:
@@ -478,7 +504,6 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
                         valid = False
                     if not valid:
                         raise MoveError('An exported database failed its integrity check; nothing was imported.')
-        data = config_path.parent
         if force and data.exists() and any(data.iterdir()):
             keep = data.with_name(f'{data.name}.before-import-{now:%Y%m%d-%H%M%S}')
             shutil.copytree(data, keep)
@@ -557,3 +582,5 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
                 restored.append(str(target))
         return {'restored': restored, 'reconnect': manifest.get('reconnect') or [], 'notes': notes,
                 'telegram': manifest.get('telegram')}
+    finally:
+        portable.shred_tree(temp)

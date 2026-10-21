@@ -121,8 +121,11 @@ def problems(database):
         out.append(('message-key-open', f'The message key {key} is readable by others.', f'chmod 600 {key}'))
     copy = path.with_name(path.name + '.before-protection')
     if copy.exists():
-        out.append(('message-protection-failed', f'Encrypting your messages did not finish; an unencrypted copy waits at {copy}.',
-                    'assistant service logs; it is tried again, and the copy removed, at the next start'))
+        out.append(('message-protection-failed', f'An unencrypted copy of your messages from an earlier version waits at {copy}.',
+                    'assistant service logs; it is removed at the next start once the database checks out'))
+    if path.with_name('.' + path.name + '.before-protection.d').exists():
+        out.append(('message-protection-failed', 'Encrypting or opening your messages did not finish; an encrypted copy of the database before it is kept.',
+                    'assistant service logs; it is put back or removed at the next start'))
     return out
 
 

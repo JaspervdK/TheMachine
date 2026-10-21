@@ -74,8 +74,8 @@ The service keeps track of its own bugs and can fix them. Small fixes that prove
 | `assistant telegram status\|on <id>\|off` | Telegram is optional: turn card delivery there off (cards then reach you through the dashboard app) or back on. `off --remove-bot` also deletes the bot and its token from OpenClaw |
 | `assistant doctor` | Checks the service, OpenClaw bridge, Telegram approval, every source, reviews, dashboard and `USER.md`; every problem comes with its fix. Exits 1 when something is broken |
 | `assistant enrich [domain]` | Organisation data from your enrichment service: status, or look up one domain now |
-| `assistant export` | Everything The Machine knows and how it is set up, in one archive (`--keys` adds your keys, encrypted with a passphrase you pick; `--estimate` only says how big). See [Moving to another computer](../README.md#moving-to-another-computer) |
-| `assistant import <file>` | Put an export back on a fresh install and list what to connect again |
+| `assistant export` | Everything The Machine knows and how it is set up, in one encrypted archive, with an export code it shows once (`--keys` adds your keys, with a passphrase you pick instead; `--estimate` only says how big). See [Moving to another computer](../README.md#moving-to-another-computer) |
+| `assistant import <file>` | Put an export back on a fresh install (asks its export code or passphrase) and list what to connect again |
 | `assistant raw <action> '<json>'` | Any other non-owner service action |
 
 ## Message actions

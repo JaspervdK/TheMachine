@@ -95,10 +95,13 @@ card states and times, errors, sync health and logs. `python3 learnings.py --dat
 exactly that, without the key.
 
 Turning it on or off rewrites the database once at start, when no review, preparation or profile turn is running
-(while one runs, the service waits and restarts itself once it's done). A copy is made first, kept only if the
-change fails; then the rewrite in one step, a check that every message opens, and a wipe of the free space.
+(while one runs, the service waits and restarts itself once it's done). A copy is made first, encrypted with the
+message key in a private folder next to the database; then the rewrite in one step, a check that every message opens
+(if not, the copy is put back at once), and a wipe of the free space. The copy is then overwritten and removed. A
+plain copy an earlier version left behind (`events.sqlite.before-protection`) is removed the same way at the next
+start, once the database checks out; `assistant doctor` says when it can't be.
 Installs from before it was the default are encrypted this way at their first start after the upgrade. To opt out,
-set `"message_protection": false`. Exports open the messages and leave the key out; an import is encrypted again
+set `"message_protection": false`. Exports open the messages inside the encrypted export and leave the key out; an import is encrypted again
 with the new Machine's own key at its next start, so moving between your computer and hosted keeps working. The key does not stop someone with root on the machine, who can
 read it; it stops the database file, its copies and tools without the key. Also sealed: a phone notification waiting
 for the app (the Gateway's plugin seals it with the same key) and Network replies (one waiting to go out is sealed end

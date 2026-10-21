@@ -146,10 +146,10 @@ One pass over the service, the OpenClaw bridge, your Telegram approval, every so
 
 Everything moves in one file: what The Machine knows, your settings, connectors you built, your workspace files (`AGENTS.md`, `USER.md`, memory) and who may talk to your Telegram bot.
 
-1. On the hosted Account page, click **Export everything**. Pick a passphrase if your keys should come along: then the whole file is encrypted with it. Without one, keys stay behind and you connect those sources again. Download the file; it is deleted from your server after 24 hours.
+1. On the hosted Account page, click **Export everything**. The file is always encrypted. Pick a passphrase if your keys should come along; without one you get an export code to save, and you connect those sources again. Download the file; it is deleted from your server after 24 hours.
 2. On your own computer, follow steps 1 above to install The Machine.
 3. Stop the target service first: `systemctl --user stop personal-assistant.service`. Close other database readers, then
-   put it back: `assistant import the-machine-export-<date>.zip` (for `.tar.gz.enc` it asks the passphrase).
+   put it back: `assistant import the-machine-export-<date>.tar.gz.enc` (it asks the export code or passphrase).
 4. Connect what the import lists. Always: your model, and Google or Microsoft (hosted access works through the hosting and does not move along: `assistant connect gmail --account <id>`, or `outlook`, and the same for the calendar). Without a passphrase also every source's key and your Telegram bot token.
 5. `systemctl --user start personal-assistant.service`, then `assistant doctor`.
 

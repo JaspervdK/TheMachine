@@ -1716,6 +1716,74 @@ def message_event(account, raw, config=None):
             'deleted': False}
 
 
+COPY_MAGIC = b'MC1COPY\x00'
+COPY_CHUNK = 1 << 20
+
+
+def _copy_keys(key):
+    derive = lambda name: hashlib.blake2b(key=key, person=name, digest_size=32).digest()
+    return derive(b'mc1-copy-seal'), derive(b'mc1-copy-mac')
+
+
+def _copy_tag(mac, index, nonce, sealed):
+    return hashlib.blake2b(index.to_bytes(8, 'big') + len(sealed).to_bytes(4, 'big') + nonce + sealed, key=mac, digest_size=16).digest()
+
+
+def _xor(data, stream):
+    return (int.from_bytes(data, 'little') ^ int.from_bytes(stream, 'little')).to_bytes(len(data), 'little')
+
+
+def seal_copy(database, target, key):
+    """An encrypted copy of a SQLite database, as message_seal seals a value (SHAKE256 keystream, BLAKE2b MAC) in
+    chunks of 1 MB, with keys derived from the message key. The consistent copy SQLite's backup makes on the way only
+    exists in the same private folder as the target, and is overwritten before it is removed."""
+    target = Path(target)
+    plain = target.with_name(target.name + '.tmp')
+    enc, mac = _copy_keys(key)
+    try:
+        with contextlib.closing(sqlite3.connect(database, timeout=60)) as source, contextlib.closing(sqlite3.connect(plain)) as copy:
+            source.backup(copy)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with open(plain, 'rb') as source, os.fdopen(fd, 'wb') as out:
+            out.write(COPY_MAGIC)
+            index = 0
+            while chunk := source.read(COPY_CHUNK):
+                nonce = os.urandom(16)
+                sealed = _xor(chunk, hashlib.shake_256(enc + nonce).digest(len(chunk)))
+                out.write(len(chunk).to_bytes(4, 'big') + nonce + sealed + _copy_tag(mac, index, nonce, sealed))
+                index += 1
+            out.write((0).to_bytes(4, 'big') + _copy_tag(mac, index, b'', b''))  # the end: a cut-off copy does not open
+            out.flush()
+            os.fsync(out.fileno())
+    finally:
+        portable.shred(plain)
+
+
+def open_copy(source, target, key):
+    """The database back from seal_copy, written to target (600); SealError when the key or the copy is wrong."""
+    enc, mac = _copy_keys(key)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(source, 'rb') as copy, os.fdopen(fd, 'wb') as out:
+        if copy.read(len(COPY_MAGIC)) != COPY_MAGIC:
+            raise message_seal.SealError(f'{source} is not an encrypted database copy')
+        index = 0
+        while True:
+            size = int.from_bytes(copy.read(4) or b'\xff' * 4, 'big')
+            if size == 0:
+                if not hmac.compare_digest(copy.read(16), _copy_tag(mac, index, b'', b'')):
+                    raise message_seal.SealError(f'{source} did not open: wrong key or a damaged copy')
+                break
+            if size > COPY_CHUNK:
+                raise message_seal.SealError(f'{source} is cut off or damaged')
+            nonce, sealed, tag = copy.read(16), copy.read(size), copy.read(16)
+            if len(sealed) != size or not hmac.compare_digest(tag, _copy_tag(mac, index, nonce, sealed)):
+                raise message_seal.SealError(f'{source} did not open: wrong key or a damaged copy')
+            out.write(_xor(sealed, hashlib.shake_256(enc + nonce).digest(size)))
+            index += 1
+        out.flush()
+        os.fsync(out.fileno())
+
+
 class Store:
     exclusions = {}  # account id -> owner exclude rules, set by App from config
     owner_user_ids = set()  # The owner's own chat user IDs (Slack), set by App from config
@@ -1952,6 +2020,7 @@ class Store:
             graph.ensure(db)
             if 'project' not in {r[1] for r in db.execute('PRAGMA table_info(suggestions)')}:
                 db.execute('ALTER TABLE suggestions ADD COLUMN project TEXT')
+        self.clean_protection_leftovers()
         try:
             self.message_protection(True if protect is None and os.environ.get('MESSAGE_PROTECTION_TEST') else protect)
         except Exception as error:  # the app keeps running as it was; the next start tries again
@@ -1964,8 +2033,9 @@ class Store:
 
     def message_protection(self, protect):
         """Bring the database to the wanted state: sealed message contents, or plain. A change is one transaction,
-        after a consistent copy of the database (removed once the change is checked), then a VACUUM so no page keeps
-        the old text. Returns what changed, or None."""
+        after a consistent copy of the database, encrypted with the message key in a private folder (put back when the
+        change does not check out, overwritten and removed once it does), then a VACUUM so no page keeps the old text.
+        Returns what changed, or None."""
         with self.connect() as db:
             sealed = message_seal.is_protected(db)
             if sealed and not self.sealer:
@@ -1977,29 +2047,99 @@ class Store:
                 return None
         if not self.sealer:
             self.sealer = message_seal.Sealer(message_seal.load_key(self.path, create=True))
-        copy = self.path.with_name(self.path.name + '.before-protection')
-        copy.unlink(missing_ok=True)
-        with contextlib.closing(sqlite3.connect(self.path, timeout=60)) as source, contextlib.closing(sqlite3.connect(copy)) as target:
-            source.backup(target)
-        os.chmod(copy, 0o600)
+        safety = self.safety_dir()
+        safety.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(safety, 0o700)
+        copy = safety / (self.path.name + '.before-protection.sealed')
+        portable.shred(copy)
+        seal_copy(self.path, copy, message_seal.load_key(self.path))
+        changed, restored, done = None, False, False
+        try:
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                changed = message_seal.protect(db) if protect else message_seal.unprotect(db) or {}
+                if protect and message_seal.leftovers(db):
+                    raise message_seal.SealError('Some message contents could not be sealed; nothing was changed')
+            self.protected = bool(protect)
+            try:
+                self.check_sealed()  # every sealed value opens with this key before the copy goes
+            except Exception:
+                restored = self.restore_copy(copy)
+                raise
+            with contextlib.closing(sqlite3.connect(self.path, timeout=60)) as db:
+                db.execute('PRAGMA secure_delete=ON')
+                db.execute('VACUUM')
+                db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            done = True
+        finally:
+            if done or changed is None or restored or self.database_ok():
+                portable.shred_tree(safety)  # unchanged, put back, or checked: the copy is not needed
+            else:
+                LOG.error('The encrypted copy of the database before the change is kept at %s', copy)
+        LOG.info('message contents %s: %s', 'sealed' if protect else 'opened', changed)
+        return changed
+
+    def safety_dir(self):
+        """The private folder (700) next to the database that holds its encrypted copy while message protection
+        switches on or off."""
+        return self.path.with_name('.' + self.path.name + '.before-protection.d')
+
+    def check_sealed(self):
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            changed = message_seal.protect(db) if protect else message_seal.unprotect(db) or {}
-            if protect and message_seal.leftovers(db):
-                raise message_seal.SealError('Some message contents could not be sealed; nothing was changed')
-        self.protected = bool(protect)
-        with self.connect() as db:  # every sealed value opens with this key before the copy goes
             for table, column, _ in message_seal.sealed_columns(db):
                 for _ in db.execute(f'SELECT {column} FROM {table}'):
                     pass
-        with contextlib.closing(sqlite3.connect(self.path, timeout=60)) as db:
-            db.execute('PRAGMA secure_delete=ON')
-            db.execute('VACUUM')
-            db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        copy.unlink()
-        self.protected = bool(protect)
-        LOG.info('message contents %s: %s', 'sealed' if protect else 'opened', changed)
-        return changed
+
+    def database_ok(self):
+        """The live database is whole and, when sealed, every sealed value opens with this Machine's key."""
+        try:
+            with contextlib.closing(sqlite3.connect(self.path, timeout=60)) as db:
+                if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                    return False
+                sealed = message_seal.is_protected(db)
+            if sealed and not self.sealer:
+                return False
+            if sealed or self.sealer:
+                self.check_sealed()
+            return True
+        except Exception as error:
+            LOG.error('The database did not check out: %s', error)
+            return False
+
+    def restore_copy(self, copy):
+        """Put the encrypted copy back over the live database. The plain copy only exists in the private folder
+        for the moment it takes, and is overwritten before it is removed."""
+        plain = copy.with_name(copy.name.replace('.sealed', '.tmp'))
+        try:
+            open_copy(copy, plain, message_seal.load_key(self.path))
+            with contextlib.closing(sqlite3.connect(plain)) as source, contextlib.closing(sqlite3.connect(self.path, timeout=60)) as target:
+                source.backup(target)
+            with contextlib.closing(sqlite3.connect(self.path)) as db:
+                self.protected = bool(message_seal.is_protected(db))
+            LOG.error('Message protection did not check out; the database was put back as it was')
+            return True
+        except Exception as error:
+            LOG.error('The database could not be put back from %s: %s', copy, error)
+            return False
+        finally:
+            portable.shred(plain)
+
+    def clean_protection_leftovers(self):
+        """Copies an interrupted switch left behind: a plain events.sqlite.before-protection from earlier versions,
+        and the private folder with its encrypted copy. Removed (overwritten first) once the live database checks
+        out; an encrypted copy is put back when it does not. What can't be cleaned, doctor reports."""
+        legacy = self.path.with_name(self.path.name + '.before-protection')
+        safety = self.safety_dir()
+        if not legacy.exists() and not safety.exists():
+            return
+        if not self.database_ok():
+            copy = safety / (self.path.name + '.before-protection.sealed')
+            if not (copy.is_file() and self.restore_copy(copy) and self.database_ok()):
+                LOG.error('Left the copies from an interrupted message protection change in place: the database did not check out')
+                return
+        portable.shred(legacy)
+        portable.shred_tree(safety)
+        LOG.info('Removed the copies an interrupted message protection change left behind')
 
     def ensure_monotonic_event_ids(self):
         # Purged evidence IDs remain in review/suggestion provenance. Never let

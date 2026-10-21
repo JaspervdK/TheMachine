@@ -225,7 +225,7 @@ class Protected(unittest.TestCase):
         self.assertEqual(len(plain.events(['acct'], query=CANARY.lower())), len(SOURCES))
         sealed = assistant.Store(self.path, protect=True)
         self.assertNotIn(CANARY.encode(), files(self.path))  # VACUUM: no free page keeps the old text
-        self.assertFalse(self.path.with_name('events.sqlite.before-protection').exists())  # the copy goes once checked
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir() if 'protection' in p.name), [])  # the copy goes once checked
         self.assertEqual(len(sealed.events(['acct'], query=CANARY.lower())), len(SOURCES))
         self.assertTrue(message_seal.is_protected(sqlite3.connect(self.path)))
         assistant.Store(self.path)  # no setting: stays as it is
@@ -250,22 +250,108 @@ class Protected(unittest.TestCase):
         finally:
             message_seal.protect = original
         self.assertFalse(message_seal.is_protected(sqlite3.connect(self.path)))
-        self.assertTrue(self.path.with_name('events.sqlite.before-protection').exists())  # kept for a look
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir() if 'protection' in p.name), [])  # no copy stays behind
         self.assertEqual(len(assistant.Store(self.path).events(['acct'], query=CANARY.lower())), len(SOURCES))
+
+    def everything_but_the_database(self):
+        return b''.join(p.read_bytes() for p in self.path.parent.rglob('*') if p.is_file() and not p.name.startswith('events.sqlite'))
+
+    def test_the_copy_while_switching_is_encrypted(self):
+        self.fill(assistant.Store(self.path))
+        seen = []
+        original = message_seal.protect
+        def look(db):
+            seen.append(self.everything_but_the_database())
+            safety = self.path.with_name('.events.sqlite.before-protection.d')
+            seen.append(sorted(p.name for p in safety.iterdir()))
+            seen.append(oct(safety.stat().st_mode & 0o777))
+            return original(db)
+        message_seal.protect = look
+        try:
+            assistant.Store(self.path, protect=True)
+        finally:
+            message_seal.protect = original
+        self.assertNotIn(CANARY.encode(), seen[0])
+        self.assertEqual(seen[1:], [['events.sqlite.before-protection.sealed'], '0o700'])
+        self.assertFalse(self.path.with_name('.events.sqlite.before-protection.d').exists())
+
+    def test_a_change_that_does_not_open_is_put_back(self):
+        self.fill(assistant.Store(self.path))
+        original = assistant.Store.check_sealed
+        calls = []
+        def broken(store):
+            calls.append(1)
+            if len(calls) == 1:
+                raise message_seal.SealError('does not open')
+            return original(store)
+        assistant.Store.check_sealed = broken
+        try:
+            with self.assertLogs(assistant.LOG, 'ERROR'):
+                store = assistant.Store(self.path, protect=True)
+        finally:
+            assistant.Store.check_sealed = original
+        self.assertFalse(store.protected)
+        self.assertFalse(message_seal.is_protected(sqlite3.connect(self.path)))  # put back as it was
+        self.assertFalse(self.path.with_name('.events.sqlite.before-protection.d').exists())
+        self.assertEqual(len(assistant.Store(self.path).events(['acct'], query=CANARY.lower())), len(SOURCES))
+
+    def test_a_plain_copy_from_an_earlier_version_is_removed_once_the_database_checks_out(self):
+        self.fill(assistant.Store(self.path, protect=True))
+        legacy = self.path.with_name('events.sqlite.before-protection')
+        legacy.write_bytes(CANARY.encode() * 100)
+        self.assertEqual([p[0] for p in message_seal.problems(self.path)], ['message-protection-failed'])
+        assistant.Store(self.path, protect=True)
+        self.assertFalse(legacy.exists())
+        self.assertEqual(message_seal.problems(self.path), [])
+
+    def test_a_plain_copy_stays_when_the_database_does_not_check_out(self):
+        self.fill(assistant.Store(self.path, protect=True))
+        legacy = self.path.with_name('events.sqlite.before-protection')
+        legacy.write_bytes(b'kept')
+        original = assistant.Store.database_ok
+        assistant.Store.database_ok = lambda store: False
+        try:
+            with self.assertLogs(assistant.LOG, 'ERROR'):
+                assistant.Store(self.path, protect=True)
+        finally:
+            assistant.Store.database_ok = original
+        self.assertTrue(legacy.exists())
+        self.assertEqual([p[0] for p in message_seal.problems(self.path)], ['message-protection-failed'])
+
+    def test_an_encrypted_copy_opens_only_with_its_key(self):
+        self.fill(assistant.Store(self.path))
+        key, there = os.urandom(32), Path(self.temp.name) / 'copy.sealed'
+        assistant.seal_copy(self.path, there, key)
+        self.assertNotIn(CANARY.encode(), there.read_bytes())
+        self.assertEqual(sorted(p.name for p in there.parent.iterdir() if p.name.startswith('copy')), ['copy.sealed'])
+        back = Path(self.temp.name) / 'back.sqlite'
+        assistant.open_copy(there, back, key)
+        self.assertEqual(sqlite3.connect(back).execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+        with self.assertRaises(message_seal.SealError):
+            assistant.open_copy(there, back, os.urandom(32))
+        there.write_bytes(there.read_bytes()[:-20])
+        with self.assertRaises(message_seal.SealError):
+            assistant.open_copy(there, back, key)
 
     def test_an_export_opens_the_messages_and_leaves_the_key_behind(self):
         config = Path(self.temp.name) / 'config.json'
         config.write_text(json.dumps({'database': str(self.path), 'accounts': []}))
         self.fill(assistant.Store(self.path, protect=True))
-        archive, _ = moving.export(config, Path(self.temp.name) / 'out', workspace=Path(self.temp.name) / 'ws',
-                                   openclaw_home=Path(self.temp.name) / 'oc')
-        import zipfile
-        with zipfile.ZipFile(archive) as z:
-            self.assertNotIn(f'data/{message_seal.KEY_NAME}', z.namelist())
-            db = Path(self.temp.name) / 'exported.sqlite'
-            db.write_bytes(z.read('data/events.sqlite'))
+        found = self.exported(config)
+        self.assertNotIn(f'data/{message_seal.KEY_NAME}', found)
+        db = Path(self.temp.name) / 'exported.sqlite'
+        db.write_bytes(found['data/events.sqlite'])
         self.assertFalse(message_seal.is_protected(sqlite3.connect(db)))
         self.assertIn(CANARY.encode(), db.read_bytes())
+
+    def exported(self, config):
+        import tarfile
+        archive, manifest = moving.export(config, Path(self.temp.name) / 'out', workspace=Path(self.temp.name) / 'ws',
+                                          openclaw_home=Path(self.temp.name) / 'oc')
+        plain = Path(self.temp.name) / 'opened.tar.gz'
+        moving._openssl(['-in', str(archive), '-out', str(plain)], manifest['code'], decrypt=True)
+        with tarfile.open(plain, 'r:gz') as opened:
+            return {m.name: opened.extractfile(m).read() for m in opened.getmembers() if m.isfile()}
 
     def app(self, **config):
         app = object.__new__(assistant.App)
@@ -354,13 +440,9 @@ class Protected(unittest.TestCase):
         config = Path(self.temp.name) / 'config.json'
         config.write_text(json.dumps({'database': str(self.path), 'accounts': []}))
         self.fill(assistant.Store(self.path, protect=True))
-        archive, _ = moving.export(config, Path(self.temp.name) / 'out', workspace=Path(self.temp.name) / 'ws',
-                                   openclaw_home=Path(self.temp.name) / 'oc')
-        import zipfile
         there = Path(self.temp.name) / 'there' / 'events.sqlite'
         there.parent.mkdir()
-        with zipfile.ZipFile(archive) as z:
-            there.write_bytes(z.read('data/events.sqlite'))
+        there.write_bytes(self.exported(config)['data/events.sqlite'])
         app = self.app(database=str(there))
         store = assistant.Store(there, protect=app.protection_now(app.config))
         self.assertTrue(store.protected)

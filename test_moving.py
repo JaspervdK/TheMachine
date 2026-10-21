@@ -55,24 +55,36 @@ class Moving(unittest.TestCase):
         self.out = self.tmp / 'out'
 
     def export(self, passphrase=None):
-        return moving.export(self.config, self.out, passphrase=passphrase, workspace=self.space, openclaw_home=self.claw,
-                             source='hosted')
+        path, manifest = moving.export(self.config, self.out, passphrase=passphrase, workspace=self.space,
+                                       openclaw_home=self.claw, source='hosted')
+        self.code = passphrase or manifest.get('code')
+        return path, manifest
+
+    def files(self, path):
+        """{name: bytes} of an export, opened with its code or passphrase."""
+        plain = self.tmp / 'opened.tar.gz'
+        moving._openssl(['-in', str(path), '-out', str(plain)], self.code, decrypt=True)
+        with tarfile.open(plain, 'r:gz') as archive:
+            found = {m.name: archive.extractfile(m).read() for m in archive.getmembers() if m.isfile()}
+        plain.unlink()
+        return found
 
     def names(self, path):
-        with zipfile.ZipFile(path) as archive:
-            return set(archive.namelist()), archive
+        return set(self.files(path)), None
 
     def read(self, path, name):
-        with zipfile.ZipFile(path) as archive:
-            return archive.read(name).decode()
+        return self.files(path)[name].decode()
 
     def target(self):
         local = self.tmp / 'local'
         return local / 'data/config.json', local / 'workspace', local / 'openclaw'
 
+    @unittest.skipUnless(HAS_OPENSSL, 'openssl not installed')
     def test_without_a_passphrase_no_key_leaves(self):
         path, manifest = self.export()
-        self.assertTrue(path.name.endswith('.zip'))  # opens on Windows and macOS without extra tools
+        self.assertTrue(path.name.endswith('.tar.gz.enc'))  # always encrypted, with an export code made for it
+        self.assertRegex(manifest['code'], r'^([A-Z2-9]{4}-){4}[A-Z2-9]{4}$')
+        self.assertNotIn(b'Example subject', path.read_bytes())
         names, _ = self.names(path)
         self.assertIn('data/events.sqlite', names)
         self.assertIn('data/notes.txt', names)
@@ -80,8 +92,8 @@ class Moving(unittest.TestCase):
         self.assertIn('workspace/memory/today.md', names)
         self.assertFalse([n for n in names if n.startswith(('secrets/', 'workspace/tools'))])
         self.assertNotIn('data/events-old.sqlite.bak', names)
-        with zipfile.ZipFile(path) as archive:
-            blob = b''.join(archive.read(name) for name in archive.namelist())
+        blob = b''.join(self.files(path).values())
+        self.assertNotIn(manifest['code'].encode(), blob)  # the code is never in the archive
         for secret in (b'xoxb-example', b'owner-example', b'hosted-example', b'123:example', b'relay-example'):
             self.assertNotIn(secret, blob)
         self.assertEqual(manifest['telegram'], {'enabled': True, 'owner_allow_from': ['tg:1000']})
@@ -122,17 +134,21 @@ class Moving(unittest.TestCase):
 
     def test_the_database_copy_is_whole(self):
         path, _ = self.export()
-        with zipfile.ZipFile(path) as archive:
-            archive.extract('data/events.sqlite', self.tmp / 'check')
+        (self.tmp / 'check/data').mkdir(parents=True)
+        (self.tmp / 'check/data/events.sqlite').write_bytes(self.files(path)['data/events.sqlite'])
         db = sqlite3.connect(self.tmp / 'check/data/events.sqlite')
         self.addCleanup(db.close)
         rows = db.execute('SELECT title FROM events').fetchall()
         self.assertEqual(rows, [('Example subject',)])
 
     def test_import_into_a_fresh_install(self):
-        path, _ = self.export()
+        path, manifest = self.export()
         config_path, space, claw = self.target()
-        result = moving.import_(path, config_path, workspace=space, openclaw_home=claw)
+        with self.assertRaisesRegex(moving.MoveError, 'export code'):
+            moving.import_(path, config_path, workspace=space, openclaw_home=claw)
+        typed = manifest['code'].lower().replace('-', ' ')  # as someone may type it
+        result = moving.import_(path, config_path, passphrase=typed, workspace=space, openclaw_home=claw)
+        self.assertEqual([p.name for p in config_path.parent.parent.iterdir() if '.import-' in p.name], [])  # unpacked copy gone
         config = json.loads(config_path.read_text())
         data = str(config_path.parent)
         self.assertEqual(config['database'], data + '/events.sqlite')
@@ -149,14 +165,15 @@ class Moving(unittest.TestCase):
 
     def test_an_existing_setup_is_not_overwritten_without_force(self):
         path, _ = self.export()
+        code = self.code
         config_path, space, claw = self.target()
         config_path.parent.mkdir(parents=True)
         config_path.write_text(json.dumps({'accounts': [{'id': 'mine'}]}))
         (space).mkdir(parents=True)
         (space / 'USER.md').write_text('Local version\n')
         with self.assertRaisesRegex(moving.MoveError, 'already has connected sources'):
-            moving.import_(path, config_path, workspace=space, openclaw_home=claw)
-        result = moving.import_(path, config_path, workspace=space, openclaw_home=claw, force=True)
+            moving.import_(path, config_path, passphrase=code, workspace=space, openclaw_home=claw)
+        result = moving.import_(path, config_path, passphrase=code, workspace=space, openclaw_home=claw, force=True)
         self.assertEqual((space / 'USER.md').read_text(), 'Local version\n')
         self.assertEqual((space / 'USER.md.from-export').read_text(), 'About the owner\n')
         self.assertTrue(any('USER.md' in note for note in result['notes']))
@@ -187,9 +204,8 @@ class Moving(unittest.TestCase):
     def test_an_older_tar_gz_export_still_imports(self):
         path, _ = self.export()
         older = self.tmp / 'the-machine-export-2026-01-01.tar.gz'
-        with zipfile.ZipFile(path) as source, tarfile.open(older, 'w:gz') as archive:
-            for name in source.namelist():
-                data = source.read(name)
+        with tarfile.open(older, 'w:gz') as archive:
+            for name, data in self.files(path).items():
                 info = tarfile.TarInfo(name)
                 info.size = len(data)
                 archive.addfile(info, io.BytesIO(data))
@@ -205,20 +221,39 @@ class Moving(unittest.TestCase):
     def test_with_a_passphrase_keys_move_encrypted(self):
         path, manifest = self.export('a long example passphrase')
         self.assertTrue(path.name.endswith('.tar.gz.enc'))
-        self.assertFalse(list(self.out.glob('*.tar.gz')) + list(self.out.glob('*.zip')))
+        self.assertEqual([p.name for p in self.out.iterdir()], [path.name])  # no plain archive or work folder left
         self.assertTrue(manifest['includes_keys'])
+        self.assertNotIn('code', manifest)
         raw = path.read_bytes()
         self.assertNotIn(b'xoxb-example', raw)
         with self.assertRaises(tarfile.TarError):
             tarfile.open(path, 'r:gz').getnames()
         config_path, space, claw = self.target()
-        with self.assertRaisesRegex(moving.MoveError, 'Wrong passphrase'):
+        with self.assertRaisesRegex(moving.MoveError, 'Wrong export code or passphrase'):
             moving.import_(path, config_path, passphrase='not the right one', workspace=space, openclaw_home=claw)
         moving.import_(path, config_path, passphrase='a long example passphrase', workspace=space, openclaw_home=claw)
         self.assertEqual((config_path.parent / 'slack.env').read_text(), 'SLACK_TOKEN=xoxb-example\n')
         self.assertEqual(oct((config_path.parent / 'slack.env').stat().st_mode & 0o777), '0o600')
         self.assertIn('123:example', (claw / 'openclaw.json').read_text())
         self.assertFalse((config_path.parent / 'machine-token').exists())
+
+    @unittest.skipUnless(HAS_OPENSSL, 'openssl not installed')
+    def test_no_plain_copy_is_left_when_packing_fails(self):
+        with patch.object(moving, 'readme', side_effect=RuntimeError('disk full')):
+            with self.assertRaises(RuntimeError):
+                self.export()
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    @unittest.skipUnless(HAS_OPENSSL, 'openssl not installed')
+    def test_database_copies_stay_next_to_the_export_never_in_tmp(self):
+        seen = []
+        original = moving._open_messages
+        def look(copy, path):
+            seen.append((copy.parent.parent, oct(copy.parent.stat().st_mode & 0o777)))
+            return original(copy, path)
+        with patch.object(moving, '_open_messages', look):
+            self.export()
+        self.assertEqual(seen, [(self.out, '0o700')])
 
     def test_estimate_counts_without_writing(self):
         plain = moving.estimate(self.config, workspace=self.space, openclaw_home=self.claw)

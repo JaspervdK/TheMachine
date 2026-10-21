@@ -69,9 +69,10 @@ class ExportBoundaries(unittest.TestCase):
             (space/'USER.md').write_text('Owner')
             config=data/'config.json';config.write_text(json.dumps({'credentials':{'slack':str(key)},'accounts':[]}))
             file,manifest=moving.export(config,root/'out',workspace=space,openclaw_home=root/'claw')
-            import zipfile
-            with zipfile.ZipFile(file) as archive:
-                self.assertNotIn('private-value',''.join(archive.read(n).decode(errors='replace') for n in archive.namelist()))
+            import tarfile
+            plain=root/'opened.tar.gz';moving._openssl(['-in',str(file),'-out',str(plain)],manifest['code'],decrypt=True)
+            with tarfile.open(plain,'r:gz') as archive:
+                self.assertNotIn('private-value',''.join(archive.extractfile(m).read().decode(errors='replace') for m in archive.getmembers() if m.isfile()))
             secrets=[i for i in moving.plan(config,space,root/'claw') if i[0]=='secret']
             self.assertEqual([name for _,_,name in secrets],['secrets/workspace/unusual-credential.json'])
 
