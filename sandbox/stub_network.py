@@ -1,7 +1,8 @@
 """A stand-in for The Machine Network, for the sandbox: the same endpoints the app calls (/directory, /inbox, /ask,
 /answer, /decide, /claim(s), /friends, /me), answered from memory. Teammates and friends are the fixture's invented
 people; their Machines answer a question a few seconds after it is asked, so asking, handing off and adding friends
-behave as they would. Nothing leaves this machine."""
+behave as they would. Each of their Machines has its own keys, as on the real Network: what they say to this Machine is
+sealed for it, and what it says to them comes sealed. Nothing leaves this machine."""
 import datetime as dt
 import json
 import secrets
@@ -10,12 +11,20 @@ import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import network_crypto as nc  # noqa: E402
 
 ANSWER_AFTER = 3  # seconds before a teammate's Machine answers
 
 
 def now():
     return time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime())
+
+
+class Refused(Exception):
+    """What the Network says no to (426), as the real one does to anything not sealed."""
 
 
 class Network:
@@ -28,9 +37,40 @@ class Network:
         self.requests_in = [{'id': 'frq_in_0001', **self.net['friends']['request_in'], 'at': now()}]
         self.requests_out = [{'id': 'frq_out_0001', 'username': self.net['friends']['request_out'], 'at': now()}]
         self.blocked = []
-        self.undelivered = set()  # questions to a teammate without a Machine
         self.keys = None  # this Machine's public keys, as it published them (POST /keys)
+        self.peers = {}  # each simulated teammate's and friend's Machine: its private keys
+        self.sent = {}  # what this Machine asked, by question id: (kind, member id), to seal the answer for it
         self.notices = {n['id']: {**n, 'at': now()} for n in self.net['notices']}
+
+    # -- sealing, as the simulated Machines do
+    def peer(self, member_id):
+        if member_id not in self.peers:
+            self.peers[member_id] = nc.new_keys()
+        return self.peers[member_id]
+
+    def sealed_for_me(self, body, purpose, kind, member_id, ref):
+        return nc.seal(body, self.peer(member_id), self.keys, {'p': purpose, 'k': kind, 'f': member_id, 't': self.net['owner']['member_id'], 'r': ref})
+
+    def handed_out(self, found):
+        """What waits, sealed for this Machine; held back until it has published its keys."""
+        if not self.keys:
+            return {'asks': [], 'answers': [], 'notices': found['notices']}, {**found, 'notices': []}
+        asks = [{**{k: v for k, v in a.items() if k != 'question'}, 'question': {},
+                 'sealed': self.sealed_for_me(a['question'], 'ask', a['kind'], a['from'], a.get('request_id'))} for a in found['asks']]
+        answers = [{**{k: v for k, v in a.items() if k != 'answer'},
+                    **({'answer': None, 'sealed': self.sealed_for_me(a['answer'], 'answer', a['kind'], a['from'], a['id'])} if a.get('answer') is not None else {})}
+                   for a in found['answers']]
+        return {'asks': asks, 'answers': answers, 'notices': found['notices']}, {'asks': [], 'answers': [], 'notices': []}
+
+    def opened(self, body):
+        """An answer this Machine sealed for a simulated teammate, opened as their Machine would."""
+        asked = self.sent.get(body.get('id'))
+        if body.get('sealed') is None or not asked or not self.keys:
+            return body
+        kind, member_id = asked
+        answer = nc.open_sealed(body['sealed'], self.peer(member_id), self.keys,
+                                {'p': 'answer', 'k': kind, 'f': self.net['owner']['member_id'], 't': member_id, 'r': body['id']})
+        return {**{k: v for k, v in body.items() if k != 'sealed'}, 'answer': answer}
 
     # -- what the app reads
     def me(self, emails=None):
@@ -41,7 +81,7 @@ class Network:
     def member(self, m):
         return {'member_id': m['member_id'], 'name': m['name'], 'role': m.get('role', 'member'), 'emails': [m['email']] if m.get('email') else [],
                 'machine': m.get('machine', True), 'account_email': m.get('email', ''), 'label': m['name'],
-                **({} if m.get('machine', True) else {'answers_with': 'no Machine yet'})}
+                **({'keys': nc.public_keys(self.peer(m['member_id']))} if m.get('machine', True) else {'answers_with': 'no Machine yet'})}
 
     def directory(self):
         fleets = []
@@ -55,7 +95,8 @@ class Network:
             fleets.append({'id': self.net['friends']['id'], 'kind': 'friends', 'name': 'Friends', 'username': self.net['owner']['username'],
                            'asks': ['availability', 'skill'], 'me': {'member_id': self.net['owner']['member_id'], 'role': 'owner'},
                            'members': [self.me()] + [{'member_id': f['member_id'], 'name': f['name'], 'role': 'friend', 'emails': [], 'machine': True,
-                                                      'label': f['name'] + ' (@' + f['username'] + ')'} for f in self.friends],
+                                                      'label': f['name'] + ' (@' + f['username'] + ')', 'keys': nc.public_keys(self.peer(f['member_id']))}
+                                                     for f in self.friends],
                            'requests': {'in': list(self.requests_in), 'out': list(self.requests_out)}, 'blocked': list(self.blocked)})
         return {'fleets': fleets}
 
@@ -82,13 +123,14 @@ class Network:
             return {'busy': [[f'{day + dt.timedelta(days=n)}T07:00Z', f'{day + dt.timedelta(days=n)}T10:30Z'] for n in range(7)] if index == 0 else []}
         return None
 
-    def answer_later(self, ids, kind):
+    def answer_later(self, ids, kind, fleet_id):
         def later():
             time.sleep(ANSWER_AFTER)
             with self.lock:
                 for index, (member_id, ask_id) in enumerate(ids.items()):
                     answer = self.reply(kind, index)
-                    self.inbox['answers'].append({'id': ask_id, 'status': 'answered' if answer is not None else 'declined',
+                    self.inbox['answers'].append({'id': ask_id, 'fleet_id': fleet_id, 'from': member_id, 'kind': kind,
+                                                  'status': 'answered' if answer is not None else 'declined',
                                                   **({'answer': answer} if answer is not None else {}), 'receipt': secrets.token_hex(8)})
                 self.lock.notify_all()
         threading.Thread(target=later, daemon=True).start()
@@ -105,27 +147,33 @@ class Network:
             return self.directory()
         if method == 'POST' and path == '/me':
             return {}
-        if method == 'POST' and path == '/keys':  # teammates here have no keys, so they ask and answer in plaintext
-            self.keys = body
+        if method == 'POST' and path == '/keys':  # from now on what waits is sealed for this Machine and handed out
+            with self.lock:
+                self.keys = body
+                self.lock.notify_all()
             return {}
         if method == 'GET' and path == '/inbox':
             wait = min(int((query.get('wait') or ['0'])[0] or 0), 10)
             with self.lock:
-                if not any(self.inbox.values()):
+                if not (self.keys and (self.inbox['asks'] or self.inbox['answers'])) and not self.inbox['notices']:
                     self.lock.wait(wait)
-                found, self.inbox = self.inbox, {'asks': [], 'answers': [], 'notices': []}
+                found, self.inbox = self.handed_out(self.inbox)
             return {**found, 'ack': True}
         if method == 'POST' and path in ('/ack', '/answer'):
             if path == '/answer':
-                self.answered.append(body)
+                self.answered.append(self.opened(body))
             return {}
-        if method == 'POST' and path == '/ask':
+        if method == 'POST' and path == '/ask':  # sealed for each Machine, as the Network takes them
             fleet = body.get('fleet_id') or body.get('fleet') or 'work'
-            team = [m for m in self.group_of(fleet) if not body.get('to') or m['member_id'] in body['to']]
+            sealed = body.get('sealed') or {}
+            if body.get('question') is not None or not sealed or not set(body.get('to') or []) <= set(sealed):
+                raise Refused('their Machine needs an update before it can get questions on The Machine Network')
+            team = [m for m in self.group_of(fleet) if m['member_id'] in sealed]
             ids = {m['member_id']: 'fa_' + secrets.token_hex(8) for m in team}
-            machine = {t['member_id']: t.get('machine', True) for t in team}
-            self.undelivered |= {i for m, i in ids.items() if not machine[m]}
-            self.answer_later({m: i for m, i in ids.items() if machine[m]}, body.get('kind'))
+            for member_id, ask_id in ids.items():
+                self.sent[ask_id] = (body.get('kind'), member_id)
+            group = next((g['id'] for g in self.directory()['fleets'] if fleet in (g['id'], g['kind'])), fleet)
+            self.answer_later(ids, body.get('kind'), group)
             return {'ids': ids}
         if method == 'POST' and path == '/decide':
             notice = self.notices.get(body.get('id'))
@@ -134,8 +182,8 @@ class Network:
             status = 'confirmed' if body.get('choice') == 'confirm' else 'declined'
             notice.update(status=status, version=notice['version'] + 1, buttons=[], outcome='Confirmed' if status == 'confirmed' else 'Declined')
             return {'status': status, 'notice': notice}
-        if method == 'POST' and path == '/delivery':  # a teammate without a Machine never gets the question
-            return {'delivery': {i: {'delivered': i not in self.undelivered} for i in body.get('ids', [])}}
+        if method == 'POST' and path == '/delivery':
+            return {'delivery': {i: {'delivered': True} for i in body.get('ids', [])}}
         if method == 'POST' and path == '/claims':
             return {'claims': {}}
         if method == 'POST' and path == '/claim':
@@ -179,7 +227,10 @@ def serve(network, port):
                 return self.send(403, {'error': 'Not a Machine in this sandbox'})
             length = int(self.headers.get('Content-Length') or 0)
             body = json.loads(self.rfile.read(length) or b'{}') if length else {}
-            found = network.handle(self.command, path, urllib.parse.parse_qs(url.query), body)
+            try:
+                found = network.handle(self.command, path, urllib.parse.parse_qs(url.query), body)
+            except Refused as error:
+                return self.send(426, {'error': str(error)})
             if found is None:
                 print(f'sandbox network: no stand-in for {self.command} {path}', file=sys.stderr, flush=True)
                 return self.send(404, {'error': 'Not here'})

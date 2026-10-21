@@ -1,6 +1,6 @@
 """The Machine Network on a Machine (network_crypto.py, network.py): the crypto against its RFC vectors, sealed
-questions and answers end to end between two Machines, pinned keys and key-change warnings, no downgrade to
-plaintext, the outbox while the Network is away, delivery state and endpoint failover. A fake Network stands in
+questions and answers end to end between two Machines, pinned keys and key-change warnings, nothing ever in the
+clear (a Machine without keys gets nothing, and anything unsealed is dropped), the outbox while the Network is away, delivery state and endpoint failover. A fake Network stands in
 for the control plane; no network."""
 import importlib.util
 import json
@@ -52,10 +52,10 @@ class FakeRelay:
             for to in body.get('to') or [m for m in NAMES if m != self.me]:
                 ask_id = f'a{len(self.net.asks) + 1}'
                 sealed = (body.get('sealed') or {}).get(to)
-                if sealed is None and body.get('question') is None:
-                    raise ValueError('question: needed for a Machine that has no keys yet')
+                if sealed is None or body.get('question') is not None:  # the Network carries sealed messages only
+                    raise ValueError('their Machine needs an update before it can get questions on The Machine Network')
                 self.net.asks[ask_id] = {'id': ask_id, 'from': self.me, 'to': to, 'kind': body['kind'], 'request_id': body.get('request_id'),
-                                         'question': None if sealed else body['question'], 'sealed': sealed, 'status': 'queued'}
+                                         'question': None, 'sealed': sealed, 'status': 'queued'}
                 ids[to] = ask_id
             return {'ids': ids}
         if route == '/inbox':
@@ -193,17 +193,17 @@ class Machines(unittest.TestCase):
             self.me.ask('relationships', {'about': 'client.example'})
         self.assertEqual(self.net.asks, {})
 
-    def test_plaintext_to_and_from_a_machine_without_keys(self):
+    def test_nothing_in_the_clear_to_or_from_a_machine_without_keys(self):
         self.net = FakeNetwork()
         self.me, old = self.machine('me1', where='new'), self.machine('pat1', sealed=False, where='new')
         self.me.directory(refresh=True); old.directory(refresh=True)
-        sent = self.me.ask('relationships', {'about': 'client.example'})
-        self.assertEqual(self.net.asks[sent['ids']['pat1']]['question'], {'about': 'client.example'})
-        old.step(wait=0)
-        with old.connect() as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM fleet_in').fetchone()[0], 1)
+        with self.assertRaises(ValueError):  # pat1's Machine has no keys: it can't be asked
+            self.me.ask('relationships', {'about': 'client.example'})
+        with self.assertRaises(ValueError):  # and a Machine without keys can't ask
+            old.ask('relationships', {'about': 'client.example'})
+        self.assertEqual(self.net.asks, {})
 
-    def test_tampered_or_plaintext_from_a_sealing_machine_is_dropped(self):
+    def test_tampered_or_unsealed_is_dropped(self):
         sent = self.me.ask('relationships', {'about': 'client.example'})
         stored = self.net.asks[sent['ids']['pat1']]
         stored['sealed'] = {**stored['sealed'], 'mac': stored['sealed']['mac'][::-1]}
@@ -211,12 +211,17 @@ class Machines(unittest.TestCase):
         with self.pat.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM fleet_in').fetchone()[0], 0)
         self.assertEqual(stored['status'], 'declined')
-        self.pat.set_meta('network_published_at', '2020-01-01T00:00:00+00:00')  # past the grace day
         self.net.asks['x1'] = {'id': 'x1', 'from': 'me1', 'to': 'pat1', 'kind': 'relationships', 'request_id': 'r', 'question': {'about': 'client.example'},
                                'sealed': None, 'status': 'queued'}
         self.pat.step(wait=0)
         with self.pat.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM fleet_in').fetchone()[0], 0)
+        # an unsealed answer to one of this Machine's questions is dropped too, never shown
+        mine = self.me.ask('relationships', {'about': 'client.example'})['ids']['pat1']
+        self.net.asks[mine].update(status='answered', answered=True, answer={'knows': True}, answer_sealed=None)
+        self.me.step(wait=0)
+        with self.me.connect() as db:
+            self.assertNotIn('knows', json.dumps([dict(r) for r in db.execute('SELECT * FROM fleet_out')]))
 
     def test_outbox_keeps_answers_while_the_network_is_away_and_never_acts_twice(self):
         sent = self.me.ask('relationships', {'about': 'client.example'})
@@ -255,21 +260,20 @@ class OlderNetwork(Machines):
         for box in (self.me, self.pat, self.me):
             box.directory(refresh=True)
 
-    def test_no_keys_or_delivery_routes_is_plaintext_as_before_never_off(self):
+    def test_no_keys_route_sends_nothing_in_the_clear_and_is_never_off(self):
         self.assertEqual(self.net.keys, {})
-        sent = self.me.ask('relationships', {'about': 'client.example'})
-        self.assertEqual(self.net.asks[sent['ids']['pat1']]['question'], {'about': 'client.example'})
+        with self.assertRaises(ValueError):
+            self.me.ask('relationships', {'about': 'client.example'})
+        self.assertEqual(self.net.asks, {})
         self.me.step(wait=0)  # includes the delivery round: a 404 there is not "off"
-        self.pat.step(wait=0)
-        with self.pat.connect() as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM fleet_in').fetchone()[0], 1)
+        self.assertFalse(self.me.off)
         self.me.delivery_round()
         self.assertEqual(self.me.meta('network_delivery'), None)
 
     # the end-to-end tests of Machines don't apply to an older Network
     test_sealed_question_and_answer_end_to_end = test_key_change_is_warned_and_pinned = test_no_downgrade_when_keys_disappear = None
-    test_tampered_or_plaintext_from_a_sealing_machine_is_dropped = test_outbox_keeps_answers_while_the_network_is_away_and_never_acts_twice = None
-    test_not_delivered_yet_is_shown = test_plaintext_to_and_from_a_machine_without_keys = None
+    test_tampered_or_unsealed_is_dropped = test_outbox_keeps_answers_while_the_network_is_away_and_never_acts_twice = None
+    test_not_delivered_yet_is_shown = test_nothing_in_the_clear_to_or_from_a_machine_without_keys = None
 
 
 class Failover(unittest.TestCase):

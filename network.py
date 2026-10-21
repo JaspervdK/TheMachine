@@ -7,11 +7,11 @@ through it without each one knowing:
   Machine's keys change later, the owner is warned (key_changes) and the new keys are pinned. This Machine publishes
   its own public keys when the directory doesn't show them yet.
 - Asking: the question is sealed for each recipient's Machine (network_crypto), bound to who asks whom, what kind and
-  the request id. A Machine without keys yet (from before) still gets plaintext until the Network's end date; one
-  that had keys never gets plaintext again (a relay can't strip keys to read along).
+  the request id. Every message is sealed: a teammate's or friend's Machine without keys can't be asked until it
+  updates, and nothing is ever sent in the clear (a relay can't strip keys to read along).
 - Answering: an answer to a sealed question is sealed for the asking Machine, bound to the question's id.
-- Receiving: sealed questions and answers are opened and checked; anything that doesn't open, or plaintext from a
-  Machine that seals, is dropped and logged, never shown.
+- Receiving: sealed questions and answers are opened and checked; anything that doesn't open, and anything that
+  isn't sealed, is dropped and logged, never shown.
 - Outbox: an answer the relay didn't take because it was away (restarting, network down) is kept here and sent again
   with backoff, so a question is never acted on twice: this Machine remembers what it answered (network_taken) and
   sends that again if the same question comes back.
@@ -31,13 +31,11 @@ SCHEMA = '''
 CREATE TABLE IF NOT EXISTS network_outbox(key TEXT PRIMARY KEY,method TEXT NOT NULL,path TEXT NOT NULL,body TEXT NOT NULL,
   tries INTEGER NOT NULL DEFAULT 0,next_at TEXT NOT NULL,created_at TEXT NOT NULL,error TEXT);
 CREATE TABLE IF NOT EXISTS network_taken(ask_id TEXT PRIMARY KEY,at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS network_sent(ask_id TEXT PRIMARY KEY,at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS network_pins(member_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,keys TEXT NOT NULL,name TEXT,
   first_at TEXT NOT NULL,changed_at TEXT);
 CREATE TABLE IF NOT EXISTS network_sealed(ask_id TEXT PRIMARY KEY,kind TEXT NOT NULL,asker TEXT NOT NULL,me TEXT NOT NULL,at TEXT NOT NULL);
 '''
 OUTBOX_DAYS = 3          # an answer the relay can't take for this long is given up (the question expired there too)
-TRUST_AFTER = 86400      # seconds after publishing our keys: from then on, plaintext from a Machine that seals is refused
 KEEP_DAYS = 30
 
 
@@ -88,18 +86,13 @@ class Sealing:
     # -- what the Fleet calls
     def call(self, method, path, body=None, timeout=40):
         route = path.split('?', 1)[0]
-        if not self.private:
-            return self.inner.call(method, path, body, timeout=timeout)
+        if not self.private and route in ('/ask', '/answer') and isinstance(body, dict) and (body.get('question') is not None or body.get('answer') is not None):
+            raise ValueError("This Machine has no keys for The Machine Network, so it can't send anything there; nothing was sent.")
         if route == '/directory':
             return self._directory(self.inner.call(method, path, body, timeout=timeout))
         if route == '/ask' and method == 'POST' and isinstance(body, dict) and body.get('question') is not None:
             body = self._seal_ask(body)
-            found = self.inner.call(method, path, body, timeout=timeout)
-            with self.fleet.connect() as db:
-                for member_id, ask_id in ((found or {}).get('ids') or {}).items():
-                    if member_id in (body.get('sealed') or {}):
-                        db.execute('INSERT OR IGNORE INTO network_sent(ask_id,at) VALUES(?,?)', (str(ask_id), now()))
-            return found
+            return self.inner.call(method, path, body, timeout=timeout)
         if route == '/answer' and method == 'POST':
             return self._answer(body, timeout)
         found = self.inner.call(method, path, body, timeout=timeout)
@@ -145,7 +138,7 @@ class Sealing:
             self.inner.call('POST', '/keys', self.public, timeout=30)
             if not self.fleet.meta('network_published_at'):
                 self.fleet.set_meta('network_published_at', now())
-        except Exception as error:  # an older Network without keys (404/405) or away: plaintext as before, never "off"
+        except Exception as error:  # away: published on a later directory round, never "off"
             LOG.info('network keys not published yet error=%s', type(error).__name__)
 
     def _group(self, ref):
@@ -166,31 +159,34 @@ class Sealing:
 
     # -- asking
     def _seal_ask(self, body):
+        """The question sealed for each recipient's Machine, and only that: never the question itself. Asking everyone
+        skips a member whose Machine has no keys (none yet, or from before); asking someone by name whose Machine has
+        none is refused, as is anyone whose keys disappeared since they were pinned."""
         group = self._group(body.get('fleet'))
         me = self._me(group)
         if not me:
-            return body
+            raise ValueError('This Machine is not in that group on The Machine Network; nothing was sent.')
         kind, question = body.get('kind'), body['question']
+        named = bool(body.get('to')) or kind == 'followup'
         if body.get('to'):
             to = list(body['to'])
         elif kind == 'followup':
             to = sorted({i.get('member_id') for i in question.get('items', []) if i.get('member_id') and i.get('member_id') != me})
         else:
             to = [m['member_id'] for m in group.get('members', []) if not m.get('me')]
-        sealed, plain = {}, []
+        sealed = {}
         for member_id in to:
             keys = self._current_keys(group, member_id)
             if keys:
                 sealed[member_id] = nc.seal(question, self.private, keys, {'p': 'ask', 'k': kind, 'f': me, 't': member_id, 'r': body.get('request_id')})
             elif self._keys_of(member_id):
                 raise ValueError("A teammate's Machine stopped showing its keys on The Machine Network; nothing was sent. Try again later.")
-            else:
-                plain.append(member_id)
+            elif named:
+                raise ValueError("Their Machine needs an update before it can get questions on The Machine Network; nothing was sent.")
         if not sealed:
-            return body
-        out = {**body, 'sealed': sealed, 'to': to}
-        if not plain:
-            out.pop('question')
+            raise ValueError("Nobody to ask yet: their Machines need an update before they can get questions on The Machine Network.")
+        out = {**body, 'sealed': sealed, 'to': sorted(sealed)}
+        out.pop('question')
         return out
 
     # -- answering, with the outbox
@@ -199,11 +195,12 @@ class Sealing:
         ask_id = str(body.get('id') or '')
         with self.fleet.connect() as db:
             row = db.execute('SELECT * FROM network_sealed WHERE ask_id=?', (ask_id,)).fetchone()
-        if row and body.get('answer') is not None:
-            keys = self._keys_of(row['asker'])
-            if keys:
-                body['sealed'] = nc.seal(body.pop('answer'), self.private, keys,
-                                         {'p': 'answer', 'k': row['kind'], 'f': row['me'], 't': row['asker'], 'r': ask_id})
+        if body.get('answer') is not None:  # sealed for the asking Machine, or not sent at all
+            keys = self._keys_of(row['asker']) if row else None
+            if not keys:
+                raise ValueError("That question's Machine has no keys on The Machine Network, so the answer can't be sealed; nothing was sent.")
+            body['sealed'] = nc.seal(body.pop('answer'), self.private, keys,
+                                     {'p': 'answer', 'k': row['kind'], 'f': row['me'], 't': row['asker'], 'r': ask_id})
         return self.send_or_keep('POST', '/answer', body, 'answer:' + ask_id + ':' + str(body.get('status')), timeout)
 
     def send_or_keep(self, method, path, body, key, timeout=40):
@@ -265,8 +262,6 @@ class Sealing:
 
     # -- receiving
     def _open_inbox(self, found):
-        published = self.fleet.meta('network_published_at')
-        strict = bool(published) and (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(published)).total_seconds() > TRUST_AFTER
         self._refreshed = False
         for ask in (found or {}).get('asks', []):
             if ask.get('sealed') is not None:
@@ -278,13 +273,14 @@ class Sealing:
                 except nc.SealError as error:
                     LOG.warning('network question dropped member=%s reason=%s', ask.get('from'), error)
                     ask['question'] = {}
-            elif strict and self._keys_of(ask.get('from')):
-                LOG.warning('network plaintext question dropped member=%s', ask.get('from'))
+            else:
+                if ask.get('question'):
+                    LOG.warning('network unsealed question dropped member=%s', ask.get('from'))
                 ask['question'] = {}
         for item in (found or {}).get('answers', []):
             if item.get('sealed') is None:
-                if item.get('answer') is not None and strict and self._keys_of(item.get('from')) and self._asked_sealed(item.get('id')):
-                    LOG.warning('network plaintext answer dropped member=%s', item.get('from'))
+                if item.get('answer') is not None:
+                    LOG.warning('network unsealed answer dropped member=%s', item.get('from'))
                     item['answer'], item['status'] = None, 'declined'
                 continue
             try:
@@ -300,7 +296,7 @@ class Sealing:
             group = self._group(item.get('fleet_id') or item.get('fleet'))
             me, sender = self._me(group), self._keys_of(item.get('from'))
             try:
-                if not sender or not me:
+                if not sender or not me or not self.private:
                     raise nc.SealError('no keys for the sender')
                 return nc.open_sealed(env, self.private, sender, {'p': purpose, 'k': item.get('kind'), 'f': item.get('from'), 't': me, 'r': ref}), me
             except nc.SealError:
@@ -308,10 +304,6 @@ class Sealing:
                     raise
                 self._refreshed = True
                 self.fleet.directory(refresh=True)
-
-    def _asked_sealed(self, ask_id):
-        with self.fleet.connect() as db:
-            return bool(db.execute('SELECT 1 FROM network_sent WHERE ask_id=?', (str(ask_id),)).fetchone())
 
     # -- once per question, ever
     def taken(self, ask_id):
@@ -327,7 +319,6 @@ class Sealing:
         with self.fleet.connect() as db:
             db.execute('DELETE FROM network_taken WHERE at<?', (cut,))
             db.execute('DELETE FROM network_sealed WHERE at<?', (cut,))
-            db.execute('DELETE FROM network_sent WHERE at<?', (cut,))
 
     def view(self):
         changes = self.fleet.meta('network_key_changes', [])
@@ -336,15 +327,13 @@ class Sealing:
 
 
 def wrap(inner, fleet, config):
-    """The Fleet's relay connection, sealed when this Machine can keep keys (a database path), else as it was."""
-    path = keys_path(config)
-    if not path:
-        return inner
+    """The Fleet's relay connection, always sealing. A Machine that can't keep keys (no database path, or they can't be
+    read or made) sends nothing on the Network and opens nothing from it."""
+    path, private = keys_path(config), None
     try:
-        private = nc.load_or_make(path)
+        private = nc.load_or_make(path) if path else None
     except OSError as error:
         LOG.warning('network keys unavailable error=%s', type(error).__name__)
-        return inner
     return Sealing(inner, fleet, private)
 
 
