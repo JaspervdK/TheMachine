@@ -4024,6 +4024,10 @@ class Store:
                 feedback = db.execute("SELECT id,feedback,choice,created_at,source FROM decisions WHERE suggestion_id=? AND trim(feedback)<>'' AND source IN ('telegram','dashboard') AND id NOT IN (SELECT decision_id FROM decision_annotations) ORDER BY created_at DESC,rowid DESC LIMIT 1", (suggestion['id'],)).fetchone()
                 suggestion['latest_feedback'] = dict(feedback) if feedback else None
             result['suggestion_counts'] = {r['status']: r['count'] for r in db.execute('SELECT status,count(*) count FROM suggestions GROUP BY status')}
+            try:  # roles waiting in Graph, Who's who: the Graph tab's badge
+                result['graph_waiting'] = graph.waiting(db)
+            except sqlite3.Error:
+                result['graph_waiting'] = 0
             result['connectors'] = []
             for account in accounts:
                 row = db.execute('SELECT * FROM checkpoints WHERE account_id=?', (account['id'],)).fetchone()

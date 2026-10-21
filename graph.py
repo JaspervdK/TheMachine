@@ -968,6 +968,7 @@ def overview(db, limit=12):
                         week_ago, 8),
             'orgs': rows("SELECT * FROM graph_nodes WHERE kind='org' ORDER BY strength DESC LIMIT ?", 8),
             'whos_who': unconfirmed(db),
+            'waiting': waiting(db),
             'warmup': hidden_list(db)}
 
 
@@ -1187,6 +1188,12 @@ def unconfirmed(db, limit=30):
                       "JOIN graph_nodes n ON r.identifier=coalesce(json_extract(n.info,'$.role_id'),n.id) WHERE r.source!='owner' ORDER BY n.kind='org',n.strength DESC LIMIT ?", (limit,)).fetchall()
     return [{'id': r['identifier'], 'kind': r['kind'], 'name': r['name'], 'role': r['role'], 'quote': r['quote'], 'event_id': r['event_id'],
              'set_at': r['created_at'][:10], 'closeness': closeness(r['strength']) if r['kind'] == 'person' else None} for r in rows]
+
+
+def waiting(db):
+    """How many of the review's roles wait for the owner: the Who's who count, for the Graph tab's badge."""
+    return db.execute("SELECT count(*) FROM person_roles r JOIN graph_nodes n ON r.identifier=coalesce(json_extract(n.info,'$.role_id'),n.id) "
+                      "WHERE r.source!='owner'").fetchone()[0]
 
 
 def stale_roles(db, now, limit=3, days=RECHECK_DAYS):
