@@ -2,7 +2,9 @@ import base64
 import datetime as dt
 import http.server
 import json
+import os
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -134,7 +136,8 @@ class InstallerTest(unittest.TestCase):
             paths = installer.Paths(tmp)
             paths.config.parent.mkdir(parents=True)
             paths.config.write_text(json.dumps({'accounts': []}))
-            with mock.patch.object(installer, 'run', return_value=mock.Mock(returncode=0)):
+            with mock.patch.object(installer, 'run', return_value=subprocess.CompletedProcess(['service'], 0, 'state = running\n', '')), \
+                    mock.patch.dict(os.environ, {'ASSISTANT_SERVICE_MANAGER': 'launchd'}):
                 self.assertEqual(installer.browser_viewer_setup(paths, install=lambda say: browser_viewer.VIEWER_URL), 0)
                 self.assertEqual(installer.browser_viewer_setup(paths, install=lambda say: None), 1)
             config = json.loads(paths.config.read_text())
