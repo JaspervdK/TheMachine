@@ -236,7 +236,8 @@ paired with your account (see above) claims a username too.
   request. There is no directory and no search by name, and a request looks the same whether or not that name exists.
   Nothing connects until they accept. People you already know can also be found privately; see below.
 - **A request for you** shows in the Fleet tab and on your account page, as a Telegram message with Accept and Decline,
-  and as a phone notification. Only you can answer it; a tap on an old message does nothing.
+  and as a phone notification. Only you can answer it. A tap turns that message into the result (Accepted, Declined,
+  or already handled), or says why nothing was done.
 - **Remove or block** a friend, or block a request, at any time. Blocking is silent: their requests are dropped from
   then on. You can unblock later.
 

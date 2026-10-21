@@ -31,6 +31,8 @@ class FriendsRelay(FakeRelay):
             return {'ids': {m: 'fask-' + str(len(self.calls)) for m in body.get('to') or ['fp_lou']}}
         if path == '/decide':
             self.calls.append((method, path, body))
+            if getattr(self, 'decide', None):
+                return self.decide(body)
             return {'status': 'confirmed', 'reason': '', 'notice': {**NOTICE, 'status': 'accepted', 'buttons': [], 'outcome': 'Accepted: you are friends now.', 'version': 2}}
         return super().call(method, path, body, timeout)
 
@@ -154,6 +156,66 @@ class Friends(unittest.TestCase):
         self.assertEqual(found['status'], 'confirmed')
         self.assertEqual(self.relay.sent('/decide')[-1]['choice'], 'confirm')
         self.assertEqual(self.fleet.summary()['waiting'], 0)
+
+    def tapped(self, decide):
+        """A friend request told in Telegram as message 77, then tapped there, with the Network answering `decide`."""
+        self.fleet.notify_notice = lambda view, message: '77'
+        self.fleet.take_notice(NOTICE)
+        self.fleet.notice_round()
+        self.relay.decide = decide
+        return self.fleet.decide_notice_from_telegram
+
+    def test_accept_in_telegram_says_who_you_are_friends_with(self):
+        found = self.tapped(None)(NOTICE['id'], 'confirm', '77')
+        self.assertEqual(found['message']['text'], 'Accepted: you and Max (@max) are now Friends.')
+        self.assertTrue(all(b.get('url') for row in found['message']['buttons'] for b in row))  # Open only, no Accept again
+        self.assertEqual(self.relay.sent('/decide')[-1]['via'], 'telegram')
+
+    def test_decline_and_an_already_handled_request_show_what_came_of_it(self):
+        declined = {**NOTICE, 'status': 'declined', 'buttons': [], 'version': 2}
+        found = self.tapped(lambda body: {'status': 'declined', 'reason': '', 'notice': declined})(NOTICE['id'], 'decline', '77')
+        self.assertEqual(found['message']['text'], "Declined: Max (@max)'s friend request. They are not told.")
+        # Accepted on the dashboard a moment ago, then tapped in Telegram: the message shows it, nothing is done twice
+        accepted = {**NOTICE, 'status': 'accepted', 'buttons': [], 'version': 3}
+        self.relay.decide = lambda body: {'status': 'stale', 'reason': 'This request is no longer open. Nothing was done.', 'notice': accepted}
+        found = self.fleet.decide_notice_from_telegram(NOTICE['id'], 'confirm', '77')
+        self.assertEqual(found['status'], 'stale')
+        self.assertEqual(found['message']['text'], 'Accepted: you and Max (@max) are now Friends.')
+        expired = {**NOTICE, 'status': 'expired', 'buttons': [], 'version': 4}
+        self.relay.decide = lambda body: {'status': 'stale', 'reason': 'This request is no longer open. Nothing was done.', 'notice': expired}
+        self.assertEqual(self.fleet.decide_notice_from_telegram(NOTICE['id'], 'confirm', '77')['message']['text'],
+                         "Max (@max)'s friend request is no longer open.")
+
+    def test_network_away_keeps_the_buttons_and_says_nothing_was_done(self):
+        def away(body):
+            raise fleet.Unavailable('The Network is restarting; try again in a minute.')
+        found = self.tapped(away)(NOTICE['id'], 'confirm', '77')
+        text = found['message']['text']
+        self.assertTrue(text.startswith('Max (@max) wants to be friends.'))
+        self.assertTrue(text.endswith('→ The Network is restarting; try again in a minute. Nothing was done.'))
+        values = [b.get('value') for row in found['message']['buttons'] for b in row]
+        self.assertIn(f"assistant:fleetn:{NOTICE['id']}:confirm", values)  # tap again
+        self.assertEqual(json.loads(self.fleet.notice(NOTICE['id'])['view'])['status'], 'open')
+        self.assertEqual(self.fleet.summary()['waiting'], 1)
+
+    def test_an_unexpected_error_is_said_not_swallowed(self):
+        def broken(body):
+            raise KeyError('notice')
+        found = self.tapped(broken)(NOTICE['id'], 'confirm', '77')
+        self.assertEqual(found['status'], 'stale')
+        self.assertIn('Something went wrong on your Machine, so nothing was done.', found['message']['text'])
+        self.assertTrue(any(b.get('value') for row in found['message']['buttons'] for b in row))
+
+    def test_a_tap_waits_less_than_the_bridge(self):
+        timeouts = []
+        original = self.relay.call
+        self.relay.call = lambda method, path, body=None, timeout=40: timeouts.append(timeout) or original(method, path, body, timeout)
+        self.tapped(None)(NOTICE['id'], 'confirm', '77')
+        self.assertLessEqual(timeouts[-1] * 3, 25)  # three Network endpoints, inside the bridge's 30 seconds
+
+    def test_a_tap_on_a_request_that_is_gone(self):
+        with self.assertRaisesRegex(ValueError, 'no longer here'):
+            self.fleet.decide_notice_from_telegram('fn_' + 'e' * 16, 'confirm', '77')
 
     def test_friend_actions_go_to_the_relay_as_is(self):
         self.fleet.friend_action('add', username='@Lou')

@@ -162,6 +162,7 @@ NETWORK2 = 'https://network2.themachine.computer'
 MAIN_HOSTS = ('network.themachine.computer', 'relay.themachine.computer', 'app.themachine.computer')  # one node, three names
 DRAIN_EVERY = 60   # seconds between looks into the other nodes' mailboxes
 HOME_AFTER = 300   # seconds on another node before the first endpoint is tried first again
+TAP_TIMEOUT = 8   # seconds per Network endpoint for a Telegram tap: the bridge waits 30 for the whole answer
 
 
 def reachable(url):
@@ -1058,12 +1059,30 @@ def notice_push(view, root):
             'tag': 'fleet-' + view['id']}
 
 
+FRIEND_SETTLED = {'accepted': 'Accepted: you and {name} are now Friends.',
+                  'declined': "Declined: {name}'s friend request. They are not told.",
+                  'blocked': 'Blocked: {name}. They are not told, and their requests are dropped from now on.'}
+
+
+def friend_settled(view):
+    """A friend request that is no longer open, in one line: who it was from and what came of it."""
+    text = view['text']
+    name = text[:-len(' wants to be friends.')] if text.endswith(' wants to be friends.') else ''
+    if not name:
+        return text + (f"\n\n→ {view['outcome']}" if view['outcome'] else '')
+    return FRIEND_SETTLED.get(view['status'], "{name}'s friend request is no longer open.").format(name=name)
+
+
 def notice_message(view, root):
     """The Telegram message for a notice. A seat request waiting for the owner: its line, the fine print, Confirm
-    (with the amount) and Decline; once settled, its outcome. Anything else: its line and Open."""
-    text = view['text'] + (f"\n\n{view['detail']}" if view['detail'] and (view['buttons'] or view['kind'] not in ('seat_request', 'friend_request')) else '')
-    if view['outcome']:
-        text += f"\n\n→ {view['outcome']}"
+    (with the amount) and Decline; once settled, its outcome. A friend request once settled: just what came of it.
+    Anything else: its line and Open."""
+    if view['kind'] == 'friend_request' and view['status'] != 'open':
+        text = friend_settled(view)
+    else:
+        text = view['text'] + (f"\n\n{view['detail']}" if view['detail'] and (view['buttons'] or view['kind'] not in ('seat_request', 'friend_request')) else '')
+        if view['outcome']:
+            text += f"\n\n→ {view['outcome']}"
     buttons = []
     if view['buttons']:
         buttons.append([{'text': b['label'], 'value': f"assistant:fleetn:{view['id']}:{b['choice']}"} for b in view['buttons']])
@@ -1730,7 +1749,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
             told.append(row['id'])
         return told
 
-    def decide_notice(self, nid, choice, key, via='dashboard'):
+    def decide_notice(self, nid, choice, key, via='dashboard', timeout=40):
         """The owner's Confirm or Decline on a seat request, relayed as is. The relay decides whether it still
         holds: it may come back stale (already settled, withdrawn, no longer the owner) or changed (new terms), and then
         nothing was done. Returns {status, reason, notice}."""
@@ -1739,7 +1758,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         row = self.notice(nid)
         if not row or row['kind'] not in ('seat_request', 'friend_request'):
             raise ValueError('No such request')
-        found = self.relay.call('POST', '/decide', {'id': row['id'], 'choice': choice, 'key': key or '', 'via': via}, timeout=40)
+        found = self.relay.call('POST', '/decide', {'id': row['id'], 'choice': choice, 'key': key or '', 'via': via}, timeout=timeout)
         view = notice_clean(found.get('notice')) or json.loads(row['view'])
         status = found.get('status') if found.get('status') in ('confirmed', 'declined', 'stale', 'changed') else 'stale'
         reason = clean(found.get('reason'), 300)
@@ -1755,18 +1774,27 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
 
     def decide_notice_from_telegram(self, nid, choice, message_id):
         """A tap on the Telegram message this Machine sent for that request, and only that message. It confirms the
-        terms that message showed; the reply is the message as it is now, and why nothing happened if nothing did."""
+        terms that message showed. The reply is the message as it is now, so the tap always shows its result there:
+        settled (Accepted, Declined, or already handled elsewhere), or still open with why nothing happened and the
+        buttons to tap again. It answers well within the bridge's wait, also when the Network is away."""
         row = self.notice(nid)
-        if not row or not message_id or str(row['telegram_message_id'] or '') != str(message_id):
+        if not row:
+            raise ValueError('That request is no longer here, so nothing was done. Open the Fleet tab to see your requests.')
+        if not message_id or str(row['telegram_message_id'] or '') != str(message_id):
             raise ValueError('That Telegram message is not the one sent for this request')
         try:
-            result = self.decide_notice(nid, choice, row['telegram_key'], via='telegram')
-        except ValueError as error:
-            result = {'status': 'stale', 'reason': clean(str(error), 300) + ' Nothing was done.', 'notice': json.loads(row['view'])}
+            result = self.decide_notice(nid, choice, row['telegram_key'], via='telegram', timeout=TAP_TIMEOUT)
+        except ValueError as error:  # a refusal, or the Network away (Unavailable)
+            result = {'status': 'stale', 'reason': clean(str(error), 240).rstrip('.') + '. Nothing was done.'}
         except (Off, OSError):
-            result = {'status': 'stale', 'reason': 'Your Machine could not reach the Network just now, so nothing was done. Tap again in a minute.',
-                      'notice': json.loads(row['view'])}
-        message, key = self.notice_telegram(self.notice(nid))
+            result = {'status': 'stale', 'reason': 'Your Machine could not reach the Network just now, so nothing was done. Tap again in a minute.'}
+        except Exception as error:  # never a tap that silently does nothing
+            LOG.warning('fleet notice tap error=%s at=%s', type(error).__name__, where(error))
+            result = {'status': 'stale', 'reason': 'Something went wrong on your Machine, so nothing was done. Tap again in a minute.'}
+        row = self.notice(nid)
+        message, key = self.notice_telegram(row)
+        if result['status'] not in ('confirmed', 'declined') and result['reason'] and json.loads(row['view'])['status'] == 'open':
+            message = {**message, 'text': message['text'] + '\n\n→ ' + result['reason']}
         with self.connect() as db:
             db.execute('UPDATE fleet_notices SET telegram_key=? WHERE id=?', (key, nid))
         return {'status': result['status'], 'reason': result['reason'], 'message': message}

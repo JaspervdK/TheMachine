@@ -18,6 +18,19 @@ const taskActions=(item:any)=>{
 const OWNER_ACTIONS = new Set(['decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'fleet_decide', 'fleet_notice_decide']);
 // The service lays out its Fleet question message; callbacks get the same wire format as card buttons.
 const fleetButtons=(rows:any[])=>rows.map(row=>row.map((b:any)=>b.url?{text:b.text,url:b.url}:{text:b.text,callback_data:buildCallback(b.value)}));
+// A Fleet tap's result, shown in the tapped message itself. An unchanged message can't be edited: then the reason, if
+// any, comes as a short reply instead, so a tap never looks like it did nothing.
+async function showResult(ctx:any,message:any,reason?:string){
+  try{await ctx.respond.editMessage({text:message.text,buttons:fleetButtons(message.buttons)});}
+  catch(error:any){
+    const unchanged=/not modified/i.test(String(error?.message||error));
+    if(reason||!unchanged)await ctx.respond.reply({text:reason||message.text}).catch(()=>{});
+  }
+}
+// The local service didn't answer the tap. Nothing was decided; the message and its buttons stay as they were.
+async function notReached(ctx:any){
+  await ctx.respond.reply({text:'Your Machine did not answer just now, so nothing was done. Tap the button again in a minute.'}).catch(()=>{});
+}
 const TOOL_ACTIONS = ['status', 'events', 'begin_analysis', 'analysis_page', 'finish_analysis', 'suggest', 'prepare', 'preparation_blocked', 'preparation_history', 'remember_fact', 'looks_handled', 'promise', 'related', 'graph', 'profile_evidence', 'save_profile'];
 // dismiss_handled stays for older cards; the service records that reason as done.
 const DISMISS_REASONS: Record<string,string> = {dismiss_irrelevant:'Not relevant', dismiss_handled:'Already handled', dismiss_wrong:'Wrong facts'};
@@ -192,11 +205,11 @@ export default definePluginEntry({
           try { result = await call('fleet_decide', { id: fleetTap[1], choice: fleetTap[2], source: 'telegram',
             message_id: String(ctx.callback.messageId), decision_id: `telegram:${ctx.callbackId}` }); }
           catch (error:any) {
-            if (error.status !== 400) throw error;
-            await ctx.respond.clearButtons();
+            if (error.status !== 400) { await notReached(ctx); return { handled: true }; }
+            await ctx.respond.clearButtons().catch(()=>{});
             return { handled: true };
           }
-          if (result?.message) await ctx.respond.editMessage({ text: result.message.text, buttons: fleetButtons(result.message.buttons) });
+          if (result?.message) await showResult(ctx, result.message);
           return { handled: true };
         }
         // A member asks the owner's Fleet for a server. The tap is relayed with the terms that message showed; the control
@@ -207,17 +220,25 @@ export default definePluginEntry({
           try { result = await call('fleet_notice_decide', { id: noticeTap[1], choice: noticeTap[2], source: 'telegram',
             message_id: String(ctx.callback.messageId), decision_id: `telegram:${ctx.callbackId}` }); }
           catch (error:any) {
-            if (error.status !== 400) throw error;
-            await ctx.respond.clearButtons();
-            await ctx.respond.reply({ text: 'This message is not the one sent for that request, so nothing was done. Please use the dashboard.' });
+            // The service didn't answer (restarting, slow): nothing was decided, and the buttons stay to tap again.
+            if (error.status !== 400) { await notReached(ctx); return { handled: true }; }
+            await ctx.respond.clearButtons().catch(()=>{});
+            await ctx.respond.reply({ text: /^That Telegram message is not/.test(error.message||'') ?
+              'This message is not the one sent for that request, so nothing was done. Please use the dashboard.' : error.message });
             return { handled: true };
           }
-          if (result?.message) await ctx.respond.editMessage({ text: result.message.text, buttons: fleetButtons(result.message.buttons) });
-          if (result?.reason) await ctx.respond.reply({ text: result.reason });
+          // The message itself shows the result: Accepted, Declined, already handled, or why nothing happened with the
+          // buttons kept. Only when it can't be edited (unchanged) does the reason come as a reply.
+          if (result?.message) await showResult(ctx, result.message, result.reason);
+          else if (result?.reason) await ctx.respond.reply({ text: result.reason });
           return { handled: true };
         }
         const match = /^assistant:([a-f0-9]{16}):(accept|reject|snooze|other|complete|undo|unmerge|retry|back|snooze_(?:2h|tomorrow|3d|1w)|dismiss_(?:irrelevant|handled|wrong|other|none)|(?:send|confirm|next)_[a-f0-9]{12}|confirm_[a-f0-9]{12}_[0-5])$/.exec(ctx.callback.data);
-        if (!match) return { handled: true };
+        if (!match) {
+          // A button this version doesn't know (an older message, or one from a newer Machine): say so, never stay silent.
+          await ctx.respond.reply({ text: 'That button did nothing: it is not one this Machine knows. Please use the dashboard.' }).catch(()=>{});
+          return { handled: true };
+        }
         const [, id, choice] = match;
         const state = await call('status', {full:true});
         const delivery = state.deliveries.find((d: any) => d.suggestion_id === id);
