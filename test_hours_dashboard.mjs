@@ -36,9 +36,9 @@ try{
  assert.equal(await page.locator('#settings #theme-toggle').isVisible(),true);
  assert.equal(await page.locator('#settings-fleet').isHidden(),true);  // no Fleet here
  assert.match(await page.locator('#settings-more').textContent(),/assistant telegram/);
- // self-hosted, not paired: a way onto The Machine Network (Friends, free) or a Fleet, marked alpha
+ // self-hosted, not paired: a way onto The Machine Network (Friends, free) or a Fleet, marked Beta
  assert.match(await page.locator('#settings-more').textContent(),/The Machine Network/);
- assert.equal(await page.locator('#settings-more .alpha').textContent(),'alpha');
+ assert.equal(await page.locator('#settings-more .alpha').textContent(),'Beta');
  assert.equal(await page.locator('#settings-more a').count(),0);  // a button, not an inline link
  assert.equal(await page.locator('#settings-cloud').textContent(),'Join the Network');
  assert.equal(await page.locator('#settings-cloud').getAttribute('href'),'https://app.themachine.computer/start');  // the Network or a Fleet, kept through sign-in
