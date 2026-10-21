@@ -29,6 +29,7 @@ import urllib.request
 from contextlib import closing
 from pathlib import Path
 
+import message_seal
 import portable
 import service
 
@@ -1877,6 +1878,20 @@ def doctor(config_path, workspace=None):
             add('✗', f'credential {name} missing', './install.sh')
         elif path.exists() and path.stat().st_mode & 0o077:
             add('!', f'credential {name} is readable by others', f'chmod 600 {path}')
+    # Message contents encrypted in the database: the key must survive with it
+    if config.get('database'):
+        db_path = Path(config['database']).expanduser()
+        found = message_seal.problems(db_path)
+        for name, text, fix in found:
+            add('✗' if name == 'message-key-missing' else '!', text, fix)
+        sealed, _ = message_seal.state(db_path)
+        if sealed and not found:
+            add('✓', f'messages encrypted; keep {message_seal.key_path(db_path)} in your backups with the database')
+        elif sealed is False and not message_seal.wanted(config):
+            add('!', 'messages are stored unencrypted ("message_protection": false in config.json)',
+                f'remove that line, then {service.hint("restart")}')
+        elif sealed is False:
+            add('!', 'messages are not encrypted yet: that happens at the next start with nothing running', service.hint('restart'))
     # Sources
     db = database(config)
     checkpoints, counts, last_review = {}, {}, None

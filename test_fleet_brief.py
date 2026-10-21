@@ -77,12 +77,15 @@ class Brief(unittest.TestCase):
             self.store.commit_page(e['account_id'], {}, [e])
         with self.store.connect() as db:
             db.isolation_level = None
+            # matched in Python: the metadata may be sealed in the database (message_seal.py)
+            metadata = {r['id']: r['metadata'] for r in db.execute('SELECT id,metadata FROM events')}
+            find = lambda text: next(i for i, m in metadata.items() if text in m)
             for n, found in enumerate(('lead-1@prospect', 'both-1@client', 'shared-1@inbound', 'cust-1@customer', 'alias-1@alias')):
-                event = db.execute("SELECT id FROM events WHERE instr(metadata,?)>0", (found,)).fetchone()[0]
+                event = find(found)
                 db.execute("INSERT INTO suggestions(id,dedupe_key,title,body,event_ids,account_ids,created_at) VALUES(?,?,'Reply','',?,'[\"work\"]',?)",
                            (f's{n}', f'd{n}', json.dumps([event]), NOW.isoformat()))
             # the review saw this one and the owner said it isn't needed: not waiting
-            cold = db.execute("SELECT id FROM events WHERE instr(metadata,'pitch@vendor.example')>0").fetchone()[0]
+            cold = find('pitch@vendor.example')
             db.execute("INSERT INTO suggestions(id,dedupe_key,title,body,event_ids,account_ids,created_at,status) VALUES('sx','dx','Reply','',?,'[\"work\"]',?,'rejected')",
                        (json.dumps([cold]), NOW.isoformat()))
             graph.build(db, CONFIG, NOW.isoformat())

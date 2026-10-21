@@ -18,7 +18,7 @@
 | `dashboard_aliases`, `dashboard_alias_path` | `[]`, `/assistant/` | Extra host names and their path |
 | `port` | `8787` | Local API and dashboard port on 127.0.0.1 |
 | `database` | — | SQLite file; tokens and keys sit next to it |
-| `message_protection` | unset | `true` seals message contents in the database, `false` opens them again, unset leaves them as they are ([below](#message-protection)) |
+| `message_protection` | `true` | Encrypts message contents in the database; `false` opens them again ([below](#message-protection)) |
 | `credentials` | — | Name → file path of each secret: `api-token`, `owner-token`, `gog-password`, `google-broker` and `microsoft-broker` (with a broker), and one per source credential. systemd `LoadCredential` with the same names takes precedence |
 | `app_dir` | `~/.openclaw/workspace/tools/personal-assistant` | This checkout; the plugin reads `AGENTS.md`/`PREPARATION.md` here and protects it from edits |
 | `fix_dir` | `~/.cache/the-machine/fixes` | Where Do it clones The Machine to fix it ([The Machine fixes itself](../README.md#the-machine-fixes-itself)) |
@@ -73,19 +73,27 @@ Every account has `id`, `service`, `transport` and `boundary`, plus optional `sc
 
 ## Message protection
 
-With `"message_protection": true` the service encrypts what messages say, from every source, in its database:
+By default the service encrypts what messages say, from every source, in its database:
 subjects, bodies, attachments' names, quoted text and other metadata of email, chats, notifications, tickets,
 transcripts and calendar events, plus the text derived from them (card text, drafts and their edits, preparation
 tool calls and results, Fleet and Network questions and answers). The key is `message-content.key`, next to the
 database, readable only by the service user. The dashboard, search, embeddings and reviews work as before: search
 uses a keyed hash of each word.
 
+**Back up the key with the database.** A backup of the data folder (or your home folder) holds both. Without the
+key, the messages in the database and its copies can't be read by anyone, you included. `assistant doctor` and the
+dashboard say when the key is missing or readable by others.
+
 What stays readable, for support and to improve The Machine: feedback, facts and rules, skills, profile and notes,
 card states and times, errors, sync health and logs. `python3 learnings.py --database ... --workspace ...` exports
 exactly that, without the key.
 
-Turning it on or off rewrites the database once at start: a copy is made first, kept only if the change fails.
-Exports open the messages and leave the key out. The key does not stop someone with root on the machine, who can
+Turning it on or off rewrites the database once at start, when no review, preparation or profile turn is running
+(while one runs, the service waits and restarts itself once it's done). A copy is made first, kept only if the
+change fails; then the rewrite in one step, a check that every message opens, and a wipe of the free space.
+Installs from before it was the default are encrypted this way at their first start after the upgrade. To opt out,
+set `"message_protection": false`. Exports open the messages and leave the key out; an import is encrypted again
+with the new Machine's own key at its next start, so moving between your computer and hosted keeps working. The key does not stop someone with root on the machine, who can
 read it; it stops the database file, its copies and tools without the key. Not covered: OpenClaw's own session
 transcripts and caches, WhatsApp's `wacli` store, browser profiles, promises' text and Network replies waiting to
 go out.

@@ -352,7 +352,7 @@ class Requests(unittest.TestCase):
         self.fleet.set_rule('work', 'pat1', 'handoff', 'always')
         self.assertEqual(self.ask('handoff', {'title': 'Book the demo', 'summary': 'Lee wants a demo'}, 'q2'), 'answered')
         with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM suggestions WHERE title LIKE 'Pat handed you%'").fetchone()[0], 2)
+            self.assertEqual(sum(r['title'].startswith('Pat handed you') for r in db.execute('SELECT title FROM suggestions')), 2)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM action_jobs').fetchone()[0], 0)
 
     # -- shared follow-ups

@@ -41,6 +41,7 @@ import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import message_seal
 import onboarding
 import service
 from onboarding import CONNECTORS, expand, write_private
@@ -920,6 +921,10 @@ def next_steps(config, healthy, started, paths=None):
         lines.append(f'  - Tell the agent about you: create USER.md in {paths.workspace} (name, companies, tone, preferences)')
     elif not onboarding.says_how_you_write(user_md):
         lines.append('  - Let your agent draft how you write and what matters to you from your own messages: assistant profile (you see it first)')
+    if config.get('message_protection') is not False and config.get('database'):
+        key = message_seal.key_path(Path(config['database']).expanduser())
+        lines.append(f'  - Messages are encrypted in the database with the key {key}. Back it up with the database:'
+                     ' without it they are lost')
     lines += ['  - Keep `Do it` in mind: it lets the agent act with your accounts. Read README "Security model".',
               '  - After editing config.json: ' + service.hint('restart')]
     if not config.get('delivery_enabled') or not config.get('review_worker', {}).get('enabled'):

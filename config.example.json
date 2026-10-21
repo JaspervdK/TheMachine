@@ -9,6 +9,7 @@
   "dashboard_alias_path": "/assistant/",
   "port": 8787,
   "database": "~/.local/share/personal-assistant/events.sqlite",
+  "message_protection": true,
   "credentials": {
     "api-token": "~/.local/share/personal-assistant/api-token",
     "owner-token": "~/.local/share/personal-assistant/owner-token",

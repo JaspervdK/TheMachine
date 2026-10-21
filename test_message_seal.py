@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('assistant', ROOT / 'assistant.py')
@@ -46,7 +47,8 @@ class Sealer(unittest.TestCase):
         for text in ['a', 'Grüße 👋\n' * 500, CANARY]:
             sealed = self.sealer.seal(text)
             self.assertTrue(message_seal.is_sealed(sealed))
-            self.assertNotIn(text.encode(), sealed)
+            if len(text) > 4:  # one letter turns up among random bytes by chance
+                self.assertNotIn(text.encode(), sealed)
             self.assertEqual(self.sealer.open(sealed), text)
         self.assertNotEqual(self.sealer.seal('same'), self.sealer.seal('same'))
         for value in [None, '', 3, b'\x00plain blob']:
@@ -80,6 +82,11 @@ class Sealer(unittest.TestCase):
 
 class Protected(unittest.TestCase):
     def setUp(self):
+        # these tests choose plain or sealed themselves, also when the whole suite runs sealed
+        patcher = unittest.mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop('MESSAGE_PROTECTION_TEST', None)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / 'events.sqlite'
@@ -199,6 +206,76 @@ class Protected(unittest.TestCase):
             db.write_bytes(z.read('data/events.sqlite'))
         self.assertFalse(message_seal.is_protected(sqlite3.connect(db)))
         self.assertIn(CANARY.encode(), db.read_bytes())
+
+    def app(self, **config):
+        app = object.__new__(assistant.App)
+        app.config, app.stop = {'database': str(self.path), **config}, __import__('threading').Event()
+        return app
+
+    def test_on_by_default_off_only_when_config_says_so(self):
+        self.assertTrue(self.app().protection_now({'database': str(self.path)}))  # a new install
+        self.assertTrue(self.app().protection_now({'database': str(self.path), 'message_protection': None}))
+        self.assertFalse(self.app().protection_now({'database': str(self.path), 'message_protection': False}))
+        self.fill(assistant.Store(self.path))
+        app = self.app()
+        store = assistant.Store(self.path, protect=app.protection_now(app.config))  # an upgrade, with nothing running
+        self.assertTrue(store.protected and message_seal.is_protected(sqlite3.connect(self.path)))
+        self.assertNotIn(CANARY.encode(), files(self.path))
+        self.assertEqual(oct(message_seal.key_path(self.path).stat().st_mode & 0o777), '0o600')
+
+    def test_an_upgrade_waits_until_nothing_runs_then_restarts_to_seal(self):
+        self.fill(assistant.Store(self.path))
+        now = assistant.dt.datetime.now(assistant.dt.timezone.utc).isoformat()
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at) VALUES('r1','running',?,?)", (now, now))
+        app = self.app()
+        self.assertIsNone(app.protection_now(app.config))  # a review runs: it is not cut off
+        self.assertTrue(app.protection_waits)
+        self.assertFalse(assistant.Store(self.path, protect=None).protected)
+        restarts = []
+        original = assistant.restart_self
+        assistant.restart_self = lambda: restarts.append(1) or True
+        try:
+            waiter = __import__('threading').Thread(target=app.protection_waiter, kwargs={'every': 0.05})
+            waiter.start()
+            __import__('time').sleep(0.3)
+            self.assertEqual(restarts, [])
+            with sqlite3.connect(self.path) as db:
+                db.execute("UPDATE review_runs SET status='complete'")
+            waiter.join(5)
+        finally:
+            assistant.restart_self = original
+        self.assertEqual(restarts, [1])
+        self.assertTrue(assistant.Store(self.path, protect=app.protection_now(app.config)).protected)
+        self.assertFalse(app.protection_waits)
+
+    def test_the_key_is_checked_by_doctor_and_the_dashboard(self):
+        assistant.Store(self.path, protect=True)
+        self.assertEqual(message_seal.problems(self.path), [])
+        key = message_seal.key_path(self.path)
+        key.chmod(0o644)
+        self.assertEqual([p[0] for p in message_seal.problems(self.path)], ['message-key-open'])
+        self.assertEqual(assistant.needs_you({'database': str(self.path), 'accounts': []})[0]['action'], f'Run: chmod 600 {key}')
+        key.rename(key.with_name('elsewhere'))
+        self.assertEqual([p[0] for p in message_seal.problems(self.path)], ['message-key-missing'])
+
+    def test_an_export_moves_over_and_is_sealed_again_with_the_new_machines_key(self):
+        config = Path(self.temp.name) / 'config.json'
+        config.write_text(json.dumps({'database': str(self.path), 'accounts': []}))
+        self.fill(assistant.Store(self.path, protect=True))
+        archive, _ = moving.export(config, Path(self.temp.name) / 'out', workspace=Path(self.temp.name) / 'ws',
+                                   openclaw_home=Path(self.temp.name) / 'oc')
+        import zipfile
+        there = Path(self.temp.name) / 'there' / 'events.sqlite'
+        there.parent.mkdir()
+        with zipfile.ZipFile(archive) as z:
+            there.write_bytes(z.read('data/events.sqlite'))
+        app = self.app(database=str(there))
+        store = assistant.Store(there, protect=app.protection_now(app.config))
+        self.assertTrue(store.protected)
+        self.assertNotEqual(message_seal.key_path(there).read_bytes(), message_seal.key_path(self.path).read_bytes())
+        self.assertNotIn(CANARY.encode(), files(there))
+        self.assertEqual(len(store.events(['acct'], query=CANARY.lower())), len(SOURCES))
 
     def test_learnings_hold_what_the_machine_learned_never_message_text(self):
         store = assistant.Store(self.path, protect=True)

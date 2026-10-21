@@ -234,7 +234,8 @@ class PerTaskSite(unittest.TestCase):
         SigninHandoff.setUp(self)
         self.block('Wise is signed out; sign in on the Wise login tab, then tap Continue.')
         with self.store.connect() as db:
-            db.execute("UPDATE preparation_calls SET params=replace(params,'www.example.com','wise.com')")
+            for row in db.execute('SELECT rowid,params FROM preparation_calls').fetchall():  # in Python: params may be sealed
+                db.execute('UPDATE preparation_calls SET params=? WHERE rowid=?', (row['params'].replace('www.example.com', 'wise.com'), row['rowid']))
         # The second task's latest run only reused a tab an earlier run of its session opened.
         self.other, job = self.add_task('profit', [('browser', {'action': 'focus', 'targetId': 'profit-tab'}),
                                                    ('exec', {'command': 'release lease'})],

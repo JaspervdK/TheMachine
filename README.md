@@ -147,6 +147,7 @@ In plain words: [themachine.computer/security](https://themachine.computer/secur
 - Reviews only read. Do it permits broad task execution; plugin guards are not an OS sandbox and differ by runtime.
 - Credentials must not enter model context; the owner's dashboard sign-in facility handles them separately.
 - Private evidence reaches your chosen reasoning provider; local embeddings do not make cloud model calls local.
+- Message contents are encrypted in the database by default, with a key next to it (`message-content.key`). Back it up with the database: without it the messages are lost ([configuration](docs/configuration.md#message-protection)).
 - Unknown sends/remote writes are reconciled, not blindly repeated. Cancellation cannot recall an already-admitted send.
 
 Read [SECURITY.md](SECURITY.md), [PREPARATION.md](PREPARATION.md) and [architecture](docs/architecture.md) before enabling accepted work. No new approval tiers are implied by this documentation.

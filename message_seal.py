@@ -14,7 +14,8 @@ The app itself reads everything as before: its connections open sealed values as
 connection without the key (sqlite3 on the command line, a support tool) sees only blobs, and its writes to these
 tables fail rather than store plain text.
 
-The key is 32 random bytes in `message-content.key` next to the database, readable only by the owner's account. It
+On by default, on every Machine: only `"message_protection": false` in config.json keeps (or makes) the database plain
+(`wanted`). The key is 32 random bytes in `message-content.key` next to the database, readable only by the owner's account. It
 protects against reading the database without that account: a copied database file, a support tool that opens the
 file, someone signed in as another user. It does not protect against root on the same server, which can read the key
 or the running app's memory; nor against what other programs keep (OpenClaw's session transcripts, a chat bridge's
@@ -35,6 +36,7 @@ import re
 import secrets
 import sqlite3
 import unicodedata
+from contextlib import closing
 from pathlib import Path
 
 MAGIC = b'\x00\xffMC1\x00'
@@ -61,6 +63,64 @@ SYSTEM_KINDS = ('gateway.', 'machine.')
 
 class SealError(ValueError):
     pass
+
+
+def wanted(config):
+    """Message protection is on unless config.json turns it off explicitly with "message_protection": false."""
+    return config.get('message_protection') is not False
+
+
+def work_running(database, minutes=40):
+    """Review, preparation and profile turns heard from in the last `minutes` (one quiet longer is stuck, not running),
+    counted as the hosted updater counts them: sealing or opening the database waits until this is 0. None when the
+    database can't be read: not proof that nothing runs."""
+    import datetime
+    path = Path(database).expanduser()
+    if not path.is_file():
+        return 0
+    since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).isoformat(timespec='seconds')
+    active = 0
+    try:
+        with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)) as db:
+            present = _tables(db)
+            for table, states in (('review_runs', "'starting','running','recovering'"), ('preparations', "'starting','running'"),
+                                  ('profile_runs', "'starting','running','recovering'")):
+                if table in present:
+                    active += db.execute(f'SELECT count(*) FROM {table} WHERE status IN ({states}) AND updated_at>?', (since,)).fetchone()[0]
+    except sqlite3.Error:
+        return None
+    return active
+
+
+def problems(database):
+    """What the owner has to fix about the key, as [(id, text, fix)] (assistant doctor and the dashboard's Needs you).
+    Without the key the messages are lost for good, so it goes in every backup of the database."""
+    path = Path(database).expanduser()
+    sealed, has_key = state(path)
+    key, out = key_path(path), []
+    if sealed and not has_key:
+        out.append(('message-key-missing', f'Your messages are encrypted, but their key {key} is missing. Without it they can\'t be read.',
+                    f'put {KEY_NAME} back from your backup, next to {path.name}'))
+    elif has_key and key.stat().st_mode & 0o077:
+        out.append(('message-key-open', f'The message key {key} is readable by others.', f'chmod 600 {key}'))
+    copy = path.with_name(path.name + '.before-protection')
+    if copy.exists():
+        out.append(('message-protection-failed', f'Encrypting your messages did not finish; an unencrypted copy waits at {copy}.',
+                    'assistant service logs; it is tried again, and the copy removed, at the next start'))
+    return out
+
+
+def state(database):
+    """(sealed, key present) for the database at this path, read without the key; (None, …) when there is no database."""
+    path = Path(database).expanduser()
+    key = key_path(path).is_file()
+    if not path.is_file():
+        return None, key
+    try:
+        with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)) as db:
+            return is_protected(db), key
+    except sqlite3.Error:
+        return None, key
 
 
 def key_path(database):

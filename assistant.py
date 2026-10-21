@@ -6873,6 +6873,12 @@ def needs_you(config):
         if why:
             items.append({'id': 'setup-' + account['id'], 'text': f'{name} is not fully set up yet ({why}).',
                           'url': manage + '#sources' if manage else None, 'action': 'Finish it' if manage else 'Run: assistant connect'})
+    # The message key (message_seal.py): without it, the messages can't be read after a restart
+    try:
+        for key, text, fix in message_seal.problems(config['database']) if config.get('database') else []:
+            items.append({'id': key, 'text': text, 'url': None, 'action': 'Run: ' + (fix if fix.startswith('chmod') else 'assistant doctor')})
+    except OSError:
+        pass
     # `needs_you_file`: optional JSON list of notes from a hosting layer (a hosted machine), shown as they are.
     path = config.get('needs_you_file')
     if path:
@@ -6898,7 +6904,7 @@ class App:
             set_work_hours(None)
         self.config = config
         self.config_path = Path(config_path) if config_path else None  # where Work hours are saved
-        self.store = Store(config['database'], protect=config.get('message_protection'))
+        self.store = Store(config['database'], protect=self.protection_now(config))
         self.store.exclusions = {a['id']: rules for a in config['accounts'] if (rules := (a.get('exclude') or []) + default_exclusions(config, a))}
         self.store.owner_user_ids = {a['user_id'] for a in config['accounts'] if a.get('service') == 'slack' and a.get('user_id')}
         self.store.accounts = config['accounts']
@@ -9366,6 +9372,34 @@ class App:
         lines=[f"- {i} ({rows[i]['account_id']}) {source_line([rows[i]])[8:]} · {clamp(' '.join(rows[i]['title'].split()),100)}" for i,_ in found if i in rows]
         return ('\n\nPossibly related (found by meaning in this task\'s accounts; read any that matter with events, its account and event_ids):\n'+'\n'.join(lines)) if lines else ''
 
+    def protection_now(self, config):
+        """What the Store does with message protection at this start: on unless config.json says false. A change to an
+        existing database (an upgrade that turns it on by default, say) waits while a review, preparation or profile
+        turn runs, so none is cut off: the app starts as it was and restarts itself once they are done
+        (`protection_waiter`). The change itself keeps a copy until it checks out (Store.message_protection)."""
+        self.protection_waits = False
+        want = message_seal.wanted(config)
+        sealed, _ = message_seal.state(config['database'])
+        if sealed is None or sealed == want:
+            return want
+        running = message_seal.work_running(config['database'])
+        if running == 0:
+            return want
+        self.protection_waits = True
+        LOG.info('message contents will be %s once The Machine is idle (%s running)', 'sealed' if want else 'opened',
+                 running if running is not None else 'unknown')
+        return None
+
+    def protection_waiter(self, every=30):
+        """Restart once nothing runs, so the next start seals (or opens) the database with nothing cut off."""
+        while not self.stop.wait(every):
+            if message_seal.work_running(self.config['database']) == 0:
+                if restart_self():
+                    LOG.info('idle: restarting to apply message protection')
+                else:
+                    LOG.info('idle: message protection applies at the next start')
+                return
+
     def serve(self):
         app = self
 
@@ -9643,6 +9677,8 @@ class App:
             threading.Thread(target=self.embedding_worker, daemon=True).start()
         if enrichment.settings(self.config):
             threading.Thread(target=self.enrichment_worker, daemon=True).start()
+        if getattr(self, 'protection_waits', False):
+            threading.Thread(target=self.protection_waiter, daemon=True).start()
         server.timeout = 1
         LOG.info('service started; loopback only; accounts=%d', len(self.config['accounts']))
         while not self.stop.is_set():
