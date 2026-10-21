@@ -281,7 +281,8 @@ class OpenClawSkills(unittest.TestCase):
             done = real(argv, **kw)
             self.assertIs(kw.get('stdin'), skills.subprocess.DEVNULL)
             self.assertEqual(kw['env'].get('NO_COLOR'), '1')
-            done.stdout = '\x1b[36m[plugins] codex: loaded from npm\x1b[39m\n[skills] note\n' + done.stdout + '\nDone.\n'
+            done.stdout = ('\x1b[36m[plugins] codex: loaded from npm\x1b[39m\n[skills] note\n{"level":"warn","msg":"plugin note"}\n'
+                           + done.stdout + '\n{"level":"info","msg":"done"}\n')
             return done
         self.keeper.catalog.run = noisy
         self.assertIn('trello', {i['name'] for i in self.keeper.installed(refresh=True)['installed']})

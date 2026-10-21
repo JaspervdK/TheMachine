@@ -556,13 +556,15 @@ KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}')
 ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
 
-def json_in(text):
-    """The JSON object in a CLI's output, also when OpenClaw printed a notice or a warning before or after it (a plugin
-    being loaded, a config note): the first line that starts a whole JSON object. None when there is none."""
+def json_in(text, key=None):
+    """The JSON object in a CLI's output, also when OpenClaw printed notices or log lines around it (a plugin being
+    loaded, a config note, or its own logs as JSON lines): with `key`, the first whole object that has that key,
+    otherwise the first whole object. None when there is none."""
     text = ANSI.sub('', text or '')
     try:
         found = json.loads(text)
-        return found if isinstance(found, (dict, list)) else None
+        if isinstance(found, (dict, list)) and (key is None or isinstance(found, dict) and key in found):
+            return found
     except ValueError:
         pass
     decoder = json.JSONDecoder()
@@ -571,9 +573,11 @@ def json_in(text):
             found, _ = decoder.raw_decode(text, start.end() - 1)
         except ValueError:
             continue
-        if isinstance(found, dict):
+        if isinstance(found, dict) and (key is None or key in found):
             return found
     return None
+
+
 TEXT_FILES = ('.md', '.txt', '.json', '.yaml', '.yml', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp')
 OS_NAMES = {'darwin': 'macOS', 'linux': 'Linux', 'win32': 'Windows'}
 SOURCES = {'openclaw-workspace': 'Workspace', 'openclaw-bundled': 'Bundled with OpenClaw', 'openclaw-workshop': 'Learned by OpenClaw',
@@ -657,23 +661,23 @@ class Catalog:
         lines = [line for line in lines if line and not line.startswith(('OpenClaw ', '🦞'))]
         return one_line(lines[-1] if lines else 'OpenClaw said no', 300)
 
-    def _json(self, args, timeout=60):
+    def _json(self, args, timeout=60, key=None):
         done = self._cli([*args, '--json'], timeout)
-        data = json_in(done.stdout)
+        data = json_in(done.stdout, key)
         if data is None and not done.returncode:
-            data = json_in(done.stderr)
+            data = json_in(done.stderr, key)
         if data is None:
             if not done.returncode:  # what it looked like, for support: sizes and the first line, never the whole answer
                 first = next((ANSI.sub('', line).strip() for line in (done.stdout or '').splitlines() if line.strip()), '')
-                LOG.warning('openclaw %s unreadable stdout=%d stderr=%d first=%r', ' '.join(args[:2]), len(done.stdout or ''),
-                            len(done.stderr or ''), first[:120])
+                LOG.warning('openclaw %s unreadable stdout=%d lines=%d stderr=%d first=%r', ' '.join(args[:2]), len(done.stdout or ''),
+                            len((done.stdout or '').splitlines()), len(done.stderr or ''), first[:120])
             raise ValueError(self._reason(done) if done.returncode else 'OpenClaw gave an answer The Machine could not read')
         return data
 
     def load(self):
         """Asks OpenClaw for every skill it has (about two seconds). Keeps the last good list when it fails."""
         try:
-            data = self._json(['skills', 'list'])
+            data = self._json(['skills', 'list'], key='skills')
             found = data.get('skills') if isinstance(data, dict) else None
             if not isinstance(found, list):
                 raise ValueError('OpenClaw gave an answer The Machine could not read')
