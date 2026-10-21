@@ -628,8 +628,11 @@ def cmd_export(config, args):
         raise CliError(str(error)) from None
     if args.json:
         return out_json({'file': str(path), 'bytes': path.stat().st_size, 'includes_keys': manifest['includes_keys'],
-                         'left_out': manifest['left_out']})
+                         'left_out': manifest['left_out'], 'network_identity': manifest.get('network_identity')})
     print(f'Wrote {path} ({path.stat().st_size / 1e6:.1f} MB)' + (', keys included and encrypted' if args.keys else ', without keys'))
+    if manifest.get('network_identity') == 'new':
+        print('Without keys, a new Network identity will be made after the import; teammates and friends see a '
+              'key-change notice once. Export with --keys to keep it.')
     if manifest['left_out']:
         print('Left out (a computer rebuilds these): ' + moving.left_out_text(manifest['left_out']))
     print('Put it back on another computer with:  assistant import ' + path.name)
@@ -686,6 +689,13 @@ def cmd_skills_propose(config, args):
     if args.json:
         return out_json(out)
     print('Already proposed or on.' if out.get('duplicate') else 'Proposed: it waits for the owner\'s Approve on the dashboard (Settings, Skills).')
+
+
+def cmd_task_import(config, args):
+    """A task link someone sent by email: adding it is the owner's own step, so it opens on the dashboard."""
+    invite_id, key = assistant.task_invites.parse_link(args.link)
+    root = dashboard_url(config) or 'http://127.0.0.1:' + str(config.get('port', 8787)) + '/'
+    print(f'Open this on your dashboard to add the task: {root}#task={invite_id}.{key}')
 
 
 def cmd_raw(config, args):
@@ -781,6 +791,8 @@ def parser():
     c.add_argument('--description', required=True, help='one line: when to use it')
     c.add_argument('--file', required=True, help='markdown file with the instructions, or - for stdin')
     c.add_argument('--why', help='one line for the owner: what repeated work this comes from')
+    c = add('task-import', 'Add a task someone sent you by email, from its link (opens your dashboard to confirm)', cmd_task_import)
+    c.add_argument('link', help="the task link from the email, in quotes: 'https://…/t/…#k=…'")
     c = add('raw', 'Call any non-owner service action with JSON args', cmd_raw)
     c.add_argument('action')
     c.add_argument('args', nargs='?', help='JSON object')

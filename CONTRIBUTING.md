@@ -8,8 +8,10 @@ Small fixes, clearer setup instructions and additional general-purpose sources a
 1. Clone the repository. Use Python 3.12+ and a supported Node version from the README.
 2. Install the pinned SDK: `npm install -g openclaw@2026.10.5`.
 3. Install Chromium, or set `CHROMIUM_PATH` to an existing Chromium executable.
-4. Run `python3 scripts/test.py`. It runs every Python and Node suite, uses a disposable
-   HOME and returns a failing exit code if any suite fails. No real accounts or Gateway are needed.
+4. Run `python3 scripts/test.py`. It runs every Python and Node suite, each test file in its own process
+   with a disposable HOME, several at once (`THE_MACHINE_TEST_JOBS=1` runs them one by one), and returns a
+   failing exit code if any suite fails. Name files to run only those: `python3 scripts/test.py test_moving.py`.
+   No real accounts or Gateway are needed.
 
 If OpenClaw is installed outside the Node prefix, set `OPENCLAW_PACKAGE_DIR` to its package
 directory. `PLAYWRIGHT_CORE` may point to another `playwright-core/index.mjs`.

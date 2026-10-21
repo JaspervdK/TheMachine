@@ -58,6 +58,15 @@ default, Always accept, Never), and nothing happens on your side until you accep
    emails travel only as those keys. Your card says "Handed off to <teammate>" and how it went; once they accept, it is
    marked done for you, still saying to whom (Undo brings it back). A card handed to you can't be handed straight back to
    whoever gave it; to others it can.
+
+   **Someone not on the Network.** Pick **Someone else, by email** and give their address: instead of a Fleet request,
+   the card gets an ordinary email draft from its Gmail account, for you to read, change and send yourself (it never
+   goes out by itself). It says what you need from them, then ends with one line about The Machine and a task link.
+   Only the title, summary and due date you edited go into that link, sealed on your Machine with a key that exists
+   only in the link itself: the Network keeps an unreadable copy for 30 days at most. If they get a Machine of their
+   own (hosted, or self-hosted with `assistant task-import '<link>'`), the task arrives there as a card with your words
+   quoted, and their dashboard offers to connect with you on the Network. The Network only counts how far each
+   link got (opened, signed up, task added, connected), never what was in it.
 6. **Shared follow-ups.** After a meeting that several members of one Work Fleet attended (in the last two days), one
    Machine proposes who does which follow-up: the organizer's, else that of the member who joined the Fleet first, so
    there is only ever one proposal. It starts from that owner's own open cards and promises on the meeting; the owner

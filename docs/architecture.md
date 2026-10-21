@@ -39,7 +39,6 @@ Do it → isolated preparation turn of the same agent → result, draft + Send, 
 | `embeddings.py` | Optional related signals by meaning, through a local embedding server |
 | `graph.py` | People and projects: a living graph rebuilt from signals, card decisions, project labels and merges |
 | `deploy/` | Example systemd units (the service, an optional local embedding server) and Caddyfile |
-| `site/` | The project website, [themachine.computer](https://themachine.computer) (GitHub Pages, `.github/workflows/pages.yml`) |
 | `test_*.py`, `test_*.mjs` | Offline tests |
 
 Python's standard library and SQLite are enough: no database server, queue, web framework or extra scheduler. Runtime data lives in `~/.local/share/personal-assistant/`: `config.json`, `events.sqlite`, tokens and receipts.

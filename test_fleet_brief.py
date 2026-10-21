@@ -138,8 +138,9 @@ class Brief(unittest.TestCase):
         pat = {'touched': [{'org': 'Client', 'domain': 'client.example', 'count': 2, 'last': '2026-10-19'},
                            {'org': 'Quiet Co', 'domain': 'quiet.example', 'count': 1, 'last': '2026-10-19'}],
                'quiet': [{'org': 'Old Co', 'domain': 'old.example', 'last': '2026-08-01'}],
-               'unanswered': [{'org': 'Lead', 'domain': 'lead.example', 'key': 'a' * 64, 'at': '2026-10-18'},
-                              {'org': 'Claimed', 'domain': 'claimed.example', 'key': 'c' * 64, 'at': '2026-10-18'}],
+               # relative to the test's clock like the rest: Pat's lead came in after my prospect, so it ranks second
+               'unanswered': [{'org': 'Lead', 'domain': 'lead.example', 'key': 'a' * 64, 'at': (NOW - dt.timedelta(days=1)).date().isoformat()},
+                              {'org': 'Claimed', 'domain': 'claimed.example', 'key': 'c' * 64, 'at': (NOW - dt.timedelta(days=1)).date().isoformat()}],
                'replied': [mine], 'meetings': [dict(own['meetings'][0])]}
         view = fleet.assemble_brief(own, [('Pat', fleet.clean_brief(pat))], claimed={'c' * 64})
         self.assertEqual([x['domain'] for x in view['several']], ['client.example'])

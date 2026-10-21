@@ -143,7 +143,9 @@ def plan(config_path, workspace=None, openclaw_home=None, left_out=None):
             items.append(('file', path, f'data/{relative}'))
     for path in keys - {p.resolve() for _, p, _ in items}:  # keys kept outside the data folder
         if path.is_file():
-            items.append(('secret', path, f'secrets/elsewhere/{path.name}'))
+            # the Network keys get their own place, so they can't clash with a credential of the same name
+            items.append(('secret', path, f'secrets/network/{path.name}' if network_key and path == network_key.resolve()
+                          else f'secrets/elsewhere/{path.name}'))
     space = _workspace(workspace)
     if space.is_dir():
         for path, relative in _files(space, WORKSPACE_SKIP, left_out):
@@ -190,6 +192,13 @@ def telegram(openclaw_home=None):
     return {'enabled': bool(channel.get('enabled')), 'owner_allow_from': allowed} if channel or allowed else None
 
 
+def network_identity(config):
+    """Whether this Machine has keys on The Machine Network (network-keys.json): they are its identity there."""
+    from network import keys_path
+    found = keys_path(config)
+    return bool(found and found.is_file())
+
+
 def reconnect(config, secrets):
     """What has to be connected again after an import, in plain words."""
     out = []
@@ -202,6 +211,9 @@ def reconnect(config, secrets):
     out.append('your model: sign in to ChatGPT again, or paste your API key')
     if not secrets:
         out.append('Telegram: your bot token (the people allowed to talk to it are kept)')
+    if not secrets and network_identity(config):
+        out.append('The Machine Network: a new Network identity will be made; your teammates and friends see a '
+                   'key-change notice once')
     return out
 
 
@@ -243,7 +255,8 @@ def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=
     manifest = {'format': FORMAT, 'created_at': now.isoformat(timespec='seconds'), 'source': source,
                 'data_dir': str(config_path.parent), 'workspace_dir': str(_workspace(workspace)), 'includes_keys': secrets,
                 'files': sorted(name for _, _, name in items), 'telegram': telegram(openclaw_home),
-                'reconnect': reconnect(config, secrets), 'left_out': left_out}
+                'reconnect': reconnect(config, secrets), 'left_out': left_out,
+                'network_identity': ('kept' if secrets else 'new') if network_identity(config) else None}
     out_dir = Path(out_dir)
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     stem = f'the-machine-export-{now:%Y-%m-%d}'
@@ -461,6 +474,23 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
                 target = data / Path(path).name
                 _place(unpacked / 'secrets/elsewhere' / Path(path).name, target, notes)
                 config['credentials'][name] = str(target)
+        # Network keys from outside the data folder (inside it, the data restore above and the rebase cover them).
+        # They are this Machine's identity on the Network: the exported ones replace any a fresh install made already,
+        # so teammates and friends see the same Machine and no key-change notice.
+        found = config.get('network_keys')
+        if found:
+            name = Path(found).name
+            source = next((p for p in (unpacked / 'secrets/network' / name, unpacked / 'secrets/elsewhere' / name) if p.is_file()), None)
+            if source and not (Path(found).expanduser().is_file() and Path(found).expanduser().read_bytes() == source.read_bytes()):
+                target = data / name
+                temporary = target.with_name(name + '.import-new')
+                shutil.copyfile(source, temporary)
+                os.chmod(temporary, 0o600)
+                temporary.replace(target)
+                config['network_keys'] = str(target)
+                restored.append(str(target))
+            elif not source and not Path(found).expanduser().parent.is_dir():
+                config.pop('network_keys')  # a folder this computer doesn't have: new keys go next to the database
         if config_path.exists():
             shutil.copyfile(config_path, config_path.with_name(config_path.name + '.bak'))
         fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
