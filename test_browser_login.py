@@ -31,6 +31,10 @@ PAGES = {
         <form action="/home" method="post"><input name="verification" autocomplete="one-time-code"><button>Verify</button></form></section>'''.encode(),
     '/unknown': b'''<!doctype html><meta charset="utf-8"><title>Verify</title><form action="/home" method="post"><p>Enter your verification code to continue.</p>
         <input name="passcode"><button>Submit</button></form><p>Questions? Write to help@example.com</p>''',
+    # LinkedIn's way: after the password, nothing to type, "approve the sign-in in your app" on a checkpoint address
+    '/applogin': b'''<!doctype html><title>Sign in</title><form action="/checkpoint/challenge/x" method="post">
+        <input name="session_key" type="email"><input name="session_password" type="password"><button>Sign in</button></form>''',
+    '/checkpoint/challenge/x': b'<!doctype html><title>Check your app</title><p>Open your app to approve this sign-in.</p>',
 }
 
 
@@ -116,6 +120,23 @@ class FillTest(unittest.TestCase):
         done = browser_login.fill(self.config, page['id'], page['host'], code=CODE, settle=5)
         self.assertEqual(done, {'result': 'done', 'page': None})
         self.assertIn(('/home', 'otp=' + CODE), Site.posted)
+
+    def test_approving_in_the_sites_app_is_waited_on_not_called_done(self):
+        self.open('/applogin')
+        [page] = browser_login.pages(self.config)
+        done = browser_login.fill(self.config, page['id'], page['host'], USER, SECRET, settle=5)
+        self.assertEqual(done['result'], 'approve')
+        self.assertEqual(done['page']['id'], page['id'])
+        self.assertEqual(browser_login.watch(self.config, page['id']), {'state': 'waiting'})
+        base, target = self.config['browser_cdp_url'], page['id'].split(':', 1)[1]
+        browser_login.browser_cdp.navigate(base, target, self.origin + '/home')  # approved on the phone: the site moves on
+        time.sleep(1)
+        self.assertEqual(browser_login.watch(self.config, page['id']), {'state': 'done'})
+        browser_login.browser_cdp.navigate(base, target, self.origin + '/login')
+        time.sleep(1)
+        self.assertEqual(browser_login.watch(self.config, page['id'])['state'], 'form')
+        with self.assertRaises(ValueError):
+            browser_login.watch(self.config, '0:gone')
 
     def test_a_page_that_stays_gets_its_password_emptied(self):
         self.open('/stuck')

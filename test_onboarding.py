@@ -114,6 +114,24 @@ class OnboardingTest(unittest.TestCase):
              mock.patch.object(onboarding, 'step_plugin', side_effect=lambda config, account, ui: None), self.assertRaises(onboarding.SetupError):
             onboarding.connect(self.path, 'x', FakeUI(answers=['personal']), 'other-x', restart=False)
 
+    def test_signed_out_says_so_plainly_and_a_waiting_ui_connects_once_signed_in(self):
+        self.config()
+        with mock.patch.object(onboarding, 'check', return_value='linkedin_signed_out'), \
+             mock.patch.object(onboarding, 'step_plugin', side_effect=lambda config, account, ui: None), \
+             self.assertRaises(onboarding.SetupError) as raised:
+            onboarding.connect(self.path, 'linkedin', FakeUI(answers=['personal']), restart=False)
+        self.assertEqual(raised.exception.message, 'You are not signed in to LinkedIn on your Machine yet')
+        self.assertNotIn('linkedin_signed_out', str(raised.exception))
+        ui = FakeUI(answers=['personal'])
+        ui.wait_signin = 60  # the hosted setup page: wait for the owner to sign in, then go on
+        checks = iter(['linkedin_signed_out', 'linkedin_signed_out', None])
+        with mock.patch.object(onboarding, 'check', side_effect=lambda config, account: next(checks)), \
+             mock.patch.object(onboarding, 'step_plugin', side_effect=lambda config, account, ui: None), \
+             mock.patch.object(onboarding, 'SIGNIN_EVERY', 0):
+            onboarding.connect(self.path, 'linkedin', ui, restart=False)
+        self.assertEqual([a['service'] for a in json.loads(self.path.read_text())['accounts']], ['linkedin'])
+        self.assertTrue(any('waiting for you to sign in to LinkedIn on your Machine' in line for line in ui.out))
+
     def test_a_second_browser_account_keeps_the_browser_profile_it_was_signed_in_with(self):
         self.config()
         def plugin(config, account, ui):

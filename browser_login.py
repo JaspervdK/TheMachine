@@ -304,8 +304,9 @@ _store_locks_guard = threading.Lock()
 def fill(config, page, host, username=None, password=None, code=None, settle=SETTLE):
     """Types what the owner gave into the sign-in page `page` (an id from pages()) on `host`, and submits it.
 
-    Returns {'result': 'next'|'done'|'still_here', 'page': the sign-in form now shown, if any}. Errors are plain
-    ValueErrors that never contain a value given here."""
+    Returns {'result': 'next'|'done'|'approve'|'still_here', 'page': the sign-in form now shown, if any}. 'approve':
+    no form left, but the tab is still at a sign-in step (approve it in the site's app); watch() says when it is past.
+    Errors are plain ValueErrors that never contain a value given here."""
     index, _, target = str(page or '').partition(':')
     bases = endpoints(config)
     if not index.isdigit() or int(index) >= len(bases) or not target:
@@ -371,6 +372,8 @@ def fill(config, page, host, username=None, password=None, code=None, settle=SET
             return {'result': 'still_here', 'page': shown and {**shown, 'id': page, 'site': site(shown['host'])}}
         if shown:
             return {'result': 'next', 'page': {**shown, 'id': page, 'site': site(shown['host'])}}
+        if _checkpoint(base, target):  # nothing to type, but not in yet: approve it in the site's app, say
+            return {'result': 'approve', 'page': {'id': page, 'host': host, 'site': site(host)}}
         return {'result': 'done', 'page': None}
     finally:
         _filling.release()
@@ -415,6 +418,39 @@ def choose(config, page, host, label, settle=2.0):
         return {'result': 'elsewhere', 'page': None}
     finally:
         _filling.release()
+
+
+# A tab address that is still part of signing in, with nothing to type: approving it in the site's own app (LinkedIn's
+# checkpoint), a two-step or verification page, a challenge.
+CHECKPOINT = re.compile(r'(?i)checkpoint|challenge|/2fa|/mfa|two.?(step|factor)|verif|approv|log-?in|sign-?in|/uas/|/auth\b')
+ADDRESS = '() => location.pathname + location.search'
+
+
+def _checkpoint(base, target):
+    try:
+        return bool(CHECKPOINT.search(str(browser_cdp.evaluate(base, target, ADDRESS, timeout_ms=3000) or '')))
+    except (browser_cdp.CdpError, OSError):
+        return False
+
+
+def watch(config, page):
+    """How the sign-in in tab `page` (an id from pages()) is going, after the dialog sent it: {'state': 'form', 'page'}
+    when the page asks for something to type, 'waiting' while it waits on the owner elsewhere (their phone's app),
+    'done' once past it. Read-only: which fields show and the tab's address, never what is in them."""
+    index, _, target = str(page or '').partition(':')
+    bases = endpoints(config)
+    if not index.isdigit() or int(index) >= len(bases) or not target:
+        raise ValueError('That page is not open in the browser any more')
+    base = bases[int(index)]
+    try:
+        if not any(t.get('id') == target for t in browser_cdp._http(base, '/json/list', timeout=3)):
+            raise ValueError('That page is not open in the browser any more')
+        shown = describe(browser_cdp.evaluate(base, target, DETECT, timeout_ms=3000))
+    except (browser_cdp.CdpError, OSError, TypeError, AttributeError):
+        return {'state': 'waiting'}  # mid-navigation, or the browser is slow: look again
+    if isinstance(shown, dict) and shown.get('host'):
+        return {'state': 'form', 'page': {**shown, 'id': page, 'site': site(shown['host'])}}
+    return {'state': 'waiting' if _checkpoint(base, target) else 'done'}
 
 
 class LoginStore:

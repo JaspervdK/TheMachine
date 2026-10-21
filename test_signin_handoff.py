@@ -140,6 +140,19 @@ class SigninHandoff(unittest.TestCase):
                                                                                 'suggestion_id': self.sid}, owner_dashboard=True))
         self.assertEqual(self.job()['status'], 'blocked')
 
+    def test_approving_in_the_sites_app_carries_the_task_on_once_the_dialog_sees_it_done(self):
+        self.block()
+        with patch.object(a.browser_login, 'fill', return_value={'result': 'approve', 'page': {'id': '0:tab', 'host': 'www.example.com'}}):
+            self.assertNotIn('resumed', self.app.action('browser_login_fill', {'page': '0:tab', 'host': 'www.example.com', 'password': SECRET,
+                                                                                'suggestion_id': self.sid}, owner_dashboard=True))
+        with patch.object(a.browser_login, 'watch', return_value={'state': 'waiting'}):
+            self.assertEqual(self.app.action('browser_login_pages', {'watch': '0:tab', 'host': 'www.example.com', 'suggestion_id': self.sid},
+                                             owner_dashboard=True), {'state': 'waiting'})
+        self.assertEqual(self.job()['status'], 'blocked')
+        with patch.object(a.browser_login, 'watch', return_value={'state': 'done'}):
+            done = self.app.action('browser_login_pages', {'watch': '0:tab', 'host': 'www.example.com', 'suggestion_id': self.sid}, owner_dashboard=True)
+        self.assertEqual(done['resumed'], [self.sid])
+
     def test_the_same_site_by_host_alone(self):
         self.block()
         with patch.object(a.browser_login, 'fill', return_value={'result': 'done', 'page': None}):

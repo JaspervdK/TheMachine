@@ -1343,6 +1343,23 @@ def offer_phone_skip(config, account, ui):
                 phone.setdefault('exclude', []).append({'packages': packages})
 
 
+SIGNIN_EVERY = 10  # seconds between looks while a connect waits on the owner signing in to the browser
+
+
+def wait_signed_in(config, account, name, ui, error):
+    """A source read through the browser, connected before the owner signed in there: a UI that can wait (the hosted
+    setup page, `ui.wait_signin` seconds) keeps looking until they are in, then the connect goes on by itself.
+    Returns the last check's error (None once signed in)."""
+    ui.say(f'  waiting for you to sign in to {name} on your Machine...')
+    until = time.monotonic() + float(ui.wait_signin)
+    while error and error.endswith('_signed_out') and time.monotonic() < until:
+        time.sleep(SIGNIN_EVERY)
+        error = check(config, account)
+    if not error:
+        ui.say(f'  signed in to {name}')
+    return error
+
+
 def connect(config_path, name, ui, account_id=None, restart=True):
     """Set up one source: ask, write config and credentials, find IDs, read it once; then restart
     the service and show the first sync. Returns the account. Raises SetupError with a fix."""
@@ -1370,6 +1387,12 @@ def connect(config_path, name, ui, account_id=None, restart=True):
         account.update(own)  # it reads in the browser it was signed in with, also once others are added
     STEPS.get(service, step_plugin)(config, account, ui)
     error = check(config, account)
+    if error and error.endswith('_signed_out') and getattr(ui, 'wait_signin', 0):
+        error = wait_signed_in(config, account, label(service), ui, error)
+    if error and error.endswith('_signed_out'):
+        # in plain words: the raw code and the browser jargon stay out of what the owner reads
+        raise SetupError(f'You are not signed in to {label(service)} on your Machine yet',
+                         f'sign in to {label(service)} in your Machine\'s browser, then connect again')
     if error and error.startswith(BUSY):
         ui.say(f'  ! not read yet: {hint(error) or error}. Saved; the first sync reads it.')
     elif error:

@@ -7308,8 +7308,15 @@ class App:
                 if not isinstance(args.get('suggestion_id'), str):
                     raise ValueError('Which task?')
                 return self.signin_open(args['suggestion_id'])
+            if name == 'browser_login_pages' and isinstance(args.get('watch'), str):
+                # the dialog after a sign-in it sent waits on the owner elsewhere (approving it in the site's app)
+                seen = browser_login.watch(self.config, args['watch'])
+                if seen['state'] == 'done' and isinstance(args.get('host'), str):
+                    task = args.get('suggestion_id') if isinstance(args.get('suggestion_id'), str) else None
+                    seen['resumed'] = self.resume_signed_in(host=args['host'], suggestion_id=task)
+                return seen
             if name == 'browser_login_pages':
-                found = browser_login.pages(self.config, logins, args.get('account') if isinstance(args.get('account'), str) else None)
+                found =browser_login.pages(self.config, logins, args.get('account') if isinstance(args.get('account'), str) else None)
                 if isinstance(args.get('suggestion_id'), str):
                     # For a task, only the sign-in on the site its own run left off at; unknown: none, never a guess.
                     page = self.signin_page(args['suggestion_id'])
