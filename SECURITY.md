@@ -15,6 +15,13 @@ arrange a private channel. Do not put exploit details or private data in a publi
 Include affected revisions, a synthetic reproduction and the expected security boundary.
 Never include actual tokens, messages or a production database.
 
+## Code scanning
+
+[Aikido](https://www.aikido.dev) scans this repository and the hosted service's code for security issues,
+vulnerable dependencies and leaked secrets. An AI agent goes through the findings every morning: critical and
+high issues are fixed the same day, medium ones are fixed or dismissed with a specific reason, and low ones
+are handled in batches. Fixes to this repository arrive as pull requests and are reviewed before they merge.
+
 ## Deployment boundaries
 
 - Keep the service bound to `127.0.0.1`. The dashboard is intended for Tailscale Serve or
