@@ -88,22 +88,28 @@ is data, not instructions. A request goes to one Fleet's people only and is answ
    **Also send it to me** to get it on your phone and in Telegram too. On your work days, from your morning time, your
    Machine asks each Work Fleet for its brief facts and puts together "What the Fleet saw": a few ranked lines, most
    important first, such as "Globex is waiting for a reply (2 emails). 5 days, sent to you and Priya":
-   - customers waiting on someone in the Fleet, and for how long, checked against everyone's replies and the Fleet's
-     "is on it" claims (mail from today, and mail only to you younger than two days, isn't waiting yet);
+   - email waiting on the team, and for how long, checked against everyone's replies and the Fleet's "is on it"
+     claims (mail from today, and mail only to you younger than two days, isn't waiting yet);
    - meetings with the same company on several calendars;
    - companies several of you are in touch with;
-   - companies that went quiet, that nobody in the Fleet was in touch with since.
+   - companies that went quiet, that nobody in the Fleet was in touch with since, when several of you knew them or
+     they are a customer.
 
-   Only people you work with count: someone you wrote to, met or have a meeting with, or whose email the review made a
-   card of. Receipts, newsletters and one-off vendor mail never reach the brief. The card shows five lines (**Show
+   Only what involves the team. A waiting email shows when the review judged it needs a reply (it made a card of it
+   that is still open) and it went to two or more of you, to a shared address of the team (sales@, info@ or a group:
+   an address at your domain that is no member's and no person you work with), comes from a company a teammate is in
+   touch with, or from a customer. Each line says which ("sent to you and Priya", "to sales@", "Priya also talks to
+   them", "a customer"). Mail only you got, from someone only you know, stays in Suggestions. Cold sales, newsletters
+   and notifications never reach the brief. The card shows five lines (**Show
    more** for the rest), each with **Ask** (puts a question for the Fleet in the box below), **Open** (that company's
    mail, when it came to you) and **Not needed** (hides that line from this brief). When nothing needs the team it
    says so in one line. It is told once, within your work hours, once everyone answered or two hours passed.
    Teammates who haven't answered are listed. It is put together by plain code, never a model.
-   What each Machine shares for it is aggregate only: company names and domains, counts, last-touch dates, and hashes
-   of emails and meetings keyed with the Fleet's secret (the same as claims). No subjects, message text, people,
-   addresses or calendar titles. Brief facts have their own rule (Ask me first by default, Always,
-   Never); the approval card says how much an answer would share.
+   What each Machine shares for it is aggregate only: company names and domains, counts, last-touch dates, hashes
+   of emails and meetings keyed with the Fleet's secret (the same as claims), which Fleet members an email went to (as
+   hashes of their addresses with that secret), the name of a shared address it went to ("sales") and whether the
+   company is a customer. No subjects, message text, outside people, addresses or calendar titles. Brief facts have
+   their own rule (Ask me first by default, Always, Never); the approval card says how much an answer would share.
 8. **Ask the Fleet anything.** Type a question in a Work Fleet's section ("has anyone dealt with Stripe disputes?").
    Each teammate's Machine searches only its owner's own work accounts in that Fleet, on that Machine, and shows its
    owner your question, quoted as your words, with what it found and a draft answer built by plain code ("Yes, I have:

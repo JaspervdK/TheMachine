@@ -14,6 +14,8 @@ with a long poll. A Work Fleet asks three things:
 - brief: "what the Fleet saw", daily or weekly. Each teammate's Machine answers with aggregate facts only (companies
   with counts and last-touch dates, which went quiet, hashes of unanswered and answered inbound emails, hashes of
   meetings with outside people); the asking Machine assembles the brief by plain code (brief_facts, assemble_brief).
+  Only what involves the team: mail the review said needs a reply that went to two of you, to a shared address, or
+  comes from a company a teammate knows or a customer. Mail only you got from someone only you know stays in Suggestions.
 - anything: a free-text question ("has anyone dealt with Stripe disputes?"). Untrusted text: it is only searched for in
   the owner's own work accounts and shown to them quoted, with a draft answer built by plain code; nothing goes back
   until the owner sends that answer (edited or not). There is no Always for it.
@@ -687,15 +689,32 @@ def _engaged(row):
     return bool((info.get('wrote') or 0) >= 1 or (info.get('met') or 0) >= 1 or info.get('next_meeting'))
 
 
-def brief_facts(db, accounts, since, secret, internal, today=None):
+def _org_known(db, domain):
+    """'customer' when the owner's graph says the company pays the team (billed through Stripe), else ''. A role the
+    owner gave a company isn't enough: it can be anything, also a personal one."""
+    row = db.execute("SELECT info FROM graph_nodes WHERE id=?", ('org:' + domain,)).fetchone()
+    try:
+        info = json.loads(row['info'] or '{}') if row else {}
+    except ValueError:
+        return ''
+    return 'customer' if info.get('paying') else ''
+
+
+def _tokens(address):
+    return {t for t in re.split(r'[._+-]', address.split('@', 1)[0]) if len(t) > 1}
+
+
+def brief_facts(db, accounts, since, secret, internal, today=None, team=(), mine=()):
     """What this Machine adds to a teammate's brief: aggregate facts from the given (work) accounts only. Company
     names and domains, counts and dates, and hashes keyed by the Fleet's secret (an email's like a claim's, a meeting's
     of its calendar id), never a message, a subject, a person, an address or a calendar title.
     - touched: companies in contact since `since`, with how many signals and the last day;
     - quiet: companies of people the graph says went quiet (silent much longer than usual), with the last day;
-    - unanswered: inbound emails of the last UNANSWERED_DAYS from people the owner works with (or that the review made a
-      card of), with no reply in their thread yet; replied: those answered. Companies touched count only such people too,
-      so receipts, newsletters and one-off vendor mail never reach the brief;
+    - unanswered: inbound emails of the last UNANSWERED_DAYS that the review judged need something (an open card on
+      them), with no reply in their thread yet. Each says which Fleet members it was sent to (hashes of their addresses,
+      `team`), which shared addresses of the team it went to ("sales" for sales@) and whether the company is a
+      customer; replied: inbound from people the owner works with that was answered.
+      Companies touched count only such people too, so receipts, newsletters and one-off vendor mail never reach it;
     - meetings: meetings with outside people from `since` to a week ahead."""
     today = today or dt.datetime.now(dt.timezone.utc).date()
     out = {'touched': [], 'quiet': [], 'unanswered': [], 'replied': [], 'meetings': []}
@@ -710,8 +729,25 @@ def brief_facts(db, accounts, since, secret, internal, today=None):
             nodes[node_id] = sorted({e.rsplit('@', 1)[1] for e in _emails(row) if not graph.bulk(e)} if row and _engaged(row) else set())
         return [d for d in nodes[node_id] if _outside(d, internal)]
     known = {}
-    carded = {i for (ids,) in db.execute("SELECT event_ids FROM suggestions WHERE created_at>=?", ((today - dt.timedelta(days=UNANSWERED_DAYS + 7)).isoformat(),))
-              for i in _event_ids(ids)} if _has_table(db, 'suggestions') else set()
+    cards = db.execute("SELECT event_ids,status FROM suggestions WHERE created_at>=?", ((today - dt.timedelta(days=UNANSWERED_DAYS + 7)).isoformat(),)).fetchall() \
+        if _has_table(db, 'suggestions') else []
+    carded = {i for ids, _ in cards for i in _event_ids(ids)}
+    waiting = {i for ids, status in cards if status in graph.OPEN_CARD for i in _event_ids(ids)}  # the review's own "needs something"
+    team, mine = {str(e).lower() for e in team if '@' in str(e)}, {str(e).lower() for e in mine if '@' in str(e)}
+    members = team | mine
+    me = set().union(*(_tokens(e) for e in mine)) if mine else set()
+    personal = {}
+
+    def shared(address):
+        """A shared address of the team (sales@, info@, a group): at the team's own domain, no Fleet member's, not one
+        of the owner's own aliases (named like their own address), and not a person the owner works with in the graph."""
+        domain = address.rsplit('@', 1)[1]
+        if address in members or not any(domain == d or domain.endswith('.' + d) for d in internal) or (_tokens(address) & me):
+            return False
+        if address not in personal:
+            row = db.execute("SELECT * FROM graph_nodes WHERE kind='person' AND instr(info,?)>0 LIMIT 1", (json.dumps('email:' + address),)).fetchone()
+            personal[address] = bool(row and _engaged(row))
+        return not personal[address]
 
     def real(address, event_id):
         """Someone the owner works with (see _engaged), or an email the review turned into a card: a new lead counts,
@@ -738,7 +774,8 @@ def brief_facts(db, accounts, since, secret, internal, today=None):
         for domain in domains(row['id'])[:1]:
             if last and domain not in touched:
                 quiet[domain] = max(quiet.get(domain, ''), str(last)[:10])
-    out['quiet'] = [{'org': _org_name(db, d), 'domain': d, 'last': day(last)} for d, last in list(quiet.items())[:20]]
+    out['quiet'] = [{'org': _org_name(db, d), 'domain': d, 'last': day(last), **({'known': k} if (k := _org_known(db, d)) else {})}
+                    for d, last in list(quiet.items())[:20]]
     start = (today - dt.timedelta(days=UNANSWERED_DAYS)).isoformat()
     later = ("SELECT 1 FROM events r WHERE r.account_id=e.account_id AND r.kind='gmail.message' AND r.deleted=0 AND r.occurred_at>e.occurred_at "
              "AND instr(r.metadata,'\"SENT\"')>0 AND json_extract(r.metadata,'$.thread_id')=json_extract(e.metadata,'$.thread_id')")
@@ -757,9 +794,14 @@ def brief_facts(db, accounts, since, secret, internal, today=None):
         if row['answered']:
             if len(out['replied']) < 60:
                 out['replied'].append(key)
-        elif len(out['unanswered']) < 25:
+        elif str(row['id']) in waiting and len(out['unanswered']) < 25:
             domain = sender.rsplit('@', 1)[1]
-            out['unanswered'].append({'org': _org_name(db, domain), 'domain': domain, 'key': key, 'at': day(row['occurred_at'])})
+            sent_to = {a for _, a in graph.addresses(m.get('to')) + graph.addresses(m.get('cc'))}
+            item = {'org': _org_name(db, domain), 'domain': domain, 'key': key, 'at': day(row['occurred_at'])}
+            to = sorted({_hash(secret, 'member', a) for a in sent_to & team})  # the teammates it went to too
+            groups = sorted({a.split('@', 1)[0].split('+', 1)[0] for a in sent_to if shared(a)})[:3]
+            org = _org_known(db, domain)
+            out['unanswered'].append({**item, **({'team': to} if to else {}), **({'shared': groups} if groups else {}), **({'known': org} if org else {})})
     ahead = (today + dt.timedelta(days=7)).isoformat()
     for row in db.execute(f"SELECT source_id,metadata FROM events WHERE kind='calendar.event' AND deleted=0 AND account_id IN ({marks}) "
                           "AND occurred_at>=? AND occurred_at<=? ORDER BY occurred_at", (*accounts, since, ahead + 'T23:59:59')):
@@ -893,14 +935,32 @@ def _brief_items(items, fields, limit):
     return out
 
 
+SHARED = re.compile(r'[a-z0-9][a-z0-9._-]{0,39}')
+KNOWN = ('customer',)
+
+
+def _brief_extras(raw, kept):
+    """The optional team fields of brief items, by shape: `team` (hashes of Fleet members' addresses), `shared` (local
+    parts of the team's shared addresses) and `known`. Matched to the kept items by their key or domain."""
+    raw = [r for r in (raw if isinstance(raw, list) else []) if isinstance(r, dict)]
+    out = []
+    for item in kept:
+        found = next((r for r in raw if r.get('key', r.get('domain')) == item.get('key', item.get('domain'))), {})
+        team = [h for h in (found.get('team') if isinstance(found.get('team'), list) else [])[:10] if isinstance(h, str) and HASH.fullmatch(h)]
+        shared = [x for x in (found.get('shared') if isinstance(found.get('shared'), list) else [])[:3] if isinstance(x, str) and SHARED.fullmatch(x)]
+        known = found.get('known') if found.get('known') in KNOWN else None
+        out.append({**item, **({'team': team} if team else {}), **({'shared': shared} if shared else {}), **({'known': known} if known else {})})
+    return out
+
+
 def clean_brief(answer):
     """A teammate's brief facts, kept to the fields brief_facts sends: anything else (text, names, addresses) is dropped."""
     if not isinstance(answer, dict):
         return None
     replied = answer.get('replied') if isinstance(answer.get('replied'), list) else []
     return {'touched': _brief_items(answer.get('touched'), ('org', 'domain', 'count', 'last'), 40),
-            'quiet': _brief_items(answer.get('quiet'), ('org', 'domain', 'last'), 20),
-            'unanswered': _brief_items(answer.get('unanswered'), ('org', 'domain', 'key', 'at'), 25),
+            'quiet': _brief_extras(answer.get('quiet'), _brief_items(answer.get('quiet'), ('org', 'domain', 'last'), 20)),
+            'unanswered': _brief_extras(answer.get('unanswered'), _brief_items(answer.get('unanswered'), ('org', 'domain', 'key', 'at'), 25)),
             'replied': [k for k in replied[:60] if isinstance(k, str) and HASH.fullmatch(k)],
             'meetings': _brief_items(answer.get('meetings'), ('org', 'domain', 'day', 'key'), 30)}
 
@@ -1144,15 +1204,21 @@ def answer_text(kind, answer):
     return '; '.join(lines) if lines else 'doesn’t know them'
 
 
-def assemble_brief(own, answers, claimed=()):
+def assemble_brief(own, answers, claimed=(), members=None):
     """"What the Fleet saw", by plain code from cleaned facts: this Machine's own (as "You") and each teammate's that
-    answered [(name, facts)]. Nothing here reaches a model.
-    - quiet: companies someone says went quiet that nobody was in touch with in the period;
+    answered [(name, facts)]. Only what involves the team; nothing here reaches a model. `members` names the hashes of
+    Fleet members' addresses ("You" for the owner's own).
+    - quiet: companies that went quiet, that nobody was in touch with in the period, and that two or more of you knew
+      or that are a customer;
     - several: companies two or more of you were in touch with;
-    - unanswered: inbound emails nobody answered: not answered by anyone who got them, and not claimed in the Fleet;
+    - unanswered: inbound emails the review said need something that nobody answered or claimed, and only when they
+      involve the team: sent to two or more of you, to a shared address of the team, from a company another of you
+      is in touch with, or from a customer. Mail only you got from someone only you
+      know is for Suggestions, not here;
     - meetings: the same meeting on several calendars, or several of you meeting one company."""
     everyone = [('You', own)] + list(answers)
-    orgs, touched = {}, {}
+    members = members or {}
+    orgs, touched, talks = {}, {}, {}
 
     def named(domain, org):  # a real company name wins over a bare domain, whoever has it
         if orgs.get(domain, domain) == domain:
@@ -1163,27 +1229,46 @@ def assemble_brief(own, answers, claimed=()):
             entry = touched.setdefault(t['domain'], {'who': {}, 'last': ''})
             entry['who'][name] = entry['who'].get(name, 0) + t['count']
             entry['last'] = max(entry['last'], t['last'])
+            talks.setdefault(t['domain'], set()).add(name)
+        for m in facts['meetings']:
+            talks.setdefault(m['domain'], set()).add(name)
     quiet = {}
     for name, facts in everyone:
         for q in facts['quiet']:
             if q['domain'] in touched:
                 continue
             named(q['domain'], q['org'])
-            entry = quiet.setdefault(q['domain'], {'who': [], 'last': ''})
-            entry['who'].append(name)
+            entry = quiet.setdefault(q['domain'], {'who': [], 'last': '', 'known': ''})
+            if name not in entry['who']:
+                entry['who'].append(name)
             entry['last'] = max(entry['last'], q['last'])
+            entry['known'] = entry['known'] or q.get('known') or ''
     replied = {k for _, facts in everyone for k in facts['replied']} | set(claimed)
-    open_ = {}
+    emails = {}
     for name, facts in everyone:
         for u in facts['unanswered']:
             if u['key'] in replied:
                 continue
             named(u['domain'], u['org'])
-            entry = open_.setdefault(u['domain'], {'keys': set(), 'who': [], 'since': u['at']})
-            entry['keys'].add(u['key'])
-            entry['since'] = min(entry['since'], u['at'])
-            if name not in entry['who']:
-                entry['who'].append(name)
+            entry = emails.setdefault(u['key'], {'domain': u['domain'], 'at': u['at'], 'who': [], 'shared': set(), 'known': ''})
+            for who in [name] + [members[h] for h in u.get('team') or () if h in members]:
+                if who not in entry['who']:
+                    entry['who'].append(who)
+            entry['shared'] |= set(u.get('shared') or ())
+            entry['known'] = entry['known'] or u.get('known') or ''
+            entry['at'] = min(entry['at'], u['at'])
+    open_ = {}
+    for key, e in emails.items():
+        also = talks.get(e['domain'], set()) - set(e['who'])
+        if len(e['who']) < 2 and not e['shared'] and not also and not e['known']:
+            continue  # only you got it, from someone only you know: that's for Suggestions
+        entry = open_.setdefault(e['domain'], {'keys': set(), 'who': [], 'since': e['at'], 'shared': set(), 'also': set(), 'known': ''})
+        entry['keys'].add(key)
+        entry['since'] = min(entry['since'], e['at'])
+        entry['who'] += [w for w in e['who'] if w not in entry['who']]
+        entry['shared'] |= e['shared']
+        entry['also'] |= also
+        entry['known'] = entry['known'] or e['known']
     by_key, by_domain = {}, {}
     for name, facts in everyone:
         for m in facts['meetings']:
@@ -1197,12 +1282,15 @@ def assemble_brief(own, answers, claimed=()):
     covered = {m['domain'] for m in meetings}
     meetings += [{'org': orgs[d], 'domain': d, 'day': min(min(days) for days in who.values()), 'who': sorted(who), 'same': False}
                  for d, who in by_domain.items() if len(who) > 1 and d not in covered]
-    return {'quiet': [{'org': orgs[d], 'domain': d, 'last': e['last'], 'who': e['who']}
-                      for d, e in sorted(quiet.items(), key=lambda kv: kv[1]['last'])][:10],
+    return {'quiet': [{'org': orgs[d], 'domain': d, 'last': e['last'], 'who': e['who'], **({'known': e['known']} if e['known'] else {})}
+                      for d, e in sorted(quiet.items(), key=lambda kv: kv[1]['last']) if len(e['who']) > 1 or e['known']][:10],
             'several': [{'org': orgs[d], 'domain': d, 'last': e['last'], 'who': [{'name': n, 'count': c} for n, c in e['who'].items()]}
                         for d, e in sorted(touched.items(), key=lambda kv: (-len(kv[1]['who']), -sum(kv[1]['who'].values())))
                         if len(e['who']) > 1][:10],
-            'unanswered': [{'org': orgs[d], 'domain': d, 'count': len(e['keys']), 'since': e['since'], 'who': e['who']}
+            'unanswered': [{'org': orgs[d], 'domain': d, 'count': len(e['keys']), 'since': e['since'], 'who': e['who'],
+                            **({'shared': sorted(e['shared'])} if e['shared'] else {}),
+                            **({'also': sorted(e['also'] - set(e['who']))} if e['also'] - set(e['who']) else {}),
+                            **({'known': e['known']} if e['known'] else {})}
                            for d, e in sorted(open_.items(), key=lambda kv: kv[1]['since'])][:10],
             'meetings': sorted(meetings, key=lambda m: m['day'])[:10],
             'from': [name for name, _ in answers]}
@@ -1251,7 +1339,7 @@ def _plain_name(label):
 def _first_names(view):
     """Teammates by first name when that's unambiguous in this brief ("Priya" for Priya Okonedo), never an address."""
     everyone = {w if isinstance(w, str) else w.get('name') for k in ('unanswered', 'several', 'meetings', 'quiet') for x in view.get(k) or []
-                for w in x.get('who') or []} | set(view.get('from') or []) | set(view.get('missing') or [])
+                for w in (x.get('who') or []) + (x.get('also') or [])} | set(view.get('from') or []) | set(view.get('missing') or [])
     everyone = {str(n) for n in everyone if n and n != 'You'}
     first = collections.Counter(_plain_name(n).split()[0] for n in everyone)
     return {n: _plain_name(n).split()[0] if first[_plain_name(n).split()[0]] == 1 else _plain_name(n) for n in everyone}
@@ -1281,6 +1369,25 @@ def gmail_search(domain):
     return 'https://mail.google.com/mail/#search/' + urllib.parse.quote(f"from:{domain} in:inbox")
 
 
+KNOWN_WHY = {'customer': 'a customer'}
+
+
+def _team_why(x, people):
+    """Why a waiting email is the team's: who got it, a shared address, a teammate in touch, a customer. '' when none."""
+    who, also = x.get('who') or [], x.get('also') or []
+    why = []
+    if len(who) > 1 or (who and 'You' not in who):
+        why.append(f"sent to {people(who)}")
+    if x.get('shared'):
+        why.append('to ' + ', '.join(f"{s}@" for s in x['shared']))
+    if also:
+        why.append(f"{people(also)} also {'talks' if len(also) == 1 and also[0] != 'You' else 'talk'} to them")
+    if x.get('known') in KNOWN_WHY:
+        why.append(KNOWN_WHY[x['known']])
+    team = len(who) > 1 or x.get('shared') or also or x.get('known') in KNOWN_WHY
+    return ', '.join(why) if team else ''
+
+
 def brief_items(view, today=None, hidden=(), opener=None):
     """The brief as a few ranked lines worth reading: who is waiting on the team and for how long, where several of you
     are on the same company or meeting, and companies that went quiet that a teammate knows. Each item has a stable key
@@ -1293,16 +1400,19 @@ def brief_items(view, today=None, hidden=(), opener=None):
     items = []
     for x in view.get('unanswered') or []:
         days, waited = _waited(x.get('since'), today)
-        team = [w for w in x.get('who') or [] if w != 'You']
+        who, also = x.get('who') or [], x.get('also') or []
+        team = [w for w in who if w != 'You']
         if days < 1 or (not team and days < 2):  # today's mail isn't waiting yet; your own needs a couple of days
             continue
-        several = len(x.get('who') or []) > 1
+        several = len(who) > 1
+        why = _team_why(x, people)
+        if not why:  # only you got it, from someone only you know (a brief from before 2026-10-21): that's for Suggestions
+            continue
         count = x.get('count') or 1
         items.append({'key': 'unanswered:' + x['domain'], 'kind': 'waiting', 'score': 100 + min(days, 14) * 5 + (20 if several else 0),
                       'title': f"{company(x)} is waiting for a reply" + (f" ({count} emails)" if count > 1 else ''),
-                      'why': f"{waited}, sent to {people(x['who'])}" + (', and nobody answered or took it' if several else ''),
-                      'ask': f"Who is answering {company(x)}?" if several or team else '',
-                      'open': opener(x['domain']) if 'You' in (x.get('who') or []) else ''})
+                      'why': f"{waited}, {why}", 'ask': f"Who is answering {company(x)}?",
+                      'open': opener(x['domain']) if 'You' in who else ''})
     for x in view.get('meetings') or []:
         d = _brief_date(x.get('day'))
         soon = d is not None and 0 <= (d - today).days <= 3
@@ -1316,11 +1426,15 @@ def brief_items(view, today=None, hidden=(), opener=None):
                       'title': f"{_cap(people(who))} are all in touch with {company(x)}" if len(who) > 2 else f"{_cap(people(who))} are both in touch with {company(x)}",
                       'why': f"last contact {_on_day(x.get('last'), today)}, so keep it to one thread", 'ask': f"Who leads with {company(x)}?"})
     for x in view.get('quiet') or []:
-        team = [w for w in x.get('who') or [] if w != 'You']
-        items.append({'key': 'quiet:' + x['domain'], 'kind': 'quiet', 'score': 40 + (10 if team else 0),
+        who = x.get('who') or []
+        if len(who) < 2 and not x.get('known'):  # one of you, a company the team doesn't know (a brief from before 2026-10-21)
+            continue
+        why = [f"known to {people(who)}"] if len(who) > 1 else []
+        why += [KNOWN_WHY[x['known']]] if x.get('known') in KNOWN_WHY else []
+        items.append({'key': 'quiet:' + x['domain'], 'kind': 'quiet', 'score': 40 + (10 if len(who) > 1 else 0),
                       'title': f"{company(x)} went quiet",
-                      'why': f"last contact {_on_day(x.get('last'), today)}" + (f", and {people(team)} knew them" if team else ''),
-                      'ask': f"Anyone in touch with {company(x)} lately?" if team else ''})
+                      'why': f"last contact {_on_day(x.get('last'), today)}, " + ', '.join(why),
+                      'ask': f"Anyone in touch with {company(x)} lately?"})
     hidden = set(hidden)
     items = [i for i in items if i['key'] not in hidden]
     items.sort(key=lambda i: -i['score'])
@@ -1553,7 +1667,9 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         accounts, keep = scope_accounts(self.config, scope), scope and scope_keep(scope, only)
         if kind == 'brief':
             secret = (self.fleets().get(self.ref(fleet or 'work')) or {}).get('secret') or ''
-            return brief_facts(db, self.fleet_accounts(fleet or 'work'), question['since'], secret, self.internal(fleet or 'work'))
+            team = [e for m in self.teammates(fleet or 'work') for e in m.get('emails', [])]
+            return brief_facts(db, self.fleet_accounts(fleet or 'work'), question['since'], secret, self.internal(fleet or 'work'),
+                               team=team, mine=self.my_emails())
         if kind == 'availability':  # a friend's free/busy question: busy blocks only (friends.py)
             return friends.free_busy(db, self.config, question)
         if kind == 'relationships':
@@ -2054,7 +2170,10 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
                 claimed = set((self.relay.call('POST', '/claims', {'fleet': fleet, 'keys': keys[:200]}) or {}).get('claims', {}))
             except (ValueError, OSError) as error:
                 LOG.warning('fleet brief claims error=%s', type(error).__name__)
-        view = assemble_brief(own, answers, claimed)
+        secret = (self.fleets().get(self.ref(fleet)) or {}).get('secret') or ''
+        members = {_hash(secret, 'member', str(e).lower()): clean(label(m), 120) or 'A teammate' for m in self.teammates(fleet) for e in m.get('emails', [])}
+        members.update({_hash(secret, 'member', e): 'You' for e in self.my_emails()})
+        view = assemble_brief(own, answers, claimed, members)
         view.update(period=period, every=every, since=since, fleet=fleet, fleet_name=clean((self.fleets().get(fleet) or {}).get('name'), 80),
                     asked=len(rows), missing=[r['name'] for r in rows if r['status'] in ('asked', 'waiting')],
                     declined=[r['name'] for r in rows if r['status'] in ('declined', 'expired')])
