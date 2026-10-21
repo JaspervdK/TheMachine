@@ -209,6 +209,15 @@ def account_emails(config):
                    if a.get('id') in work and '@' in str(a.get('email') or '')})
 
 
+def dashboard_address(config):
+    """The dashboard's own https address (dashboard_host and dashboard_path), told to the Network so its owner's Account
+    page can link to it; None when it has none (only reachable on this computer)."""
+    host = str(config.get('dashboard_host') or '').strip().lower()
+    if not host:
+        return None
+    return f"https://{host}/{str(config.get('dashboard_path') or '/').strip('/')}".rstrip('/') + '/'
+
+
 def pair(code, label, emails, timeout=30):
     """A self-hosted Machine trades the pairing code from its owner's account for its own Network token: {token, label}.
     NETWORK first, its old address RELAY when that cannot be reached."""
@@ -1530,11 +1539,13 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         import time
         stamp = (clock or time.monotonic)()
         if refresh or not self.meta('directory') or stamp - self.last['directory'] > DIRECTORY_EVERY:
-            emails = account_emails(self.config)
-            if self.meta('me_sent') != emails:  # a self-hosted Machine's addresses, for its teammates' "who knows"
+            # A self-hosted Machine's addresses, for its teammates' "who knows", and its dashboard's address, for the
+            # Open your dashboard button on its owner's Account page
+            me = {'emails': account_emails(self.config), 'dashboard': dashboard_address(self.config)}
+            if self.meta('me_sent') != me:
                 try:
-                    self.relay.call('POST', '/me', {'emails': emails}, timeout=30)
-                    self.set_meta('me_sent', emails)
+                    self.relay.call('POST', '/me', me, timeout=30)
+                    self.set_meta('me_sent', me)
                 except ValueError:
                     pass
             try:

@@ -25,6 +25,9 @@ how messages stay reliable, and where it's going.
   intersection), so the Network never sees your address book. Being findable covers your account email and the
   addresses of the mail accounts your Machine connected, each of which you can turn off; the Network keeps those only
   blinded and learns which addresses matched people who chose to be found.
+- **Your own addresses.** A self-hosted Machine tells the Network the mail addresses of its work accounts (so teammates'
+  Machines know who knows whom) and its dashboard's https address when you set `dashboard_host`, so your Account page
+  can link to your dashboard. Without `dashboard_host` it sends no dashboard address.
 - **Moving your Machine.** `assistant export --keys` carries `network-keys.json` (encrypted with your passphrase) and
   `assistant import` puts it back, so your teammates and friends see the same Machine. An export without keys leaves
   them out: the import makes a new Network identity, and your teammates and friends see a key-change notice once.
