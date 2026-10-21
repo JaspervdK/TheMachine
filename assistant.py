@@ -76,6 +76,8 @@ BRAND_ASSETS = {
     '/brand/app-icon-badge-96.png': ROOT / 'brand/app-icon-badge-96.png',  # monochrome status-bar icon for pushes
     # Heading typeface (Source Serif 4, SIL OFL; licence in brand/fonts/OFL.txt).
     '/brand/serif.woff2': ROOT / 'brand/fonts/source-serif-4-latin.woff2',
+    # Interface typeface (Inter, SIL OFL; licence in brand/fonts/Inter-OFL.txt).
+    '/brand/sans.woff2': ROOT / 'brand/fonts/inter-latin.woff2',
 }
 ANDROID_APP_NAMES = {
     'android': 'Android System', 'com.google.android.gm': 'Gmail',

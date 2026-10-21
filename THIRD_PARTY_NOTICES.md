@@ -44,3 +44,7 @@ Installed from their own package sources only when you use the feature that need
 ## Source Serif 4
 
 The dashboard's headings use Source Serif 4 by Adobe, bundled unmodified as `brand/fonts/source-serif-4-latin.woff2` (the Latin subset Google Fonts serves). It is licensed under the SIL Open Font License 1.1; the full licence is in [brand/fonts/OFL.txt](brand/fonts/OFL.txt).
+
+## Inter
+
+The dashboard's interface text uses Inter by The Inter Project Authors, bundled unmodified as `brand/fonts/inter-latin.woff2` (the Latin subset Google Fonts serves). It is licensed under the SIL Open Font License 1.1; the full licence is in [brand/fonts/Inter-OFL.txt](brand/fonts/Inter-OFL.txt).

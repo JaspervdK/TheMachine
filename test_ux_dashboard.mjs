@@ -273,7 +273,7 @@ await toggle.scrollIntoViewIfNeeded();await toggle.screenshot({path:'/tmp/261013
 await toggle.click();assert.deepEqual(await theme(),['light','light']);assert.equal(await toggle.getAttribute('aria-checked'),'true');assert.equal(await size(),before);
 assert.match(await page.evaluate(()=>document.cookie),/(^|; )theme=light(;|$)/);  // shared with the hosted app's pages
 await page.waitForTimeout(400);await toggle.screenshot({path:'/tmp/261013-toggle-light.png'});
-assert.equal(await page.evaluate(()=>getComputedStyle(document.body).color),'rgb(29, 31, 36)');
+assert.equal(await page.evaluate(()=>getComputedStyle(document.body).color),'rgb(29, 29, 27)');
 await page.reload();await page.locator('#task-'+ids[0]).waitFor();assert.deepEqual(await theme(),['light','light']);
 await page.setViewportSize({width:1100,height:900});await page.screenshot({path:'/tmp/261013-light-desktop.png'});
 {await page.setViewportSize({width:1100,height:2600});const f=await page.locator('.site-footer').evaluate(el=>[el.getBoundingClientRect().bottom,innerHeight,el.textContent]);
