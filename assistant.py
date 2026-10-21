@@ -1793,6 +1793,8 @@ class Store:
                 id TEXT PRIMARY KEY,suggestion_id TEXT NOT NULL,old_revision TEXT NOT NULL,new_revision TEXT NOT NULL,
                 kind TEXT NOT NULL,before_subject TEXT,before_body TEXT NOT NULL,after_subject TEXT,after_body TEXT NOT NULL,
                 source TEXT NOT NULL,created_at TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS suggestion_keys(
+                dedupe_key TEXT PRIMARY KEY,suggestion_id TEXT NOT NULL,created_at TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS tool_approval_proposals(
                 id TEXT PRIMARY KEY,title TEXT NOT NULL,detail TEXT NOT NULL,created_at TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS profile_runs(
@@ -2756,11 +2758,15 @@ class Store:
                        (now(), summary[:4000], encoded(items), analysis_id))
         return {'status': 'complete'}
 
-    def suggest(self, dedupe_key, title, body, event_ids, when='now', digest_at='08:30', work=False, urgent=False, due=None, ahead=False, awaiting=None, project=None, _db=None):
+    def suggest(self, dedupe_key, title, body, event_ids, when='now', digest_at='08:30', work=False, urgent=False, due=None, ahead=False, awaiting=None, project=None,
+                card_id=None, separate=False, reopen=False, match=False, _db=None):
+        """A new card, or with match (the review) the existing card about the same matter brought up to date:
+        card_id names the card the reviewer judged to be the same matter, separate says it is a different one."""
         if _db is None:
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
-                return self.suggest(dedupe_key, title, body, event_ids, when, digest_at, work, urgent, due, ahead, awaiting, project, _db=db)
+                return self.suggest(dedupe_key, title, body, event_ids, when, digest_at, work, urgent, due, ahead, awaiting, project,
+                                    card_id, separate, reopen, match, _db=db)
         if not dedupe_key or not title or not body or not event_ids:
             raise ValueError('Evidence, title, body and stable dedupe_key are required')
         if due is not None:
@@ -2771,9 +2777,10 @@ class Store:
         if len(title) > 90 or len(body) > 700:
             raise ValueError('Keep it simple: title under 90 characters; body under 700 characters, about three short sentences. Keep event IDs and internal details out of the message.')
         with contextlib.nullcontext(_db) as db:
-            existing = db.execute('SELECT id,status FROM suggestions WHERE dedupe_key=?', (dedupe_key,)).fetchone()
-            if existing:
-                return {**dict(existing), 'duplicate': True}
+            existing = db.execute('SELECT * FROM suggestions WHERE dedupe_key=? OR id=(SELECT suggestion_id FROM suggestion_keys WHERE dedupe_key=?)',
+                                  (dedupe_key, dedupe_key)).fetchone()
+            if existing and (not match or set(event_ids) <= set(json.loads(existing['event_ids'] or '[]'))):
+                return {'id': existing['id'], 'status': existing['status'], 'duplicate': True}
             rows = db.execute('SELECT id,account_id,kind,occurred_at,metadata FROM events WHERE deleted=0 AND id IN (' + ','.join('?' for _ in event_ids) + ')', event_ids).fetchall()
             if {r['id'] for r in rows} != set(event_ids):
                 raise ValueError('Every evidence event must exist and be live')
@@ -2785,6 +2792,25 @@ class Store:
                     raise ValueError('awaiting_event_id must be one of event_ids: the email, Slack, WhatsApp or LinkedIn message where someone else made the promise')
                 if when in ('now', 'digest') and not due:
                     raise ValueError('A follow-up on someone else\'s promise needs due (their deadline) or when, so the card waits until then')
+            target = None
+            if card_id is not None and match:
+                target = db.execute('SELECT * FROM suggestions WHERE id=?', (card_id,)).fetchone()
+                if not target:
+                    raise ValueError('card_id must be an existing card')
+            elif existing:
+                target = existing  # the same key with new evidence: that card again
+            elif match and not separate and awaiting is None:
+                target = same_thread_card(db, rows)
+                if not target:
+                    alike = same_matter_cards(db, event_ids, project)
+                    if alike:
+                        raise ValueError('Not saved yet. These open cards share people or the project with this signal: '
+                                         + '; '.join(f"{c['id']} \"{c['title']}\" ({c['status']})" for c in alike)
+                                         + '. If it is the same matter (the same ask, commitment or conversation, in other words), call suggest again with '
+                                           'card_id set to that card: it gets the new evidence, title and body and comes back if it was waiting. '
+                                           'If it is a different matter, call suggest again with separate:true.')
+            if target:
+                return self.update_card(db, target, dedupe_key, title, body, rows, event_ids, when, digest_at, work, urgent, due, ahead, project, reopen)
             if due:
                 # A deadline within three days goes out now; one that the
                 # weekend hold would reach too late counts as urgent.
@@ -2826,6 +2852,61 @@ class Store:
         return {'id': suggestion_id, 'status': 'accepted' if ahead else 'pending', 'duplicate': False, 'deliver_after': deliver_after,
                 **({'prepared_ahead': True} if ahead else {}), **({'preview': True} if preview else {}),
                 **({'awaiting': 'The card waits; if they follow up first it closes itself.'} if watch else {})}
+
+    def update_card(self, db, card, dedupe_key, title, body, rows, event_ids, when, digest_at, work, urgent, due, ahead, project, reopen):
+        """A new signal about a matter that already has a card. An open card gets the new evidence, title and body,
+        and one that was snoozed or waiting for a reply comes back. A done or dismissed card only reopens when the
+        reviewer says the matter needs the owner again (reopen); otherwise the signal is kept on it as evidence."""
+        stamp, sid = now(), card['id']
+        old_ids = json.loads(card['event_ids'] or '[]')
+        ids = [*event_ids, *[i for i in old_ids if i not in event_ids]]  # the newest evidence leads the source line
+        evidence = {r['id']: dict(r) for r in db.execute('SELECT id,account_id,kind,occurred_at,metadata FROM events WHERE id IN (' + ','.join('?' * len(ids)) + ')', ids)}
+        accounts = sorted(set(json.loads(card['account_ids'] or '[]')) | {r['account_id'] for r in rows})
+        db.execute('INSERT OR IGNORE INTO suggestion_keys(dedupe_key,suggestion_id,created_at) VALUES(?,?,?)', (dedupe_key[:240], sid, stamp))
+        added = [i for i in event_ids if i not in old_ids]
+        closed = card['status'] in ('completed', 'rejected')
+        if closed and not reopen:
+            db.execute('UPDATE suggestions SET event_ids=?,account_ids=? WHERE id=?', (encoded(ids), encoded(accounts), sid))
+            if added:
+                db.execute('INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)',
+                           ('update:' + uuid.uuid4().hex, sid, 'update', f'A later message was added: {title[:150]}', 'assistant', stamp))
+            return {'id': sid, 'status': card['status'], 'duplicate': False, 'attached': True,
+                    'note': 'Kept on the closed card as evidence; nothing was sent to the owner. If this genuinely needs the owner again, '
+                            'call suggest again with card_id and reopen:true.'}
+        if due and (dt.date.fromisoformat(due) - dt.datetime.fromisoformat(stamp).astimezone(local_tz()).date()).days <= 3:
+            when = 'now'
+        deliver_after = delivery_time(when, digest_at, work=work, urgent=urgent)
+        if active_preview(db):
+            ahead, deliver_after = False, None
+        waiting = card['status'] == 'snoozed'
+        # New work on the matter: back to Outstanding as a fresh suggestion, or prepared ahead again.
+        status = 'accepted' if ahead else 'pending' if waiting or closed or card['status'] in ('pending', 'prepared') else card['status']
+        db.execute('UPDATE suggestions SET title=?,body=?,event_ids=?,account_ids=?,source_line=?,deliver_after=?,urgent=?,due=coalesce(?,due),status=?,'
+                   'early=?,outcome=CASE WHEN status=? THEN outcome ELSE NULL END,snoozed_until=NULL,resume_status=NULL,awaiting=NULL,handled_hint=NULL,undo_until=NULL,completed_from=NULL,'
+                   'feedback_until=NULL WHERE id=?',
+                   (title[:300], body[:5000], encoded(ids), encoded(accounts), source_line([evidence[i] for i in ids if i in evidence]),
+                    deliver_after, int(urgent or bool(card['urgent'])), due, status, int(bool(ahead)), status, sid))
+        was = f"Updated with a new signal{' and brought back' if waiting else ' and reopened' if closed else ''}. Before: {card['title'][:150]}"
+        db.execute('INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)',
+                   ('update:' + uuid.uuid4().hex, sid, 'update', was, 'assistant', stamp))
+        db.execute("UPDATE action_jobs SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status IN ('queued','blocked')", (stamp, sid))
+        if project:
+            graph.label(db, event_ids, project, 'card', stamp)
+        if ahead:
+            decision_id = 'ahead:' + uuid.uuid4().hex
+            db.execute('INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)',
+                       (decision_id, sid, 'prepare_ahead', '', 'assistant', stamp))
+            db.execute("UPDATE preparations SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status='done'", (stamp, sid))
+            self.queue_preparation(db, sid, decision_id)
+        elif status == 'pending':
+            db.execute("UPDATE preparations SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status IN ('queued','starting','running','blocked')", (stamp, sid))
+        # One notification for the update, on the new suggestion's timing; the old message is edited to match.
+        db.execute("INSERT INTO deliveries(suggestion_id,status,updated_at) VALUES(?,'queued',?) ON CONFLICT(suggestion_id) DO UPDATE SET "
+                   "status=CASE WHEN status IN ('sending') THEN status ELSE 'queued' END,reminder=0,error=NULL,"
+                   "needs_edit=CASE WHEN message_id IS NULL THEN needs_edit ELSE 1 END,updated_at=excluded.updated_at", (sid, stamp))
+        return {'id': sid, 'status': status, 'duplicate': False, 'updated': True, 'deliver_after': deliver_after,
+                **({'brought_back': True} if waiting else {}), **({'reopened': True} if closed else {}), **({'prepared_ahead': True} if ahead else {}),
+                'note': 'The existing card was updated with this signal instead of a new card.'}
 
     def ahead_room(self, per_day):
         since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=1)).isoformat()
@@ -5479,6 +5560,65 @@ def suggestion_scope(account_ids, accounts):
     return 'work' if any(a['id'] in ids and a.get('scope', 'work' if a.get('boundary', '').startswith('work:') else 'personal') == 'work' for a in accounts) else 'personal'
 
 
+def thread_keys(rows):
+    """The conversations a set of signals belong to where one thread is one matter: an email thread, a Slack thread."""
+    keys = set()
+    for r in rows:
+        m = r['metadata'] if isinstance(r['metadata'], dict) else json.loads(r['metadata'] or '{}')
+        if r['kind'] == 'gmail.message' and m.get('thread_id'):
+            keys.add(('mail', r['account_id'], str(m['thread_id'])))
+        elif r['kind'] == 'slack.message' and m.get('channel_id') and m.get('thread_ts'):
+            keys.add(('slack', r['account_id'], m['channel_id'], str(m['thread_ts'])))
+    return keys
+
+
+CARD_OPEN = ('pending', 'accepted', 'prepared', 'instructions', 'snoozed')
+
+
+def same_thread_card(db, rows, days=60):
+    """The latest card whose evidence is in the same email or Slack thread as these signals: a later message in a
+    thread is the same matter, so it updates that card (open, snoozed, waiting) instead of starting another one.
+    Done and dismissed cards count too, after open ones."""
+    keys = thread_keys(rows)
+    if not keys:
+        return None
+    since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+    statuses = CARD_OPEN + ('completed', 'rejected')
+    cards = db.execute(f"SELECT * FROM suggestions WHERE status IN ({','.join('?' * len(statuses))}) AND (created_at>=? OR status IN ('pending','accepted','prepared','instructions','snoozed')) "
+                       "ORDER BY CASE WHEN status IN ('completed','rejected') THEN 1 ELSE 0 END,created_at DESC", (*statuses, since)).fetchall()
+    for card in cards:
+        ids = json.loads(card['event_ids'] or '[]')
+        if not ids:
+            continue
+        evidence = db.execute('SELECT account_id,kind,metadata FROM events WHERE id IN (' + ','.join('?' * len(ids)) + ')', ids).fetchall()
+        if thread_keys(evidence) & keys:
+            return card
+    return None
+
+
+def same_matter_cards(db, event_ids, project=None, limit=4):
+    """Open cards that may be about the same matter: they share the people a signal is directly about, or its
+    project. Only the reviewer can tell by meaning, so these are asked about, never merged by themselves."""
+    try:
+        people = {p['id'] for p in graph.card_people(db, event_ids, limit=10)[0]}
+    except (sqlite3.Error, ValueError, TypeError):
+        people = set()
+    found = []
+    for card in db.execute(f"SELECT * FROM suggestions WHERE status IN ({','.join('?' * len(CARD_OPEN))}) ORDER BY created_at DESC LIMIT 200", CARD_OPEN):
+        same_project = project and card['project'] and re.sub(r'\s+', ' ', str(project)).strip().lower() == card['project'].lower()
+        shared = False
+        if people and not same_project:
+            try:
+                shared = bool(people & {p['id'] for p in graph.card_people(db, json.loads(card['event_ids'] or '[]'), limit=10)[0]})
+            except (sqlite3.Error, ValueError, TypeError):
+                shared = False
+        if same_project or shared:
+            found.append({'id': card['id'], 'title': card['title'], 'status': card['status']})
+        if len(found) >= limit:
+            break
+    return found
+
+
 def source_line(rows):
     """One readable line about where a suggestion comes from, for the card."""
     if not rows:
@@ -6650,7 +6790,7 @@ def review_prompt(run_id, accounts, preferences='', facts='', slipped='', promis
     return f'''This is a signal review started by the personal-assistant service (review run {run_id}). It is not a chat with the owner and not a preparation task.
 The assistant instructions (tools/personal-assistant/AGENTS.md) and the owner's profile (USER.md) are included in this turn's context; follow the "Reviewing signals" section. Don't re-read those files.
 With the assistant_signals tool: call status, then ONE begin_analysis with account_ids {json.dumps(accounts)} and limit 120. The reply is paged: read every page with analysis_page before finishing, including next_row_offset continuations on the same page. Where body_clipped matters, read the rest with events (the account, event_ids and body_offset). Events replies contain events and remaining_event_ids; read the remaining IDs with the same accounts. Follow body_next_offset to the end of long bodies.
-Save only genuinely useful, distinct suggestions with suggest; the service delivers them. Then finish_analysis with reviewed_ids. Defer only what you expect to judge better later.
+Save only genuinely useful, distinct suggestions with suggest; the service delivers them. One card per matter: when a signal is about the same matter as an existing card (open, snoozed, waiting for a reply or done: the same conversation, people and ask, judged by meaning), pass card_id so that card is updated and comes back instead of a new one; reopen:true only when a done card genuinely needs the owner again. Then finish_analysis with reviewed_ids. Defer only what you expect to judge better later.
 Name the ongoing work: finish_analysis projects ({{"Project name": [event_ids from this batch]}}) for signals that clearly belong to a deal, hire, launch, renovation or other piece of work, and project on a suggest that belongs to one. Reuse begin_analysis's projects names when they fit; a signal's probably_project is the graph's guess from meaning and people, so add it to projects when it's right. graph tells who someone is to the owner (role, closeness, rhythm, gone quiet, their projects, what's open between them); when a message shows what someone is to them (their title, "our accountant", an introduction) and graph has no role or a wrong one, set it with graph node_id, role, event_id and quote (a short line copied from that message).
 Before suggesting, check it isn't already handled: search related signals (same thread, sender or chat) for a later reply from the owner or from a colleague (e.g. a teammate on the owner's own email domain answering the thread), or a confirmation (signed, paid, booked, resolved). If so, don't suggest it. When a signal in this batch shows that an OPEN suggestion (pending, prepared, accepted or snoozed in status) is now done, call looks_handled with suggestion_id, a short plain reason and the event_ids that show it; the owner still closes it themselves. For anything tied to a date, check the calendars for that date (days off, travel, existing plans).
 When a note the owner wrote on a suggestion (decisions with source telegram or dashboard) states something that stays true beyond that card, save it once with remember_fact (text, decision_id); skip one-off wording requests.
@@ -7155,7 +7295,8 @@ class App:
                                        self.config.get('digest_at', '08:30'),work=work,urgent=args.get('urgent') is True,due=args.get('due'),
                                        ahead=args.get('prepare_ahead') is True and self.config.get('prepare_ahead', True) is not False
                                        and self.store.ahead_room(int(self.config.get('prepare_ahead_per_day', 10))),
-                                       awaiting=args.get('awaiting_event_id'),project=args.get('project'))
+                                       awaiting=args.get('awaiting_event_id'),project=args.get('project'),card_id=args.get('card_id'),
+                                       separate=args.get('separate') is True,reopen=args.get('reopen') is True,match=True)
             if isinstance(saved, dict) and saved.get('id') and args.get('skill_hint') and getattr(self, 'skills', None):
                 saved['skill_hint'] = self.skills.hint(saved['id'], args['skill_hint'])  # "There's a skill for this", if it clearly helps
             unknown = self.store.no_role_yet(args['event_ids'])
