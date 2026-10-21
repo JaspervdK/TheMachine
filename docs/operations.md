@@ -116,12 +116,17 @@ The runner returns nonzero if any suite fails and isolates HOME/config from your
 ## Update and rollback
 
 1. Inspect local changes and the intended source revision. Keep custom connectors and owner overlays; never reset a dirty checkout to update it.
+   Take a signed release rather than whatever main is: `python3 scripts/release.py update` moves the checkout to the newest release tag (`release-YYYYMMDD-HHMM`) whose signature checks out against `deploy/release-signers` in the code you already run, and refuses anything else ("Unsigned update refused"). `python3 scripts/release.py verify [tag]` only checks. Hosted Machines do the same check before every update.
 2. Save a consistent SQLite backup with the backup API, plus private config/source backups. These are recovery evidence, not a reason to overwrite newer decisions.
 3. Run the relevant failure-path tests with `python3 scripts/test.py`, commit the reviewed changes, then install/update through `./install.sh`.
 4. Check `assistant doctor`, service health, recent source syncs and review/delivery receipts. For plugin changes use `openclaw plugins reload personal-assistant-bridge --wait`; if busy, wait instead of forcing a restart.
 5. To roll back, use a reviewed revert commit and the same installer route. Keep the live database, receipts, checkpoints, prompts and newer owner input. Schema compatibility must be checked per migration; some old code cannot read a newer schema. If a send is admitted or uncertain, reconcile it before replaying anything.
 
 A running service after a reboot is not enough: verify the checkpoint resumed, missed events arrived and no duplicate message/action was made. Do not create real purchases or messages merely to test recovery.
+
+## Releases
+
+Hosted Machines install only signed releases, and self-hosted installs should too. A commit pushed to main reaches no one until it is released. To cut one, the release key holder runs `python3 scripts/release.py cut`: it signs origin/main with the release key, checks the signature against `deploy/release-signers` and pushes the tag. The private key is never in this repository or in CI. The hosted service gives each release to its own Machines first and to everyone else a few hours later.
 
 ## Disable one feature
 

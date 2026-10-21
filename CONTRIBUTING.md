@@ -34,6 +34,8 @@ and explain why they are needed. The dashboard is plain HTML, CSS and JavaScript
   Never include real emails, chats, credentials, task exports, browser sessions or databases.
 - Keep personal preferences in the OpenClaw workspace's `USER.md`, outside the checkout.
 
+Merged changes reach installs only through a signed release (`python3 scripts/release.py cut`, by the release key holder; see [Operations](docs/operations.md#releases)).
+
 Check `git diff --check` and the test suite before submitting. CI also scans the complete
 reachable Git history with Gitleaks. A passing secret scan does not prove that text is
 free of private information; review every added fixture and attachment yourself.
