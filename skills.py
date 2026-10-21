@@ -6,7 +6,7 @@ workspace skill and refreshes its skill list by itself. That folder is The Machi
 here is removed, and nothing outside it is touched.
 
 Where a skill comes from:
-- mine: written (or started from an example) by the owner on the dashboard.
+- mine: written (or started from an example) by the owner on the dashboard, or imported from Claude or ChatGPT (Importer).
 - proposed: suggested by the agent from repeated work (`assistant skills-propose`); waits for the owner's Approve.
 - shared: sent by a teammate or friend over the Network (the Fleet's `skill` question); waits for the owner's Install.
 
@@ -18,8 +18,10 @@ the same author is a new version to read and install again. Text from someone el
 who sent it."""
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import hashlib
+import io
 import json
 import logging
 import os
@@ -33,6 +35,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 
 LOG = logging.getLogger('personal-assistant')
@@ -89,6 +92,8 @@ def ensure(db):
     for statement in SCHEMA.split(';'):
         if statement.strip():
             db.execute(statement)
+    if 'imported' not in {r[1] for r in db.execute('PRAGMA table_info(skills)')}:  # where an imported skill came from
+        db.execute('ALTER TABLE skills ADD COLUMN imported TEXT')
 
 
 def one_line(value, chars):
@@ -118,18 +123,35 @@ def digest(name, description, body):
     return hashlib.sha256(json.dumps([name, description, body], ensure_ascii=False).encode()).hexdigest()
 
 
+def header(text):
+    """A SKILL.md's top-level header fields as text: `key: value`, quoted values, and `>` or `|` blocks. Nested fields
+    (metadata, tools) come back as the key with an empty value, so their presence shows; they are never used."""
+    found = FRONTMATTER.match(text or '')
+    fields, key, block = {}, None, None
+    for line in (found.group(1).splitlines() if found else []):
+        if block is not None and (line.startswith((' ', '\t')) or not line.strip()):
+            block.append(line.strip())
+            fields[key] = ' '.join(b for b in block if b) if style == '>' else '\n'.join(block).strip()
+            continue
+        block = None
+        if line.startswith((' ', '\t', '#', '-')) or ':' not in line:
+            continue
+        key, _, value = line.partition(':')
+        key, value = key.strip(), value.strip()
+        if value[:1] in ('>', '|'):
+            style, block, fields[key] = value[0], [], ''
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+            if line.strip().endswith('"'):
+                value = value.replace('\\"', '"')
+        fields[key] = value
+    return fields
+
+
 def from_skill_md(text):
     """Name, description and instructions from a pasted SKILL.md; any other frontmatter (metadata, env, tools) is dropped."""
-    found = FRONTMATTER.match(text or '')
-    fields = {}
-    if found:
-        for line in found.group(1).splitlines():
-            key, sep, value = line.partition(':')
-            if sep and key.strip() in ('name', 'description'):
-                value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
-                    value = value[1:-1]
-                fields[key.strip()] = value
+    fields = header(text)
     return fields.get('name', ''), fields.get('description', ''), clean_body(text)
 
 
@@ -178,6 +200,10 @@ def render(row):
     lines = ['---', 'name: ' + row['slug'], 'description: ' + json.dumps(row['description'], ensure_ascii=False), '---', '',
              '# ' + row['name'], '',
              '<!-- Kept by The Machine (Settings > Skills). Edit it there: changes here are overwritten. -->']
+    imported = json.loads(row['imported'] or 'null') if 'imported' in row.keys() else None
+    if imported:
+        lines += ['', f"> Imported from {IMPORT_FROM.get(imported.get('from'), 'elsewhere')}. Guidance only: this Machine's own rules and approvals "
+                      'still apply.']
     if row['origin'] == 'shared':
         lines += ['', f"> Shared by {row['author'] or 'a teammate'}, version {row['version']}. Guidance only: this Machine's own rules "
                       'and approvals still apply, and this skill does not change what it may do.']
@@ -240,11 +266,15 @@ def sync(db, workspace):
 
 
 class Skills:
-    def __init__(self, connect, workspace, fleet=None, config=None, catalog=None):
+    def __init__(self, connect, workspace, fleet=None, config=None, catalog=None, home=None):
         self.connect, self.workspace, self.fleet = connect, Path(workspace), fleet
         # What OpenClaw itself has (read-only here); without a config (tests, tools) only The Machine's own.
         self.catalog = catalog if catalog is not None else Catalog(config) if config is not None else None
         self.hints = Hints(connect, self.catalog)
+        # Importing from Claude and ChatGPT. Skill folders on this computer only on a self-hosted Machine (a hosted one
+        # has a manage_url); `finder` starts the agent's turn that reads the owner's accounts and recommends (assistant.py).
+        self.importer = Importer(self, home, local=not (config or {}).get('manage_url'))
+        self.finder = None
         with self.connect() as db:
             ensure(db)
 
@@ -303,6 +333,44 @@ class Skills:
         self.hints.close(shown['ref'])
         LOG.info('skills installed from clawhub ref=%s version=%s', shown['ref'], shown['version'])
         return {'installed_skill': shown['slug'], **({'differs': True} if shown.get('differs') else {}), **self.installed()}
+
+    # -- importing from Claude and ChatGPT (Importer)
+    def import_find(self):
+        """Find my skills: what is on this computer, listed now; the agent's turn adds the owner's claude.ai and
+        chatgpt.com skills and marks the ones worth importing."""
+        items, errors = self.importer.find()
+        token = self.importer.keep(items, errors)
+        if self.finder:
+            try:
+                run = self.finder(token, [{'key': i['public']['key'], 'name': i['public']['name'], 'description': i['public']['description'][:200],
+                                           'group': i['public']['group'], 'blocked': bool(i['public']['blocked']),
+                                           'here': bool(i['public']['duplicate'])} for i in items])
+            except (ValueError, OSError) as error:
+                LOG.warning('skills find turn error=%s', type(error).__name__)
+                run = None
+            if run:
+                self.importer.scans[token]['finding'] = {'run_id': run, 'status': 'running'}
+        return self.importer.view(token)
+
+    def import_upload(self, frm, data):
+        return self.importer.view(self.importer.keep(*self.importer.upload(frm, data)))
+
+    def import_paste(self, frm, text):
+        return self.importer.view(self.importer.keep(*self.importer.paste(frm, text)))
+
+    def import_status(self, token):
+        return self.importer.view(token)
+
+    def import_read(self, token, key):
+        return self.importer.read(token, key)
+
+    def import_run(self, token, keys):
+        results = self.importer.run(token, keys)
+        return {'results': results, 'list': self.importer.view(token), **self.view()}
+
+    def import_install(self, token, key, sha):
+        shown = self.importer.install(token, key, sha)
+        return {**shown, 'list': self.importer.view(token), **self.installed()}
 
     def hint(self, suggestion_id, hint):
         return self.hints.add(suggestion_id, hint, self.mine())
@@ -534,13 +602,15 @@ class Skills:
                 item = {'id': r['id'], 'name': r['name'], 'description': r['description'], 'status': r['status'], 'origin': r['origin'],
                         'version': r['version'], 'author': r['author'] or '', 'note': r['note'] or '', 'update': bool(r['replaces']),
                         'chars': len(r['body']), 'updated_at': r['updated_at']}
+                if r['imported']:
+                    item['imported'] = json.loads(r['imported'])
                 if r['status'] in ('on', 'off'):
                     item['shares'] = self.shares_out(db, r['id'])
                     item['changed'] = any(s['version'] < r['version'] for s in item['shares'])
                 items.append(item)
         waiting = sum(1 for i in items if i['status'] in ('incoming', 'proposed'))
         return {'skills': items, 'waiting': waiting, 'targets': self.targets(), 'folder': f'skills/{FOLDER}', 'hints': self.hints.open(),
-                'openclaw': bool(self.catalog)}
+                'openclaw': bool(self.catalog), 'import_local': self.importer.local}
 
 
 # -- Everything OpenClaw has (docs/skills.md): read from OpenClaw itself, never written here --------------------------
@@ -946,6 +1016,561 @@ class Hints:
             return [{k: r[k] for k in ('id', 'suggestion_id', 'skill', 'kind', 'name', 'summary', 'why')}
                     for r in db.execute("SELECT h.* FROM skill_hints h JOIN suggestions s ON s.id=h.suggestion_id WHERE h.status='open' AND h.created_at>? "
                                         "AND s.status NOT IN ('completed','rejected') ORDER BY h.created_at DESC LIMIT 10", (since,))]
+
+
+# -- Importing from Claude and ChatGPT (docs/skills.md#import-from-claude-or-chatgpt) -----------------------------------
+# Both use the same SKILL.md form. What comes in is only what a skill here may be: a name, when to use it and the
+# instructions, with reference .md files the instructions point to written into them. Scripts and other files never
+# become The Machine's; a skill that needs them can be installed with them as OpenClaw's own, after reading it, like
+# ClawHub. Files are read here, never run.
+IMPORT_FROM = {'claude': 'Claude', 'chatgpt': 'ChatGPT'}
+UPLOAD_BYTES = 6 * 1024 * 1024        # one upload from the dashboard
+FILE_BYTES, TREE_BYTES, TREE_FILES = 1024 * 1024, 8 * 1024 * 1024, 300
+SCAN_SECONDS, SCANS, CANDIDATES = 3600, 4, 200
+SCRIPT_EXT = ('.py', '.sh', '.bash', '.zsh', '.fish', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl', '.php', '.ps1', '.bat', '.cmd',
+              '.exe', '.bin', '.jar', '.go', '.rs', '.lua', '.swift', '.so', '.dylib', '.dll', '.wasm')
+LICENCE_FILES = ('LICENSE', 'LICENCE', 'COPYING')
+CLOSED = re.compile(r'proprietary|all rights reserved|may not (?:be )?(?:copied|shared|redistributed)|not (?:be )?redistribut', re.I)
+TOOLS = {'Bash': 'exec', 'Read': 'read', 'Write': 'write', 'Edit': 'edit', 'MultiEdit': 'edit', 'WebFetch': 'web_fetch', 'WebSearch': 'web_search'}
+FLAGS = ((re.compile(r'`(?:TodoWrite|Task|Agent|AskUserQuestion|NotebookEdit|Skill|Glob|Grep|ExitPlanMode)`'),
+          'Names Claude Code tools OpenClaw has no tool of that name for'),
+         (re.compile(r'\bmcp__\w+'), 'Calls connector (MCP) tools by name; they may not exist here'),
+         (re.compile(r'/mnt/(?:user-data|skills|data)\b'), 'Uses folders of the claude.ai or ChatGPT sandbox (/mnt/…), which aren\'t here'),
+         (re.compile(r'\$\{?CLAUDE_[A-Z_]+|~/\.claude\b|\$\{?CODEX_HOME|~/\.codex\b'), 'Refers to Claude Code or Codex folders'),
+         (re.compile(r'\bartifacts?\b', re.I), 'Talks about artifacts, which The Machine doesn\'t show'))
+
+
+def rewrite(text):
+    """Claude Code's tool names where OpenClaw's are plainly the same tool (`Bash` is `exec`), and what else may not
+    work here, flagged for the owner, never changed."""
+    changed = set()
+
+    def tick(found):
+        changed.add(found.group(1))
+        return '`' + TOOLS[found.group(1)] + '`'
+
+    def named(found):
+        changed.add(found.group(2))
+        return found.group(1) + TOOLS[found.group(2)] + ' tool'
+    names = '|'.join(TOOLS)
+    text = re.sub(r'`(' + names + r')`', tick, text)
+    text = re.sub(r'(\b[Tt]he )(' + names + r') tool\b', named, text)
+    flags = ['Renamed tools to OpenClaw\'s: ' + ', '.join(f'{k} → {TOOLS[k]}' for k in sorted(changed))] if changed else []
+    return text, flags + [note for pattern, note in FLAGS if pattern.search(text)]
+
+
+def tree_digest(files):
+    return hashlib.sha256(json.dumps(sorted([path, hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else str(data)]
+                                            for path, data in files.items())).encode()).hexdigest()
+
+
+def keep_text(path):
+    """Files kept in memory after reading: the ones that can become part of the instructions or tell the licence."""
+    name = path.rsplit('/', 1)[-1]
+    return name.lower().endswith(('.md', '.txt')) or name.upper().startswith(LICENCE_FILES)
+
+
+def read_tree(root, keep=keep_text):
+    """A skill folder on this computer: {path: bytes}, with only a hash kept for scripts and other files, and None for
+    one too big to read. Hidden files and anything linked from outside the folder are left out."""
+    root = Path(root).resolve()
+    files, total = {}, 0
+    for top, dirs, names in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in ('node_modules', '__pycache__'))
+        for name in sorted(names):
+            if name.startswith('.') or len(files) >= TREE_FILES:
+                continue
+            path = Path(top) / name
+            try:
+                real = path.resolve()
+                if not real.is_relative_to(root) or not real.is_file():
+                    continue
+                size = real.stat().st_size
+                rel = path.relative_to(root).as_posix()
+                if size > FILE_BYTES or total + size > TREE_BYTES:
+                    files[rel] = None
+                    continue
+                data = real.read_bytes()
+            except OSError:
+                continue
+            total += size
+            files[rel] = data if keep(rel) else 'sha256:' + hashlib.sha256(data).hexdigest()
+    return files
+
+
+def clean_path(name):
+    parts = [p for p in str(name or '').replace('\\', '/').split('/') if p]
+    if not parts or str(name).startswith('/') or any(p in ('..', '__MACOSX') or p.startswith('.') or ':' in p for p in parts):
+        return None
+    return '/'.join(parts)
+
+
+def unzip(raw):
+    """A .skill or .zip export: {path: bytes}. Read in memory, nothing unpacked to disk; size limits per file and in all."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw))
+        entries = archive.infolist()
+    except (zipfile.BadZipFile, ValueError):
+        raise ValueError('That isn\'t a .skill or .zip file') from None
+    files, total = {}, 0
+    for info in entries[:TREE_FILES * 3]:
+        path = clean_path(info.filename)
+        if info.is_dir() or not path or len(files) >= TREE_FILES:
+            continue
+        if info.file_size > FILE_BYTES or total + info.file_size > TREE_BYTES:
+            files[path] = None
+            continue
+        try:
+            with archive.open(info) as stream:
+                data = stream.read(FILE_BYTES + 1)
+        except (zipfile.BadZipFile, ValueError, OSError, NotImplementedError, RuntimeError):
+            continue
+        if len(data) > FILE_BYTES:
+            files[path] = None
+            continue
+        total += len(data)
+        files[path] = data
+    return files
+
+
+def split_skills(files):
+    """The skills in a set of files: each folder with a SKILL.md, with the files under it (the nearest one's)."""
+    roots = sorted({p.rsplit('/', 1)[0] if '/' in p else '' for p in files if p.rsplit('/', 1)[-1].lower() == 'skill.md'},
+                   key=lambda r: -len(r))
+    out = {r: {} for r in roots}
+    for path, data in files.items():
+        root = next((r for r in roots if not r or path.startswith(r + '/')), None)
+        if root is not None:
+            out[root][path[len(root) + 1:] if root else path] = data
+    return out
+
+
+def mentioned(path, text):
+    name = path.rsplit('/', 1)[-1]
+    return path in text or (len(name) >= 5 and re.search(r'(?<![\w.-])' + re.escape(name) + r'(?![\w-])', text) is not None)
+
+
+def short(description):
+    """"When to use it" in at most DESCRIPTION_CHARS: whole sentences when they fit, else cut at a word."""
+    description = one_line(description, 4000)
+    if len(description) <= DESCRIPTION_CHARS:
+        return description, False
+    cut = description[:DESCRIPTION_CHARS]
+    end = max(cut.rfind('. '), cut.rfind('; '))
+    return (cut[:end + 1] if end > 80 else cut[:DESCRIPTION_CHARS - 1].rsplit(' ', 1)[0] + '…'), True
+
+
+def convert(files, frm, folder=''):
+    """A skill's files as a skill here: (name, description, body) and what the owner should know about it."""
+    md_path = next((p for p in files if p.lower() == 'skill.md'), None)
+    text = files.get(md_path) if md_path else None
+    if not isinstance(text, bytes):
+        raise ValueError('No readable SKILL.md')
+    text = text.decode('utf-8', errors='replace')
+    fields = header(text)
+    name = one_line(fields.get('name') or folder or 'Imported skill', NAME_CHARS)
+    if len(name) < 3:
+        name = (name + ' skill').strip()
+    description, shortened = short(fields.get('description') or '')
+    if len(description) < 10:
+        description = one_line(f'When a task calls for {name}', DESCRIPTION_CHARS)
+    body, flags = rewrite(clean_body(text))
+    notes, left_out = [], []
+    dropped = sorted(k for k in fields if k not in ('name', 'description', 'license', 'licence'))
+    if dropped:
+        notes.append('Header settings left out: ' + ', '.join(dropped[:5]))
+    if shortened:
+        notes.append('"When to use it" was shortened to fit')
+    scripts = sorted(p for p in files if p.split('/')[0] in ('scripts', 'bin') or p.lower().endswith(SCRIPT_EXT))
+    licence_files = [p for p in files if '/' not in p and p.upper().startswith(LICENCE_FILES)]
+    references = [p for p in files if p.lower().endswith('.md') and p != md_path and p not in scripts and mentioned(p, body)]
+    others = sorted(p for p in files if p not in (md_path, *scripts, *licence_files, *references))
+    depends = any(mentioned(p, body) for p in scripts) or bool(scripts and re.search(r'\bscripts/', body))
+    room = BODY_CHARS - 700
+    if len(body) > room:
+        cut = body[:room]
+        end = max(cut.rfind('\n#'), cut.rfind('\n\n'))
+        left_out.append(f'the end of its SKILL.md ({len(body) - (end if end > room // 2 else room):,} characters)')
+        body = cut[:end if end > room // 2 else room].rstrip()
+    for path in references:
+        data = files.get(path)
+        extra = rewrite(clean_body(data.decode('utf-8', errors='replace')))[0] if isinstance(data, bytes) else ''
+        section = f'\n\n---\n\n## Reference: {path}\n\n{extra}'
+        if extra and len(body) + len(section) <= room:
+            body += section
+        else:
+            left_out.append(f'{path} (too long to include)' if extra else f'{path} (couldn\'t be read)')
+    left_out += [p for p in others][:8] + ([f'and {len(others) - 8} more files'] if len(others) > 8 else [])
+    if scripts:
+        left_out.insert(0, f'{len(scripts)} script{"s" if len(scripts) > 1 else ""} ({", ".join(scripts[:3])}{", …" if len(scripts) > 3 else ""})')
+        if depends:
+            body += ('\n\n## Not included\nThis skill came with scripts that were not brought in (' + ', '.join(scripts[:5])
+                     + (', …' if len(scripts) > 5 else '') + '). Steps that run them won\'t work here; say so instead of improvising.')
+    licence_text = next((files[p][:4000].decode('utf-8', errors='replace') for p in licence_files if isinstance(files.get(p), bytes)), '')
+    licence = one_line(fields.get('license') or fields.get('licence'), 80) or one_line(next((l for l in licence_text.splitlines() if l.strip()), ''), 80)
+    closed = bool(CLOSED.search(fields.get('license') or fields.get('licence') or '') or CLOSED.search(licence_text))
+    return {'name': name, 'description': description, 'body': body, 'flags': flags, 'notes': notes, 'left_out': left_out,
+            'scripts': scripts, 'references': references, 'depends': depends, 'licence': licence, 'closed': closed,
+            'files': len(files), 'original': text}
+
+
+class Importer:
+    """Skills found elsewhere, listed for the owner to tick (Settings > Skills > Import). A scan is kept in memory for
+    an hour under a token, so what is imported is what was listed."""
+
+    def __init__(self, keeper, home=None, local=True):
+        self.keeper, self.home, self.local = keeper, Path(home or Path.home()), local
+        self.scans, self.lock = {}, threading.Lock()
+
+    # -- where to look
+    def label(self, path):
+        try:
+            return '~/' + Path(path).relative_to(self.home).as_posix()
+        except ValueError:
+            return str(path)
+
+    def folders(self):
+        """(from, folder, kind, label, url) for each skill folder on this computer, Claude Code's and Codex's."""
+        out = []
+
+        def skills_in(base):
+            try:
+                return sorted(d for d in Path(base).iterdir() if not d.name.startswith('.') and (d / 'SKILL.md').is_file())
+            except OSError:
+                return []
+        claude = self.home / '.claude' / 'skills'
+        for d in skills_in(claude):
+            out.append(('claude', d, 'local', 'Claude Code', ''))
+        try:
+            buckets = sorted(b for b in (claude / 'synced').iterdir() if b.is_dir() and not b.name.startswith('.'))
+        except OSError:
+            buckets = []
+        for bucket in buckets:
+            try:
+                manifest = {s.get('skillId') or s.get('name'): s for s in json.loads((bucket / 'manifest.json').read_text()).get('skills') or []
+                            if isinstance(s, dict)}
+            except (OSError, ValueError, AttributeError):
+                manifest = {}
+            for d in skills_in(bucket):
+                kind = 'builtin' if str((manifest.get(d.name) or {}).get('source') or '').startswith('anthropic') else 'synced'
+                out.append(('claude', d, kind, 'claude.ai', 'https://claude.ai/customize/skills'))
+        # claude.ai plugins synced by Claude Code: the owner's own uploads, else a vendor's (vendor caches elsewhere are left out)
+        try:
+            buckets = sorted(b for b in (self.home / '.claude' / 'plugins' / 'synced').iterdir() if b.is_dir() and not b.name.startswith('.'))
+        except OSError:
+            buckets = []
+        for bucket in buckets:
+            try:
+                plugins = sorted(p for p in bucket.iterdir() if p.is_dir() and not p.name.startswith('.'))
+            except OSError:
+                continue
+            for plugin in plugins:
+                try:
+                    market = str(json.loads((bucket / f'{plugin.name}.meta.json').read_text()).get('marketplace_name') or '')
+                except (OSError, ValueError, AttributeError):
+                    market = ''
+                for d in skills_in(plugin / 'skills'):
+                    out.append(('claude', d, 'synced' if market == 'My Uploads' else 'plugin', f'claude.ai plugin {plugin.name}', 'https://claude.ai/customize/skills'))
+        codex = Path(os.environ.get('CODEX_HOME') or self.home / '.codex') / 'skills'
+        for d in skills_in(codex):
+            out.append(('chatgpt', d, 'local', 'Codex', ''))
+        for d in skills_in(codex / '.system'):
+            out.append(('chatgpt', d, 'builtin', 'Codex', ''))
+        projects = []
+        try:
+            for top in sorted(self.home.iterdir())[:400]:
+                if top.name.startswith('.') or top.name == 'node_modules' or not top.is_dir() or top.is_symlink():
+                    continue
+                projects.append(top / '.claude' / 'skills')
+                try:
+                    projects += [sub / '.claude' / 'skills' for sub in sorted(top.iterdir())[:200]
+                                 if not sub.name.startswith('.') and sub.name != 'node_modules' and sub.is_dir() and not sub.is_symlink()]
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        for base in projects:
+            for d in skills_in(base):
+                out.append(('claude', d, 'project', 'Project', ''))
+        return out[:CANDIDATES]
+
+    # -- what is here already
+    def taken(self):
+        with self.keeper.connect() as db:
+            rows = db.execute("SELECT name,sha,imported FROM skills WHERE status IN ('on','off','proposed')").fetchall()
+        keys = {json.loads(r['imported']).get('key') for r in rows if r['imported']}
+        names = {r['name'].lower() for r in rows}
+        catalog = self.keeper.catalog.peek() if self.keeper.catalog else None
+        others = {str(r.get('name') or '').lower() for r in catalog or [] if isinstance(r, dict)} - set(self.keeper.mine())
+        others |= other_names(self.keeper.workspace / 'skills')
+        return keys, names, {r['sha'] for r in rows}, others
+
+    def item(self, key, frm, files, *, source, kind='upload', url='', folder='', link='', taken=None):
+        """One skill as listed: what would come in and what the owner should know first."""
+        try:
+            done = convert(files, frm, folder)
+        except ValueError as error:
+            return None, str(error)
+        keys, names, shas, others = taken or self.taken()
+        name, description, body = done['name'], done['description'], done['body']
+        try:
+            validate(name, description, body)
+        except ValueError as error:
+            return None, str(error)
+        group = ('builtin' if done['closed'] or kind == 'builtin' else 'vendor' if kind == 'plugin' or link and not Path(link).is_relative_to(self.home)
+                 else 'project' if kind == 'project' else 'yours')
+        duplicate = ('Already in your skills' if key in keys or name.lower() in names or digest(name, description, body) in shas
+                     else 'OpenClaw already has a skill with this name' if slug_of(name) in others or name.lower() in others else '')
+        public = {'key': key, 'name': name, 'description': description, 'from': frm, 'from_label': IMPORT_FROM.get(frm, frm),
+                  'source': source, 'url': url if url.startswith('https://') else '', 'group': group, 'files': done['files'],
+                  'scripts': done['scripts'][:5], 'script_count': len(done['scripts']), 'depends': done['depends'],
+                  'references': done['references'][:5], 'left_out': done['left_out'], 'flags': done['flags'] + done['notes'],
+                  'licence': done['licence'], 'blocked': 'Can\'t import: its licence doesn\'t allow it' if done['closed'] else '',
+                  'duplicate': duplicate, 'recommended': False, 'why': '', **({'link': link} if link else {})}
+        return {'public': public, 'files': files, 'converted': (name, description, body), 'original': done['original'],
+                'sha': tree_digest(files)}, ''
+
+    def keep(self, items, errors, finding=None):
+        token = secrets.token_hex(12)
+        with self.lock:
+            stamp = time.time()
+            self.scans = {k: v for k, v in sorted(self.scans.items(), key=lambda kv: kv[1]['at'])[-(SCANS - 1):] if stamp - v['at'] < SCAN_SECONDS}
+            self.scans[token] = {'at': stamp, 'items': {i['public']['key']: i for i in items}, 'errors': errors[:10], 'finding': finding,
+                                 'browser': {}}
+        return token
+
+    def scan(self, token):
+        with self.lock:
+            found = self.scans.get(str(token or ''))
+        if not found or time.time() - found['at'] > SCAN_SECONDS:
+            raise ValueError('That list is out of date; look again')
+        return found
+
+    def view(self, token):
+        found = self.scan(token)
+        order = {'yours': 0, 'project': 1, 'vendor': 2, 'builtin': 3}
+        items = sorted((i['public'] for i in found['items'].values()), key=lambda p: (order.get(p['group'], 3), not p['recommended'], p['name'].lower()))
+        return {'token': token, 'items': items, 'errors': found['errors'], 'finding': found['finding'], 'browser': found['browser'],
+                'local': self.local}
+
+    # -- listing
+    def find(self):
+        """Every skill on this computer that could come in (on a self-hosted Machine), listed at once."""
+        items, errors, taken = [], [], self.taken()
+        seen = set()
+        for frm, folder, kind, where, url in (self.folders() if self.local else []):
+            try:
+                real = folder.resolve()
+            except OSError:
+                continue
+            if real in seen:  # the same folder linked from Claude Code and Codex: listed once
+                continue
+            seen.add(real)
+            link = str(real) if folder.is_symlink() else ''
+            files = read_tree(folder)
+            source = (f'claude.ai, built in ({folder.name})' if kind == 'builtin' and where == 'claude.ai' else
+                      f'{where}, uploaded by you' if where.startswith('claude.ai plugin') and kind == 'synced' else
+                      where if where.startswith('claude.ai plugin') else self.label(folder))
+            item, error = self.item(f'{frm}:{self.label(folder)}', frm, files, source=source, kind=kind, url=url, folder=folder.name,
+                                    link=link, taken=taken)
+            if item:
+                item['path'] = str(folder)
+                items.append(item)
+            elif error:
+                errors.append(f'{self.label(folder)}: {error}')
+        return items, errors
+
+    def upload(self, frm, data):
+        """An export the owner uploaded: a .skill or .zip (base64), or a folder's files ([{path, data}] in base64)."""
+        if frm not in IMPORT_FROM:
+            raise ValueError('Choose Claude or ChatGPT')
+        if not isinstance(data, dict):
+            raise ValueError('Nothing was uploaded')
+        label = one_line(data.get('name'), 120) or 'Upload'
+        try:
+            if isinstance(data.get('zip'), str):
+                raw = base64.b64decode(data['zip'], validate=True)
+                if len(raw) > UPLOAD_BYTES:
+                    raise ValueError('That file is too big (6 MB at most)')
+                files = unzip(raw)
+            elif isinstance(data.get('files'), list):
+                files, total = {}, 0
+                for f in data['files'][:TREE_FILES]:
+                    path = clean_path(f.get('path')) if isinstance(f, dict) else None
+                    if not path or not isinstance(f.get('data'), str):
+                        continue
+                    raw = base64.b64decode(f['data'], validate=True)
+                    total += len(raw)
+                    if total > UPLOAD_BYTES:
+                        raise ValueError('That folder is too big (6 MB at most)')
+                    files[path] = raw
+            else:
+                raise ValueError('Nothing was uploaded')
+        except (ValueError, TypeError) as error:
+            raise ValueError(str(error) if 'big' in str(error) or 'skill' in str(error) else 'That upload couldn\'t be read') from None
+        found = split_skills(files)
+        if not found:
+            raise ValueError('No SKILL.md in it')
+        items, errors, taken = [], [], self.taken()
+        for root, tree in list(found.items())[:50]:
+            folder = root.rsplit('/', 1)[-1] if root else label.rsplit('.', 1)[0]
+            item, error = self.item(f'{frm}:upload:{label}/{root}', frm, tree, source=f'{label}' + (f' › {root}' if root else ''), folder=folder, taken=taken)
+            (items.append(item) if item else errors.append(f'{root or label}: {error}'))
+        return items, errors
+
+    def paste(self, frm, text):
+        if frm not in IMPORT_FROM:
+            raise ValueError('Choose Claude or ChatGPT')
+        if not isinstance(text, str) or not FRONTMATTER.match(text.strip() + '\n'):
+            raise ValueError('Paste a whole SKILL.md, starting with its --- header')
+        text = text.strip() + '\n'
+        item, error = self.item(f'{frm}:paste:{hashlib.sha256(text.encode()).hexdigest()[:16]}', frm, {'SKILL.md': text.encode()}, source='Pasted SKILL.md')
+        if not item:
+            raise ValueError(error)
+        return [item], []
+
+    # -- reading, importing, installing with scripts
+    def read(self, token, key):
+        found = self.scan(token)['items'].get(str(key))
+        if not found:
+            raise ValueError('That skill isn\'t in this list')
+        name, description, body = found['converted']
+        public = found['public']
+        installable = bool(public['script_count'] and not public['blocked'] and self.keeper.catalog and (found.get('path') or self.complete(found)))
+        return {**public, 'body': body, 'original': found['original'][:64000], 'sha': found['sha'], 'installable': installable}
+
+    @staticmethod
+    def complete(found):
+        return all(isinstance(v, bytes) for v in found['files'].values())
+
+    def run(self, token, keys):
+        """Imports the ticked skills as the owner's own (origin mine, with where they came from). Skips one that is
+        here already or whose licence doesn't allow it, and says why."""
+        found = self.scan(token)
+        if not isinstance(keys, list) or not keys:
+            raise ValueError('Tick the skills to import')
+        results, stamp = [], now()
+        for key in [str(k) for k in keys][:CANDIDATES]:
+            item = found['items'].get(key)
+            if not item:
+                results.append({'key': key, 'status': 'skipped', 'reason': 'Not in this list'})
+                continue
+            public = item['public']
+            name, description, body = item['converted']
+            keys_here, names, shas, _ = self.taken()
+            reason = (public['blocked'] or ('Already in your skills' if key in keys_here or name.lower() in names or digest(name, description, body) in shas else ''))
+            if reason:
+                results.append({'key': key, 'name': name, 'status': 'skipped', 'reason': reason})
+                continue
+            imported = {'key': key, 'from': public['from'], 'source': public['source'], **({'url': public['url']} if public['url'] else {}),
+                        'left_out': public['left_out'][:10], 'flags': public['flags'][:8]}
+            with self.keeper.connect() as db:
+                if db.execute("SELECT COUNT(*) FROM skills WHERE status IN ('on','off')").fetchone()[0] >= MAX_SKILLS:
+                    results.append({'key': key, 'name': name, 'status': 'skipped', 'reason': f'At most {MAX_SKILLS} skills'})
+                    continue
+                db.execute("INSERT INTO skills(id,slug,name,description,body,status,origin,sha,imported,created_at,updated_at) "
+                           "VALUES(?,?,?,?,?,'on','mine',?,?,?,?)",
+                           ('sk_' + secrets.token_hex(8), self.keeper._slug(db, name), name, description, body,
+                            digest(name, description, body), json.dumps(imported), stamp, stamp))
+            public['duplicate'] = 'Already in your skills'
+            results.append({'key': key, 'name': name, 'status': 'imported', 'left_out': public['left_out'], 'flags': public['flags']})
+            LOG.info('skill imported from=%s scripts=%d', public['from'], public['script_count'])
+        self.keeper.sync()
+        return results
+
+    def install(self, token, key, sha):
+        """A skill that needs its scripts, installed with them as OpenClaw's own (`openclaw skills install <folder>`),
+        exactly as the owner read it: never forced, never past a policy warning, never one whose licence says no."""
+        found = self.scan(token)['items'].get(str(key))
+        if not found:
+            raise ValueError('That skill isn\'t in this list')
+        public, catalog = found['public'], self.keeper.catalog
+        if public['blocked']:
+            raise ValueError(public['blocked'])
+        if not catalog:
+            raise ValueError('OpenClaw isn\'t set up here')
+        if found['sha'] != str(sha):
+            raise ValueError('Read it first')
+        slug = slug_of(public['name'])
+        if slug == FOLDER or slug in {str(r.get('name') or '') for r in catalog.installed()} or slug in other_names(self.keeper.workspace / 'skills'):
+            raise ValueError('A skill with that name is already here')
+        temporary = None
+        try:
+            if found.get('path'):
+                folder = Path(found['path'])
+                if tree_digest(read_tree(folder)) != found['sha']:
+                    raise ValueError('It changed since you read it; look again')
+            elif self.complete(found):
+                temporary = tempfile.mkdtemp(prefix='skill-import-')
+                folder = Path(temporary) / slug
+                for path, data in found['files'].items():
+                    target = folder / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+            else:
+                raise ValueError('Upload the whole skill to install it with its files')
+            done = catalog._cli(['skills', 'install', str(folder), '--as', slug], timeout=240)
+            if done.returncode:
+                raise ValueError(catalog._reason(done))
+        finally:
+            if temporary:
+                shutil.rmtree(temporary, ignore_errors=True)
+        catalog.load()
+        public['duplicate'] = 'Installed in OpenClaw'
+        LOG.info('skill installed in openclaw from=%s scripts=%d', public['from'], public['script_count'])
+        return {'installed_skill': slug}
+
+    # -- what the agent found and judged (the "Find my skills" turn)
+    def report(self, token, found, recommended, browser):
+        """Account skills the agent read on claude.ai or chatgpt.com, and which skills it recommends, with why."""
+        scan = self.scan(token)
+        added, taken = 0, self.taken()
+        for f in (found if isinstance(found, list) else [])[:60]:
+            if not isinstance(f, dict) or f.get('from') not in IMPORT_FROM:
+                continue
+            body, name = f.get('body'), one_line(f.get('name'), NAME_CHARS)
+            if not name or any(i['public']['from'] == f['from'] and i['public']['name'].lower() == name.lower() for i in scan['items'].values()):
+                continue  # synced to this computer already, or listed twice
+            if isinstance(f.get('zip'), str):  # the skill's own download (a .skill file), read like an upload
+                try:
+                    raw = base64.b64decode(f['zip'], validate=True)
+                    trees = list(split_skills(unzip(raw)).values()) if len(raw) <= UPLOAD_BYTES else []
+                except ValueError:
+                    trees = []
+                files = trees[0] if trees else None
+            elif isinstance(body, str) and len(body) <= 200000:
+                files = None
+            else:
+                continue
+            if files is None:
+                if not isinstance(body, str):
+                    continue
+                text = body if FRONTMATTER.match(body) else '---\nname: ' + json.dumps(name) + '\ndescription: ' + json.dumps(one_line(f.get('description'), 4000)) + '\n---\n' + body
+                files = {'SKILL.md': text.encode()}
+            site = 'claude.ai' if f['from'] == 'claude' else 'chatgpt.com'
+            url = str(f.get('url') or '')
+            item, _ = self.item(f"{f['from']}:account:{slug_of(name)}", f['from'], files, source=f'{site}, your account',
+                                kind='builtin' if f.get('builtin') is True else 'account', url=url if url.startswith(f'https://{site}/') else '',
+                                taken=taken)
+            if item:
+                if f.get('recommended') is True and not item['public']['blocked']:
+                    item['public']['recommended'], item['public']['why'] = True, one_line(f.get('why'), 160)
+                with self.lock:
+                    scan['items'].setdefault(item['public']['key'], item)
+                added += 1
+        for r in (recommended if isinstance(recommended, list) else [])[:12]:
+            item = scan['items'].get(str(r.get('key') if isinstance(r, dict) else ''))
+            if item and not item['public']['blocked']:
+                item['public']['recommended'], item['public']['why'] = True, one_line(r.get('why'), 160)
+        if isinstance(browser, dict):
+            scan['browser'] = {k: one_line(v, 40) for k, v in browser.items() if k in ('claude', 'chatgpt')}
+        return {'added': added}
+
+    def finished(self, token, status):
+        with self.lock:
+            scan = self.scans.get(token)
+            if scan and scan['finding']:
+                scan['finding'] = {**scan['finding'], 'status': status}
 
 
 def fleet_module():

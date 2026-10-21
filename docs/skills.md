@@ -26,6 +26,30 @@ other OpenClaw header field (metadata, environment variables, install steps, too
 scripts are dropped. A skill runs under your Machine's own rules and approvals, like anything else the agent does:
 Do it still asks you, nothing is sent without your Send, and a Fleet's rules stay as you set them.
 
+## Import from Claude or ChatGPT
+
+Both use the same `SKILL.md` form. **Import** under Settings > Skills lists skills to bring in; you tick which ones.
+
+- **Find my skills** looks on this computer (Claude Code's `~/.claude/skills`, including skills and your own plugins
+  synced from claude.ai, Codex's `~/.codex/skills`, and `.claude/skills` in your projects). Then your agent reads the
+  skills in your claude.ai and ChatGPT accounts, read-only, in your Machine's own browser: it never signs in or types a
+  password, and if a site is signed out the list says so. It also marks a few as **Recommended**, judged against the
+  work your Machine actually does. A hosted Machine has no such folders; there it only checks your accounts.
+- **From Claude** or **From ChatGPT**: upload a `.skill` or `.zip` export or a folder, or paste a `SKILL.md`.
+
+Each skill shows where it comes from, its scripts and other files, and its licence, grouped as yours, in your projects,
+from vendors and built in. One whose licence doesn't allow copying (some built-in Claude skills) can't be imported.
+
+An imported skill becomes your own, instructions only, and remembers where it came from. Reference `.md` files its
+instructions point to are added to them when they fit. Scripts and other files are left out, and **Read** says what was
+left out; when the instructions need the scripts, the skill says so to your agent. Claude Code tool names with a plain
+OpenClaw equivalent are renamed (`Bash` → `exec`); other tool-specific parts are flagged, not changed. A skill you have
+already, or that OpenClaw already has by that name, isn't imported twice.
+
+A skill that needs its scripts can instead be installed as OpenClaw's own, scripts included: **Read**, then **Install in
+OpenClaw with its scripts**. Like ClawHub, that is only exactly what you read, never forced past OpenClaw's install
+policy.
+
 ## Proposed by your Machine
 
 When your agent notices the same kind of work coming back, it can propose a skill for it
@@ -85,7 +109,7 @@ a week, nothing is ever installed or turned on by itself.
 ## From the command line
 
 - `assistant skills` lists your skills and what waits for you.
-- `assistant skills-propose` proposes one (see above). Installing, sharing and deciding are on the dashboard only.
+- `assistant skills-propose` proposes one (see above). Installing, importing, sharing and deciding are on the dashboard only.
 
 ### Reading a ClawHub release
 

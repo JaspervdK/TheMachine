@@ -60,14 +60,14 @@ def load_config(path):
         raise CliError(f'Cannot read config {path}: {error.strerror}') from None
 
 
-def call(config, action, args=None):
+def call(config, action, args=None, upload=False):
     if action in assistant.OWNER_ACTIONS:
         raise CliError('Owner decisions and feedback come from Telegram or the dashboard, not the CLI.')
     request = urllib.request.Request(
         f"http://127.0.0.1:{config['port']}/api/action",
         data=json.dumps({'action': action, 'args': args or {}}).encode(),
         headers={'Authorization': 'Bearer ' + assistant.credential(config, 'api-token'),
-                 'Content-Type': 'application/json', 'X-Assistant-Client': 'local-cli'})
+                 'Content-Type': 'application/json', 'X-Assistant-Client': 'local-cli', **({'X-Upload': 'skill-import'} if upload else {})})
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             return json.loads(response.read())
@@ -707,6 +707,17 @@ def cmd_skills_propose(config, args):
     print('Already proposed or on.' if out.get('duplicate') else 'Proposed: it waits for the owner\'s Approve on the dashboard (Settings, Skills).')
 
 
+def cmd_skills_found(config, args):
+    """The Find my skills turn's report: the owner's account skills it read and the ones it recommends."""
+    report = json.loads(sys.stdin.read() if args.file == '-' else Path(args.file).read_text())
+    if not isinstance(report, dict):
+        raise CliError('The report is a JSON object: {"found": [...], "recommended": [...], "browser": {...}}')
+    out = call(config, 'skill_import_report', {**report, 'run': args.run}, upload=True)
+    if args.json:
+        return out_json(out)
+    print(f"Reported: {out.get('added', 0)} skill(s) from the owner's accounts added to the list.")
+
+
 def cmd_task_import(config, args):
     """A task link someone sent by email: adding it is the owner's own step, so it opens on the dashboard."""
     invite_id, key = assistant.task_invites.parse_link(args.link)
@@ -838,6 +849,9 @@ def parser():
     c.add_argument('--description', required=True, help='one line: when to use it')
     c.add_argument('--file', required=True, help='markdown file with the instructions, or - for stdin')
     c.add_argument('--why', help='one line for the owner: what repeated work this comes from')
+    c = add('skills-found', 'Report from the Find my skills turn: the owner\'s account skills and the ones worth importing', cmd_skills_found)
+    c.add_argument('--run', required=True, help='the skills run ID from the turn\'s message')
+    c.add_argument('--file', required=True, help='the JSON report, or - for stdin')
     c = add('task-import', 'Add a task someone sent you by email, from its link (opens your dashboard to confirm)', cmd_task_import)
     c.add_argument('link', help="the task link from the email, in quotes: 'https://…/t/…#k=…'")
     c = add('service', 'The background service: status, start, stop, restart or its logs (systemd on Linux, launchd on macOS)', cmd_service)
