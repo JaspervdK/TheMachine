@@ -6496,26 +6496,51 @@ class App:
         return {'saved': str(path), 'name': name, 'mime': chosen['mime'], 'size': len(data)}
 
     def signature_view(self):
-        """Each mailbox's signature for Settings: the one set or found (cleaned HTML), and where it came from."""
+        """Each mailbox's signature for Settings: the owner's own, or the one imported from the mailbox (cleaned HTML),
+        and where it came from: owner, imported (Gmail's own), detected (Outlook's sent mail) or '' (none yet)."""
         return [{'account_id': a['id'], 'email': a.get('email', ''), 'service': a.get('service', 'gmail'),
                  'html': (entry or {}).get('html', ''), 'source': (entry or {}).get('source', ''),
                  'saveable': bool(signatures.path(self.config))}
                 for a in self.config.get('accounts', []) if next_actions.mail_account(a)
                 for entry in [signatures.get(self.config, a['id'])]]
 
+    def mailbox_signature(self, account):
+        """The signature the mailbox itself has, cleaned: Gmail's own (sendAs, read with gmail.readonly, the scope the
+        send check already uses), or for Outlook, which has no signature API, the one its sent mail ends with."""
+        if account.get('service') == 'outlook':
+            try:
+                return signatures.detect(ms_graph.sent_bodies(self.config, credential, account),
+                                         (str(self.config.get('owner_name') or '').split() or [''])[0]), 'detected'
+            except ms_graph.GraphError as error:
+                raise ValueError(f'Outlook could not be read now ({error})') from None
+        try:
+            send_as = (getattr(self, 'mail_read', None) or gog_read)(
+                self.config, account, 'gmail', 'v1', 'gmail.users.settings.sendAs.get',
+                {'userId': 'me', 'sendAsEmail': account['email']}, 'https://www.googleapis.com/auth/gmail.readonly')
+        except Exception:
+            raise ValueError('Gmail could not be read now; try again in a minute') from None
+        return signatures.clean((send_as or {}).get('signature') or ''), 'imported'
+
     def signature_action(self, name, args):
         account = next((a for a in self.config.get('accounts', []) if a['id'] == args.get('account_id') and next_actions.mail_account(a)), None)
         if not account:
             raise ValueError('Choose one of your Gmail or Outlook accounts')
         if name == 'detect_signature':
-            if account.get('service') != 'outlook':
-                raise ValueError('Gmail keeps its own signature; leave this empty to use it')
+            # Import: kept as the mailbox's signature unless the owner has their own, which stays.
+            found, source = self.mailbox_signature(account)
+            if signatures.path(self.config):
+                signatures.save(self.config, account['id'], found, source)
+            return {'html': found, 'found': bool(signatures.text(found).strip() or '<img' in found), 'source': source,
+                    'signatures': self.signature_view()}
+        if args.get('use_mailbox') is True:
+            # Back to the mailbox's own: the owner's version goes, and the mailbox's is imported again.
+            signatures.remove(self.config, account['id'])
             try:
-                found = signatures.detect(ms_graph.sent_bodies(self.config, credential, account),
-                                          (str(self.config.get('owner_name') or '').split() or [''])[0])
-            except ms_graph.GraphError as error:
-                raise ValueError(f'Outlook could not be read now ({error})') from None
-            return {'html': found, 'found': bool(found)}
+                found, source = self.mailbox_signature(account)
+                signatures.save(self.config, account['id'], found, source)
+            except ValueError:
+                pass  # read again at the next send
+            return self.signature_view()
         value = str(args.get('html') or '')
         if len(value) > signatures.MAX_HTML:
             raise ValueError('That signature is too long')
@@ -8690,7 +8715,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset','set_work_hours','set_signature','detect_signature')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

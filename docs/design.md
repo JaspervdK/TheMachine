@@ -61,8 +61,15 @@ Observed on claude.ai, claude.com and anthropic.com (public pages, light and dar
 
 ## Components
 
+- **Layout**: every tab, and Settings, uses the same reading column: `--measure` (720px) plus 24px gutters, so `main`
+  is 768px. No tab sets its own width, and the page keeps the scrollbar's room (`scrollbar-gutter: stable`), so a
+  short tab like Events doesn't shift or look narrower than a long one.
 - **Tabs**: a sunken track; the current tab gets the accent tint and ink text. On a phone the row scrolls sideways
   with a soft fade on the side that has more, and the current tab scrolls into view.
+- **Sub-tabs** (Fleet, Graph, Connections): a row of round pills under the tabs, the current one tinted, with a count
+  (orange when something needs you). It scrolls and fades like the tabs on a phone. Each pane is drawn at once and
+  shown one at a time; the choice is kept, and links open one (`#graph=roles`).
+- **Section heads**: the serif heading and its count as a small pill on one line, a one-line explainer below.
 - **Cards**: surface, 1px line, 14px radius; a slim tone mark at the top left for urgency; title in sans 600;
   body in secondary text; actions left to right, one primary.
 - **Buttons**: primary (mint fill), secondary (lifted fill and hairline), quiet (text, soft fill on hover).

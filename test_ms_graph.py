@@ -405,6 +405,43 @@ class Signatures(Base):
         self.assertEqual(len(reads), 1)
         self.assertEqual(email.signature({**action, 'signature': False}, gmail), '')
 
+    def settings_app(self, read):
+        app = types.SimpleNamespace(config=self.config, mail_read=read)
+        for name in ('mailbox_signature', 'signature_view', 'signature_action'):
+            setattr(app, name, getattr(a.App, name).__get__(app))
+        return app
+
+    def test_settings_imports_each_mailboxs_own_cleaned_and_keeps_the_owners(self):
+        gmail = {'id': 'acme-gmail', 'service': 'gmail', 'transport': 'broker', 'email': 'alex@acme.test', 'boundary': 'work:Acme'}
+        self.config['accounts'].append(gmail)
+        reads = []
+        app = self.settings_app(lambda *args: reads.append(args) or {'signature': '<b onclick="x()">Alex</b><script>steal()</script><img src="http://plain.test/t.png">'})
+        found = app.signature_action('detect_signature', {'account_id': 'acme-gmail'})
+        self.assertEqual((found['html'], found['found'], found['source']), ('<b>Alex</b><img>', True, 'imported'))
+        self.assertEqual(reads[0][4:], ('gmail.users.settings.sendAs.get', {'userId': 'me', 'sendAsEmail': 'alex@acme.test'},
+                                        'https://www.googleapis.com/auth/gmail.readonly'))  # the read-only scope it already has
+        self.assertEqual(signatures.get(self.config, 'acme-gmail')['source'], 'imported')
+        # Outlook: from the sent mail, through Graph (no send).
+        self.fake.sent_html = [SENT_SIGNED.format(n) for n in range(3)]
+        found = app.signature_action('detect_signature', {'account_id': 'acme-outlook'})
+        self.assertIn('Alex Smith', found['html']); self.assertNotIn('steal', found['html'])
+        self.assertEqual(signatures.get(self.config, 'acme-outlook')['source'], 'detected')
+        self.assertFalse([c for c in self.fake.calls if c[0] == 'POST' and c[1].startswith(G)])  # read only: nothing sent
+        # The owner's own stays through an import, is cleaned when saved, and "Use mailbox signature" brings Gmail's back.
+        app.signature_action('set_signature', {'account_id': 'acme-gmail', 'html': '<i>Mine</i><script>x()</script>'})
+        self.assertEqual(signatures.get(self.config, 'acme-gmail'), {**signatures.get(self.config, 'acme-gmail'), 'html': '<i>Mine</i>', 'source': 'owner'})
+        app.signature_action('detect_signature', {'account_id': 'acme-gmail'})
+        self.assertEqual(signatures.get(self.config, 'acme-gmail')['html'], '<i>Mine</i>')
+        view = app.signature_action('set_signature', {'account_id': 'acme-gmail', 'use_mailbox': True})
+        self.assertEqual(next(v for v in view if v['account_id'] == 'acme-gmail')['source'], 'imported')
+        self.assertEqual(signatures.get(self.config, 'acme-gmail')['html'], '<b>Alex</b><img>')
+        # A mailbox that can't be read now says so; nothing is kept.
+        signatures.remove(self.config, 'acme-gmail')
+        app.mail_read = lambda *args: (_ for _ in ()).throw(a.SourceError('network'))
+        with self.assertRaisesRegex(ValueError, 'Gmail could not be read now'):
+            app.signature_action('detect_signature', {'account_id': 'acme-gmail'})
+        self.assertIsNone(signatures.get(self.config, 'acme-gmail'))
+
 
 class Attachments(Base):
     def test_a_preparation_lists_and_saves_outlook_attachments(self):

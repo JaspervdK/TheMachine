@@ -138,8 +138,19 @@ def load(directory, states, port=8870, network_port=8871, fixture_path=HERE / 'f
     if not fresh:
         with store.connect() as db:
             graph.build(db, config, base.isoformat())
+            load_roles(db, base)
             load_skills(db, states, fixture, base)
     return config, config_path
+
+
+def load_roles(db, base):
+    """Graph > Who's who: roles a review read for the four closest people, waiting for the owner to confirm."""
+    import graph
+    roles = [('head of operations', 'I run operations here, so send the rollout plan my way.'), ('finance lead', 'Looping in finance; I sign off on the invoice.'),
+             ('product manager', 'As PM for the mobile app I own the beta list.'), ('customer success', 'I look after your account from our side.')]
+    people = db.execute("SELECT id FROM graph_nodes WHERE kind='person' ORDER BY strength DESC LIMIT 4").fetchall()
+    for (node_id,), (role, quote) in zip(people, roles):
+        graph.set_role(db, node_id, role, 'review', base.isoformat(), quote=quote)
 
 
 def load_skills(db, states, fixture, base):

@@ -1,9 +1,10 @@
-"""Email signatures per mail account, as HTML: found in the owner's own sent mail (Outlook has no signature API) or set
-on the dashboard (Settings, Signatures). For Gmail a set one overrides the sendAs signature; empty means Gmail's own.
+"""Email signatures per mail account, as HTML: imported from the mailbox (Gmail's sendAs signature; for Outlook, which has
+no signature API, found in the owner's own sent mail) or set on the dashboard (Settings, Signatures). For Gmail a set
+one overrides the sendAs signature, which is read fresh at every send; empty means Gmail's own.
 
 Kept in signatures.json next to the database (state, not a secret):
-    {"<account id>": {"html": "<div>Alex Smith<br>Acme</div>", "source": "detected" | "owner", "updated_at": "..."}}
-An owner's own entry is never replaced by a detected one. Every signature is cleaned to a small set of tags and
+    {"<account id>": {"html": "<div>Alex Smith<br>Acme</div>", "source": "imported" | "detected" | "owner", "updated_at": "..."}}
+An owner's own entry is never replaced by an imported or detected one. Every signature is cleaned to a small set of tags and
 attributes before it is stored, shown or sent: no scripts, event handlers, frames, forms or remote styles."""
 from __future__ import annotations
 
@@ -198,7 +199,8 @@ def get(config, account_id):
 
 
 def save(config, account_id, value, source):
-    """Store a cleaned signature; a detected one never replaces the owner's own. Returns the stored entry."""
+    """Store a cleaned signature; one read from the mailbox (imported or detected) never replaces the owner's own.
+    Returns the stored entry."""
     where = path(config)
     if not where:
         raise ValueError('Signatures can only be saved with a database path in config.json')
@@ -206,7 +208,7 @@ def save(config, account_id, value, source):
     with open(where.with_name(where.name + '.lock'), 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         current = load(config)
-        if source == 'detected' and (current.get(account_id) or {}).get('source') == 'owner':
+        if source != 'owner' and (current.get(account_id) or {}).get('source') == 'owner':
             return current[account_id]
         current[account_id] = {'html': clean(value), 'source': source,
                                'updated_at': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')}
@@ -216,3 +218,20 @@ def save(config, account_id, value, source):
             json.dump(current, handle, indent=2)
         os.replace(temp, where)
         return current[account_id]
+
+
+def remove(config, account_id):
+    """Forget the signature kept for this account (the owner's own included): the mailbox's own applies again."""
+    where = path(config)
+    if not where or not where.exists():
+        return
+    with open(where.with_name(where.name + '.lock'), 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = load(config)
+        if current.pop(account_id, None) is None:
+            return
+        temp = where.with_name(where.name + '.tmp')
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as handle:
+            json.dump(current, handle, indent=2)
+        os.replace(temp, where)

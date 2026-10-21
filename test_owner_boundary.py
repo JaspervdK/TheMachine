@@ -210,6 +210,17 @@ class OwnerBoundary(unittest.TestCase):
         self.assertEqual(status, 200)  # the Gateway plugin's owner tap
         self.assertEqual(len(self.decisions()), 1)
 
+    def test_the_dashboard_reaches_its_settings_actions(self):
+        # Work hours and signatures are saved from Settings: the owner's dashboard gets through, a bare token doesn't.
+        port = self.serve()
+        csrf = a.hmac.new(self.app.token.encode(), self.app.config['tailscale_owner'].encode(), a.hashlib.sha256).hexdigest()
+        owner = {'Host': 'machine.example:8443', 'Tailscale-User-Login': 'owner@example.com',
+                 'Origin': 'https://machine.example:8443', 'X-CSRF-Token': csrf}
+        for action in ('set_work_hours', 'set_signature', 'detect_signature'):
+            status, body = self.post(port, {'action': action, 'args': {'account_id': 'nobody'}}, owner)
+            self.assertNotEqual(status, 403, (action, body))
+            self.assertEqual(self.post(port, {'action': action, 'args': {}}, {'Authorization': 'Bearer ' + TOKEN})[0], 403)
+
     def test_owner_key_is_created_private(self):
         config = {'credentials': {}, 'database': str(Path(self.temp.name) / 'events.sqlite')}
         key = a.owner_credential(config)

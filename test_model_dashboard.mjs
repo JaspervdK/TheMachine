@@ -35,7 +35,8 @@ try{
  await page.locator('#open-settings').click();
  await page.locator('#model-panel strong').first().waitFor();
  const panel=await page.locator('#model-panel').textContent();
- assert.match(panel,/openai\/example-model/);
+ assert.match(panel,/^Example Model/);  // the name as people say it; the id on hover
+ assert.equal(await page.locator('#model-panel strong').first().getAttribute('title'),'openai/example-model');
  assert.match(panel,/Signed in with ChatGPT · plan: pro/);
  assert.match(panel,/5-hour limit: 100% used · resets in 2h 14m/);
  assert.match(panel,/Weekly limit: 40% used · resets in 3d 1h/);
@@ -63,6 +64,11 @@ try{
  status={...status,limit_reached:true,limit_resets_at:t+3600,can_reset:false,resets:null};
  await page.evaluate(()=>refresh());
  await page.locator('#model-panel a',{hasText:'Open ChatGPT to use a reset'}).first().waitFor();
+ // A link that looks like a button: no underline, its text centred in it, as tall as a button.
+ {const a=await page.locator('#model-panel a',{hasText:'Open ChatGPT to use a reset'}).first().evaluate(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect(),t=document.createRange();t.selectNodeContents(el);const q=t.getBoundingClientRect();
+  return {line:s.textDecorationLine,h:r.height,dx:Math.abs((q.left-r.left)-(r.right-q.right)),dy:Math.abs((q.top-r.top)-(r.bottom-q.bottom))}});
+  assert.equal(a.line,'none');assert.ok(a.h>=30&&a.dx<=2&&a.dy<=2,JSON.stringify(a))}
+ assert.equal(await page.evaluate(()=>[modelName('acme/lm-2.5-swift'),modelName('example-model'),modelName('')].join('|')),'LM-2.5 Swift|Example Model|');
  assert.equal(await page.locator('#model-panel a').first().getAttribute('href'),'https://chatgpt.com/codex/settings/usage');
  assert.match(await page.locator('#model-panel').textContent(),/Resets available: unknown/);
  // Where a run failed on the limit, Connections says so and offers the same way out.

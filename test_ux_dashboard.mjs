@@ -39,7 +39,7 @@ await page.setViewportSize({width:390,height:844});
 await page.goto('http://127.0.0.1:'+server.address().port);await page.getByText('Needs your decision',{exact:true}).last().waitFor();
 // Connected-source cards must fit a narrow phone after the design-system change.
 await page.locator('nav [data-tab="health"]').click();
-await page.locator('.health article').first().waitFor();
+await page.locator('.health article:not([hidden])').first().waitFor();
 for(const width of [320,390]){
  await page.setViewportSize({width,height:844});
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Connections overflows at '+width);
@@ -247,6 +247,7 @@ await page.evaluate(()=>refresh());
 const usage=await page.locator('#model-usage').textContent();
 assert.match(usage,/OpenAI 5-hour limit: 42% used, resets /);assert.match(usage,/OpenAI Weekly: 18% used, resets /);assert.doesNotMatch(usage,/99%/);
 assert.equal(await page.locator('#model-usage progress').count(),2);
+await page.locator('#health-tabs [data-health-pane="reviews"]').click();  // Connections > Reviews
 await page.locator('#review-run-history > summary').click();
 const runs=page.locator('#review-runs');
 assert.match(await runs.textContent(),/40 signal versions saved/);

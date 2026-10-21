@@ -84,6 +84,17 @@ def quiet_workers(app, sent):
     assistant.telegram = lambda config, row, action, message_id=None: sent.record('telegram', {'card': row.get('id') if hasattr(row, 'get') else None}) and {}
 
 
+def seed_model(app):
+    """Settings > Model: a made-up model on a signed-in plan, a limit half used and no resets left."""
+    reset = int(time.time()) + 3 * 3600
+    app.model_status = {'model': 'acme/lm-2.5-swift', 'provider': 'acme', 'chatgpt': True, 'plan': 'plus',
+                        'windows': [{'label': '5h', 'used': 46, 'reset': reset}, {'label': 'Week', 'used': 12, 'reset': reset + 5 * 86400}],
+                        'limit_reached': False, 'limit_resets_at': None, 'resets': {'available': 0, 'credits': []}, 'can_reset': False,
+                        'usage_page': 'https://chatgpt.example/usage', 'checked_at': dt.datetime.now(dt.timezone.utc).isoformat()}
+    # Settings > Signatures imports the mailbox's own: a made-up Gmail signature, no Google call.
+    app.mail_read = lambda config, account, *a: {'signature': '<div><b>Alex Morgan</b></div><div style="color:#4e6b34">Lumen Labs</div><div><a href="https://lumenlabs.example">lumenlabs.example</a></div>'}
+
+
 def proxy(public_port, app_port, config):
     """Signs each request in as the owner on the dashboard's own host (what Tailscale Serve does for real)."""
     host, owner = config['dashboard_host'], config['tailscale_owner']
@@ -202,6 +213,7 @@ def main():
     sent = Sent(directory / 'sent.jsonl')
     app = assistant.App(config, config_path)
     quiet_workers(app, sent)
+    seed_model(app)
     fixture = json.loads((HERE / 'fixture.json').read_text())
     net = None
     if load.groups(states):
