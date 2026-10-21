@@ -90,6 +90,26 @@ class Discovery(unittest.TestCase):
         with self.store.connect() as db:
             self.assertIn(f'Checked {len(contacts)} contacts privately; 3 on the Network', [r['what'] for r in db.execute('SELECT what FROM fleet_log')])
 
+    def test_a_failing_lookup_is_logged_once_and_tried_again(self):
+        import urllib.error
+        self.fleet.network_action('find_on')
+        self.fleet._set_network(last='2000-01-01T00:00:00+00:00')
+        real, sent = self.relay.call, len(self.relay.sent('/discover'))
+
+        def cut(method, path, body=None, timeout=40):
+            if path == '/discover':
+                raise urllib.error.URLError(ConnectionResetError(104, 'Connection reset by peer'))
+            return real(method, path, body, timeout)
+        self.relay.call = cut
+        with self.assertLogs(fleet.LOG.name, 'INFO') as logs:
+            for _ in range(3):
+                self.fleet.discovery_step()  # the rest of the step goes on
+            self.relay.call = real
+            self.fleet.discovery_step()
+        self.assertEqual([m.split(':', 2)[2] for m in logs.output],
+                         ['network discovery failed error=URLError; tried again every round', 'network discovery works again'])
+        self.assertEqual(len(self.relay.sent('/discover')), sent + 2)  # the lookup was done once it worked: match and resolve
+
     def test_connect_later_never(self):
         self.fleet.network_action('find_on')
         self.assertEqual(self.fleet.network_action('connect', 'nia@nia.example', 'family'), {'status': 'requested', 'relation': 'family'})

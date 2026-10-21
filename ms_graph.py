@@ -36,6 +36,7 @@ import os
 import re
 import threading
 import time
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -80,6 +81,7 @@ LINK_HOSTS = ('outlook.office.com', 'outlook.office365.com', 'outlook.live.com')
 # within this window a broker account's refused sign-in is retried with backoff (each wait as long as the account's age) before it
 # counts as expired.
 SETTLE_SECONDS = 900
+MAX_RESPONSE = 40_000_000  # Never save an oversized response as a successful partial file.
 _tokens: dict = {}
 _folders: dict = {}
 _lock = threading.Lock()
@@ -185,11 +187,16 @@ def save_signin(path, refresh_token, scopes):
     """Write the sign-in (mode 600, atomically): the refresh token and the scopes Microsoft granted."""
     path = Path(path).expanduser()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temp = path.with_name(path.name + '.tmp')
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as handle:
-        json.dump({'refresh_token': refresh_token, 'scopes': sorted(scopes)}, handle)
-    os.replace(temp, path)
+    fd, temp = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            json.dump({'refresh_token': refresh_token, 'scopes': sorted(scopes)}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
 
 
 def short_scopes(text):
@@ -235,8 +242,23 @@ def scopes(config, credential, account):
     raise GraphError('unsupported_transport')
 
 
+def _connection_key(config, account):
+    """Cache only within one account connection, including reconnects and rotated credential files."""
+    transport = account.get('transport')
+    name = 'microsoft-broker' if transport == 'broker' else account.get('credential') or credential_name(account['email'])
+    path = str((config.get('credentials') or {}).get(name) or '')
+    try:
+        stat = Path(path).expanduser().stat()
+        version = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        version = None
+    app = config.get('microsoft_graph') or {}
+    return (account.get('id'), account['email'].lower(), transport, account.get('connected_at'), path, version,
+            (config.get('microsoft_broker') or {}).get('url'), app.get('client_id'), app.get('tenant'))
+
+
 def token(config, credential, account, scope, fresh=False):
-    key = (account['email'].lower(), scope)
+    key = (_connection_key(config, account), scope)
     with _lock:
         hit = _tokens.get(key)
         if hit and not fresh and hit[1] > time.monotonic():
@@ -256,6 +278,7 @@ def token(config, credential, account, scope, fresh=False):
     if not answer.get('access_token'):
         raise GraphError('microsoft_broker')
     with _lock:
+        key = (_connection_key(config, account), scope)  # refresh may have rotated the credential file
         _tokens[key] = (answer['access_token'], time.monotonic() + max(0, int(answer.get('expires_in') or 0) - 120))
     return answer['access_token']
 
@@ -303,13 +326,15 @@ def call(config, credential, account, method, params=None, body=None, write=Fals
             **({'Content-Type': kind} if kind else {})})
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                payload = response.read(40_000_000)
+                payload = response.read(MAX_RESPONSE + 1)
+                if len(payload) > MAX_RESPONSE:
+                    raise GraphError('response_too_large')
                 return payload if raw else json.loads(payload or b'{}')
         except urllib.error.HTTPError as error:
             error.close()
             if error.code == 401 and not attempt and not write:
                 continue  # the access token expired early: one fresh one, for reads only
-            raise GraphError('outlook', error.code) from None
+            raise GraphError('outlook', error.code, retry_after=_retry_after(error.headers) if error.code in (429, 503) else None) from None
         except (urllib.error.URLError, TimeoutError, OSError):
             raise GraphError('timeout') from None
         except ValueError:
@@ -323,7 +348,7 @@ def identity(me):
 
 def folders(config, credential, account):
     """The well-known folders' IDs for this mailbox, looked up once per run."""
-    key = account['email'].lower()
+    key = _connection_key(config, account)
     with _lock:
         if key in _folders:
             return _folders[key]
@@ -335,7 +360,7 @@ def folders(config, credential, account):
             if error.status != 404:
                 raise
     with _lock:
-        _folders[key] = found
+        _folders[_connection_key(config, account)] = found
     return found
 
 
@@ -366,11 +391,22 @@ def web_link(url):
 
 def attachments(config, credential, account, message_id):
     """A message's attachments: files can be saved; links to cloud files and attached emails or events can't."""
-    page = call(config, credential, account, 'attachments.list', {'id': message_id, '$select': 'id,name,contentType,size,isInline'})
+    params = {'id': message_id, '$select': 'id,name,contentType,size,isInline'}
     kinds = {'#microsoft.graph.fileAttachment': 'file', '#microsoft.graph.itemAttachment': 'item', '#microsoft.graph.referenceAttachment': 'link'}
-    return [{'id': a.get('id'), 'name': str(a.get('name') or 'attachment')[:200], 'mime': str(a.get('contentType') or 'application/octet-stream')[:100],
-             'size': int(a.get('size') or 0), 'inline': bool(a.get('isInline')), 'kind': kinds.get(a.get('@odata.type'), 'file')}
-            for a in page.get('value', [])]
+    found = []
+    seen = set()
+    while True:
+        page = call(config, credential, account, 'attachments.list', params)
+        found.extend({'id': a.get('id'), 'name': str(a.get('name') or 'attachment')[:200], 'mime': str(a.get('contentType') or 'application/octet-stream')[:100],
+                      'size': int(a.get('size') or 0), 'inline': bool(a.get('isInline')), 'kind': kinds.get(a.get('@odata.type'), 'file')}
+                     for a in page.get('value', []))
+        link = page.get('@odata.nextLink')
+        if not link:
+            return found
+        if link in seen:
+            raise GraphError('repeated_graph_page')
+        seen.add(link)
+        params = {'id': message_id, '$link': link}
 
 
 def sent_bodies(config, credential, account, count=10):
@@ -386,7 +422,7 @@ def sent_bodies(config, credential, account, count=10):
 
 
 def attachment(config, credential, account, message_id, attachment_id):
-    """One file attachment's bytes, whatever its size (the raw $value, not base64 contentBytes)."""
+    """One file attachment's bytes (raw $value); over MAX_RESPONSE is an explicit failure, never a partial file."""
     return call(config, credential, account, 'attachments.value', {'id': message_id, 'attachment': attachment_id}, raw=True, timeout=120)
 
 

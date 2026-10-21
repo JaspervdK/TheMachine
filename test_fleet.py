@@ -550,15 +550,54 @@ class TwoNodes(unittest.TestCase):
         self.assertEqual((len(self.boxes[self.MAIN]), self.boxes[self.SECOND]), (1, {}))
         self.assertEqual(self.client.sticky, {})
 
+    def test_ambiguous_url_error_does_not_send_the_question_to_another_node(self):
+        import urllib.error
+        from unittest.mock import patch
+        with patch.object(self.client, '_call', side_effect=urllib.error.URLError(TimeoutError('connection timed out'))) as called:
+            with self.assertRaises(fleet.Unavailable):
+                self.client.call('POST', '/ask', {'kind': 'todo', 'request_id': 'e' * 32})
+        self.assertEqual([c.args[0] for c in called.call_args_list], [self.MAIN])
+
+    def test_an_unknown_or_known_receipt_keeps_its_node_after_restart(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as folder:
+            store = a.Store(Path(folder) / 'events.sqlite')
+            before = fleet.NetworkClient(self.MAIN, lambda: 'test', [self.SECOND], connect=store.connect)
+            with patch.object(before, '_call', side_effect=TimeoutError('response was lost')):
+                with self.assertRaises(fleet.Unavailable):
+                    before.call('POST', '/ask', {'kind': 'todo', 'request_id': 'f' * 32})
+            after = fleet.NetworkClient(self.MAIN, lambda: 'test', [self.SECOND], connect=store.connect)
+            self.down.add(self.MAIN)
+            with self.assertRaises(fleet.Unavailable):
+                after.call('POST', '/ask', {'kind': 'todo', 'request_id': 'f' * 32})
+            self.assertNotIn(self.SECOND, [b for b, *_ in self.seen])
+            self.down.clear()
+            after.call('POST', '/ask', {'kind': 'todo', 'request_id': 'f' * 32})
+            # Receipt returned, but the caller was interrupted before saving it locally: the node still belongs to this request.
+            again = fleet.NetworkClient(self.SECOND, lambda: 'test', [self.MAIN], connect=store.connect)
+            again.call('POST', '/ask', {'kind': 'todo', 'request_id': 'f' * 32})
+            self.assertEqual(self.boxes[self.SECOND], {})
+
     def test_the_main_node_is_tried_first_again_after_a_while(self):
         self.down.add(self.MAIN)
-        self.client.call('GET', '/directory')
+        self.client.call('GET', '/inbox?wait=0')
         self.assertEqual(self.client.url, self.SECOND)
         self.down.clear()
         self.client.switched -= fleet.HOME_AFTER + 1
-        self.client.call('GET', '/directory')
+        self.client.call('GET', '/inbox?wait=0')
         self.assertEqual(self.client.url, self.MAIN)
 
+
+    def test_what_only_the_main_node_does_never_goes_to_the_second(self):
+        self.down.add(self.MAIN)
+        with self.assertRaises(fleet.Unavailable):
+            self.client.call('POST', '/discover', {'action': 'match', 'items': [], 'buckets': []})
+        self.assertEqual({b for b, *_ in self.seen}, {self.MAIN})
+        self.client.call('POST', '/ask', {'kind': 'todo', 'request_id': 'd' * 32})  # what it serves still goes there
+        with self.assertRaises(fleet.Unavailable):  # and only the main node is asked, even while the second one is in use
+            self.client.call('GET', '/directory')
+        self.assertEqual(self.seen[-1][:3], (self.MAIN, 'GET', '/directory'))
+        self.down.clear()
 
 A, B = 'fl_' + 'a' * 16, 'fl_' + 'b' * 16
 

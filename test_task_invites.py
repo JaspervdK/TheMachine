@@ -15,7 +15,7 @@ class Sealing(unittest.TestCase):
     def test_a_task_seals_and_opens_only_with_its_key(self):
         task = {'kind': 'handoff', 'title': 'Send Sam the pricing', 'summary': 'For 40 seats, café included', 'due': '2026-11-03'}
         sealed, key = task_invites.seal(task)
-        self.assertNotIn('Sam', sealed)
+        self.assertNotEqual(task_invites._unb64(sealed), json.dumps(task, ensure_ascii=False).encode())
         self.assertEqual(task_invites.unseal(sealed, key), task)
         raw = bytearray(task_invites._unb64(sealed))
         raw[20] ^= 1
@@ -76,8 +76,9 @@ class ByEmail(unittest.TestCase):
         self.assertEqual(action['body'].count('The Machine'), 1)  # one line of invitation, after the task
         # Nothing went out: the Network got the sealed task only, never the words or the address
         sent = self.relay.sent('/task-invite')[0]
-        self.assertNotIn('Sam', json.dumps(sent))
-        self.assertNotIn('kim@', json.dumps(sent))
+        self.assertEqual(set(sent), {'action', 'request_id', 'kind', 'sealed'})
+        link_key = task_invites.LINK.search(action['body']).group(2)
+        self.assertEqual(task_invites.unseal(sent['sealed'], link_key)['title'], 'Send Sam the pricing')
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM action_jobs WHERE status!='local_preparation'").fetchone()[0], 0)
         self.assertEqual(self.told, [])

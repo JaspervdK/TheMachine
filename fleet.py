@@ -42,6 +42,7 @@ import json
 import logging
 import re
 import secrets
+import socket
 import threading
 import traceback
 import urllib.error
@@ -165,6 +166,9 @@ MAIN_HOSTS = ('network.themachine.computer', 'relay.themachine.computer', 'app.t
 DRAIN_EVERY = 60   # seconds between looks into the other nodes' mailboxes
 HOME_AFTER = 300   # seconds on another node before the first endpoint is tried first again
 TAP_TIMEOUT = 8   # seconds per Network endpoint for a Telegram tap: the bridge waits 30 for the whole answer
+# What the second node serves (the control plane's cloud/standby.py ROUTES); anything else is the main node's only, so
+# it never goes there (it would say 503: "on its standby node for a moment").
+STANDBY_ROUTES = {('GET', '/inbox'), ('POST', '/ask'), ('POST', '/answer'), ('POST', '/ack'), ('POST', '/delivery')}
 
 
 def reachable(url):
@@ -290,8 +294,9 @@ class NetworkClient:
     - an answer goes to whichever node has its question (the others say 404); when that node is away the answer waits
       in the outbox (network.py), so it is never given up because another node doesn't know the question;
     - the inbox looks into the other nodes' mailboxes every DRAIN_EVERY seconds, and an ack goes to every node;
-    - a question that came through two nodes (the same request id) is taken once (Fleet.step)."""
-    def __init__(self, url, token, others=()):
+    - a question that came through two nodes (the same request id) is taken once (Fleet.step);
+    - what only the main node does (STANDBY_ROUTES has what the second one serves) never goes to the second node."""
+    def __init__(self, url, token, others=(), connect=None):
         import time
         self.urls = [u.rstrip('/') for u in [url, *others] if u]
         self.urls = [u for i, u in enumerate(self.urls) if u not in self.urls[:i]]
@@ -300,6 +305,25 @@ class NetworkClient:
         self.switched, self.drained = 0.0, 0.0
         self.sticky = {}  # request id -> the node that may have taken it already
         self.clock = time.monotonic
+        self.connect = connect
+        if connect:
+            with connect() as db:
+                db.execute('CREATE TABLE IF NOT EXISTS network_request_nodes(request_id TEXT PRIMARY KEY,node TEXT NOT NULL,at TEXT NOT NULL)')
+                self.sticky.update((r[0], r[1]) for r in db.execute('SELECT request_id,node FROM network_request_nodes'))
+
+    def _bind(self, request_id, url):
+        self.sticky[request_id] = node(url)
+        if self.connect:
+            with self.connect() as db:
+                db.execute('INSERT INTO network_request_nodes(request_id,node,at) VALUES(?,?,?) '
+                           'ON CONFLICT(request_id) DO UPDATE SET node=excluded.node,at=excluded.at', (request_id, node(url), now()))
+
+    def _unbind(self, request_id):
+        self.sticky.pop(request_id, None)
+        if self.connect:
+            with self.connect() as db:
+                db.execute('DELETE FROM network_request_nodes WHERE request_id=?', (request_id,))
+
 
     def call(self, method, path, body=None, timeout=40):
         route = path.split('?', 1)[0]
@@ -310,7 +334,7 @@ class NetworkClient:
         if method == 'POST' and route == '/ack':
             return self._everywhere(method, path, body, timeout)
         request_id = body.get('request_id') if route == '/ask' and isinstance(body, dict) else None
-        found = self._failover(method, path, body, timeout, request_id)
+        found = self._failover(method, path, body, timeout, request_id, (method, route) not in STANDBY_ROUTES)
         if len({node(u) for u in self.urls}) > 1:
             if method == 'GET' and route == '/inbox':
                 found = self._drain(path, found)
@@ -318,24 +342,29 @@ class NetworkClient:
                 found = self._delivery(path, body, found)
         return found
 
-    def _failover(self, method, path, body, timeout, request_id=None):
+    def _failover(self, method, path, body, timeout, request_id=None, main_only=False):
         only = self.sticky.get(request_id) if request_id else None
-        urls = [u for u in self.urls if only is None or node(u) == only]
+        urls = [u for u in self.urls if (only is None or node(u) == only) and not (main_only and node(u) == node(NETWORK2 + '/'))]
         last = None
         while urls:
             url = urls.pop(0)
             try:
+                was_bound = bool(request_id and request_id in self.sticky)
+                if request_id:
+                    self._bind(request_id, url)  # commit before the POST, not after a lost response
                 found = self._call(url, method, path, body, timeout)
             except (Unavailable, urllib.error.URLError, OSError) as error:
                 last = error
                 if request_id and not self._surely_not_taken(error):
-                    self.sticky[request_id] = node(url)  # it may be there: ask that node again, never another one
+                    self._bind(request_id, url)  # it may be there: ask that node again, never another one
                     urls = [u for u in urls if node(u) == node(url)]
+                elif request_id and not was_bound:
+                    self._unbind(request_id)  # this first attempt definitely did not land
                 if urls:
                     LOG.info('network endpoint away, trying the next one')
                 continue
-            if request_id:
-                self.sticky.pop(request_id, None)
+            if request_id and not self.connect:
+                self.sticky.pop(request_id, None)  # production keeps the binding for the 30-day replay window
             self._use(url)
             return found
         if request_id in self.sticky and not isinstance(last, Unavailable):  # unsure: the caller sees "try again"
@@ -345,7 +374,9 @@ class NetworkClient:
     @staticmethod
     def _surely_not_taken(error):
         """No connection (urllib wraps what fails before the request is sent), or the proxy saying the node is down."""
-        return isinstance(error, urllib.error.URLError) and not isinstance(error, urllib.error.HTTPError) or \
+        reason = getattr(error, 'reason', None)
+        return (isinstance(error, urllib.error.URLError) and not isinstance(error, urllib.error.HTTPError)
+                and isinstance(reason, (ConnectionRefusedError, socket.gaierror))) or \
             isinstance(error, Unavailable) and getattr(error, 'code', None) in (502, 503)
 
     def _use(self, url):
@@ -1462,7 +1493,7 @@ def brief_text(view, today=None, hidden=()):
 class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, family.Family):
     def __init__(self, connect, config, token, relay=None):
         self.connect, self.config = connect, config
-        self.relay = relay or NetworkClient(settings(config)['url'], token, endpoints(config))
+        self.relay = relay or NetworkClient(settings(config)['url'], token, endpoints(config), connect=connect)
         if relay is None or config.get('network_keys'):  # end-to-end sealing, an outbox and delivery state (network.py)
             self.relay = network.wrap(self.relay, self, config)
         self.lock = threading.Lock()
@@ -2392,6 +2423,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
             # The same question through two Network nodes (asked again on the second after an unsure first try): once
             twin = ask.get('request_id') and 'request:' + ':'.join(str(ask.get(k) or '') for k in ('fleet_id', 'from', 'request_id'))
             if sealing and twin and sealing.taken(twin):
+                sealing.alias(ask['id'], twin)
                 sealing.take(ask['id'])
                 LOG.warning('network question came twice member=%s', ask.get('from'))
                 continue
@@ -2400,7 +2432,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
                 if sealing and ask.get('id'):
                     sealing.take(ask['id'])
                     if twin:
-                        sealing.take(twin)
+                        sealing.take(twin, canonical=ask['id'])
             except (ValueError, KeyError, TypeError) as error:
                 LOG.error('fleet ask error=%s', type(error).__name__)
         acknowledged = {'answers': [], 'notices': []}
@@ -2446,7 +2478,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
             self.family_reminders()
         if stamp - self.last.get('network', 0.0) > MEETINGS_EVERY or not wait:
             self.last['network'] = stamp
-            self.discovery_round()  # finding people you know on the Network (discovery.py), when the owner turned it on
+            self.discovery_step()
         if stamp - self.last['briefs'] > 60 or not wait:
             self.last['briefs'] = stamp
             self.brief_round()
@@ -2455,6 +2487,22 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
             self.delivery_round()
             sealing.tidy()
         return found
+
+    def discovery_step(self):
+        """Finding people you know on the Network (discovery.py), when the owner turned it on. A lookup that fails is
+        tried again next round without holding up the rest of the step, and logged once until it works again."""
+        try:
+            self.discovery_round()
+        except Off:
+            raise
+        except Exception as error:
+            if not getattr(self, 'discovery_failing', False):
+                LOG.info('network discovery failed error=%s; tried again every round', type(error).__name__)
+            self.discovery_failing = True
+            return
+        if getattr(self, 'discovery_failing', False):
+            LOG.info('network discovery works again')
+        self.discovery_failing = False
 
     def delivery_round(self):
         """Where this Machine's open questions are on the Network, so the owner sees "not delivered yet" (docs/network.md)."""

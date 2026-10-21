@@ -20,7 +20,7 @@ from pathlib import Path
 MAX_HTML = 20000
 TAGS = {'a', 'b', 'strong', 'i', 'em', 'u', 'br', 'p', 'div', 'span', 'font', 'small', 'big', 'sub', 'sup', 'hr', 'img',
         'table', 'thead', 'tbody', 'tr', 'td', 'th', 'ul', 'ol', 'li', 'blockquote', 'center', 'h1', 'h2', 'h3', 'h4'}
-VOID = {'br', 'hr', 'img'}
+VOID = {'br', 'hr', 'img', 'meta', 'link', 'base', 'input', 'embed'}
 DROP = {'script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'svg', 'math',
         'template', 'noscript', 'head', 'title', 'meta', 'link', 'base'}  # removed with everything inside them
 ATTRS = {'href', 'src', 'alt', 'title', 'width', 'height', 'style', 'color', 'face', 'size', 'align', 'valign', 'border',
@@ -57,12 +57,15 @@ class _Cleaner(HTMLParser):
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
-        if tag not in VOID and self.open and self.open[-1] == tag:
+        if tag in DROP and tag not in VOID:
+            self.handle_endtag(tag)
+        elif tag not in VOID and self.open and self.open[-1] == tag:
             self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
         if tag in DROP:
-            self.dropping = max(0, self.dropping - 1)
+            if tag not in VOID:
+                self.dropping = max(0, self.dropping - 1)
             return
         if self.dropping or tag not in self.open:
             return

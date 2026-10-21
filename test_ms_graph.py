@@ -197,6 +197,41 @@ class Calls(Base):
         ms_graph._tokens.clear()
         self.assertEqual(onboarding.check(self.config, self.cal), 'microsoft_scope_not_granted:HTTP_403')
 
+    def test_access_and_folder_caches_do_not_cross_independent_connections(self):
+        other = {**self.config, 'microsoft_broker': {'url': 'https://other.example/token'}}
+        with mock.patch.object(ms_graph, '_broker', side_effect=lambda config, *args: {'access_token': config['microsoft_broker']['url'], 'expires_in': 3600}):
+            first = ms_graph.token(self.config, a.credential, self.mail, 'Mail.Read')
+            second = ms_graph.token(other, a.credential, self.mail, 'Mail.Read')
+        self.assertNotEqual(first, second)
+        with mock.patch.object(ms_graph, 'call', side_effect=lambda config, *args: {'id': config['microsoft_broker']['url']}):
+            self.assertNotEqual(ms_graph.folders(self.config, a.credential, self.mail), ms_graph.folders(other, a.credential, self.mail))
+
+    def test_reconnecting_invalidates_the_cached_access(self):
+        with mock.patch.object(ms_graph, '_broker', side_effect=[{'access_token': 'first', 'expires_in': 3600}, {'access_token': 'second', 'expires_in': 3600}]):
+            first = ms_graph.token(self.config, a.credential, self.mail, 'Mail.Read')
+            second = ms_graph.token(self.config, a.credential, {**self.mail, 'connected_at': '2026-10-21T09:00:00Z'}, 'Mail.Read')
+        self.assertNotEqual(first, second)
+
+    def test_graph_throttle_preserves_the_requested_wait(self):
+        with mock.patch.object(ms_graph.urllib.request, 'urlopen', side_effect=urllib.error.HTTPError(G, 429, 'busy', {'Retry-After': '420'}, io.BytesIO())):
+            with mock.patch.object(ms_graph, 'token', return_value='test'):
+                with self.assertRaises(ms_graph.GraphError) as got:
+                    ms_graph.call(self.config, a.credential, self.mail, 'me')
+        self.assertEqual(got.exception.retry_after, 420)
+
+    def test_oversized_raw_response_never_becomes_a_successful_partial_file(self):
+        with mock.patch.object(ms_graph, 'token', return_value='test'), mock.patch.object(ms_graph.urllib.request, 'urlopen', return_value=Response(b'x' * 40_000_001)):
+            with self.assertRaises(ms_graph.GraphError):
+                ms_graph.call(self.config, a.credential, self.mail, 'messages.mime', {'id': 'm1'}, raw=True)
+
+    def test_attachment_listing_follows_every_page_and_keeps_call_scope(self):
+        link = G + '/me/messages/m1/attachments?$skip=1'
+        pages = [{'value': [{'id': 'one', 'name': 'one.pdf'}], '@odata.nextLink': link}, {'value': [{'id': 'two', 'name': 'two.pdf'}]}]
+        with mock.patch.object(ms_graph, 'call', side_effect=pages) as called:
+            found = ms_graph.attachments(self.config, a.credential, self.mail, 'm1')
+        self.assertEqual([f['id'] for f in found], ['one', 'two'])
+        self.assertEqual(called.call_args_list[1].args[4], {'id': 'm1', '$link': link})
+
     def test_a_refused_sign_in_right_after_connecting_retries_with_backoff(self):
         def ago(seconds):
             return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)).isoformat()
@@ -382,6 +417,12 @@ class Signatures(Base):
                                    '<img src="http://plain.test/t.png"><img src="cid:logo"><div style="background:url(x)">t</div><iframe>in</iframe>')
         self.assertEqual(cleaned, '<b>Alex</b><a>a</a><img><img src="cid:logo"><div>t</div>')
 
+    def test_dropped_void_elements_do_not_swallow_the_signature(self):
+        for tag in ('meta', 'link', 'base', 'input', 'embed'):
+            self.assertEqual(signatures.clean(f'<{tag}><b>Alex</b>'), '<b>Alex</b>')
+        self.assertEqual(signatures.clean('<head><meta></head><body>Alex</body>'), 'Alex')
+        self.assertEqual(signatures.clean('<script/><b>Alex</b>'), '<b>Alex</b>')
+
     def test_found_only_when_it_repeats_and_without_the_closing(self):
         plain = [f'<div>Note {n}.</div><div>Cheers,</div><div>Alex</div><div><b>Alex Smith</b></div><div>Acme</div>'
                  '<div id="appendonsend"></div><div>quoted <b>Someone Else</b></div>' for n in range(3)]
@@ -483,7 +524,7 @@ class BriefLinks(Base):
         opener = fleet.Fleet.brief_opener(types.SimpleNamespace(config=self.config, connect=self.store.connect))
         self.assertEqual(opener('client.test'), 'https://outlook.office365.com/owa/?ItemID=m1')
         self.assertTrue(opener('other.test').startswith('https://mail.google.com/'))
-        view = {'unanswered': [{'org': 'Client', 'domain': 'client.test', 'count': 1, 'since': '2099-01-01', 'who': ['You']}]}
+        view = {'unanswered': [{'org': 'Client', 'domain': 'client.test', 'count': 1, 'since': '2099-01-01', 'who': ['You'], 'shared': ['sales']}]}
         items = fleet.brief_items(view, fleet.dt.date(2099, 1, 5), (), opener)
         self.assertEqual(items[0]['open'], 'https://outlook.office365.com/owa/?ItemID=m1')
         self.assertTrue(fleet.brief_items(view, fleet.dt.date(2099, 1, 5))[0]['open'].startswith('https://mail.google.com/'))
@@ -558,6 +599,14 @@ class OwnApp(unittest.TestCase):
                 ms_graph.token(self.config, a.credential, self.account, 'Mail.Read')
         self.assertTrue(caught.exception.category.startswith('outlook:microsoft_signin_expired'))
         self.assertEqual(caught.exception.retry_after, 3600)
+
+    def test_signin_save_does_not_follow_an_old_temporary_symlink(self):
+        elsewhere = Path(self.temp.name) / 'unrelated'
+        elsewhere.write_text('leave me')
+        self.path.with_name(self.path.name + '.tmp').symlink_to(elsewhere)
+        ms_graph.save_signin(self.path, 'new-test-refresh', ['User.Read'])
+        self.assertEqual(elsewhere.read_text(), 'leave me')
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
     def test_setup_names_what_is_missing(self):
         self.assertEqual(onboarding.missing(self.config, self.account), 'no microsoft-alex-acme-test credential yet')

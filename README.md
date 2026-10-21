@@ -172,3 +172,7 @@ Report ordinary bugs through the dashboard's [GitHub issue link](https://github.
 ## License
 
 MIT: [LICENSE](LICENSE). OpenClaw and optional components: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Names, branding and the hosted service have separate terms: [TRADEMARKS.md](TRADEMARKS.md). Website: [themachine.computer](https://themachine.computer).
+
+## Outlook reliability
+
+Microsoft access and folder caches are isolated by account, connection and credential revision. Reconnecting invalidates old cache entries. Attachment lists follow every Graph page; responses over 40 MB fail clearly rather than creating partial files. Graph throttling preserves the requested retry wait. Signatures keep ordinary HTML after removed void tags. These are reliability checks, not new owner approvals.

@@ -45,8 +45,8 @@ its own implementation of the same standard algorithms.
   when one is away.
 - **Two nodes in two clouds.** The Network runs on a main node and a standby node with another provider
   (`network2.themachine.computer`), both built in. When the main node is away your Machine uses the standby, which
-  carries sealed questions and answers only (pairing, keys, claims and the directory wait for the main node; your
-  Machine keeps its directory from before). Nothing is lost or done twice: a question moves to the standby only when
+  carries sealed questions and answers only (pairing, keys, claims, finding people and the directory wait for the main
+  node and never go to the standby; your Machine keeps its directory from before). Nothing is lost or done twice: a question moves to the standby only when
   the main node surely didn't take it, an answer goes to the node that has its question (or waits in the outbox until
   that node is back), your Machine looks into both mailboxes, and a question that came through both is taken once.
   After 5 minutes it tries the main node first again.
@@ -74,3 +74,7 @@ tried when the new one can't be reached, so Machines from before the rename carr
 Private Network keys are written atomically on first use; concurrent starts use one pair, and a malformed key file is reported instead of silently rotating identity. Plain exports omit these keys even at a custom configured path; encrypted `--keys` exports carry them (also from a custom path) and the import restores them next to the database. Outbound reply intent is committed before delivery and retained after interruption. A stale flush cannot erase a newer queued reply. Family requests keep their request identity after a failed response and obtain a new one only once the local receipt is saved.
 
 Import restores external Network keys into the new data folder even when their old path still exists. If a credential has the same filename, the identity goes in `network-identity/` instead; neither overwrites the other. Plain imports do not point back at the exporting Machine’s external identity.
+
+## Restart-safe node ownership
+
+Request-to-node identity is saved before a question is sent and kept through restarts and local receipt commits. An ambiguous connection failure stays on that node; a definite refused connection may use the next one. Duplicate deliveries keep one owner choice and receive the same final answer on both nodes. Discovery and membership operations stay on the main node. Replay bindings, duplicate mappings and saved reply receipts expire after 30 days in the local private database. No extra approval tier is added.

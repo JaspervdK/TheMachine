@@ -31,6 +31,9 @@ SCHEMA = '''
 CREATE TABLE IF NOT EXISTS network_outbox(key TEXT PRIMARY KEY,method TEXT NOT NULL,path TEXT NOT NULL,body TEXT NOT NULL,
   tries INTEGER NOT NULL DEFAULT 0,next_at TEXT NOT NULL,created_at TEXT NOT NULL,error TEXT);
 CREATE TABLE IF NOT EXISTS network_taken(ask_id TEXT PRIMARY KEY,at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS network_twins(request_key TEXT PRIMARY KEY,ask_id TEXT NOT NULL,at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS network_aliases(ask_id TEXT PRIMARY KEY,original_id TEXT NOT NULL,at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS network_replies(ask_id TEXT PRIMARY KEY,body TEXT NOT NULL,at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS network_pins(member_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,keys TEXT NOT NULL,name TEXT,
   first_at TEXT NOT NULL,changed_at TEXT);
 CREATE TABLE IF NOT EXISTS network_sealed(ask_id TEXT PRIMARY KEY,kind TEXT NOT NULL,asker TEXT NOT NULL,me TEXT NOT NULL,at TEXT NOT NULL);
@@ -194,6 +197,33 @@ class Sealing:
         body = dict(body or {})
         ask_id = str(body.get('id') or '')
         with self.fleet.connect() as db:
+            previous = db.execute('SELECT body FROM network_replies WHERE ask_id=?', (ask_id,)).fetchone()
+            if previous and body.get('status') == 'waiting' and json.loads(previous[0]).get('status') != 'waiting':
+                body = json.loads(previous[0])  # an old waiting acknowledgement cannot undo the final result
+            db.execute('INSERT INTO network_replies(ask_id,body,at) VALUES(?,?,?) '
+                       'ON CONFLICT(ask_id) DO UPDATE SET body=excluded.body,at=excluded.at', (ask_id, json.dumps(body), now()))
+            aliases = [r[0] for r in db.execute('SELECT ask_id FROM network_aliases WHERE original_id=?', (ask_id,))]
+        result = self._answer_one(body, timeout)
+        for alias in aliases:
+            self._answer_one({**body, 'id': alias}, timeout)
+        return result
+
+    def alias(self, ask_id, request_key):
+        """Another node delivered the same request: keep one owner choice and answer both deliveries."""
+        with self.fleet.connect() as db:
+            original = db.execute('SELECT ask_id FROM network_twins WHERE request_key=?', (request_key,)).fetchone()
+            if not original:
+                return  # older taken records had no original-id mapping
+            original_id = original[0]
+            db.execute('INSERT OR IGNORE INTO network_aliases(ask_id,original_id,at) VALUES(?,?,?)', (ask_id, original_id, now()))
+            saved = db.execute('SELECT body FROM network_replies WHERE ask_id=?', (original_id,)).fetchone()
+        if saved:
+            self._answer_one({**json.loads(saved[0]), 'id': ask_id}, 30)
+
+    def _answer_one(self, body, timeout):
+        body = dict(body or {})
+        ask_id = str(body.get('id') or '')
+        with self.fleet.connect() as db:
             row = db.execute('SELECT * FROM network_sealed WHERE ask_id=?', (ask_id,)).fetchone()
         if body.get('answer') is not None:  # sealed for the asking Machine, or not sent at all
             keys = self._keys_of(row['asker']) if row else None
@@ -310,15 +340,21 @@ class Sealing:
         with self.fleet.connect() as db:
             return bool(db.execute('SELECT 1 FROM network_taken WHERE ask_id=?', (str(ask_id),)).fetchone())
 
-    def take(self, ask_id):
+    def take(self, ask_id, canonical=None):
         with self.fleet.connect() as db:
             db.execute('INSERT OR IGNORE INTO network_taken(ask_id,at) VALUES(?,?)', (str(ask_id), now()))
+            if canonical:
+                db.execute('INSERT OR IGNORE INTO network_twins(request_key,ask_id,at) VALUES(?,?,?)', (str(ask_id), str(canonical), now()))
 
     def tidy(self):
         cut = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=KEEP_DAYS)).isoformat(timespec='seconds')
         with self.fleet.connect() as db:
             db.execute('DELETE FROM network_taken WHERE at<?', (cut,))
+            for table in ('network_twins', 'network_aliases', 'network_replies'):
+                db.execute(f'DELETE FROM {table} WHERE at<?', (cut,))
             db.execute('DELETE FROM network_sealed WHERE at<?', (cut,))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='network_request_nodes'").fetchone():
+                db.execute('DELETE FROM network_request_nodes WHERE at<?', (cut,))
 
     def view(self):
         changes = self.fleet.meta('network_key_changes', [])
