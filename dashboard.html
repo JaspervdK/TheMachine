@@ -15,6 +15,21 @@ window.applyTheme=pick;pick();sys.addEventListener('change',pick);document.addEv
 <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
 <meta name="apple-mobile-web-app-title" content="The Machine">
 <style>
+/* design-tokens:start. One design system for the dashboard, the control plane and the website: this block is
+   identical in the-machine dashboard.html and themachine-cloud static/app.css (a test keeps them equal).
+   Calm and spacious: serif headings, a tight type scale, 4/8px spacing, soft lines, small radii, little motion. */
+:root{
+  --serif:"Source Serif 4","Iowan Old Style","New York",ui-serif,Georgia,serif;
+  --sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --fs-xs:12.5px;--fs-sm:14px;--fs-md:15.5px;--fs-lg:18px;--fs-xl:22px;--fs-2xl:30px;--fs-3xl:clamp(34px,5vw,50px);
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:24px;--sp-6:32px;--sp-7:48px;--sp-8:72px;
+  --r-sm:8px;--r-md:10px;--r-lg:12px;--r-pill:999px;
+  --measure:760px;
+  --ease:cubic-bezier(.2,.7,.2,1);--dur:.16s;
+  --ring:0 0 0 2px var(--bg),0 0 0 4px color-mix(in srgb,var(--mint) 75%,transparent)}
+/* design-tokens:end */
+@font-face{font-family:"Source Serif 4";font-style:normal;font-weight:400 700;font-display:swap;src:url(brand/serif.woff2) format("woff2")}
 /* Palette: BRANDING.md / palette.json. Dark charcoal surfaces, restrained mint + amber, cream text, lavender secondary. */
 :root{color-scheme:dark;
   --mint:#BCCBA8;--cream:#F5E5BF;--amber:#FFD76B;--orange:#ECA45B;--lavender:#C7B5E2;--lavender-light:#E6DEEF;--night-lavender:#58516E;--charcoal:#22252B;--screen:#34392F;
@@ -603,6 +618,91 @@ strong.nb{white-space:nowrap}
 .skill-body{white-space:pre-wrap;word-break:break-word;max-height:55vh;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);padding:12px;font-size:.84rem;background:var(--surface)}
 #skill-read{max-width:min(680px,94vw)}
 @media(max-width:560px){.skills-list>div{flex-wrap:wrap}.skills-list .skill-buttons{flex:1 1 100%;justify-content:flex-start;margin-top:6px}}
+/* Design system layer (the shared tokens at the top): calm surfaces, serif headings, one clear primary per card,
+   quiet secondary buttons, soft lines instead of heavy boxes. Last in the sheet so it settles the older rules above. */
+body{font-family:var(--sans);font-size:var(--fs-md);background:var(--bg)}
+[data-theme="light"] body{background:var(--bg)}
+main,.site-footer{max-width:calc(var(--measure) + 48px)}
+h1,h2,h3{font-family:var(--serif);font-weight:600;letter-spacing:-.01em}
+h1{font-size:1.7rem;letter-spacing:-.015em}
+header{padding-bottom:var(--sp-5)}
+.avatar{width:60px;height:60px}
+.live,[data-theme="light"] .live{background:transparent}
+.head-link,.live{border-color:var(--border)}
+
+/* Tabs: a quiet segmented control; the current tab is a soft mint tint, not a solid block. */
+nav,[data-theme="light"] nav{background:transparent;border-color:var(--border);border-radius:var(--r-lg);padding:4px;gap:2px;backdrop-filter:none;-webkit-backdrop-filter:none;margin-bottom:var(--sp-5)}
+nav button{font-weight:550;color:var(--muted);border-radius:var(--r-md);padding:8px 10px;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
+nav button:hover,[data-theme="light"] nav button:hover{background:var(--tile);color:var(--text)}
+nav button.active,nav button.active:hover,[data-theme="light"] nav button.active:hover{background:color-mix(in srgb,var(--mint) 20%,transparent);color:var(--text)}
+nav button.active .badge,[data-theme="light"] nav button.active .badge{background:color-mix(in srgb,var(--mint) 30%,transparent);color:var(--text)}
+.scope-filter{background:transparent}
+.scope-filter button[aria-pressed="true"]{background:color-mix(in srgb,var(--mint) 20%,transparent);color:var(--text)}
+.fleet-tabs button[aria-selected="true"]{background:color-mix(in srgb,var(--mint) 20%,transparent);border-color:transparent;color:var(--text)}
+.fleet-tabs button[aria-selected="true"] .badge{background:color-mix(in srgb,var(--mint) 30%,transparent);color:var(--text)}
+.settings-link[aria-current="page"],.head-side>.settings-link[aria-current="page"]{background:color-mix(in srgb,var(--mint) 20%,transparent);border-color:transparent;color:var(--text)}
+
+/* Needs you: one calm line per item with a small amber marker, not a coloured panel. */
+#needs-you{padding:var(--sp-2) var(--sp-4);border-radius:var(--r-lg);border:1px solid var(--border);background:var(--surface)}
+#needs-you>strong{display:inline-flex;align-items:center;gap:var(--sp-2);color:var(--muted);font-size:var(--fs-xs);letter-spacing:.04em;margin:var(--sp-1) 0 0}
+#needs-you>strong::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--amber)}
+#needs-you li{padding:var(--sp-1) 0}
+#needs-you .head-link{padding:4px 12px}
+
+/* Counts: plain numbers, no tiles. */
+.stats,#suggestion-stats .stats,[data-theme="light"] #suggestion-stats .stats{box-shadow:none;background:var(--bg);border-color:var(--border);border-radius:var(--r-lg);backdrop-filter:none;-webkit-backdrop-filter:none}
+.stat b{font-family:var(--sans);font-weight:600;letter-spacing:-.01em}
+.stat{padding:10px 8px}
+button.stat[aria-expanded="true"]::after{left:38%;right:38%;height:2px}
+
+/* Cards: soft line, no drop shadow, more air; the tone shows as a slim mark. */
+article{border-radius:var(--r-lg);box-shadow:none;padding:var(--sp-5) var(--sp-5) 20px;margin-bottom:var(--sp-3)}
+.card{padding-left:var(--sp-5)}
+.card::before{top:22px;bottom:auto;height:18px;width:2px;opacity:.8}
+article h3{font-size:1.18rem;line-height:1.3;color:var(--text)}
+.card .meta{margin-bottom:var(--sp-2)}
+.chip{font-size:var(--fs-xs);font-weight:550;letter-spacing:0;padding:1px 9px 1px 8px;border:0;background:var(--tile)}
+.chip.scope{color:var(--muted)}
+.section-head h2{font-size:1.15rem;letter-spacing:-.005em}
+.section-head{margin:var(--sp-6) 0 var(--sp-3)}
+.body{color:var(--muted)}.body strong{color:var(--text)}
+pre,blockquote{border-radius:var(--r-md)}
+
+/* Buttons: one filled primary; everything else is a quiet outline. */
+button,input,textarea,select,a.btn-link{border-radius:var(--r-md);transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+button:active{transform:none}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:0;box-shadow:var(--ring)}
+.card .actions:not(.result-actions)>:is(button,a.open){border-radius:var(--r-md);font-weight:550}
+.card .actions:not(.result-actions)>:is(button,a.open):not(.primary){background:transparent;box-shadow:inset 0 0 0 1px var(--border-strong)}
+.card .actions:not(.result-actions)>:is(button,a.open):not(.primary):hover{background:var(--tile)}
+.card .actions:not(.result-actions)>button.quiet{box-shadow:none}
+.card .more-actions>summary{border-radius:var(--r-md)}
+.actions button.ghost,.actions button.quiet,[data-theme="light"] .actions button.ghost,[data-theme="light"] .actions button.quiet{background:transparent}
+
+/* Boxes on the other tabs follow the cards. */
+.fleet-box,.fleet-settings,.list,.hours,.skill-form,.first-look,.search{border-radius:var(--r-lg);box-shadow:none}
+.fleet-box{padding:20px var(--sp-5)}
+dialog{border-radius:var(--r-lg)}
+.badge{font-family:var(--sans);font-weight:600}
+.card .more-actions>summary{background:transparent;box-shadow:inset 0 0 0 1px var(--border-strong)}
+.card .more-actions>summary:hover{background:var(--tile)}
+/* Wide screens: buttons at their own width, left to right, More at the end; the card text at reading size. */
+@media(min-width:561px){
+  .card,.card.card{padding:var(--sp-5) var(--sp-5) 20px}
+  .card h3{font-size:1.2rem;margin-bottom:6px}
+  .card .body{font-size:1rem}
+  .card .draft{font-size:.98rem}
+  .card .actions:not(.result-actions){display:flex;flex-wrap:wrap;gap:var(--sp-2)}
+  .card .actions:not(.result-actions)>:is(button,a.open){flex:0 0 auto;min-height:40px;padding:8px 16px;font-size:.94rem}
+  .card .actions:not(.result-actions)>.more-actions{margin-left:auto}
+  .card .more-actions>summary{min-height:40px;font-size:.94rem;padding:8px 14px}
+}
+#needs-you .head-link,.fleet-pane button:not(.primary),.fleet-box button:not(.primary){background:transparent}
+/* Lists inside a Fleet box: rows divided by a line, not boxes in a box. */
+.fleet-box .list{border:0;border-radius:0;background:transparent;box-shadow:none}
+.fleet-box .list>article{background:transparent;border:0;border-top:1px solid var(--border);border-radius:0;box-shadow:none;margin:0;padding:12px 0}
+.fleet-box .list>article p{margin:2px 0}
+@media(max-width:560px){article{padding:18px 16px}.card{padding-left:18px}.card::before{top:18px}.fleet-box{padding:16px}}
 </style>
 <main><header><div class="brand"><img class="avatar refresh-tap" role="button" tabindex="0" title="Refresh" src="brand/avatar.png" alt="" width="68" height="68"><div><h1>The Machine</h1><p id="tagline">A few useful things to do next.</p></div></div><div class="head-side"><button type="button" class="head-link settings-link" id="open-settings" aria-label="Settings" title="Settings" aria-current="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.2" class="teeth"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2.4"/></svg><span class="lbl">Settings</span></button><small class="live mono refresh-tap" id="live" role="button" tabindex="0" title="Refresh"><span id="updated">Connecting…</span></small></div></header><div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div id="needs-you" role="status" hidden></div><nav aria-label="Sections"><button class="active" data-tab="inbox">Suggestions <span class="badge" id="badge-inbox"></span></button><button data-tab="events">Events</button><button data-tab="people">Graph</button><button data-tab="fleet" id="tab-fleet" hidden>Fleet <span class="badge" id="badge-fleet"></span></button><button data-tab="feedback">Feedback</button><button data-tab="health">Connections <span class="badge warn" id="badge-health"></span></button></nav>

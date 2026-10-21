@@ -73,6 +73,8 @@ BRAND_ASSETS = {
     '/brand/app-icon-maskable-192.png': ROOT / 'brand/app-icon-maskable-192.png',
     '/brand/app-icon-maskable-512.png': ROOT / 'brand/app-icon-maskable-512.png',
     '/brand/app-icon-badge-96.png': ROOT / 'brand/app-icon-badge-96.png',  # monochrome status-bar icon for pushes
+    # Heading typeface (Source Serif 4, SIL OFL; licence in brand/fonts/OFL.txt).
+    '/brand/serif.woff2': ROOT / 'brand/fonts/source-serif-4-latin.woff2',
 }
 ANDROID_APP_NAMES = {
     'android': 'Android System', 'com.google.android.gm': 'Gmail',
@@ -8314,7 +8316,7 @@ class App:
                     self.output(200, {'key': push_key(app.config)})
                 elif path.path in BRAND_ASSETS:
                     asset = BRAND_ASSETS[path.path]
-                    self.output(200, asset.read_bytes(), 'image/webp' if asset.suffix == '.webp' else 'image/png')
+                    self.output(200, asset.read_bytes(), {'.webp': 'image/webp', '.woff2': 'font/woff2'}.get(asset.suffix, 'image/png'))
                 elif path.path == '/api/status':
                     self.output(200, app.action('status', {'full': True}))
                 elif path.path == '/api/merge-diff':
