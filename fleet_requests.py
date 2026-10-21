@@ -328,8 +328,8 @@ class Requests:
             if not card:
                 raise ValueError('No such card')
             ids = json.loads(card['event_ids'] or '[]')
-            mails = db.execute(f"SELECT metadata FROM events WHERE kind='gmail.message' AND id IN ({','.join('?' * len(ids)) or 'NULL'}) "
-                               'ORDER BY occurred_at DESC', ids).fetchall()
+            mails = db.execute("SELECT metadata FROM events WHERE kind='gmail.message' AND id IN (SELECT value FROM json_each(?)) "
+                               'ORDER BY occurred_at DESC', (json.dumps(ids),)).fetchall()
             givers = {(r['fleet'], r['member_id']) for r in db.execute(
                 "SELECT fleet,member_id FROM fleet_requests WHERE card_id=? AND kind='handoff'", (card['id'],))}
         mine = self.my_emails()
@@ -445,7 +445,7 @@ class Requests:
         with self.connect() as db:
             card = db.execute('SELECT event_ids FROM suggestions WHERE id=?', (str(card_id),)).fetchone()
             ids = json.loads(card['event_ids'] or '[]') if card else []
-            rows = db.execute(f"SELECT metadata FROM events WHERE kind='gmail.message' AND id IN ({','.join('?' * len(ids)) or 'NULL'})", ids).fetchall()
+            rows = db.execute("SELECT metadata FROM events WHERE kind='gmail.message' AND id IN (SELECT value FROM json_each(?))", (json.dumps(ids),)).fetchall()
         found = [str(json.loads(r['metadata'] or '{}').get('message-id') or '').strip().strip('<>').lower() for r in rows]
         return [fleet._hash(secret, m) for m in dict.fromkeys(found) if m][:5]
 
@@ -463,7 +463,7 @@ class Requests:
             near = []
             for card in cards:
                 ids = json.loads(card['event_ids'] or '[]')
-                rows = db.execute(f"SELECT metadata FROM events WHERE kind='gmail.message' AND id IN ({','.join('?' * len(ids)) or 'NULL'})", ids).fetchall()
+                rows = db.execute("SELECT metadata FROM events WHERE kind='gmail.message' AND id IN (SELECT value FROM json_each(?))", (json.dumps(ids),)).fetchall()
                 for r in rows:
                     m = json.loads(r['metadata'] or '{}')
                     message_id = str(m.get('message-id') or '').strip().strip('<>').lower()

@@ -299,7 +299,7 @@ class XTransportTest(unittest.TestCase):
             t.preflight(self.reply)
             self.assertEqual(t.send(self.reply, {'id': 'J1'}), {'message_id': 'x:1979000000000000005'})
         self.assertEqual(seen[0], ['/bin/x-inbox-test', 'send', '--handle', 'acme', '--primary', 'owner', '--reply-to', MENTION_ID, '--text', 'Yes!', '--json'])
-        self.assertEqual(seen[1][seen[1].index('--token') + 1], 'assistant-J1')
+        self.assertEqual(seen[1][seen[1].index('--send-id') + 1], 'assistant-J1')
         self.assertIn('--yes', seen[1])
         long_posts = {'accounts': [{**ACCOUNT, 'long_posts': True}], 'x_inbox': '/bin/x-inbox-test'}
         with patch.object(n.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps({'sent': 'sent', 'id': '77'}), '')) as call:
@@ -340,7 +340,7 @@ class XTransportTest(unittest.TestCase):
         for out, expected in (({'found': True, 'id': '9'}, {'message_id': 'x:9'}), ({'found': False, 'attempted': True}, {})):
             with patch.object(n.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(out), '')) as call:
                 self.assertEqual(t.reconcile(self.reply, {'id': 'J'}), expected)
-            self.assertEqual(call.call_args.args[0][1:], ['verify', '--token', 'assistant-J'])
+            self.assertEqual(call.call_args.args[0][1:], ['verify', '--send-id', 'assistant-J'])
         with self.assertRaisesRegex(ValueError, 'X sending isn’t set up'):
             n.ActionTransport(None, None).send(self.reply, {'id': 'J'})
         router = n.ActionTransport(object(), object(), None, t)
@@ -428,7 +428,7 @@ class XInboxSend(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
     def test_reply_logs_intent_before_the_one_click_and_switches_back(self):
-        code, out, _ = self.send('--reply-to', MENTION_ID, '--text', 'Yes!', '--token', 'assistant-J1', '--yes', '--json')
+        code, out, _ = self.send('--reply-to', MENTION_ID, '--text', 'Yes!', '--send-id', 'assistant-J1', '--yes', '--json')
         self.assertEqual((code, json.loads(out)['sent'], json.loads(out)['id']), (0, 'sent', '1979000000000000005'))
         self.assertEqual(self.steps(), ['tab', 'resolve', 'compose-check', 'compose-send', 'back'])
         self.assertEqual(self.calls[0], ('tab', True))
@@ -440,7 +440,7 @@ class XInboxSend(unittest.TestCase):
         self.assertEqual(self.entries()[0]['token'], 'assistant-J1')
 
     def test_dm_once_with_a_request_id_from_the_token(self):
-        code, out, _ = self.send('--conversation', CONV, '--text', 'Hi Ada', '--token', 'assistant-J2', '--yes', '--json')
+        code, out, _ = self.send('--conversation', CONV, '--text', 'Hi Ada', '--send-id', 'assistant-J2', '--yes', '--json')
         self.assertEqual((code, json.loads(out)['sent']), (0, 'sent'))
         self.assertEqual(self.steps().count('dm'), 1)
         dm = next(c for c in self.calls if c[0] == 'dm')
@@ -452,27 +452,27 @@ class XInboxSend(unittest.TestCase):
         for result in ('intent', 'uncertain', 'sent'):
             self.log.write_text(json.dumps({'at': '2026-10-16T10:00:00+00:00', 'token': 'assistant-J3', 'result': result}) + '\n')
             self.calls.clear()
-            code, _, err = self.send('--conversation', CONV, '--text', 'Hi', '--token', 'assistant-J3', '--yes', '--json')
+            code, _, err = self.send('--conversation', CONV, '--text', 'Hi', '--send-id', 'assistant-J3', '--yes', '--json')
             self.assertEqual(code, 2)
             self.assertIn('not sending again', err)
             self.assertEqual(self.calls, [])
         self.log.write_text('{broken\n')
-        code, _, err = self.send('--conversation', CONV, '--text', 'Hi', '--token', 'assistant-J4', '--yes', '--json')
+        code, _, err = self.send('--conversation', CONV, '--text', 'Hi', '--send-id', 'assistant-J4', '--yes', '--json')
         self.assertEqual((code, self.calls), (2, []))
         self.assertIn('damaged', err)
 
     def test_uncertain_and_refused_outcomes(self):
         self.answers['dm'] = RuntimeError('tab crashed')
-        code, out, _ = self.send('--conversation', CONV, '--text', 'Hi', '--token', 'assistant-J5', '--yes', '--json')
+        code, out, _ = self.send('--conversation', CONV, '--text', 'Hi', '--send-id', 'assistant-J5', '--yes', '--json')
         self.assertEqual((code, json.loads(out)['sent']), (4, 'uncertain'))
         self.assertEqual([e['result'] for e in self.entries()], ['intent', 'uncertain'])
         self.answers['compose-send'] = {'sent': 'failed', 'status': 187, 'detail': 'duplicate'}
-        code, out, _ = self.send('--reply-to', MENTION_ID, '--text', 'Yes', '--token', 'assistant-J6', '--yes', '--json')
+        code, out, _ = self.send('--reply-to', MENTION_ID, '--text', 'Yes', '--send-id', 'assistant-J6', '--yes', '--json')
         self.assertEqual((code, json.loads(out)['status']), (4, 187))
 
     def test_encrypted_signed_out_and_busy_stop_before_anything_is_written(self):
         self.answers['resolve'] = {'error': 'encrypted'}
-        code, out, _ = self.send('--conversation', 'e123', '--text', 'Hi', '--token', 'assistant-J7', '--yes', '--json')
+        code, out, _ = self.send('--conversation', 'e123', '--text', 'Hi', '--send-id', 'assistant-J7', '--yes', '--json')
         self.assertEqual((code, json.loads(out)['sent'], json.loads(out)['status']), (4, 'not-sent', 'encrypted'))
         self.assertIn('encrypted X Chat', json.loads(out)['detail'])
         self.answers['resolve'] = {'error': 'signed-out'}
@@ -480,7 +480,7 @@ class XInboxSend(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn('signed out', err)
         self.answers['resolve'] = {'error': 'wrong-account'}
-        code, _, err = self.send('--reply-to', MENTION_ID, '--text', 'Hi', '--token', 'assistant-J8', '--yes', '--json')
+        code, _, err = self.send('--reply-to', MENTION_ID, '--text', 'Hi', '--send-id', 'assistant-J8', '--yes', '--json')
         self.assertEqual(code, 2)
         self.assertIn('busy', err)
         self.assertNotIn('dm', self.steps())
@@ -501,15 +501,15 @@ class XInboxSend(unittest.TestCase):
                             + json.dumps({'at': 'now', 'token': 'T2', 'result': 'intent', 'handle': 'acme', 'primary': 'owner',
                                           'conversation': CONV, 'request_id': 'R2', 'text': 'Hi', 'at_ms': 1000}) + '\n'
                             + json.dumps({'at': 'now', 'token': 'T2', 'result': 'uncertain'}) + '\n')
-        self.assertEqual(json.loads(self.main('verify', '--token', 'T1')[1]), {'found': True, 'id': '55', 'via': 'log'})
+        self.assertEqual(json.loads(self.main('verify', '--send-id', 'T1')[1]), {'found': True, 'id': '55', 'via': 'log'})
         self.assertEqual(self.calls, [])
         self.answers['verify-dm'] = {'found': ['1979000000000000007']}
-        self.assertEqual(json.loads(self.main('verify', '--token', 'T2')[1])['id'], '1979000000000000007')
+        self.assertEqual(json.loads(self.main('verify', '--send-id', 'T2')[1])['id'], '1979000000000000007')
         verify = next(c for c in self.calls if c[0] == 'verify-dm')[1]
         self.assertEqual((verify['request_id'], verify['switch']), ('R2', True))
         self.answers['verify-dm'] = {'found': ['1', '2']}
-        self.assertFalse(json.loads(self.main('verify', '--token', 'T2')[1])['found'])
-        self.assertEqual(json.loads(self.main('verify', '--token', 'T9')[1])['attempted'], None)
+        self.assertFalse(json.loads(self.main('verify', '--send-id', 'T2')[1])['found'])
+        self.assertEqual(json.loads(self.main('verify', '--send-id', 'T9')[1])['attempted'], None)
 
 
 if __name__ == '__main__':

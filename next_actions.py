@@ -881,7 +881,7 @@ class LinkedInTransport:
 
     def send(self, action, job):
         try:
-            result = self.run(action, ['send', *self.target(action), '--text', action['body'], '--token', 'assistant-' + job['id'], '--yes', '--json'])
+            result = self.run(action, ['send', *self.target(action), '--text', action['body'], '--send-id', 'assistant-' + job['id'], '--yes', '--json'])
         except LinkedInBusy:
             return {'not_sent': True}
         try:
@@ -895,7 +895,7 @@ class LinkedInTransport:
         return {}  # Unknown outcome: never resend; reconcile checks the conversation.
 
     def reconcile(self, action, job):
-        result = self.run(action, ['verify', '--token', 'assistant-' + job['id']])
+        result = self.run(action, ['verify', '--send-id', 'assistant-' + job['id']])
         if result.returncode:
             return {}
         out = json.loads(result.stdout)
@@ -958,7 +958,7 @@ class XTransport:
 
     def send(self, action, job):
         try:
-            result = self.run(action, [*self.args(action), '--token', 'assistant-' + job['id'], '--yes', '--json'])
+            result = self.run(action, [*self.args(action), '--send-id', 'assistant-' + job['id'], '--yes', '--json'])
         except XBusy:
             return {'not_sent': True}
         try:
@@ -972,7 +972,7 @@ class XTransport:
         return {}  # Unknown outcome: never resend; reconcile checks X.
 
     def reconcile(self, action, job):
-        result = self.run(action, ['verify', '--token', 'assistant-' + job['id']])
+        result = self.run(action, ['verify', '--send-id', 'assistant-' + job['id']])
         if result.returncode:
             return {}
         try:

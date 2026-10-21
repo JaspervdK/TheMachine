@@ -244,7 +244,7 @@ class Transport(unittest.TestCase):
             self.assertEqual(t.send(self.action, {'id': 'J1'}), {'message_id': 'urn:li:msg_message:Q'})
         self.assertEqual(seen[0][:4], ['/bin/linkedin-inbox-test', 'send', '--profile', 'ada-l'])
         self.assertNotIn('--yes', seen[0])
-        self.assertEqual(seen[1][seen[1].index('--token') + 1], 'assistant-J1')
+        self.assertEqual(seen[1][seen[1].index('--send-id') + 1], 'assistant-J1')
         wrong = subprocess.CompletedProcess([], 0, json.dumps({'preview': {'name': 'Bob Other'}}), '')
         with patch.object(n.subprocess, 'run', return_value=wrong), self.assertRaises(ValueError):
             t.preflight(self.action)

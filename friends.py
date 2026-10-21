@@ -61,8 +61,8 @@ def free_busy(db, config, question):
     if not own:
         return {'busy': []}
     blocks = []
-    for row in db.execute(f"SELECT occurred_at,metadata FROM events WHERE kind='calendar.event' AND deleted=0 AND account_id IN ({','.join('?' * len(own))}) "
-                          'AND occurred_at<? AND occurred_at>=?', (*own, end.isoformat(), (start - dt.timedelta(days=2)).isoformat())):
+    for row in db.execute("SELECT occurred_at,metadata FROM events WHERE kind='calendar.event' AND deleted=0 AND account_id IN (SELECT value FROM json_each(?)) "
+                          'AND occurred_at<? AND occurred_at>=?', (json.dumps(list(own)), end.isoformat(), (start - dt.timedelta(days=2)).isoformat())):
         m = json.loads(row['metadata'] or '{}')
         if m.get('all_day') or m.get('status') == 'cancelled' or m.get('access') == 'shared_read_only':
             continue
@@ -174,7 +174,7 @@ class Friends:
                 ids = json.loads(card['event_ids'] or '[]')
                 if not ids:
                     continue
-                for event in db.execute(f"SELECT metadata FROM events WHERE kind='calendar.event' AND deleted=0 AND id IN ({','.join('?' * len(ids))})", ids):
+                for event in db.execute("SELECT metadata FROM events WHERE kind='calendar.event' AND deleted=0 AND id IN (SELECT value FROM json_each(?))", (json.dumps(ids),)):
                     m = json.loads(event['metadata'] or '{}')
                     when = str((m.get('start') or {}).get('dateTime') or (m.get('start') or {}).get('date') or '') if isinstance(m.get('start'), dict) else ''
                     try:

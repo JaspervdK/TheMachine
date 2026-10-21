@@ -14,6 +14,7 @@ import re
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 
 KINDS = {'rss.item': 'feed'}
 # For `assistant connect rss`: the account it adds and what it asks (see docs/adding-a-source.md).
@@ -21,6 +22,26 @@ SETUP = {'label': 'RSS feed', 'what': 'Posts from the feeds you follow.',
          'account': {'id': 'feed', 'service': 'rss', 'transport': 'http', 'boundary': 'work', 'poll_seconds': 1800},
          'ask': [('url', 'Feed URL (RSS or Atom)')]}
 ATOM = '{http://www.w3.org/2005/Atom}'
+
+
+def parse_xml(raw):
+    """ElementTree from bytes, refusing any DTD (so no entity expansion or external entities), as defusedxml does."""
+    builder = ET.TreeBuilder()
+    parser = expat.ParserCreate(namespace_separator='}')
+    name = lambda tag: '{' + tag if '}' in tag else tag  # expat's 'ns}tag' as ElementTree's '{ns}tag'
+
+    def refuse(*_):
+        raise ET.ParseError('XML with a DTD or entities is refused')
+    parser.StartDoctypeDeclHandler = parser.EntityDeclHandler = parser.ExternalEntityRefHandler = refuse
+    parser.StartElementHandler = lambda tag, attrs: builder.start(name(tag), {name(k): v for k, v in attrs.items()})
+    parser.EndElementHandler = lambda tag: builder.end(name(tag))
+    parser.CharacterDataHandler = builder.data
+    parser.buffer_text = True
+    try:
+        parser.Parse(raw, True)
+    except expat.ExpatError as error:
+        raise ET.ParseError(str(error)) from None
+    return builder.close()
 
 
 def fetch(url, state, SourceError):
@@ -91,7 +112,7 @@ def sync(store, config, account, helpers):
         if len(raw) > 5_000_000:
             raise helpers.SourceError('rss_feed_too_large')
         try:
-            root = ET.fromstring(raw)
+            root = parse_xml(raw)
         except ET.ParseError:
             raise helpers.SourceError('rss_invalid_xml') from None
         nodes = root.findall('./channel/item') or root.findall(ATOM + 'entry')
@@ -111,7 +132,7 @@ def check(config, account, helpers):
     if raw is None or len(raw) > 5_000_000:
         raise helpers.SourceError('rss_invalid_feed' if raw is None else 'rss_feed_too_large')
     try:
-        root = ET.fromstring(raw)
+        root = parse_xml(raw)
     except ET.ParseError:
         raise helpers.SourceError('rss_invalid_xml') from None
     if root.tag not in ('rss', ATOM + 'feed'):

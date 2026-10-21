@@ -96,10 +96,11 @@ def work_running(database, minutes=40):
     try:
         with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)) as db:
             present = _tables(db)
-            for table, states in (('review_runs', "'starting','running','recovering'"), ('preparations', "'starting','running'"),
-                                  ('profile_runs', "'starting','running','recovering'")):
+            for table, query in (('review_runs', "SELECT count(*) FROM review_runs WHERE status IN ('starting','running','recovering') AND updated_at>?"),
+                                 ('preparations', "SELECT count(*) FROM preparations WHERE status IN ('starting','running') AND updated_at>?"),
+                                 ('profile_runs', "SELECT count(*) FROM profile_runs WHERE status IN ('starting','running','recovering') AND updated_at>?")):
                 if table in present:
-                    active += db.execute(f'SELECT count(*) FROM {table} WHERE status IN ({states}) AND updated_at>?', (since,)).fetchone()[0]
+                    active += db.execute(query, (since,)).fetchone()[0]
     except sqlite3.Error:
         return None
     return active
@@ -408,6 +409,8 @@ def sealed_columns(db):
     return out
 
 
+# Table and column names in this module's SQL are never input: they come from the fixed events columns, DERIVED and DERIVED_JSON
+# lists (sealed_columns), kept only where the database really has them; values are always bound parameters.
 def _guard_sql(table, column, plain):
     """Triggers that seal whatever reaches the table in the clear, from any code path."""
     value = f"mc_seal_json({column},'{table}.{column}')" if plain is not None else f'mc_seal({column})'

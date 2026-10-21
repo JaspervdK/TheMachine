@@ -160,8 +160,7 @@ def purge(config, account_ids, store=None):
         tables = {r[0]: {c[1] for c in db.execute(f'PRAGMA table_info("{r[0]}")')}
                   for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND sql NOT LIKE 'CREATE VIRTUAL%' "
                                       "AND name NOT LIKE 'event_search%' AND name NOT LIKE 'sqlite_%'")}
-        marks = ','.join('?' * len(account_ids))
-        events = {r[0] for r in db.execute(f'SELECT id FROM events WHERE account_id IN ({marks})', account_ids)}
+        events = {r[0] for r in db.execute('SELECT id FROM events WHERE account_id IN (SELECT value FROM json_each(?))', (json.dumps(account_ids),))}
         cards = set()
         for r in db.execute('SELECT id,event_ids,account_ids FROM suggestions'):
             accounts, linked = set(map(str, _ids(r['account_ids']))), {_int(i) for i in _ids(r['event_ids'])}
@@ -182,7 +181,8 @@ def purge(config, account_ids, store=None):
                 continue
             for column, values in (('decision_id', decisions), ('suggestion_id', cards), ('event_id', events), ('account_id', gone_accounts)):
                 if column in columns and values:
-                    _chunks(db, f'DELETE FROM "{table}" WHERE {column} IN ({{}})', values)
+                    # table: a name sqlite_master lists, quoted as an identifier; column: one of the four fixed names above
+                    _chunks(db, 'DELETE FROM "' + table.replace('"', '""') + '" WHERE ' + column + ' IN ({})', values)
         if 'decisions' in tables and cards:
             _chunks(db, 'DELETE FROM decisions WHERE suggestion_id IN ({})', cards)
         if cards:

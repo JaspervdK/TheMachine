@@ -8,14 +8,14 @@ conversation is marked as read. Reading never writes anything to LinkedIn.
 
   linkedin-inbox list [--unread] [--limit N] [--json]
   linkedin-inbox show N|NAME [--limit N] [--json]   (N = number from `list`)
-  linkedin-inbox send (--to N|NAME | --profile SLUG) --text TEXT [--token T] [--yes] [--json]
+  linkedin-inbox send (--to N|NAME | --profile SLUG) --text TEXT [--send-id ID] [--yes] [--json]
   linkedin-inbox sync --since MS                    (JSON for the personal assistant)
-  linkedin-inbox verify --token T                   (JSON: did that send land?)
+  linkedin-inbox verify --send-id ID                 (JSON: did that send land?)
   linkedin-inbox discover                           (refresh LinkedIn's query ids)
 
 `send` only previews the resolved recipient unless --yes is given. Only run it with
 --yes for a message the owner explicitly approved. Every send is logged before and after
-in SENDS_LOG; a --token that already has a sent or uncertain entry is never sent again.
+in SENDS_LOG; a --send-id that already has a sent or uncertain entry is never sent again.
 
 Holds the shared browser lease (integrations/browser-lease.py) while it runs and always
 closes its own tab. Used by connectors/linkedin.py and next_actions.py.
@@ -655,7 +655,7 @@ def main():
     g.add_argument('--conversation', help='exact conversation URN (as given by `sync`)')
     g.add_argument('--profile', help='LinkedIn profile slug, e.g. ada-lovelace from /in/ada-lovelace/')
     p.add_argument('--text', required=True)
-    p.add_argument('--token', help='idempotency key; a token already used is never sent again')
+    p.add_argument('--send-id', '--token', dest='token', help='idempotency key; an id already used is never sent again')
     p.add_argument('--yes', action='store_true', help='really send (only after explicit approval)')
     p.add_argument('--json', action='store_true')
     p.set_defaults(fn=cmd_send)
@@ -664,7 +664,7 @@ def main():
     p.add_argument('--state', help='committed page cursors from the assistant database')
     p.set_defaults(fn=cmd_sync)
     p = sub.add_parser('verify', help='JSON: did the send with this token land?')
-    p.add_argument('--token', required=True)
+    p.add_argument('--send-id', '--token', dest='token', required=True)
     p.set_defaults(fn=cmd_verify)
     p = sub.add_parser('discover', help='refresh LinkedIn query ids after LinkedIn changes them')
     p.set_defaults(fn=cmd_discover)

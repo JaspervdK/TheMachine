@@ -14,8 +14,8 @@ an error.
   x-inbox mentions --handle H [--primary P] [--limit N] [--json]
   x-inbox dms --handle H [--primary P] [--limit N] [--json]
   x-inbox sync --handle H --primary P --since MS --state JSON   (JSON for the personal assistant)
-  x-inbox send --handle H --primary P (--reply-to ID | --conversation ID) --text T [--long] [--token T] [--check] [--yes] [--json]
-  x-inbox verify --token T                           (JSON: did that send land?)
+  x-inbox send --handle H --primary P (--reply-to ID | --conversation ID) --text T [--long] [--send-id ID] [--check] [--yes] [--json]
+  x-inbox verify --send-id ID                         (JSON: did that send land?)
 
 `send` only previews (the account, and the post replied to or the conversation partner)
 unless --yes is given; --check also opens X's reply composer with the text and checks it,
@@ -23,7 +23,7 @@ without posting. Only run it with --yes for a reply or message the owner explici
 A reply goes through X's own composer (x.com/intent/post), so X builds the request itself; the
 tab lets out only that one request, with exactly the approved text and post. A DM goes through
 the DM inbox API (dm/new2), like x.com does. Every send is logged before and after in SENDS_LOG;
-a --token that already has an entry is never sent again.
+a --send-id that already has an entry is never sent again.
 
 Encrypted X Chat conversations aren't read or sent to; only the DM inbox is. Holds the
 browser lease (exclusive during account selection/restoration) and always closes its own tab. Used
@@ -818,10 +818,10 @@ def main():
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument('--reply-to', help='id of the post to reply to'); g.add_argument('--conversation', help='DM conversation id (as given by `sync`)')
     s.add_argument('--text', required=True); s.add_argument('--long', action='store_true', help='the account has X Premium: replies up to 25000 characters')
-    s.add_argument('--token', help='idempotency key; a token already used is never sent again')
+    s.add_argument('--send-id', '--token', dest='token', help='idempotency key; an id already used is never sent again')
     s.add_argument('--check', action='store_true', help='also open the reply composer and check it, without posting')
     s.add_argument('--yes', action='store_true', help='really send (only after explicit approval)'); s.add_argument('--json', action='store_true')
-    s = sub.add_parser('verify', help='JSON: did the send with this token land?'); s.add_argument('--token', required=True)
+    s = sub.add_parser('verify', help='JSON: did the send with this token land?'); s.add_argument('--send-id', '--token', dest='token', required=True)
     a = p.parse_args()
     try:
         if a.cmd == 'send':
