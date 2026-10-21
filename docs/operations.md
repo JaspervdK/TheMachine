@@ -146,3 +146,7 @@ Do not edit worker start lines or discard jobs to pause work. There is no docume
 - [ ] Genuine owner interaction produces one delivery and persists feedback across restart.
 - [ ] Resumed writes inspect retained call details and source receipts before repeating.
 - [ ] Export/import is checked on a disposable destination, never by overwriting live data.
+
+### macOS service controls
+
+Stop unloads the app until you start it or log in again. Disable also records launchd’s persistent disabled state. Enable clears that state before loading the app. A try-restart only restarts an app that is already running. These platform commands are regression-tested; native setup and reboot checks remain part of the macOS beta.

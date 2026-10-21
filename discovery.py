@@ -286,19 +286,31 @@ class Discovery:
         hits = matches(emails, items, a, answer)
         with self.connect() as db:
             known = {r[0] for r in db.execute('SELECT email FROM network_people')}
+            looked = {r[0] for r in db.execute('SELECT email FROM network_looked')}
+        refresh = full and self._ago(found.get('refreshed'), REFRESH_DAYS * 86400)
+        # A positive match is not finished until its resolve response was committed. In an incremental pass,
+        # a known-but-unchecked address is an unfinished refresh, not a reason to skip it for another day.
+        todo = [h for h in hits if h not in known] + [h for h in hits if h in known and (refresh or (not full and h not in looked))]
+        by_email = {c[0]: c for c in contacts}
+        people, resolved = [], set()
+        for i in range(0, min(len(todo), 100), RESOLVE_BATCH):
+            batch = todo[i:min(i + RESOLVE_BATCH, 100)]
+            try:
+                result = self.relay.call('POST', '/discover', {'action': 'resolve', 'emails': batch}, timeout=60) or {}
+                if not isinstance(result.get('people'), list):
+                    break  # an incomplete response is not an empty successful lookup
+                people += result['people']
+                resolved.update(batch)
+            except ValueError:  # enough for today (429): the rest stay eligible on the next incremental pass
+                break
+        pending = set(todo) - resolved
+        with self.connect() as db:
             if full:
                 db.execute('DELETE FROM network_looked')
-            db.executemany('INSERT OR REPLACE INTO network_looked(email,at) VALUES(?,?)', [(e, now()) for e in emails])
-        refresh = full and self._ago(found.get('refreshed'), REFRESH_DAYS * 86400)
-        todo = ([h for h in hits if h not in known] + ([h for h in hits if h in known] if refresh else []))[:100]
-        by_email = {c[0]: c for c in contacts}
-        people = []
-        for i in range(0, len(todo), RESOLVE_BATCH):
-            try:
-                people += (self.relay.call('POST', '/discover', {'action': 'resolve', 'emails': todo[i:i + RESOLVE_BATCH]}, timeout=60) or {}).get('people') or []
-            except ValueError:  # enough for today (429): the rest on a later lookup
-                break
-        with self.connect() as db:
+            # Remove pending hits from an older full lookup too. Store progress with the returned people, never
+            # before the resolve call: a restart or failed response then safely repeats only a read.
+            db.executemany('DELETE FROM network_looked WHERE email=?', [(e,) for e in pending])
+            db.executemany('INSERT OR REPLACE INTO network_looked(email,at) VALUES(?,?)', [(e, now()) for e in emails if e not in pending])
             for p in people:
                 email = normal(p.get('email'))
                 if email not in by_email or not isinstance(p.get('username'), str):
@@ -314,9 +326,11 @@ class Discovery:
             if full or new:
                 self.log(db, 'out', self.friends_ref() or 'friends', None, 'Network', 'discover',
                          f'Checked {len(emails)} contacts privately; {len(people) if full else new} {"on the Network" if full else "newly found on the Network"}', 'done')
-        if refresh:
-            self._set_network(refreshed=now())
-        self._set_network(checked=now())
+        refresh_pending = pending if refresh else set(found.get('refresh_pending') or []) - resolved
+        values = {'checked': now(), 'refresh_pending': sorted(refresh_pending)}
+        if (refresh or found.get('refresh_pending')) and not refresh_pending:
+            values['refreshed'] = now()
+        self._set_network(**values)
         return len(emails)
 
     # -- the owner's own

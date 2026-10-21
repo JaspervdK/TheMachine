@@ -86,3 +86,7 @@ a week, nothing is ever installed or turned on by itself.
 
 - `assistant skills` lists your skills and what waits for you.
 - `assistant skills-propose` proposes one (see above). Installing, sharing and deciding are on the dashboard only.
+
+### Reading a ClawHub release
+
+The preview shows the complete SKILL.md. If its release file list cannot be fetched, try again: a missing list is not shown as “no scripts”. Installing uses OpenClaw’s normal version-pinned command after your existing Install choice. No extra approval tier is added.

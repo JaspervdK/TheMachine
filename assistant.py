@@ -3492,6 +3492,25 @@ class Store:
             return self._decide(db, suggestion_id, choice, feedback, decision_id, source,
                                 snooze_hours, snoozed_until, snooze_option, verified_terminal_job, work)
 
+    def wait_handoff(self, suggestion_id, feedback, decision_id, expected_decision):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            latest = db.execute('SELECT id FROM decisions WHERE suggestion_id=? ORDER BY rowid DESC LIMIT 1',
+                                (suggestion_id,)).fetchone()
+            if (latest['id'] if latest else None) != expected_decision:
+                return {'skipped': True, 'reason': 'newer_card_choice'}
+            return self._decide(db, suggestion_id, 'snooze', feedback, decision_id, 'fleet', snooze_option='3d', work=True)
+
+    def decide_handoff(self, suggestion_id, choice, feedback, decision_id, request_id):
+        """Apply an answer only while this exact handoff still owns the card. Owner input wins, atomically."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            latest = db.execute('SELECT id,source FROM decisions WHERE suggestion_id=? ORDER BY rowid DESC LIMIT 1',
+                                (suggestion_id,)).fetchone()
+            if not latest or latest['source'] != 'fleet' or latest['id'] != 'fleet-handoff-wait-' + request_id:
+                return {'skipped': True, 'reason': 'newer_card_choice'}
+            return self._decide(db, suggestion_id, choice, feedback, decision_id, 'fleet')
+
     def _decide(self, db, suggestion_id, choice, feedback, decision_id, source, snooze_hours=24, snoozed_until=None, snooze_option=None, verified_terminal_job=None, work=False):
         # The caller owns one IMMEDIATE transaction, including any prompt validation.
         if choice not in ['accept', 'reject', 'snooze', 'other', 'complete', 'reopen', 'undo', 'retry'] or not decision_id:
@@ -6611,11 +6630,11 @@ class App:
             self.fleet.notify_notice = self.fleet_notify_notice
             self.fleet.make_card, self.fleet.tell = self.fleet_card, self.fleet_tell  # Fleet requests (fleet_requests.py)
             # A handoff the teammate accepted is theirs now: the owner's card is done, saying to whom (Undo brings it back).
-            self.fleet.close_card = lambda card_id, why, key: self.store.decide(card_id, 'complete', why, key, 'fleet')
+            self.fleet.close_card = lambda card_id, why, key: self.store.decide_handoff(card_id, 'complete', why, key, key.removeprefix('fleet-handoff-'))
             # Handed off and not answered yet: the card waits under Later (back in 3 work days if their Machine stays quiet);
             # a decline brings it back to Ready.
-            self.fleet.wait_card = lambda card_id, why, key: self.store.decide(card_id, 'snooze', why, key, 'fleet', snooze_option='3d', work=True)
-            self.fleet.wake_card = lambda card_id, key: self.store.decide(card_id, 'accept', '', key, 'fleet')
+            self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
+            self.fleet.wake_card = lambda card_id, key: self.store.decide_handoff(card_id, 'accept', '', key, key.removeprefix('fleet-handoff-back-'))
             self.fleet.retell_notice = lambda message_id, message: threading.Thread(
                 target=self.fleet_retell, args=(message_id, message), daemon=True).start()
             # Briefs and free questions keep to the owner's hours; a free question is searched with the Machine's own search.

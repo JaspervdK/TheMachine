@@ -78,3 +78,7 @@ Import restores external Network keys into the new data folder even when their o
 ## Restart-safe node ownership
 
 Request-to-node identity is saved before a question is sent and kept through restarts and local receipt commits. An ambiguous connection failure stays on that node; a definite refused connection may use the next one. Duplicate deliveries keep one owner choice and receive the same final answer on both nodes. Discovery and membership operations stay on the main node. Replay bindings, duplicate mappings and saved reply receipts expire after 30 days in the local private database. No extra approval tier is added.
+
+### Interrupted discovery
+
+A blinded non-match is checked. A positive match is checked only after its name lookup returns and is saved. Rate-limited, interrupted and over-cap matches stay eligible for the next incremental lookup; the daily refresh timestamp is not advanced over unfinished name refreshes. Lookups remain bounded and do not resend a friend request.

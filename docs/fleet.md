@@ -301,3 +301,7 @@ checked, and every switch you flip, is kept in the Fleet activity history (see W
 ## Delivery and retry
 
 Current Machines save returned answers locally before acknowledging the exact answer receipt/version to the relay. They commit a request identity before asking a question; retrying the same identity and exact question returns the original result instead of asking twice. Older app/relay pairs retain their older delivery behaviour. Questions expire after at most three days; answers are retained until acknowledged or for at most three days, and question metadata for thirty days. Relay processing is not end-to-end encryption between Machines.
+
+### A handoff and a newer choice
+
+The card waits for the teammate’s answer only if you have not changed it while the handoff was sending. Their later acceptance or decline updates the card only while that exact handoff still owns it. A newer Change, Snooze, Done, Dismiss or Reopen wins; the reply stays in the Fleet log.

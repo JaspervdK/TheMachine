@@ -64,6 +64,54 @@ class Discovery(unittest.TestCase):
     def people(self):
         return {p['username']: p for p in self.fleet.network_view()['people']}
 
+    def test_unresolved_matches_remain_eligible_after_rate_limit(self):
+        real = self.relay.call
+        def limited(method, path, body=None, timeout=40):
+            if path == '/discover' and body['action'] == 'resolve':
+                raise ValueError('HTTP 429')
+            return real(method, path, body, timeout)
+        self.relay.call = limited
+        self.fleet.network_action('find_on')
+        with self.store.connect() as db:
+            looked = {r[0] for r in db.execute('SELECT email FROM network_looked')}
+        self.assertIn('zed@zed.example', looked)  # a confirmed non-match is done
+        self.assertNotIn('nia@nia.example', looked)  # a match with no answer is not
+        self.relay.call = real
+        self.ago(new_at=discovery.NEW_EVERY + 1)
+        self.fleet.discovery_round()
+        self.assertIn('nia', self.people())
+
+    def test_failed_known_person_refresh_is_retried_incrementally(self):
+        self.fleet.network_action('find_on')
+        self.ago(last=86401, refreshed=8 * 86400)
+        real = self.relay.call
+        def limited(method, path, body=None, timeout=40):
+            if path == '/discover' and body['action'] == 'resolve':
+                raise ValueError('HTTP 429')
+            return real(method, path, body, timeout)
+        self.relay.call = limited
+        self.fleet.discovery_round()
+        self.relay.call = real
+        before = len([b for b in self.relay.sent('/discover') if b['action'] == 'resolve'])
+        self.ago(new_at=discovery.NEW_EVERY + 1)
+        self.fleet.discovery_round()
+        self.assertGreater(len([b for b in self.relay.sent('/discover') if b['action'] == 'resolve']), before)
+
+    def test_matches_beyond_the_per_round_cap_are_checked_next_round(self):
+        contacts = [(f'person{i}@example.test', None, str(i)) for i in range(105)]
+        self.fleet._set_network(find=True)
+        from unittest.mock import patch
+        with patch.object(self.fleet, 'network_contacts', return_value=contacts), \
+                patch.object(discovery, 'blind', return_value=(1, [], [])), \
+                patch.object(discovery, 'matches', side_effect=lambda emails, *args: emails):
+            self.fleet.discovery_round(force=True)
+            with self.store.connect() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM network_looked').fetchone()[0], 100)
+            self.ago(new_at=discovery.NEW_EVERY + 1)
+            self.fleet.discovery_round()
+            with self.store.connect() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM network_looked').fetchone()[0], 105)
+
     def test_off_until_turned_on(self):
         self.assertEqual(self.fleet.discovery_round(force=True), 0)
         self.assertEqual(self.relay.sent('/discover'), [])

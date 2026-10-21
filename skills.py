@@ -802,7 +802,9 @@ class Catalog:
         try:
             release = json.loads(self._get(f'/api/v1/skills/{slug}/versions/{version}', ownerHandle=owner)).get('version') or {}
         except (ValueError, AttributeError):
-            release = {}
+            raise ValueError('ClawHub release files are unavailable; try again in a minute') from None
+        if not isinstance(release, dict) or not isinstance(release.get('files'), list):
+            raise ValueError('ClawHub release files are unavailable; try again in a minute')
         raw = self._get(f'/api/v1/skills/{slug}/file', path='SKILL.md', version=version, ownerHandle=owner)
         if len(raw) > 2 * 1024 * 1024:
             raise ValueError('That skill is too large to read here')
@@ -818,7 +820,7 @@ class Catalog:
         security = release.get('security') if isinstance(release.get('security'), dict) else {}
         llm = ((security.get('scanners') or {}).get('llm') or {}) if isinstance(security.get('scanners'), dict) else {}
         return {'ref': found.group(0), 'owner': owner, 'slug': slug, 'name': one_line(skill.get('displayName') or slug, 80),
-                'summary': one_line(skill.get('summary'), DESCRIPTION_CHARS), 'version': version, 'body': text[:64000],
+                'summary': one_line(skill.get('summary'), DESCRIPTION_CHARS), 'version': version, 'body': text,
                 'sha': hashlib.sha256(raw).hexdigest(), 'files': files, 'code': code[:20],
                 'install_steps': bool(re.search(r'["\']?install["\']?\s*:', head)),
                 'asks_keys': bool(re.search(r'["\']?(?:env|primaryEnv|apiKey)["\']?\s*:', head)),

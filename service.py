@@ -123,9 +123,10 @@ def enable(unit=UNIT_NAME, run=default_run):
         path = definition_path(unit)
         log_path(unit).parent.mkdir(parents=True, exist_ok=True)
         run(['launchctl', 'bootout', _target(unit)], timeout=30)  # a changed plist is only read when loaded again
-        result = run(['launchctl', 'bootstrap', _domain(), str(path)], timeout=60)
-        run(['launchctl', 'enable', _target(unit)], timeout=15)
-        return result
+        enabled = run(['launchctl', 'enable', _target(unit)], timeout=15)
+        if enabled.returncode:
+            return enabled
+        return run(['launchctl', 'bootstrap', _domain(), str(path)], timeout=60)
     return run(['systemctl', '--user', 'enable', unit], timeout=60)
 
 
@@ -147,6 +148,9 @@ def restart(unit=UNIT_NAME, run=default_run, timeout=60):
 def try_restart(unit=UNIT_NAME, run=default_run):
     """Restart only when it runs."""
     if manager() == 'launchd':
+        result = run(['launchctl', 'print', _target(unit)], timeout=15)
+        if result.returncode or not re.search(r'^\s*state = running\s*$', result.stdout or '', re.M):
+            return _ok(result.args)
         return run(['launchctl', 'kickstart', '-k', _target(unit)], timeout=60)
     return run(['systemctl', '--user', 'try-restart', unit], timeout=60)
 
@@ -169,6 +173,9 @@ def stop(unit=UNIT_NAME, run=default_run):
 
 def disable_now(unit=UNIT_NAME, run=default_run):
     if manager() == 'launchd':
+        disabled = run(['launchctl', 'disable', _target(unit)], timeout=15)
+        if disabled.returncode:
+            return disabled
         return stop(unit, run)
     return run(['systemctl', '--user', 'disable', '--now', unit], timeout=60)
 

@@ -161,12 +161,13 @@ class Requests(unittest.TestCase):
 
     def test_an_accepted_handoff_closes_the_senders_card_saying_to_whom(self):
         card = self.handed_card()
-        self.fleet.close_card = lambda card_id, why, key: self.store.decide(card_id, 'complete', why, key, 'fleet')
+        self.fleet.close_card = lambda card_id, why, key: self.store.decide_handoff(card_id, 'complete', why, key, key.removeprefix('fleet-handoff-'))
+        self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
         self.fleet.hand_off(card, self.ref, 'pat1', 'Send Sam the pricing', 'Sam wants pricing.')
         with self.store.connect() as db:
             ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
         self.fleet.take_answer({'id': ask_id, 'status': 'waiting'})
-        self.assertEqual(self.card_row(card)['status'], 'pending')  # asked, not taken yet
+        self.assertEqual(self.card_row(card)['status'], 'snoozed')  # asked, not taken yet
         for _ in range(2):  # a repeated stage changes nothing
             self.fleet.take_answer({'id': ask_id, 'status': 'answered', 'answer': {'stage': 'accepted'}})
             self.assertEqual(self.card_row(card)['status'], 'completed')
@@ -227,9 +228,9 @@ class Requests(unittest.TestCase):
 
     def test_a_handed_off_card_leaves_ready_and_waits_until_their_machine_answers(self):
         self.with_kim()
-        self.fleet.close_card = lambda card_id, why, key: self.store.decide(card_id, 'complete', why, key, 'fleet')
-        self.fleet.wait_card = lambda card_id, why, key: self.store.decide(card_id, 'snooze', why, key, 'fleet', snooze_option='3d', work=True)
-        self.fleet.wake_card = lambda card_id, key: self.store.decide(card_id, 'accept', '', key, 'fleet')
+        self.fleet.close_card = lambda card_id, why, key: self.store.decide_handoff(card_id, 'complete', why, key, key.removeprefix('fleet-handoff-'))
+        self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
+        self.fleet.wake_card = lambda card_id, key: self.store.decide_handoff(card_id, 'accept', '', key, key.removeprefix('fleet-handoff-back-'))
         slack = {'kind': 'slack', 'label': 'Send to Kim', 'revision': 'r1', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': self.HANDOFF_TEXT, 'delegate': True}
         link = {'kind': 'open', 'label': 'Open the report', 'revision': 'r2', 'url': 'https://tracker.example/1'}
         view = lambda card: (lambda s: (self.fleet.annotate(db, s), s[0])[1])([{**self.card_row(card), 'next_actions': [slack, link]}])
@@ -256,6 +257,41 @@ class Requests(unittest.TestCase):
                 with self.store.connect() as db:
                     shown = view(card)
                 self.assertEqual(len(shown['next_actions']), 2 if status == 'prepared' else 1)  # declined: hand it on another way
+
+    def test_late_handoff_answers_do_not_override_new_owner_instructions(self):
+        self.with_kim()
+        self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
+        self.fleet.close_card = lambda card_id, why, key: self.store.decide_handoff(card_id, 'complete', why, key, key.removeprefix('fleet-handoff-'))
+        self.fleet.wake_card = lambda card_id, key: self.store.decide_handoff(card_id, 'accept', '', key, key.removeprefix('fleet-handoff-back-'))
+        for answer in ('accepted', 'declined'):
+            card = self.ready_card([], 'late-' + answer)
+            self.fleet.hand_off(card, self.ref, 'kim1', 'Export leaks rows', self.HANDOFF_TEXT)
+            with self.store.connect() as db:
+                ask_id = db.execute("SELECT id FROM fleet_out WHERE context=?", ('handoff:' + card,)).fetchone()[0]
+            self.store.decide(card, 'other', 'I will handle this differently', 'new-' + answer, 'dashboard')
+            if answer == 'declined':
+                self.store.decide(card, 'snooze', '', 'my-later', 'dashboard', snooze_option='1w')
+            before = self.card_row(card)
+            self.fleet.take_answer({'id': ask_id, 'status': 'answered' if answer == 'accepted' else 'declined',
+                                    **({'answer': {'stage': 'accepted'}} if answer == 'accepted' else {})})
+            after = self.card_row(card)
+            self.assertEqual((after['status'], after['snoozed_until']), (before['status'], before['snoozed_until']))
+            with self.store.connect() as db:
+                latest = db.execute('SELECT id FROM decisions WHERE suggestion_id=? ORDER BY rowid DESC LIMIT 1', (card,)).fetchone()[0]
+            self.assertEqual(latest, 'new-' + answer if answer == 'accepted' else 'my-later')
+
+    def test_owner_change_while_handoff_is_sending_is_not_cancelled_by_wait(self):
+        self.with_kim()
+        card = self.ready_card([], 'during-send')
+        self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
+        real = self.relay.call
+        def send(method, path, body=None, timeout=40):
+            if path == '/ask':
+                self.store.decide(card, 'other', 'I will handle this differently', 'during-owner-change', 'dashboard')
+            return real(method, path, body, timeout)
+        self.relay.call = send
+        self.fleet.hand_off(card, self.ref, 'kim1', 'Export leaks rows', self.HANDOFF_TEXT)
+        self.assertEqual(self.card_row(card)['status'], 'instructions')
 
     def test_a_handoff_on_something_they_already_have_joins_that_card(self):
         mine = self.handed_card(key='k-own', title='Price the 40 seats for Sam', body='Sam asked what 40 seats cost.')

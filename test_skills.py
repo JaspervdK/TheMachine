@@ -335,6 +335,22 @@ class OpenClawSkills(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "doesn't match"):
             self.keeper.hub_get('@kim/meeting-prep')
 
+    def test_clawhub_does_not_hide_failed_file_manifest_as_an_empty_skill(self):
+        honest = self.oc.fetch
+        def missing(url):
+            if '/versions/' in url:
+                raise ValueError('temporarily unavailable')
+            return honest(url)
+        self.keeper.catalog.fetch = missing
+        with self.assertRaisesRegex(ValueError, 'release files'):
+            self.keeper.hub_get('@kim/meeting-prep')
+        self.assertFalse(any(c[:2] == ['skills', 'install'] for c in self.oc.calls))
+
+    def test_clawhub_shows_the_whole_instruction_file(self):
+        self.oc.md = HUB_MD + b'\n' + b'x' * 65000 + b'\nImportant final instruction.'
+        shown = self.keeper.hub_get('@kim/meeting-prep')
+        self.assertTrue(shown['body'].endswith('Important final instruction.'))
+
     def test_a_skill_hint_shows_on_its_card_at_most_three_a_week_and_never_again_once_dismissed(self):
         self.assertEqual(self.keeper.hint(self.card, {'skill': 'crm-notes', 'why': 'It keeps CRM notes'})['ok'], False)  # ready: the agent uses it
         self.assertEqual(self.keeper.hint(self.card, {'skill': 'apple-notes', 'why': 'Notes'})['ok'], False)  # can't work here

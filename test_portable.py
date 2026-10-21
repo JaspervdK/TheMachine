@@ -89,6 +89,21 @@ class LaunchdTest(unittest.TestCase):
         self.assertEqual(service.definition_path(), self.home / 'Library/LaunchAgents/computer.themachine.assistant.plist')
         self.assertEqual(service.label('the-machine-wacli-personal-whatsapp.service'), 'computer.themachine.wacli-personal-whatsapp')
 
+    def test_disable_survives_next_login_and_enable_clears_the_override_first(self):
+        target = f'gui/{os.getuid()}/computer.themachine.assistant'
+        run = Recorder()
+        service.disable_now(run=run)
+        self.assertIn(['launchctl', 'disable', target], run.calls)
+        run = Recorder()
+        service.enable(run=run)
+        self.assertLess(run.calls.index(['launchctl', 'enable', target]),
+                        run.calls.index(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(service.definition_path())]))
+
+    def test_try_restart_does_not_start_a_stopped_loaded_agent(self):
+        run = Recorder({'launchctl print': (0, 'state = not running\n')})
+        service.try_restart(run=run)
+        self.assertFalse(any(c[:2] == ['launchctl', 'kickstart'] for c in run.calls))
+
     def test_restart_stop_and_status_use_launchctl_in_the_gui_domain(self):
         target = f'gui/{os.getuid()}/computer.themachine.assistant'
         run = Recorder({'launchctl print': (0, 'state = running\n\tpid = 42\n')})

@@ -410,6 +410,9 @@ class Requests:
 
     def hand_off(self, card_id, fleet_ref, member_id, title, summary, contact=None):
         """Hand a card to a teammate, with the summary exactly as the owner read and edited it. Their card says how it went."""
+        with self.connect() as db:
+            latest = db.execute('SELECT id FROM decisions WHERE suggestion_id=? ORDER BY rowid DESC LIMIT 1', (str(card_id),)).fetchone()
+            expected = latest['id'] if latest else None
         draft = self.handoff_draft(card_id)
         if not self.member(fleet_ref, member_id):
             raise ValueError('Not someone in that Fleet')
@@ -428,7 +431,7 @@ class Requests:
         if self.wait_card:  # it's with them now: the card leaves Ready and waits under Later until their Machine answers
             try:
                 self.wait_card(str(card_id), f"Handed off to {fleet.label(self.member(fleet_ref, member_id))}",
-                               'fleet-handoff-wait-' + '-'.join(sorted((sent or {}).get('ids', {}).values()) or [str(card_id), fleet.now()]))
+                               'fleet-handoff-wait-' + '-'.join(sorted((sent or {}).get('ids', {}).values()) or [str(card_id), fleet.now()]), expected)
             except ValueError as error:
                 LOG.info('fleet handoff wait skipped error=%s', error)
         return sent
