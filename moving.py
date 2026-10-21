@@ -305,6 +305,10 @@ def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=
         except BaseException:
             proc.kill()
             proc.wait()
+            try:
+                proc.stdin.close()
+            except OSError:  # openssl is gone: what was still buffered for it is dropped
+                pass
             raise
         os.chmod(sealed, 0o600)
         target = out_dir / name
