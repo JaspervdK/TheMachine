@@ -347,7 +347,7 @@ class SourceError(Exception):
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
 CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel')
-OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
+OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_split', 'fleet_split_dismiss',
                          'fleet_split_adjust', 'task_import'}
@@ -7298,7 +7298,7 @@ class App:
                     return {'shown': False, 'unknown': True}
             shown = browser_viewer.focus(page, self.config.get('browser_cdp_url') or browser_viewer.CDP_URL)
             return {'shown': shown is not None}
-        if name in ('browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget'):
+        if name in ('browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget'):
             # A separate path: what the owner types goes into the page and, when asked, the encrypted store, never
             # into a log, the model or an error message (see browser_login.py).
             if not owner_dashboard:
@@ -7321,6 +7321,8 @@ class App:
             if name == 'browser_login_forget':
                 return {'forgotten': logins.forget(args.get('site'))}
             host = args.get('host') if isinstance(args.get('host'), str) else ''
+            if name == 'browser_login_choose':  # the page's own "use another method" or "resend": a click, nothing typed
+                return browser_login.choose(self.config, args.get('page'), host, args.get('option'))
             username, password = (v if isinstance(v, str) else None for v in (args.get('username'), args.get('password')))
             if args.get('use_saved') is True:
                 saved = logins.get(host)
@@ -9412,7 +9414,7 @@ class App:
                         return
                     if upload and request.get('action') not in UPLOAD_ACTIONS:
                         raise ValueError('Invalid request size')
-                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in CONNECT_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset','set_work_hours','set_signature','detect_signature')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in CONNECT_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_login_choose','browser_logins','browser_login_forget','model_usage_refresh','model_reset','set_work_hours','set_signature','detect_signature')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

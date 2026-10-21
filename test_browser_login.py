@@ -9,13 +9,28 @@ import moving
 USER, SECRET, CODE = 'test-user@example.invalid', 'not-a-real-password-123', '424242'
 
 PAGES = {
-    '/login': b'''<!doctype html><title>Log in</title><form action="/after" method="post">
+    '/login': b'''<!doctype html><meta charset="utf-8"><title>Log in</title><form action="/after" method="post">
         <input name="email" type="email"><input name="pw" type="password"><button>Log in</button></form>''',
     '/after': b'<!doctype html><title>Code</title><form action="/home" method="post"><input name="otp" autocomplete="one-time-code"><button>Verify</button></form>',
     '/home': b'<!doctype html><title>Home</title><p>Welcome</p>',
-    '/stuck': b'''<!doctype html><title>Log in</title><form onsubmit="event.preventDefault()">
+    '/stuck': b'''<!doctype html><meta charset="utf-8"><title>Log in</title><form onsubmit="event.preventDefault()">
         <input name="username"><input type="password"><button>Sign in</button></form>''',
     '/news': b'<!doctype html><title>News</title><form><input name="q"><button>Search</button></form>',
+    # One-time code pages, each saying in its own words which code it wants.
+    '/sms': '''<!doctype html><meta charset="utf-8"><title>Verify</title><meta property="og:site_name" content="Stripe"><main><h1>Two-step authentication</h1>
+        <p>Enter the code we sent to <b>\u2022\u2022\u2022\u2022 12</b>.</p>
+        <form action="/sms-check" method="post"><input name="code" autocomplete="one-time-code" inputmode="numeric"><button>Continue</button></form>
+        <p>Didn't get it? <button type="button" onclick="document.title='resent'">Resend code</button></p>
+        <a href="/totp">Use authenticator app instead</a> <a href="https://elsewhere.invalid/x">Use another method</a> <a href="/out">Sign out</a></main>'''.encode(),
+    '/sms-check': '''<!doctype html><meta charset="utf-8"><title>Verify</title><main><h1>Two-step authentication</h1><p>Enter the code we sent to \u2022\u2022\u2022\u2022 12.</p>
+        <p role="alert">That code isn't right. Try again.</p>
+        <form action="/home" method="post"><input name="code" autocomplete="one-time-code" aria-invalid="true"><button>Continue</button></form></main>'''.encode(),
+    '/totp': b'''<!doctype html><meta charset="utf-8"><title>Verify</title><div class="card"><h2>Authentication app</h2><label for="t">Enter the 6-digit code from your authenticator app</label>
+        <form action="/home" method="post"><input id="t" name="otp"><button>Verify</button></form><a href="/sms">Text me a code instead</a></div>''',
+    '/email': '''<!doctype html><meta charset="utf-8"><title>Check your inbox</title><section><h1>Check your email</h1><p>We emailed a code to j\u2022\u2022\u2022@example.com.</p>
+        <form action="/home" method="post"><input name="verification" autocomplete="one-time-code"><button>Verify</button></form></section>'''.encode(),
+    '/unknown': b'''<!doctype html><meta charset="utf-8"><title>Verify</title><form action="/home" method="post"><p>Enter your verification code to continue.</p>
+        <input name="passcode"><button>Submit</button></form><p>Questions? Write to help@example.com</p>''',
 }
 
 
@@ -121,6 +136,68 @@ class FillTest(unittest.TestCase):
             browser_login.fill(self.config, '7:nope', page['host'], USER, SECRET)
 
 
+    def test_says_which_code_the_page_wants(self):
+        for path, kind, sent in (('/sms', 'sms', 'ending in 12'), ('/totp', 'app', ''), ('/email', 'email', 'j\u2022\u2022\u2022@example.com'),
+                                 ('/unknown', 'unknown', '')):
+            self.open(path)
+            [page] = browser_login.pages(self.config)
+            self.assertEqual((page['code'], page['code_kind'], page['sent_to']), (True, kind, sent), path)
+            self.assertNotIn('field', page)
+        self.open('/sms')
+        [page] = browser_login.pages(self.config)
+        self.assertEqual(page['brand'], 'Stripe')
+        self.assertEqual(page['ask'], 'Two-step authentication \u00b7 Enter the code we sent to \u2022\u2022\u2022\u2022 12 .')
+        # Its own ways to another method or a new code, on this site only; never Sign out or a submit button.
+        self.assertEqual(page['others'], ['Resend code', 'Use authenticator app instead'])
+        self.assertEqual(page['error'], '')
+
+    def test_another_method_is_a_click_in_the_page(self):
+        self.open('/sms')
+        [page] = browser_login.pages(self.config)
+        done = browser_login.choose(self.config, page['id'], page['host'], 'Use authenticator app instead', settle=1)
+        self.assertEqual((done['result'], done['page']['code_kind']), ('next', 'app'))
+        with self.assertRaises(ValueError):
+            browser_login.choose(self.config, page['id'], page['host'], 'Sign out', settle=0)
+        with self.assertRaises(ValueError):  # another site
+            browser_login.choose(self.config, page['id'], 'evil.example', 'Text me a code instead', settle=0)
+
+    def test_a_rejected_code_shows_the_sites_words(self):
+        Site.posted.clear()
+        self.open('/sms')
+        [page] = browser_login.pages(self.config)
+        done = browser_login.fill(self.config, page['id'], page['host'], code='000000', settle=3)
+        self.assertEqual(done['result'], 'next')
+        self.assertEqual(done['page']['error'], "That code isn't right. Try again.")
+        self.assertNotIn('000000', json.dumps(done))
+        self.assertNotIn("isn't right", done['page']['ask'])
+
+
+class CodeKindTest(unittest.TestCase):
+    def test_by_what_the_page_says(self):
+        cases = {
+            'Enter the code we sent to \u2022\u2022\u2022\u2022 12': ('sms', 'ending in 12'),
+            'We texted a 6-digit code to (***) ***-**34': ('sms', 'ending in 34'),
+            'We sent a code to the phone number ending in 4821': ('sms', 'ending in 4821'),
+            'We sent a code to your phone': ('sms', ''),
+            'Enter the code from the authenticator app on your phone': ('app', ''),
+            'Open Google Authenticator and enter the code': ('app', ''),
+            'Check your email \u00b7 We sent a code to j\u2022\u2022\u2022@example.com': ('email', 'j\u2022\u2022\u2022@example.com'),
+            'Enter the code. Questions? support@example.com': ('unknown', ''),
+            'Insert your security key': ('key', ''),
+            'Enter the 6-digit code': ('unknown', ''),
+        }
+        for ask, (kind, sent) in cases.items():
+            self.assertEqual(browser_login.code_kind(ask), kind, ask)
+            self.assertEqual(browser_login.sent_to(ask, kind), sent, ask)
+        self.assertEqual(browser_login.code_kind('Enter the code', 'sms_code', ''), 'sms')  # then the field and the step
+        self.assertEqual(browser_login.code_kind('Enter the code', 'otp', '/login/totp'), 'app')
+
+    def test_brand(self):
+        self.assertEqual([browser_login.brand(h) for h in ('dashboard.stripe.com', 'shop.example.co.uk', '127.0.0.1:8000')],
+                         ['Stripe', 'Example', '127.0.0.1'])
+        self.assertEqual(browser_login.brand('x.example.com', 'Example Pay'), 'Example Pay')
+
+
 class EndpointTest(unittest.TestCase):
     def test_loopback_browsers_only(self):
         config = {'browser_cdp_url': 'http://127.0.0.1:9222', 'accounts': [{'browser_cdp': 'http://127.0.0.1:9333'},
@@ -153,7 +230,7 @@ class StoreTest(unittest.TestCase):
 class OwnerOnlyTest(unittest.TestCase):
     def test_not_for_the_agent_or_the_cli(self):
         import assistant
-        for name in ('browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget'):
+        for name in ('browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget'):
             self.assertIn(name, assistant.OWNER_ACTIONS)
             app = assistant.App.__new__(assistant.App)
             app.config = {'accounts': [], 'database': '/nonexistent/x.db'}
