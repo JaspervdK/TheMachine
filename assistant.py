@@ -359,7 +359,10 @@ FAMILY_ACTIONS = {'family_free', 'family_todo', 'family_event'}
 OWNER_ACTIONS |= FAMILY_ACTIONS
 # Skills (skills.py): writing, sharing and installing them is the owner's own, from the dashboard. The agent can only
 # propose one (skill_propose), which waits for the owner's Approve.
-SKILL_ACTIONS = {'skill_save', 'skill_get', 'skill_toggle', 'skill_delete', 'skill_share', 'skill_decide', 'skill_example'}
+SKILL_ACTIONS = {'skill_save', 'skill_get', 'skill_toggle', 'skill_delete', 'skill_share', 'skill_decide', 'skill_example',
+                 # Everything else OpenClaw has: shown read-only; OpenClaw's own on/off and ClawHub install, on the owner's tap.
+                 'skill_installed', 'skill_installed_get', 'skill_installed_toggle', 'skill_hub_search', 'skill_hub_get', 'skill_hub_install',
+                 'skill_hint_dismiss'}
 OWNER_ACTIONS |= SKILL_ACTIONS
 # A merged fix to The Machine can be undone this long; one it merged by itself undoes itself when
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
@@ -6460,7 +6463,7 @@ class App:
             self.fleet.search = lambda accounts, query, limit: self.related(accounts, query=query, limit=limit)[0]
             self.fleet.notify_brief = self.fleet_notify_brief
         # Skills (skills.py): the owner's how-tos, written to the OpenClaw workspace; shared ones come in through the Fleet.
-        self.skills = skills.Skills(self.store.connect, config.get('openclaw_workspace') or WORKSPACE, self.fleet)
+        self.skills = skills.Skills(self.store.connect, config.get('openclaw_workspace') or WORKSPACE, self.fleet, config=config)
         if self.fleet:
             self.fleet.skills = self.skills
 
@@ -6837,6 +6840,8 @@ class App:
                                        ahead=args.get('prepare_ahead') is True and self.config.get('prepare_ahead', True) is not False
                                        and self.store.ahead_room(int(self.config.get('prepare_ahead_per_day', 10))),
                                        awaiting=args.get('awaiting_event_id'),project=args.get('project'))
+            if isinstance(saved, dict) and saved.get('id') and args.get('skill_hint') and getattr(self, 'skills', None):
+                saved['skill_hint'] = self.skills.hint(saved['id'], args['skill_hint'])  # "There's a skill for this", if it clearly helps
             unknown = self.store.no_role_yet(args['event_ids'])
             if isinstance(saved, dict) and unknown:  # name them now, while the evidence is open
                 saved['no_role_yet'] = unknown
@@ -6900,6 +6905,8 @@ class App:
                 # The service decides, never the agent: a small, tested fix to its own error merges by itself.
                 why=self.store.auto_merge(args['suggestion_id'],self.config)
                 saved['auto_merge']='queued: it merges by itself if the tests pass and the new test fails without the fix' if why is None else 'waits for the owner’s Merge: '+why
+            if isinstance(saved, dict) and args.get('skill_hint') and getattr(self, 'skills', None) and not saved.get('replayed'):
+                saved['skill_hint'] = self.skills.hint(args['suggestion_id'], args['skill_hint'])  # "There's a skill for this", if it clearly helps
             return saved
         if name == 'revise_draft':
             if not owner_dashboard:raise ValueError('Drafts are edited in the dashboard')
@@ -7475,6 +7482,20 @@ class App:
             return keeper.share(str(args.get('id') or ''), str(args.get('fleet') or ''), to if isinstance(to, list) else None, str(args.get('note') or ''))
         if name == 'skill_decide':
             return keeper.decide(str(args.get('id') or ''), str(args.get('choice') or ''))
+        if name == 'skill_installed':  # refresh: read OpenClaw's list again now
+            return keeper.installed(args.get('refresh') is True)
+        if name == 'skill_installed_get':
+            return keeper.installed_get(str(args.get('name') or ''))
+        if name == 'skill_installed_toggle':
+            return keeper.installed_toggle(str(args.get('name') or ''), args.get('on') is True)
+        if name == 'skill_hub_search':
+            return keeper.hub_search(str(args.get('query') or ''))
+        if name == 'skill_hub_get':
+            return keeper.hub_get(str(args.get('ref') or ''))
+        if name == 'skill_hub_install':  # exactly the release the owner read: its version and its SKILL.md's sha
+            return keeper.hub_install(str(args.get('ref') or ''), str(args.get('version') or ''), str(args.get('sha') or ''))
+        if name == 'skill_hint_dismiss':
+            return keeper.hint_dismiss(str(args.get('id') or ''))
         raise ValueError('Unknown skill action')
 
     def is_work(self, account_ids):
@@ -7891,6 +7912,11 @@ class App:
                     lines=self.related_lines(job['suggestion_id'])
                     if len(request['message'])+len(lines)<19500:request['message']+=lines  # the runner refuses over 20,000
                 except Exception as error:LOG.error('related error=%s',type(error).__name__)
+            if getattr(self,'skills',None) and not job.get('finish'):
+                try:  # "There's a skill for this": an installed one that isn't ready, or one on ClawHub (the agent can search it)
+                    lines=self.skills.hint_prompt(clawhub=True)
+                    if lines and len(request['message'])+len(lines)<18500:request['message']+='\n\n'+lines
+                except Exception as error:LOG.error('skill hint error=%s',type(error).__name__)
             if request['session_job_id'] != job['job_id']:
                 request['message']+='\nThis continues the SAME session, with earlier work in context. Before changing anything in an app, read assistant_signals preparation_history (offset 0, then any next_offset): a compact list of earlier calls. Summaries are shortened: when reconciling a call, request preparation_history with its call_ref, offset 0 and any next_offset for exact saved parameters and receipts. If detail_complete=false, check the retained transcript or original app for the missing suffix. Do not repeat an external step that already happened; check uncertain ones against the app first. If the owner\'s latest note asks for something different (a rewrite, another approach), do that. Saving your result or a blocker is always allowed.'
         result=runner(request)
@@ -8312,6 +8338,12 @@ class App:
             request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text(),
                                                self.store.slipped(run['run_id']), self.store.promises_text(),
                                                self.store.unnamed_text(run['run_id']), self.store.role_text(run['run_id']))
+            try:  # "There's a skill for this": installed skills that aren't ready here, while there is room this week
+                hint = self.skills.hint_prompt() if getattr(self, 'skills', None) else ''
+                if hint and len(request['message']) + len(hint) < 18500:  # the runner refuses over 20,000
+                    request['message'] += '\n\n' + hint
+            except Exception as error:
+                LOG.error('skill hint error=%s', type(error).__name__)
             if getattr(self, 'fleet', None):
                 try:  # who a task can go to through The Machine (Hand it off)
                     people = sorted(set(self.fleet.handoff_people().values()))[:20]
@@ -9024,6 +9056,8 @@ class App:
         if getattr(self, 'fleet', None):
             threading.Thread(target=self.fleet.run, args=(self.stop,), daemon=True).start()
         threading.Thread(target=self.model_usage_worker, daemon=True).start()
+        if getattr(self, 'skills', None) and self.skills.catalog:  # what OpenClaw has, for Settings > Skills and skill hints
+            threading.Thread(target=self.skills.catalog.worker, args=(self.stop,), daemon=True).start()
         if embeddings.settings(self.config):
             threading.Thread(target=self.embedding_worker, daemon=True).start()
         if enrichment.settings(self.config):

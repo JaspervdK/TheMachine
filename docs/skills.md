@@ -57,6 +57,31 @@ Sharing a skill is free. Like every question on the Network, a shared skill is s
 signed with the sending Machine's own key (see [The Machine Network](network.md)), so the Network can't read or change
 it and the receiver knows whose Machine sent it.
 
+## Everything OpenClaw has
+
+Below your own skills, Settings > Skills lists every other skill OpenClaw has, grouped as Workspace, Bundled with
+OpenClaw and Other. Each shows whether it is ready or what it still needs (a command, a key, another OS). The list comes
+from `openclaw skills list`, refreshes every 30 minutes and on **Check again**, and the search box filters it.
+
+These skills are only read here, never edited. **Read** shows their `SKILL.md`. **Turn on/off** sets OpenClaw's own
+`skills.entries.<name>.enabled`; the Gateway doesn't need a restart. Your agent already sees every skill that is ready,
+in preparations too.
+
+## From ClawHub
+
+**Search ClawHub** uses `openclaw skills search`. Results are third-party: written by other people, not checked by The
+Machine. **Read** shows the `SKILL.md` with notes on any scripts, install steps, keys it asks for and ClawHub's scan.
+**Install** is only there after reading. It runs `openclaw skills install` for exactly that version, and only if it is
+still the `SKILL.md` you read. Such a skill is not limited to instructions like your own: it is OpenClaw's, with
+whatever it brings.
+
+## There's a skill for this
+
+When your agent reviews or prepares a card and an installed skill that isn't ready yet, or one on ClawHub, fits what
+the card is about, it can add a quiet "There's a skill for this" line to the card (`skill_hint` on `suggest` or
+`prepare`). It also shows under Settings > Skills. **Look** opens it; **Not now** dismisses it for good. At most three
+a week, nothing is ever installed or turned on by itself.
+
 ## From the command line
 
 - `assistant skills` lists your skills and what waits for you.

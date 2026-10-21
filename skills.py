@@ -26,7 +26,13 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 LOG = logging.getLogger('personal-assistant')
@@ -35,6 +41,8 @@ CREATE TABLE IF NOT EXISTS skills(id TEXT PRIMARY KEY,slug TEXT NOT NULL,name TE
   status TEXT NOT NULL,origin TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,sha TEXT NOT NULL,author TEXT,fleet TEXT,member_id TEXT,
   ask_id TEXT,their_slug TEXT,replaces TEXT,note TEXT,shared TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS skills_status ON skills(status);
+CREATE TABLE IF NOT EXISTS skill_hints(id TEXT PRIMARY KEY,suggestion_id TEXT NOT NULL,skill TEXT NOT NULL,kind TEXT NOT NULL,name TEXT NOT NULL,
+  summary TEXT,why TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 '''
 STATUSES = ('on', 'off', 'proposed', 'incoming')
 FOLDER = 'the-machine'          # under <workspace>/skills
@@ -232,18 +240,91 @@ def sync(db, workspace):
 
 
 class Skills:
-    def __init__(self, connect, workspace, fleet=None):
+    def __init__(self, connect, workspace, fleet=None, config=None, catalog=None):
         self.connect, self.workspace, self.fleet = connect, Path(workspace), fleet
+        # What OpenClaw itself has (read-only here); without a config (tests, tools) only The Machine's own.
+        self.catalog = catalog if catalog is not None else Catalog(config) if config is not None else None
+        self.hints = Hints(connect, self.catalog)
         with self.connect() as db:
             ensure(db)
 
     def sync(self):
         try:
             with self.connect() as db:
-                return sync(db, self.workspace)
+                written = sync(db, self.workspace)
         except OSError as error:
             LOG.error('skills sync error=%s', type(error).__name__)
             return []
+        if self.catalog:
+            self.catalog.at = 0  # OpenClaw's list changes with these: read it again when next asked
+        return written
+
+    def mine(self):
+        with self.connect() as db:
+            return {r[0] for r in db.execute("SELECT slug FROM skills WHERE status='on'")}
+
+    # -- everything OpenClaw has (read-only, see Catalog)
+    def installed(self, refresh=False):
+        if not self.catalog:
+            return {'installed': [], 'checked_at': None, 'error': 'OpenClaw isn\'t set up here'}
+        return self.catalog.view(self.mine(), refresh)
+
+    def installed_get(self, name):
+        if not self.catalog:
+            raise ValueError('OpenClaw isn\'t set up here')
+        if str(name) in self.mine():
+            raise ValueError('Open it from your own skills')
+        return self.catalog.read(str(name))
+
+    def installed_toggle(self, name, on):
+        if not self.catalog:
+            raise ValueError('OpenClaw isn\'t set up here')
+        if str(name) in self.mine():
+            raise ValueError('Turn your own skills on or off above')
+        self.catalog.toggle(str(name), bool(on))
+        if on:
+            self.hints.close(str(name))
+        return self.installed()
+
+    def hub_search(self, query):
+        if not self.catalog:
+            raise ValueError('OpenClaw isn\'t set up here')
+        return {'results': self.catalog.search(query)}
+
+    def hub_get(self, ref):
+        if not self.catalog:
+            raise ValueError('OpenClaw isn\'t set up here')
+        return self.catalog.hub(ref)
+
+    def hub_install(self, ref, version, sha):
+        if not self.catalog:
+            raise ValueError('OpenClaw isn\'t set up here')
+        shown = self.catalog.install(str(ref), str(version), str(sha))
+        self.hints.close(shown['ref'])
+        LOG.info('skills installed from clawhub ref=%s version=%s', shown['ref'], shown['version'])
+        return {'installed_skill': shown['slug'], **({'differs': True} if shown.get('differs') else {}), **self.installed()}
+
+    def hint(self, suggestion_id, hint):
+        return self.hints.add(suggestion_id, hint, self.mine())
+
+    def hint_dismiss(self, hint_id):
+        self.hints.dismiss(hint_id)
+        return self.view()
+
+    def hint_prompt(self, clawhub=False):
+        """For the agent's review (installed skills only) and preparation turns (also ClawHub, which it can search):
+        how to point the owner to a skill that would help, while there is room this week. '' when there isn't."""
+        if not self.catalog or not self.hints.room():
+            return ''
+        listed = self.hints.candidates(self.mine())
+        if not listed and not clawhub:
+            return ''
+        where = ('one that isn\'t ready here' + (' (below)' if listed else '') + ' or one on ClawHub (`openclaw skills search <what it does>`)'
+                 if clawhub else 'one of the skills below that aren\'t ready here')
+        return (f'Skills: if {where} would clearly help with this kind of work, add '
+                'skill_hint:{"skill":"<its name' + (', or @owner/slug from ClawHub' if clawhub else '') + '>","why":"<one line>"} to '
+                + ('prepare' if clawhub else 'suggest') + '. Judge it by what the card is about and only when it clearly helps: the owner sees it as a quiet '
+                'line on the card and decides, so never install or turn on a skill yourself.' + ('\n' + listed if listed else ''))
 
     def _slug(self, db, name, keep_id=None):
         """A free slug for a name: not another skill's here, not a skill OpenClaw already has from elsewhere."""
@@ -458,7 +539,379 @@ class Skills:
                     item['changed'] = any(s['version'] < r['version'] for s in item['shares'])
                 items.append(item)
         waiting = sum(1 for i in items if i['status'] in ('incoming', 'proposed'))
-        return {'skills': items, 'waiting': waiting, 'targets': self.targets(), 'folder': f'skills/{FOLDER}'}
+        return {'skills': items, 'waiting': waiting, 'targets': self.targets(), 'folder': f'skills/{FOLDER}', 'hints': self.hints.open(),
+                'openclaw': bool(self.catalog)}
+
+
+# -- Everything OpenClaw has (docs/skills.md): read from OpenClaw itself, never written here --------------------------
+# The Machine's own skills are the ones above. OpenClaw also has bundled skills, ones in the workspace, learned ones and
+# ones from ClawHub. Those are shown read-only: their files are never edited or removed from here. Turning one on or off
+# is OpenClaw's own setting (skills.entries.<key>.enabled, which OpenClaw applies without a restart), and installing
+# one from ClawHub is OpenClaw's own `openclaw skills install`, only on the owner's tap after reading it.
+CATALOG_SECONDS, SEARCH_SECONDS = 1800, 600
+HINTS_PER_WEEK = 3
+REF = re.compile(r'@([A-Za-z0-9][A-Za-z0-9_.-]{0,63})/([a-z0-9][a-z0-9-]{0,79})')
+VERSION = re.compile(r'[0-9A-Za-z][0-9A-Za-z.+-]{0,39}')
+KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}')
+ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+TEXT_FILES = ('.md', '.txt', '.json', '.yaml', '.yml', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp')
+OS_NAMES = {'darwin': 'macOS', 'linux': 'Linux', 'win32': 'Windows'}
+SOURCES = {'openclaw-workspace': 'Workspace', 'openclaw-bundled': 'Bundled with OpenClaw', 'openclaw-workshop': 'Learned by OpenClaw',
+           'openclaw-custodian': 'OpenClaw upkeep', 'openclaw-managed': 'Shared on this computer', 'openclaw-extra': 'From a plugin'}
+
+
+def needs_text(missing, key=''):
+    """What a skill still needs, in a few plain words; '' when nothing."""
+    missing = missing if isinstance(missing, dict) else {}
+    out = []
+    bins = [str(b) for b in missing.get('bins') or []]
+    if bins:
+        out.append('the ' + ', '.join(bins[:3]) + (' commands' if len(bins) > 1 else ' command'))
+    any_bins = [str(b) for b in missing.get('anyBins') or []]
+    if any_bins:
+        out.append('one of ' + ', '.join(any_bins[:3]))
+    env = [str(e) for e in missing.get('env') or []]
+    if env:
+        out.append(', '.join(env[:3]))
+    config = [str(c) for c in missing.get('config') or [] if str(c) != f'skills.entries.{key}.enabled']
+    if config:
+        out.append('the setting ' + ', '.join(config[:2]))
+    return ('Needs ' + ' and '.join(out)) if out else ''
+
+
+def os_only(missing):
+    systems = [OS_NAMES.get(str(o), str(o)) for o in (missing or {}).get('os') or []] if isinstance(missing, dict) else []
+    return (' or '.join(systems[:3]) + ' only') if systems else ''
+
+
+def installed_item(raw, mine):
+    """One skill OpenClaw lists, as the dashboard shows it."""
+    name = one_line(raw.get('name'), 80)
+    source = one_line(raw.get('source'), 60)
+    missing = raw.get('missing') or {}
+    only = os_only(missing)
+    if name in mine:
+        group = 'yours'
+    elif source == 'openclaw-workspace':
+        group = 'workspace'
+    elif source == 'openclaw-bundled' or raw.get('bundled') is True:
+        group = 'bundled'
+    else:
+        group = 'other'
+    off = raw.get('disabled') is True
+    blocked = raw.get('blockedByAllowlist') is True or raw.get('blockedByAgentFilter') is True
+    ready = raw.get('eligible') is True and not off and not blocked
+    state = 'ready' if ready else 'off' if off else 'blocked' if blocked else 'setup'
+    need = only or needs_text(missing, name) or ('Not allowed for this agent' if blocked else '')
+    return {'name': name, 'description': one_line(raw.get('description'), DESCRIPTION_CHARS), 'emoji': one_line(raw.get('emoji'), 4),
+            'group': group, 'source': SOURCES.get(source, source.replace('openclaw-', '').replace('-', ' ').capitalize() or 'Other'),
+            'state': state, 'on': not off, 'needs': need, 'toggle': group != 'yours' and not only}
+
+
+class Catalog:
+    """What OpenClaw itself sees (`openclaw skills list --json`), kept for half an hour and refreshed on demand, plus
+    ClawHub search, reading a ClawHub skill before installing it, and OpenClaw's own install and on/off setting."""
+
+    def __init__(self, config=None, run=subprocess.run, fetch=None, clock=time.time):
+        config = config or {}
+        self.binary = str(config.get('openclaw') or 'openclaw')
+        self.registry = str(config.get('clawhub_registry') or 'https://clawhub.ai').rstrip('/')
+        self.run, self.clock = run, clock
+        self.fetch = fetch or self._fetch
+        self.lock = threading.Lock()
+        self.raw, self.at, self.error, self.searches = None, 0.0, '', {}
+
+    def _cli(self, args, timeout=60):
+        try:
+            done = self.run([self.binary, *args], capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError('OpenClaw did not answer' + (' in time' if isinstance(error, subprocess.TimeoutExpired) else '')) from None
+        return done
+
+    @staticmethod
+    def _reason(done):
+        lines = [ANSI.sub('', line).strip() for line in f'{done.stderr or ""}\n{done.stdout or ""}'.splitlines()]
+        lines = [line for line in lines if line and not line.startswith(('OpenClaw ', '🦞'))]
+        return one_line(lines[-1] if lines else 'OpenClaw said no', 300)
+
+    def _json(self, args, timeout=60):
+        done = self._cli([*args, '--json'], timeout)
+        try:
+            data = json.loads(done.stdout or '')
+        except ValueError:
+            raise ValueError(self._reason(done) if done.returncode else 'OpenClaw gave an answer The Machine could not read') from None
+        return data
+
+    def load(self):
+        """Asks OpenClaw for every skill it has (about two seconds). Keeps the last good list when it fails."""
+        try:
+            data = self._json(['skills', 'list'])
+            found = data.get('skills') if isinstance(data, dict) else None
+            if not isinstance(found, list):
+                raise ValueError('OpenClaw gave an answer The Machine could not read')
+            with self.lock:
+                self.raw = [r for r in found if isinstance(r, dict) and isinstance(r.get('name'), str)][:500]
+                self.at, self.error = self.clock(), ''
+        except ValueError as error:
+            LOG.warning('skills catalog error=%s', error)
+            with self.lock:
+                self.at, self.error = self.clock(), str(error)
+        return self.raw
+
+    def peek(self):
+        """The list as last read, without waiting (the service's worker reads it every half hour)."""
+        return self.raw
+
+    def worker(self, stop):
+        """Reads OpenClaw's list every half hour, a minute after the service starts; cheap (one CLI call)."""
+        if stop.wait(60):
+            return
+        while True:
+            if self.clock() - self.at >= CATALOG_SECONDS - 5:
+                self.load()
+            if stop.wait(60):
+                return
+
+    def installed(self, refresh=False):
+        if refresh or self.raw is None or self.clock() - self.at > CATALOG_SECONDS:
+            self.load()
+        return self.raw or []
+
+    def find(self, name):
+        return next((r for r in self.installed() if r.get('name') == name), None)
+
+    def view(self, mine, refresh=False):
+        items = [installed_item(r, mine) for r in self.installed(refresh)]
+        order = {'yours': 0, 'workspace': 1, 'bundled': 2, 'other': 3}
+        items.sort(key=lambda i: (order[i['group']], i['name'].lower()))
+        return {'installed': items, 'checked_at': dt.datetime.fromtimestamp(self.at, dt.timezone.utc).isoformat(timespec='seconds') if self.at else None,
+                'error': self.error}
+
+    def read(self, name):
+        """One installed skill's SKILL.md, to read. Only read; nothing is written."""
+        if not self.find(name):
+            raise ValueError('OpenClaw doesn\'t have that skill')
+        info = self._json(['skills', 'info', name])
+        path = Path(str(info.get('filePath') or '')) if isinstance(info, dict) else Path()
+        body = ''
+        if path.name == 'SKILL.md' and path.is_file() and path.stat().st_size <= 256 * 1024:
+            body = path.read_text(errors='replace')
+        steps = [one_line(s.get('label') or s.get('kind'), 120) for s in (info.get('install') or []) if isinstance(s, dict)][:5]
+        item = installed_item({**self.find(name)}, set())
+        return {'name': name, 'description': item['description'], 'source': item['source'], 'state': item['state'], 'needs': item['needs'],
+                'body': clean_body(body)[:BODY_CHARS * 2] or item['description'], 'install_steps': [s for s in steps if s],
+                'homepage': info.get('homepage') if str(info.get('homepage') or '').startswith('https://') else ''}
+
+    def toggle(self, name, on):
+        """OpenClaw's own on/off for a skill (skills.entries.<key>.enabled): applied without a Gateway restart."""
+        if not self.find(name):
+            raise ValueError('OpenClaw doesn\'t have that skill')
+        info = self._json(['skills', 'info', name])
+        key = str(info.get('skillKey') or name) if isinstance(info, dict) else name
+        if not KEY.fullmatch(key):
+            raise ValueError('That skill can\'t be turned on or off from here')
+        done = self._cli(['config', 'set', f'skills.entries.{key}.enabled', 'true' if on else 'false', '--strict-json'])
+        if done.returncode:
+            raise ValueError(self._reason(done))
+        self.load()
+
+    # -- ClawHub: third-party skills
+    def search(self, query):
+        query = one_line(query, 80)
+        if len(query) < 2:
+            raise ValueError('Type what the skill should help with')
+        cached = self.searches.get(query.lower())
+        if cached and self.clock() - cached[0] < SEARCH_SECONDS:
+            return cached[1]
+        data = self._json(['skills', 'search', *query.split()[:8], '--limit', '12'], timeout=60)
+        have = {r.get('name') for r in self.installed()}
+        out = []
+        for r in (data.get('results') if isinstance(data, dict) else None) or []:
+            found = REF.fullmatch(str(r.get('installRef') or '')) if isinstance(r, dict) else None
+            if not found:  # only skills ClawHub itself hosts and scans (@owner/slug)
+                continue
+            native = (r.get('native') or {}).get('skill') or {}
+            trust = r.get('trust') or {}
+            out.append({'ref': found.group(0), 'owner': found.group(1), 'slug': found.group(2),
+                        'name': one_line(r.get('displayName') or found.group(2), 80), 'summary': one_line(r.get('summary'), DESCRIPTION_CHARS),
+                        'downloads': r['downloads'] if isinstance(r.get('downloads'), int) else 0,
+                        'official': r.get('official') is True, 'suspicious': native.get('isSuspicious') is True,
+                        'installable': trust.get('installability', 'installable') == 'installable', 'installed': found.group(2) in have,
+                        'url': f'{self.registry}/{found.group(1)}/skills/{found.group(2)}'})
+        self.searches = {k: v for k, v in self.searches.items() if self.clock() - v[0] < SEARCH_SECONDS}
+        self.searches[query.lower()] = (self.clock(), out)
+        return out
+
+    def _fetch(self, url):
+        request = urllib.request.Request(url, headers={'User-Agent': 'the-machine', 'Accept': 'application/json, text/plain'})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.read(2 * 1024 * 1024 + 1)
+
+    def _get(self, route, **params):
+        url = self.registry + route + ('?' + urllib.parse.urlencode(params) if params else '')
+        try:
+            return self.fetch(url)
+        except (OSError, urllib.error.URLError, ValueError):
+            raise ValueError('ClawHub did not answer; try again in a minute') from None
+
+    def hub(self, ref):
+        """A ClawHub skill, read before installing: its SKILL.md as published, its files (so scripts show), whether it
+        has install steps or asks for keys, and ClawHub's own scan. The sha is what an install must still match."""
+        found = REF.fullmatch(str(ref or ''))
+        if not found:
+            raise ValueError('That isn\'t a ClawHub skill')
+        owner, slug = found.group(1), found.group(2)
+        try:
+            detail = json.loads(self._get(f'/api/v1/skills/{slug}', ownerHandle=owner))
+        except ValueError:
+            raise ValueError('ClawHub doesn\'t have that skill') from None
+        skill = detail.get('skill') if isinstance(detail, dict) else None
+        if not isinstance(skill, dict) or skill.get('slug') != slug or ((detail.get('owner') or {}).get('handle') not in (None, owner)):
+            raise ValueError('ClawHub doesn\'t have that skill')
+        version = str((detail.get('latestVersion') or {}).get('version') or '')
+        if not VERSION.fullmatch(version):
+            raise ValueError('That skill has no release to install')
+        try:
+            release = json.loads(self._get(f'/api/v1/skills/{slug}/versions/{version}', ownerHandle=owner)).get('version') or {}
+        except (ValueError, AttributeError):
+            release = {}
+        raw = self._get(f'/api/v1/skills/{slug}/file', path='SKILL.md', version=version, ownerHandle=owner)
+        if len(raw) > 2 * 1024 * 1024:
+            raise ValueError('That skill is too large to read here')
+        listed = next((f.get('sha256') for f in release.get('files') or [] if isinstance(f, dict) and f.get('path') == 'SKILL.md'), None)
+        if listed and listed != hashlib.sha256(raw).hexdigest():
+            raise ValueError('ClawHub sent a SKILL.md that doesn\'t match its release; not shown')
+        text = raw.decode('utf-8', errors='replace')
+        moderation = detail.get('moderation')
+        files = [{'path': one_line(f.get('path'), 200), 'size': int(f.get('size') or 0)} for f in release.get('files') or [] if isinstance(f, dict)][:200]
+        code = [f['path'] for f in files if not f['path'].lower().endswith(TEXT_FILES) or f['path'].split('/')[0] in ('scripts', 'bin')]
+        top = FRONTMATTER.match(text)
+        head = top.group(1) if top else ''
+        security = release.get('security') if isinstance(release.get('security'), dict) else {}
+        llm = ((security.get('scanners') or {}).get('llm') or {}) if isinstance(security.get('scanners'), dict) else {}
+        return {'ref': found.group(0), 'owner': owner, 'slug': slug, 'name': one_line(skill.get('displayName') or slug, 80),
+                'summary': one_line(skill.get('summary'), DESCRIPTION_CHARS), 'version': version, 'body': text[:64000],
+                'sha': hashlib.sha256(raw).hexdigest(), 'files': files, 'code': code[:20],
+                'install_steps': bool(re.search(r'["\']?install["\']?\s*:', head)),
+                'asks_keys': bool(re.search(r'["\']?(?:env|primaryEnv|apiKey)["\']?\s*:', head)),
+                'scan': one_line(security.get('status'), 40), 'scan_warnings': security.get('hasWarnings') is True,
+                'scan_summary': one_line(llm.get('summary'), 400),
+                'flagged': isinstance(moderation, dict) and (moderation.get('isSuspicious') is True or moderation.get('isMalwareBlocked') is True
+                                                              or moderation.get('verdict') not in (None, 'clean')),
+                'url': f'{self.registry}/{owner}/skills/{slug}'}
+
+    def install(self, ref, version, sha):
+        """OpenClaw's own install of exactly the release the owner read. Never forced, never past a policy warning."""
+        shown = self.hub(ref)
+        if shown['version'] != version or shown['sha'] != sha:
+            raise ValueError('It changed since you read it; read it again first')
+        if shown['slug'] in {r.get('name') for r in self.installed()}:
+            raise ValueError('A skill with that name is already here')
+        done = self._cli(['skills', 'install', shown['ref'], '--version', version], timeout=240)
+        if done.returncode:
+            raise ValueError(self._reason(done))
+        self.load()
+        try:  # what OpenClaw installed is what the owner read
+            info = self._json(['skills', 'info', shown['slug']])
+            got = ((info.get('clawhub') or {}).get('skillFile') or {}).get('sha256') if isinstance(info, dict) else None
+        except ValueError:
+            got = None
+        if got and got != sha:
+            LOG.warning('skills install sha differs ref=%s', shown['ref'])
+            shown['differs'] = True
+        return shown
+
+
+class Hints:
+    """"There's a skill for this": the agent names a skill that would clearly help with a card, judged from what the
+    card is about. At most HINTS_PER_WEEK a week, never one the owner dismissed, never for a skill that is ready
+    already (the agent uses those itself). A ClawHub one is only ever shown; installing it is the owner's tap."""
+
+    def __init__(self, connect, catalog):
+        self.connect, self.catalog = connect, catalog
+
+    def room(self, db=None):
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat(timespec='seconds')
+        if db is None:
+            with self.connect() as db:
+                return self.room(db)
+        return db.execute('SELECT COUNT(*) FROM skill_hints WHERE created_at>?', (since,)).fetchone()[0] < HINTS_PER_WEEK
+
+    def candidates(self, mine, limit=25):
+        """Installed skills that aren't ready here, for the agent to weigh; '' when none or no room this week."""
+        raw = self.catalog.peek() if self.catalog else None
+        if not raw or not self.room():
+            return ''
+        with self.connect() as db:
+            dismissed = {r[0] for r in db.execute("SELECT skill FROM skill_hints WHERE status='dismissed'")}
+        lines = []
+        for r in raw:
+            item = installed_item(r, mine)
+            if item['group'] == 'yours' or item['state'] == 'ready' or not item['toggle'] or item['name'] in dismissed:
+                continue
+            lines.append(f"- {item['name']}: {item['description'][:110]}" + (f" ({item['needs']})" if item['needs'] else ' (off)'))
+        return '\n'.join(lines[:limit])
+
+    def add(self, suggestion_id, hint, mine):
+        """The agent's skill_hint on a card. Returns why not instead of failing the card."""
+        if not isinstance(hint, dict):
+            return {'ok': False, 'reason': 'skill_hint is {skill, why}'}
+        skill, why = one_line(hint.get('skill'), 120).lstrip('$/'), one_line(hint.get('why'), 200)
+        if len(why) < 5:
+            return {'ok': False, 'reason': 'Say in one line why it helps (why)'}
+        found = REF.fullmatch(skill)
+        with self.connect() as db:
+            if not db.execute('SELECT 1 FROM suggestions WHERE id=?', (str(suggestion_id),)).fetchone():
+                return {'ok': False, 'reason': 'Unknown suggestion'}
+            if db.execute("SELECT 1 FROM skill_hints WHERE skill=? AND (status='dismissed' OR status='open')", (skill,)).fetchone():
+                return {'ok': False, 'reason': 'Already suggested or dismissed by the owner'}
+            if not self.room(db):
+                return {'ok': False, 'reason': f'At most {HINTS_PER_WEEK} skill hints a week; this one is not shown'}
+        if not self.catalog:
+            return {'ok': False, 'reason': 'Skills are not available here'}
+        try:
+            if found:
+                if found.group(2) in {r.get('name') for r in self.catalog.installed()}:
+                    return {'ok': False, 'reason': 'It is installed already'}
+                shown = self.catalog.hub(skill)
+                kind, name, summary = 'clawhub', shown['name'], shown['summary']
+            else:
+                raw = self.catalog.find(skill)
+                if not raw:
+                    return {'ok': False, 'reason': 'No installed skill has that name; a ClawHub one is @owner/slug'}
+                item = installed_item(raw, mine)
+                if item['group'] == 'yours' or item['state'] == 'ready':
+                    return {'ok': False, 'reason': 'It is ready already: use it yourself'}
+                if not item['toggle']:
+                    return {'ok': False, 'reason': 'It can\'t work on this computer'}
+                kind, name, summary = 'installed', item['name'], item['description']
+        except ValueError as error:
+            return {'ok': False, 'reason': str(error)}
+        stamp = now()
+        with self.connect() as db:
+            db.execute("INSERT INTO skill_hints(id,suggestion_id,skill,kind,name,summary,why,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'open',?,?)",
+                       ('sh_' + secrets.token_hex(8), str(suggestion_id), skill, kind, name, summary, why, stamp, stamp))
+        return {'ok': True, 'shown': 'on the card, as a quiet line the owner can dismiss'}
+
+    def close(self, skill, status='done'):
+        with self.connect() as db:
+            db.execute("UPDATE skill_hints SET status=?,updated_at=? WHERE skill=? AND status='open'", (status, now(), skill))
+
+    def dismiss(self, hint_id):
+        with self.connect() as db:
+            row = db.execute("SELECT skill FROM skill_hints WHERE id=?", (str(hint_id or ''),)).fetchone()
+        if not row:
+            raise ValueError('That hint is gone')
+        self.close(row['skill'], 'dismissed')
+
+    def open(self):
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat(timespec='seconds')
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='suggestions'").fetchone():
+                return []
+            return [{k: r[k] for k in ('id', 'suggestion_id', 'skill', 'kind', 'name', 'summary', 'why')}
+                    for r in db.execute("SELECT h.* FROM skill_hints h JOIN suggestions s ON s.id=h.suggestion_id WHERE h.status='open' AND h.created_at>? "
+                                        "AND s.status NOT IN ('completed','rejected') ORDER BY h.created_at DESC LIMIT 10", (since,))]
 
 
 def fleet_module():
