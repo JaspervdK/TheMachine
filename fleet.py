@@ -155,6 +155,12 @@ def where(error):
 
 NETWORK = 'https://network.themachine.computer'  # The Machine Network
 RELAY = 'https://relay.themachine.computer'  # its old address, still served: tried when NETWORK is away (docs/network.md)
+# The Network's second node, in another cloud: tried when the main one is away, and its mailbox looked into now and
+# then, so nothing that went there while the main node was away is left behind (docs/network.md, Failover).
+NETWORK2 = 'https://network2.themachine.computer'
+MAIN_HOSTS = ('network.themachine.computer', 'relay.themachine.computer', 'app.themachine.computer')  # one node, three names
+DRAIN_EVERY = 60   # seconds between looks into the other nodes' mailboxes
+HOME_AFTER = 300   # seconds on another node before the first endpoint is tried first again
 
 
 def reachable(url):
@@ -171,12 +177,21 @@ def settings(config):
 
 
 def endpoints(config):
-    """More Network endpoints to fail over to: config network_urls, then the old address when the Network's own is used."""
+    """More Network endpoints to fail over to: config network_urls, then the old address when the Network's own is used,
+    then the Network's second node when the main one is ours (its own names, or the hosted control plane's)."""
     found = [u for u in config.get('network_urls', []) if reachable(u)]
     url = (settings(config) or {}).get('url') or ''
     if url.startswith(NETWORK + '/'):
         found.append(RELAY + url[len(NETWORK):])
-    return found
+    if (url.startswith(NETWORK + '/') or urllib.parse.urlsplit(url).netloc.lower() in MAIN_HOSTS) and url.endswith('/api/fleet'):
+        found.append(NETWORK2 + '/api/fleet')
+    return [u for i, u in enumerate(found) if u not in found[:i] and u != url]
+
+
+def node(url):
+    """Which Network node an endpoint is: the main node answers under several names."""
+    host = urllib.parse.urlsplit(url).netloc.lower()
+    return 'main' if host in MAIN_HOSTS or url.startswith((NETWORK + '/', RELAY + '/')) else host
 
 
 def account_emails(config):
@@ -262,26 +277,158 @@ def day(value):
 
 class NetworkClient:
     """The Machine Network (once called the relay), with this Machine's token. `others` are more Network endpoints for the
-    same API (config network_urls): when one is away (502/503/504, or no connection) the next is tried, and the one
-    that answered is used first from then on (docs/network.md)."""
+    same API (config network_urls, the old address, the second node): when one is away (502/503/504, or no connection)
+    the next is tried, and the one that answered is used first from then on, until HOME_AFTER passed (docs/network.md).
+
+    With a second node, each message lives on the node that took it, and nothing is lost or done twice:
+    - a question goes to the next node only when the first one surely didn't take it (no connection, 502, 503); when
+      that is unsure (a timeout, a cut response, 504) it is asked again on the same node only, with the same request id;
+    - an answer goes to whichever node has its question (the others say 404); when that node is away the answer waits
+      in the outbox (network.py), so it is never given up because another node doesn't know the question;
+    - the inbox looks into the other nodes' mailboxes every DRAIN_EVERY seconds, and an ack goes to every node;
+    - a question that came through two nodes (the same request id) is taken once (Fleet.step)."""
     def __init__(self, url, token, others=()):
+        import time
         self.urls = [u.rstrip('/') for u in [url, *others] if u]
+        self.urls = [u for i, u in enumerate(self.urls) if u not in self.urls[:i]]
+        self.home = list(self.urls)
         self.url, self.token = self.urls[0], token
+        self.switched, self.drained = 0.0, 0.0
+        self.sticky = {}  # request id -> the node that may have taken it already
+        self.clock = time.monotonic
 
     def call(self, method, path, body=None, timeout=40):
-        for i, url in enumerate(self.urls):
+        route = path.split('?', 1)[0]
+        if self.url != self.home[0] and self.clock() - self.switched > HOME_AFTER:
+            self.urls, self.url = list(self.home), self.home[0]  # back to the main node first: it may be back
+        if method == 'POST' and route == '/answer':
+            return self._wherever(method, path, body, timeout)
+        if method == 'POST' and route == '/ack':
+            return self._everywhere(method, path, body, timeout)
+        request_id = body.get('request_id') if route == '/ask' and isinstance(body, dict) else None
+        found = self._failover(method, path, body, timeout, request_id)
+        if len({node(u) for u in self.urls}) > 1:
+            if method == 'GET' and route == '/inbox':
+                found = self._drain(path, found)
+            elif method == 'POST' and route == '/delivery':
+                found = self._delivery(path, body, found)
+        return found
+
+    def _failover(self, method, path, body, timeout, request_id=None):
+        only = self.sticky.get(request_id) if request_id else None
+        urls = [u for u in self.urls if only is None or node(u) == only]
+        last = None
+        while urls:
+            url = urls.pop(0)
             try:
                 found = self._call(url, method, path, body, timeout)
-            except (Unavailable, urllib.error.URLError, OSError):
-                if i == len(self.urls) - 1:
-                    raise
-                LOG.info('network endpoint away, trying the next one')
+            except (Unavailable, urllib.error.URLError, OSError) as error:
+                last = error
+                if request_id and not self._surely_not_taken(error):
+                    self.sticky[request_id] = node(url)  # it may be there: ask that node again, never another one
+                    urls = [u for u in urls if node(u) == node(url)]
+                if urls:
+                    LOG.info('network endpoint away, trying the next one')
                 continue
-            if url != self.url:
-                self.urls.remove(url)
-                self.urls.insert(0, url)
-                self.url = url
+            if request_id:
+                self.sticky.pop(request_id, None)
+            self._use(url)
             return found
+        if request_id in self.sticky and not isinstance(last, Unavailable):  # unsure: the caller sees "try again"
+            raise Unavailable('The Network did not answer; try again in a minute.') from last
+        raise last or Unavailable('The Network is restarting; try again in a minute.')
+
+    @staticmethod
+    def _surely_not_taken(error):
+        """No connection (urllib wraps what fails before the request is sent), or the proxy saying the node is down."""
+        return isinstance(error, urllib.error.URLError) and not isinstance(error, urllib.error.HTTPError) or \
+            isinstance(error, Unavailable) and getattr(error, 'code', None) in (502, 503)
+
+    def _use(self, url):
+        if url != self.url:
+            self.urls.remove(url)
+            self.urls.insert(0, url)
+            self.url = url
+            self.switched = self.clock()
+
+    def _wherever(self, method, path, body, timeout):
+        """To the node that has the question: the others say 404. Away there: Unavailable (the outbox keeps it). Only
+        the node in use can refuse it for good: another one saying no (not synced yet, say) counts as away."""
+        away, said_no = None, set()
+        for i, url in enumerate(list(self.urls)):
+            if node(url) in said_no:
+                continue
+            try:
+                return self._call(url, method, path, body, timeout)
+            except Off:
+                said_no.add(node(url))
+            except (Unavailable, urllib.error.URLError, OSError) as error:
+                away = error
+            except ValueError as error:
+                if i == 0:
+                    raise
+                away = error
+        if away is not None:
+            raise Unavailable('The Network is restarting; try again in a minute.') from None
+        raise Off()
+
+    def _everywhere(self, method, path, body, timeout):
+        """To every node (an ack clears only what that node has): fine when one took it, else what the first one said."""
+        found, first = None, None
+        for name in dict.fromkeys(node(u) for u in self.urls):
+            for url in [u for u in self.urls if node(u) == name]:
+                try:
+                    found = self._call(url, method, path, body, timeout)
+                    break
+                except (ValueError, Off, urllib.error.URLError, OSError) as error:
+                    first = first or error
+        if found is None:
+            raise first if isinstance(first, (ValueError, Off)) else Unavailable('The Network is restarting; try again in a minute.')
+        return found
+
+    def _others(self):
+        """One endpoint for each node but the one in use."""
+        seen, out = {node(self.url)}, []
+        for url in self.urls:
+            if node(url) not in seen:
+                seen.add(node(url))
+                out.append(url)
+        return out
+
+    def _drain(self, path, found):
+        """What waits on the other nodes too, every DRAIN_EVERY seconds, without waiting there."""
+        if self.clock() - self.drained < DRAIN_EVERY:
+            return found
+        self.drained = self.clock()
+        quick = re.sub(r'([?&])wait=[^&]*', r'\g<1>wait=0', path)
+        found = dict(found or {})
+        for url in self._others():
+            try:
+                more = self._call(url, 'GET', quick, None, 20) or {}
+            except Exception as error:  # that node is away (or says no): what waits there comes on a later look
+                LOG.info('network node not drained error=%s', type(error).__name__)
+                continue
+            for key in ('asks', 'answers', 'notices'):
+                have = {item.get('id') for item in found.get(key) or []}
+                extra = [item for item in more.get(key) or [] if item.get('id') not in have]
+                if extra:
+                    found[key] = list(found.get(key) or []) + extra
+            if more.get('ack'):
+                found['ack'] = True
+        return found
+
+    def _delivery(self, path, body, found):
+        """A question the node in use doesn't know may be on another one."""
+        gone = [i for i, d in ((found or {}).get('delivery') or {}).items() if (d or {}).get('status') == 'gone']
+        for url in self._others() if gone else []:
+            try:
+                more = (self._call(url, 'POST', path, {'ids': gone}, 20) or {}).get('delivery') or {}
+            except Exception:
+                continue
+            for ask_id, d in more.items():
+                if ask_id in gone and (d or {}).get('status') != 'gone':
+                    found['delivery'][ask_id] = d
+        return found
 
     def _call(self, base, method, path, body, timeout):
         request = urllib.request.Request(base + path, method=method, data=json.dumps(body).encode() if body is not None else None,
@@ -294,10 +441,11 @@ class NetworkClient:
             with error:
                 if error.code == 404:
                     raise Off() from None
-                if error.code in (502, 503, 504):
-                    raise Unavailable('The Network is restarting; try again in a minute.') from None
-                if error.code >= 500:  # the Network's own fault: it passes, so ask again later as for a restart
-                    raise Unavailable('The Network had a problem; try again in a minute.') from None
+                if error.code >= 500:  # away (502/503/504: a restart cuts every long poll at once) or its own fault: it passes
+                    away = Unavailable('The Network is restarting; try again in a minute.' if error.code in (502, 503, 504)
+                                       else 'The Network had a problem; try again in a minute.')
+                    away.code = error.code
+                    raise away from None
                 try:
                     message = json.loads(error.read() or b'{}').get('error') or ''
                 except ValueError:
@@ -1218,7 +1366,15 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
                     self.set_meta('me_sent', emails)
                 except ValueError:
                     pass
-            self.set_meta('directory', self.relay.call('GET', '/directory', timeout=30))
+            try:
+                self.set_meta('directory', self.relay.call('GET', '/directory', timeout=30))
+            except (Unavailable, OSError):
+                if self.meta('directory') is None:
+                    raise
+                # The Network is away, or on its second node (which has no directory): the one kept here does until it's back
+                LOG.info('network directory kept from before')
+                self.last['directory'] = stamp - DIRECTORY_EVERY + 60
+                return self.meta('directory', {'fleets': []})
             self.last['directory'] = stamp
             self.by_id()
             self.fold_rules()
@@ -2060,10 +2216,18 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         for ask in found.get('asks', []):
             if sealing and ask.get('id') and sealing.taken(ask['id']):
                 continue  # taken before: its answer is sent or waits in the outbox, so it's never acted on twice
+            # The same question through two Network nodes (asked again on the second after an unsure first try): once
+            twin = ask.get('request_id') and 'request:' + ':'.join(str(ask.get(k) or '') for k in ('fleet_id', 'from', 'request_id'))
+            if sealing and twin and sealing.taken(twin):
+                sealing.take(ask['id'])
+                LOG.warning('network question came twice member=%s', ask.get('from'))
+                continue
             try:
                 self.take_ask(ask)
                 if sealing and ask.get('id'):
                     sealing.take(ask['id'])
+                    if twin:
+                        sealing.take(twin)
             except (ValueError, KeyError, TypeError) as error:
                 LOG.error('fleet ask error=%s', type(error).__name__)
         acknowledged = {'answers': [], 'notices': []}

@@ -456,8 +456,108 @@ class Renamed(unittest.TestCase):
         self.assertEqual(fleet.NETWORK, 'https://network.themachine.computer')
         self.assertEqual(fleet.RELAY, 'https://relay.themachine.computer')
         paired = {'credentials': {'fleet': '/t'}, 'network_urls': ['https://second.example/api/fleet', 'http://evil.example']}
-        self.assertEqual(fleet.endpoints(paired), ['https://second.example/api/fleet', fleet.RELAY + '/api/fleet'])
+        self.assertEqual(fleet.endpoints(paired), ['https://second.example/api/fleet', fleet.RELAY + '/api/fleet', fleet.NETWORK2 + '/api/fleet'])
         self.assertEqual(fleet.endpoints({'fleet': {'url': 'https://hosted.example/api/fleet'}}), [])
+        # A hosted Machine on the control plane fails over to the Network's second node too
+        self.assertEqual(fleet.endpoints({'fleet': {'url': 'https://app.themachine.computer/api/fleet'}}), [fleet.NETWORK2 + '/api/fleet'])
+        self.assertEqual(fleet.node(fleet.RELAY + '/api/fleet'), fleet.node(fleet.NETWORK + '/api/fleet'))
+        self.assertNotEqual(fleet.node(fleet.NETWORK2 + '/api/fleet'), fleet.node(fleet.NETWORK + '/api/fleet'))
+
+
+class TwoNodes(unittest.TestCase):
+    """The Network on two nodes (docs/network.md, Failover): a question goes to the second node only when the first surely
+    didn't take it, an answer goes to the node that has its question, both mailboxes are looked into, acks go to both,
+    and a question that came through both is taken once. Fake nodes; no network."""
+    MAIN, SECOND = 'https://network.themachine.computer/api/fleet', 'https://network2.themachine.computer/api/fleet'
+
+    def setUp(self):
+        import io
+        import urllib.error
+        from unittest.mock import patch
+        self.down, self.seen, self.paths = set(), [], []
+        self.boxes = {self.MAIN: {}, self.SECOND: {}}  # ask id -> question; the asks each node holds
+        self.waiting = {self.MAIN: [], self.SECOND: []}
+
+        def opener(request, timeout=None):
+            base = next(b for b in self.boxes if request.full_url.startswith(b))
+            path = request.full_url[len(base):]
+            body = json.loads(request.data) if request.data else None
+            self.seen.append((base, request.get_method(), path.split('?')[0], body))
+            self.paths.append((base, path))
+            how = self.down & {base, (base, path.split('?')[0])}
+            if base in self.down:
+                raise urllib.error.HTTPError(request.full_url, 502, 'down', {}, io.BytesIO(b''))
+            if how:
+                raise TimeoutError('read timed out')
+            if path.startswith('/ask'):
+                ask_id = ('q2_' if base == self.SECOND else 'q_') + body['request_id'][:6]
+                self.boxes[base][ask_id] = body
+                return io.BytesIO(json.dumps({'ids': {'pat1': ask_id}}).encode())
+            if path.startswith('/answer'):
+                if body['id'] not in self.boxes[base]:
+                    raise urllib.error.HTTPError(request.full_url, 404, 'no', {}, io.BytesIO(b'{"error":"no such open question"}'))
+                self.boxes[base][body['id']] = {'answered': body}
+                return io.BytesIO(b'{"ok":true}')
+            if path.startswith('/inbox'):
+                found, self.waiting[base] = self.waiting[base], []
+                return io.BytesIO(json.dumps({'asks': found, 'answers': [], 'ack': True}).encode())
+            if path.startswith('/delivery'):
+                return io.BytesIO(json.dumps({'delivery': {i: ({'status': 'delivered'} if i in self.boxes[base] else {'status': 'gone'})
+                                                           for i in body['ids']}}).encode())
+            return io.BytesIO(b'{"ok":true}')
+
+        patcher = patch.object(fleet.urllib.request, 'urlopen', opener)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = fleet.NetworkClient(self.MAIN, lambda: 'fd_x', [self.SECOND])
+
+    def test_failover_answers_go_where_their_question_is_and_both_mailboxes_are_read(self):
+        before = self.client.call('POST', '/ask', {'kind': 'todo', 'request_id': 'a' * 32})['ids']['pat1']
+        self.down.add(self.MAIN)
+        during = self.client.call('POST', '/ask', {'kind': 'todo', 'request_id': 'b' * 32})['ids']['pat1']
+        self.assertEqual((before in self.boxes[self.MAIN], during in self.boxes[self.SECOND]), (True, True))
+        # The second node has the new question; the main one is away, so an answer to its question waits (the outbox)
+        self.assertEqual(self.client.call('POST', '/answer', {'id': during, 'status': 'answered'}), {'ok': True})
+        with self.assertRaises(fleet.Unavailable):
+            self.client.call('POST', '/answer', {'id': before, 'status': 'answered'})
+        self.down.clear()
+        self.assertEqual(self.client.call('POST', '/answer', {'id': before, 'status': 'answered'}), {'ok': True})
+        self.assertEqual(self.boxes[self.MAIN][before], {'answered': {'id': before, 'status': 'answered'}})
+        with self.assertRaises(fleet.Off):  # neither node has it
+            self.client.call('POST', '/answer', {'id': 'q_nope', 'status': 'answered'})
+        # Both mailboxes are read (the other one without waiting), and an ack goes to both
+        self.waiting[self.MAIN].append({'id': 'q_m'})
+        self.waiting[self.SECOND].append({'id': 'q2_s'})
+        self.client.drained = -10**9
+        found = self.client.call('GET', '/inbox?wait=25&ack=1')
+        self.assertEqual(sorted(a['id'] for a in found['asks']), ['q2_s', 'q_m'])
+        # still on the second node (the main one is tried first again after HOME_AFTER): the main one without waiting
+        self.assertEqual(self.paths[-2:], [(self.SECOND, '/inbox?wait=25&ack=1'), (self.MAIN, '/inbox?wait=0&ack=1')])
+        self.seen.clear()
+        self.client.call('POST', '/ack', {'answers': [{'id': 'q2_s', 'receipt': 'r'}]})
+        self.assertEqual({b for b, _, p, _ in self.seen if p == '/ack'}, {self.MAIN, self.SECOND})
+        # "Not delivered yet" asks every node about a question the one in use doesn't know
+        found = self.client.call('POST', '/delivery', {'ids': [before, during]})['delivery']
+        self.assertEqual((found[before]['status'], found[during]['status']), ('delivered', 'delivered'))
+
+    def test_an_unsure_question_is_asked_again_on_the_same_node_only(self):
+        self.down.add((self.MAIN, '/ask'))  # sent, but no response: it may be on the main node
+        with self.assertRaises(fleet.Unavailable):
+            self.client.call('POST', '/ask', {'kind': 'todo', 'request_id': 'c' * 32})
+        self.assertEqual(self.boxes[self.SECOND], {})  # never asked on the second node as well
+        self.down.clear()
+        self.client.call('POST', '/ask', {'kind': 'todo', 'request_id': 'c' * 32})
+        self.assertEqual((len(self.boxes[self.MAIN]), self.boxes[self.SECOND]), (1, {}))
+        self.assertEqual(self.client.sticky, {})
+
+    def test_the_main_node_is_tried_first_again_after_a_while(self):
+        self.down.add(self.MAIN)
+        self.client.call('GET', '/directory')
+        self.assertEqual(self.client.url, self.SECOND)
+        self.down.clear()
+        self.client.switched -= fleet.HOME_AFTER + 1
+        self.client.call('GET', '/directory')
+        self.assertEqual(self.client.url, self.MAIN)
 
 
 A, B = 'fl_' + 'a' * 16, 'fl_' + 'b' * 16

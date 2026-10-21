@@ -43,11 +43,19 @@ its own implementation of the same standard algorithms.
 - A question the other Machine hasn't picked up yet shows as **Not delivered yet** on the Fleet tab.
 - Your Machine can use more than one Network endpoint (`network_urls` in `config.json`) and switches to the next one
   when one is away.
+- **Two nodes in two clouds.** The Network runs on a main node and a standby node with another provider
+  (`network2.themachine.computer`), both built in. When the main node is away your Machine uses the standby, which
+  carries sealed questions and answers only (pairing, keys, claims and the directory wait for the main node; your
+  Machine keeps its directory from before). Nothing is lost or done twice: a question moves to the standby only when
+  the main node surely didn't take it, an answer goes to the node that has its question (or waits in the outbox until
+  that node is back), your Machine looks into both mailboxes, and a question that came through both is taken once.
+  After 5 minutes it tries the main node first again.
 
 ## Addresses
 
 The Network lives at `network.themachine.computer`. Its old address, `relay.themachine.computer`, keeps working and is
-tried when the new one can't be reached, so Machines from before the rename carry on. Older names keep working too:
+tried when the new one can't be reached, so Machines from before the rename carry on. The standby node is
+`network2.themachine.computer`. Older names keep working too:
 `Relay` in code, `--relay` on `fleet-pair` (now `--network`; both are ignored).
 
 ## Roadmap
@@ -57,7 +65,7 @@ tried when the new one can't be reached, so Machines from before the rename carr
 | 1 | Fleets and Friends through the Network, approvals, rules, an activity log on each Machine | Done |
 | 2 | End-to-end encryption, key pinning and key-change warnings | Done |
 | 3 | Outbox with retries, once-only handling, "Not delivered yet", endpoint failover | Done |
-| 4 | A second Network node on another cloud provider, with failover drills | Planned |
+| 4 | A second Network node on another cloud provider, with failover drills | Done |
 | 5 | Finding people you know (with permission), useful-connection suggestions, task-driven email invites | In progress |
 | 6 | Other AI agents on the Network through a published protocol | Later |
 
