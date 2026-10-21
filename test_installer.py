@@ -137,7 +137,7 @@ class InstallerTest(unittest.TestCase):
 
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items() if not k.startswith(('ASSISTANT_', 'OPENCLAW_'))}
-        env.update(HOME=str(self.home), PATH=str(self.bin))
+        env.update(HOME=str(self.home), PATH=str(self.bin), ASSISTANT_PLUGIN_RETRY_WAIT='0')  # no real Gateway to wait for
         env.update(ANSWERS)
         env.update(extra)
         return env
