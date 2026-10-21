@@ -4056,7 +4056,8 @@ class Store:
                     channel_health = {'conversations': len(channels),
                                       'conversations_collected': sum(bool(c.get('last_scan')) for c in channels),
                                       'deferred_threads': sum(bool(c.get('deferred_thread')) for c in channels),
-                                      'conversation_errors': sum(bool(c.get('error')) for c in channels)}
+                                      'conversation_errors': sum(bool(c.get('error')) for c in channels),
+                                      'first_import': slack_first_import_progress(state)}
                 activity = [dict(r) for r in db.execute('SELECT at,status,signals,error,retry_at FROM sync_activity WHERE account_id=? ORDER BY at DESC,rowid DESC LIMIT 12',(account['id'],))]
                 last_failure = db.execute("SELECT at,error FROM sync_activity WHERE account_id=? AND status='failed' ORDER BY at DESC,rowid DESC LIMIT 1",(account['id'],)).fetchone()
                 failures_24h = db.execute("SELECT count(*) FROM sync_activity WHERE account_id=? AND status='failed' AND at>=?",(account['id'],cutoff)).fetchone()[0]
@@ -4265,7 +4266,7 @@ def sync_slack(store, config, account, source=None):
         try:
             page = source.get('users.conversations', params)
         except SourceError as error:
-            if error.category == 'slack_invalid_cursor':
+            if slack_error(error) == 'slack_invalid_cursor':
                 state.pop('page_token', None)
                 store.commit_page(account['id'], state, [], record_sync=False)
             raise
@@ -4284,9 +4285,40 @@ def sync_slack(store, config, account, source=None):
             state['page_token'] = cursor
         else:
             state.pop('page_token', None)
-            state['channels'].sort(key=lambda c: (c['name'] != 'My notes', c['type'] != 'channel', c['name']))
-            state.update(phase='scan', index=0, next_discovery=time.time() + 86400)
+            state['next_discovery'] = time.time() + 86400
+            if state['mode'] == 'bootstrap' and 'index' not in state:
+                # First import: a cheap look at every conversation first, so the read order follows activity.
+                state.update(phase='triage', triage=0)
+            else:
+                slack_order(state['channels'])
+                state.update(phase='scan', index=0)
         store.commit_page(account['id'], state, [])
+        return {'mode': state['mode'], 'events': 0, 'more': True}
+
+    if state['phase'] == 'triage':
+        # conversations.info isn't held to Slack's one-read-a-minute limit. A direct message shows its newest
+        # message; a channel or group only when you last read it, which stands in for its activity.
+        for _ in range(10):
+            if state['triage'] >= len(state['channels']):
+                break
+            channel = state['channels'][state['triage']]
+            try:
+                info = source.get('conversations.info', {'channel': channel['id']}).get('channel') or {}
+            except SourceError as error:
+                if slack_error(error) not in ('slack_channel_not_found', 'slack_not_in_channel', 'slack_missing_scope'):
+                    store.commit_page(account['id'], state, [], record_sync=False)
+                    raise
+                info = {}
+            latest = info.get('latest') if isinstance(info.get('latest'), dict) else {}
+            mark = latest.get('ts') if channel['type'] == 'dm' else info.get('last_read')
+            try:
+                channel['hint'] = float(mark or 0)
+            except (TypeError, ValueError):
+                channel['hint'] = 0.0
+            state['triage'] += 1
+        if state['triage'] >= len(state['channels']):
+            slack_first_import_plan(config, state)
+        store.commit_page(account['id'], state, [], record_sync=False)
         return {'mode': state['mode'], 'events': 0, 'more': True}
 
     if not state['channels']:
@@ -4305,16 +4337,28 @@ def sync_slack(store, config, account, source=None):
         retained = max(Decimal(state['after']),
                        Decimal(f'{time.time() - config.get("bootstrap_days", 7) * 86400:.6f}'))
         oldest = str(retained) if full else str(max(retained, Decimal(channel['last_scan']) - Decimal(21600)))
+        latest = f'{time.time():.6f}'
+        step = state.get('step')
+        if step == 'recent':
+            # First import, active conversations: the last day first; the rest of the window comes after.
+            oldest, full = str(max(retained, Decimal(f'{time.time() - 86400:.6f}'))), False
+            deepen_to = oldest if Decimal(oldest) > retained else None
+        elif step == 'deepen' and channel.get('deepen'):
+            oldest, latest = str(retained), channel['deepen']
         # Known threads are polled for late replies only while reasonably recent; the
         # list otherwise grows forever and is rewritten on every page commit.
         horizon = time.time() - config.get('slack_thread_retention_days', 30) * 86400
         channel['threads'] = [ts for ts in channel.get('threads', []) if float(ts) >= horizon]
-        scan = {'oldest': oldest, 'latest': f'{time.time():.6f}', 'phase': 'history',
+        scan = {'oldest': oldest, 'latest': latest, 'phase': 'history',
                 'thread_index': 0, 'threads': list(channel.get('threads', [])), 'full': full}
+        if step:
+            scan['step'] = step
+            if step == 'recent' and deepen_to:
+                scan['deepen_to'] = deepen_to
         if channel.get('threads_waiting'):
             # Threads left for later on the first pass: read them now over the whole window.
-            scan.update(thread_oldest=str(retained), thread_latest=scan['latest'])
-        elif account.get('fair_incremental') and channel.get('last_scan'):
+            scan.update(thread_oldest=str(retained), thread_latest=f'{time.time():.6f}')
+        elif account.get('fair_incremental') and channel.get('last_scan') and not step:
             # One old thread per channel turn, not its entire retained history.
             # Preserve all known threads and rotate durably on completed scans.
             scan['known_threads'] = list(scan['threads'])
@@ -4347,14 +4391,18 @@ def sync_slack(store, config, account, source=None):
             state['index']=(state['index']+1)%len(state['channels'])
             store.commit_page(account['id'],state,[],record_sync=False)
             error.retry_after = 65
-        elif error.category == 'slack_invalid_cursor':
+        elif slack_error(error) == 'slack_invalid_cursor':
             scan.pop('cursor', None)
             store.commit_page(account['id'], state, [], record_sync=False)
-        elif error.category in ('slack_thread_not_found', 'slack_channel_not_found', 'slack_not_in_channel'):
+        elif slack_error(error) in ('slack_thread_not_found', 'slack_channel_not_found', 'slack_not_in_channel'):
             # Keep a visible failure; don't silently mark a partial inaccessible channel complete.
-            channel['error'] = error.category
+            channel['error'] = slack_error(error)
             state.pop('scan', None)
-            state['index'] = (state['index'] + 1) % len(state['channels'])
+            if state.get('step'):
+                state['index'] += 1
+                slack_first_import_next(state)
+            else:
+                state['index'] = (state['index'] + 1) % len(state['channels'])
             store.commit_page(account['id'], state, [], record_sync=False)
         raise
     events = []
@@ -4406,7 +4454,14 @@ def sync_slack(store, config, account, source=None):
             if postponed and params.get('ts') == postponed['ts']:
                 channel.pop('deferred_thread',None)
         if scan['thread_index'] >= len(scan['threads']):
-            channel.update(last_scan=scan['latest'], threads=scan.get('known_threads', scan['threads'] + scan.get('waiting', [])))
+            if scan.get('step') == 'deepen' and channel.get('deepen'):
+                # The older part of the window: the newest read (last_scan) stays where it was.
+                channel.pop('deepen')
+                channel['threads'] = list(dict.fromkeys(channel.get('threads', []) + scan['threads'] + scan.get('waiting', [])))
+            else:
+                channel.update(last_scan=scan['latest'], threads=scan.get('known_threads', scan['threads'] + scan.get('waiting', [])))
+                if scan.get('deepen_to'):
+                    channel['deepen'] = scan['deepen_to']
             if scan.get('waiting'):
                 channel['threads_waiting'] = True
             else:
@@ -4420,7 +4475,9 @@ def sync_slack(store, config, account, source=None):
                 channel['next_full'] = time.time() + 86400
             state.pop('scan', None)
             state['index'] += 1
-            if state['index'] >= len(state['channels']):
+            if state.get('step'):
+                slack_first_import_next(state)
+            elif state['index'] >= len(state['channels']):
                 state.update(index=0, mode='incremental')
                 if time.time() >= state.get('next_discovery', 0):
                     state['phase'] = 'discover'
@@ -4429,6 +4486,103 @@ def sync_slack(store, config, account, source=None):
         remember_slack_names(store, source, events, state.get('channels') or ())
     more = state['mode'] != 'incremental' or state['index'] != 0 or bool(state.get('scan'))
     return {'mode': state['mode'], 'events': len(events), 'more': more}
+
+
+def slack_error(error):
+    """The Slack error label without the method it came from ('slack_not_in_channel:conversations.history')."""
+    return error.category.split(':', 1)[0]
+
+
+def slack_activity(channel):
+    """Best guess of when someone last wrote in a conversation: messages read so far, else the first import's hint."""
+    return max(float(channel.get('last_activity') or 0), float(channel.get('hint') or 0))
+
+
+def slack_order(channels):
+    """Your own notes first, then by how recently anyone wrote: today, this week, older. Within each, direct
+    messages before group chats before channels, newest first."""
+    now, kinds = time.time(), {'dm': 0, 'group': 1}
+    def key(c):
+        seen = slack_activity(c)
+        age = 0 if seen >= now - 86400 else 1 if seen >= now - 7 * 86400 else 2
+        return (c['name'] != 'My notes', age, kinds.get(c['type'], 2), -seen, c['name'])
+    channels.sort(key=key)
+
+
+SLACK_FIRST_STEPS = ('recent', 'deepen', 'quiet')
+
+
+def slack_first_import_plan(config, state):
+    """The first import's plan, so signals start within minutes rather than hours. Slack allows about one read a
+    minute, so the reads go where the activity is: conversations active today get their last day first
+    ('recent'), then the rest of the window ('deepen'), together with those active this week. Quiet ones come
+    last ('quiet'). A direct message with nothing in the window is skipped: its newest message is known."""
+    now = time.time()
+    window = now - config.get('bootstrap_days', 7) * 86400
+    for c in state['channels']:
+        seen = slack_activity(c)
+        if c['type'] == 'dm' and seen < window:
+            c['first'] = 'skip'
+            c.update(last_scan=f'{now:.6f}', next_full=now + 86400)
+            if seen:
+                c['last_activity'] = seen
+            c['due'] = now + slack_interval(config, c)
+        else:
+            c['first'] = 'recent' if seen >= now - 86400 else 'full' if seen >= window else 'quiet'
+    slack_order(state['channels'])
+    state.pop('triage', None)
+    state.update(phase='scan', index=0, step='recent')
+    slack_first_import_next(state)
+
+
+def slack_first_import_wanted(channel, step):
+    first = channel.get('first')
+    if step == 'recent':
+        return first == 'recent' and not channel.get('last_scan')
+    if step == 'deepen':
+        return bool(channel.get('deepen')) or (first == 'full' and not channel.get('last_scan'))
+    return first == 'quiet' and not channel.get('last_scan')
+
+
+def slack_first_import_next(state):
+    """Moves state['index'] to the next conversation the first import still wants, through its steps in turn.
+    After the last one, the first import is done and the regular rounds take over."""
+    while True:
+        while state['index'] < len(state['channels']):
+            if slack_first_import_wanted(state['channels'][state['index']], state['step']):
+                return
+            state['index'] += 1
+        position = SLACK_FIRST_STEPS.index(state['step'])
+        if position + 1 == len(SLACK_FIRST_STEPS):
+            state.pop('step')
+            state.update(index=0, mode='incremental')
+            if time.time() >= state.get('next_discovery', 0):
+                state['phase'] = 'discover'
+            return
+        state.update(step=SLACK_FIRST_STEPS[position + 1], index=0)
+
+
+def slack_first_import_progress(state):
+    """Where the first import is, for the Slack card: the step, how many of its conversations are done, and how
+    many quiet ones wait for the end."""
+    channels = state.get('channels') or []
+    if state.get('phase') == 'triage':
+        return {'step': 'triage', 'done': state.get('triage', 0), 'total': len(channels), 'quiet': 0}
+    step = state.get('step')
+    if not step:
+        return None
+    first = [c.get('first') for c in channels]
+    quiet = sum(f == 'quiet' and not c.get('last_scan') for f, c in zip(first, channels))
+    if step == 'recent':
+        mine = [c for f, c in zip(first, channels) if f == 'recent']
+        done = sum(bool(c.get('last_scan')) for c in mine)
+    elif step == 'deepen':
+        mine = [c for f, c in zip(first, channels) if f in ('recent', 'full')]
+        done = sum(bool(c.get('last_scan')) and not c.get('deepen') for c in mine)
+    else:
+        mine = [c for f, c in zip(first, channels) if f == 'quiet']
+        done = len(mine) - quiet
+    return {'step': step, 'done': done, 'total': len(mine), 'quiet': quiet}
 
 
 def slack_interval(config, channel):
