@@ -5133,9 +5133,13 @@ def signin_address(url, page):
 
 def signin_kind(reason, urls=()):
     """What a sign-in with nothing to type in the dialog wants (eid, passkey, captcha, account, code), from the task's
-    blocker and its tab's address, or None."""
-    text = ' '.join([reason or '', *[str(u) for u in urls]])
-    return next((kind for kind, pattern in SIGNIN_KINDS if pattern.search(text)), None)
+    blocker and its tab's address, or None. The blocker says it best; a code it offers next to another way ("an
+    authenticator code or a security key") is a code, as that can go in the dialog."""
+    for text in (reason or '', ' '.join(str(u) for u in urls)):
+        kinds = [kind for kind, pattern in SIGNIN_KINDS if pattern.search(text)]
+        if kinds:
+            return 'code' if 'code' in kinds and 'passkey' in kinds else kinds[0]
+    return None
 
 
 def signin_name(reason, page):
@@ -5169,8 +5173,10 @@ def browser_result(call):
 
 def peek_tab(db, job_id):
     """The tab a running preparation is on now, as (DevTools target ID, DevTools port), for the dashboard's live
-    look at it: only while its latest step is a browser step, and only a tab this run opened itself (by the target
-    ID its own `open` step answered with). None otherwise, never another task's tab or one the owner uses."""
+    look at it: only while its latest step is a browser step, and only a tab this task opened itself (by the target
+    ID its own `open` step answered with): this run's, or, when this run carries on in a tab an earlier run of the same
+    task opened and left open (a retry, after a sign-in or a Change), that run's. None otherwise, never another task's
+    tab or one the owner uses."""
     try:
         calls = db.execute('SELECT tool,params,result FROM preparation_calls WHERE job_id=? ORDER BY started_at DESC,rowid DESC LIMIT 200',
                            (job_id,)).fetchall()
@@ -5184,24 +5190,45 @@ def peek_tab(db, job_id):
         return None
     if not isinstance(last, dict) or last.get('action') == 'close':
         return None
-    opened = []  # this run's own tabs, newest first: (target ID, port, every name OpenClaw gave it)
-    for call in calls:
-        try:
-            given = json.loads(call['params'] or '{}')
-        except ValueError:
-            continue
-        if call['tool'] != 'browser' or not isinstance(given, dict) or given.get('action') != 'open':
-            continue
-        found = browser_result(call)
-        target, ws = found.get('targetId'), urllib.parse.urlsplit(str(found.get('wsUrl') or ''))
-        if not isinstance(target, str) or not re.fullmatch(r'[A-F0-9]{32}', target) or ws.hostname not in ('127.0.0.1', 'localhost', '::1') or not ws.port:
-            continue
-        opened.append((target, ws.port, {str(found.get(k)) for k in ('targetId', 'label', 'tabId', 'suggestedTargetId') if found.get(k)}))
+    def opened(calls, want=None):
+        """A run's own tabs, newest first: (target ID, port, every name OpenClaw gave it). With `want`, only that tab
+        and only while the run had not closed it again."""
+        tabs = []
+        for call in calls:
+            try:
+                given = json.loads(call['params'] or '{}')
+            except ValueError:
+                continue
+            if call['tool'] != 'browser' or not isinstance(given, dict):
+                continue
+            if want and not tabs and given.get('action') == 'close' and str(want) in (str(given.get('targetId')), str(given.get('label'))):
+                return []
+            if given.get('action') != 'open':
+                continue
+            found = browser_result(call)
+            target, ws = found.get('targetId'), urllib.parse.urlsplit(str(found.get('wsUrl') or ''))
+            if not isinstance(target, str) or not re.fullmatch(r'[A-F0-9]{32}', target) or ws.hostname not in ('127.0.0.1', 'localhost', '::1') or not ws.port:
+                continue
+            names = {str(found.get(k)) for k in ('targetId', 'label', 'tabId', 'suggestedTargetId') if found.get(k)}
+            if not want or str(want) in names:
+                tabs.append((target, ws.port, names))
+        return tabs
+
     want = last.get('targetId') or last.get('label')
-    if want:
-        mine = next((t for t in opened if str(want) in t[2]), None)
-    else:
-        mine = opened[0] if opened else None
+    mine = next(iter(opened(calls, want)), None)
+    if not mine and want:  # carrying on in a tab an earlier run of this same task opened
+        try:
+            session = db.execute('SELECT session_job_id FROM preparation_runs WHERE job_id=?', (job_id,)).fetchone()
+            earlier = db.execute('SELECT job_id FROM preparation_runs WHERE session_job_id=? AND job_id!=? ORDER BY started_at DESC LIMIT 10',
+                                 (session[0], job_id)).fetchall() if session else []
+        except sqlite3.OperationalError:
+            earlier = []
+        for run in earlier:
+            found = opened(db.execute('SELECT tool,params,result FROM preparation_calls WHERE job_id=? ORDER BY started_at DESC,rowid DESC LIMIT 200',
+                                      (run[0],)).fetchall(), want)
+            if found:
+                mine = found[0]
+                break
     return (mine[0], mine[1]) if mine else None
 
 

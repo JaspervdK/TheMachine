@@ -352,6 +352,10 @@ class SigninDialogOpens(unittest.TestCase):
         self.assertEqual(a.signin_kind('', ['https://idp.iamfas.belgium.be/x']), 'eid')
         self.assertEqual(a.signin_kind('Enter your six-digit authenticator code'), 'code')
         self.assertEqual(a.signin_kind('Zapier shows a switch-account page'), 'account')
+        # A code offered next to a security key goes in the dialog; a security key alone is a passkey.
+        self.assertEqual(a.signin_kind('Example requires your authenticator code or security key', ['https://accounts.example.com/2fa']), 'code')
+        self.assertEqual(a.signin_kind('Example wants your security key', ['https://accounts.example.com/2fa']), 'passkey')
+        self.assertEqual(a.signin_kind('Finish signing in', ['https://accounts.example.com/2fa']), 'code')
         self.assertIsNone(a.signin_kind(HANDOFF))
         self.assertEqual(a.signin_name('Enter the code in the ProfitWell tab, then tap Continue.', 'https://www2.profitwell.com/acc/login/'), 'ProfitWell')
         self.assertEqual(a.signin_name('', 'https://www.example.com/login'), 'example.com')

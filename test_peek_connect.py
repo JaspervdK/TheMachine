@@ -57,6 +57,27 @@ class PeekTabTest(unittest.TestCase):
         far = ('browser', {'action': 'open'}, opened(TAB, 'bills').replace('127.0.0.1', '10.0.0.5'))
         self.assertIsNone(assistant.peek_tab(journal(far), 'job'))
 
+    def test_a_tab_an_earlier_run_of_the_same_task_opened(self):
+        db = journal(('browser', {'action': 'act', 'targetId': 'bills'}, None))
+        for job, session, at, calls in (('first', 'first', '2026-01-01T10:00:00+00:00', [('open', opened(TAB, 'bills'))]),
+                                        ('job', 'first', '2026-01-01T10:05:00+00:00', []),
+                                        ('other', 'other', '2026-01-01T09:00:00+00:00', [('open', opened(OTHER, 'theirs'))])):
+            db.execute("INSERT INTO preparation_runs(job_id,suggestion_id,session_job_id,status,started_at) VALUES(?,?,?,'done',?)",
+                       (job, 's-' + session, session, at))
+            for i, (action, result) in enumerate(calls):
+                db.execute('INSERT INTO preparation_calls(job_id,call_id,tool,params,result,started_at) VALUES(?,?,?,?,?,?)',
+                           (job, f'{job}{i}', 'browser', json.dumps({'action': action}), result, at))
+        # A follow-up run (after a sign-in or a Change) carries on in the tab the first run opened: the look follows it.
+        self.assertEqual(assistant.peek_tab(db, 'job'), (TAB, 18800))
+        # Never another task's tab, even one its run opened.
+        db.execute("UPDATE preparation_calls SET params=? WHERE job_id='job'", (json.dumps({'action': 'act', 'targetId': 'theirs'}),))
+        self.assertIsNone(assistant.peek_tab(db, 'job'))
+        # Nor a tab the earlier run closed again.
+        db.execute("UPDATE preparation_calls SET params=? WHERE job_id='job'", (json.dumps({'action': 'act', 'targetId': 'bills'}),))
+        db.execute("INSERT INTO preparation_calls(job_id,call_id,tool,params,result,started_at) VALUES('first','close','browser',?,NULL,'2026-01-01T10:01:00+00:00')",
+                   (json.dumps({'action': 'close', 'targetId': 'bills'}),))
+        self.assertIsNone(assistant.peek_tab(db, 'job'))
+
     def test_the_picture_comes_from_that_tab_only_when_it_is_in_front(self):
         store_dir = tempfile.TemporaryDirectory()
         self.addCleanup(store_dir.cleanup)
