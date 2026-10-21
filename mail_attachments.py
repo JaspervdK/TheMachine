@@ -234,7 +234,8 @@ def sweep(connect, config, since=None, store=None, now=None):
         if seal and base.is_dir():
             jobs = [r[0] for r in db.execute('SELECT DISTINCT job_id FROM preparation_runs WHERE finished_at>=?', (since,))] if since else None
             query = "SELECT job_id,params,result FROM preparation_calls WHERE result IS NOT NULL"
-            rows = db.execute(query + (f" AND job_id IN ({','.join('?' * len(jobs))})" if jobs else ''), jobs or ()).fetchall() if jobs != [] else []
+            rows = (db.execute(query + ' AND job_id IN (SELECT value FROM json_each(?))', (json.dumps(jobs),)).fetchall() if jobs
+                    else db.execute(query).fetchall() if jobs is None else [])
             for job, params, result in rows:
                 if job in busy:
                     continue
