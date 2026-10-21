@@ -268,11 +268,13 @@ Friends are free, between hosted and self-hosted Machines alike.
 
 Both switches are off until you turn them on, in the Fleet tab under **Network** (Suggestions asks once).
 
-- **Find people I know** checks, about once a week, which of your contacts are on the Network. Your Machine blinds each
+- **Find people I know** checks daily which of your contacts are on the Network, and soon after you meet someone
+  new or someone you know becomes findable. Your Machine blinds each
   address with a secret only it holds before anything leaves it (a private set intersection: H(x)^a over a 2048-bit
   group); the Network raises those to its own secret and sends them back with the blinded addresses of people who let
   themselves be found. Your Machine learns only which of its own contacts matched, the Network never sees your address
-  book, and only matches are then looked up by name. Lookups are rate-limited.
+  book, and only matches are then looked up by name. Lookups are rate-limited (at most 3,000 addresses a day). To know
+  when to look again, your Machine asks hourly in which of 256 buckets someone became findable, nothing more.
 - **Let people who have my email find me** makes your account email findable that way, and only by people who already
   have it, plus the addresses of the mail and calendar accounts your Machine signed in to. The Fleet tab lists them
   under **Findable by**; untick any you'd rather keep out. The Network stores those only blinded. Someone's sign-in

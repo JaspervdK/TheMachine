@@ -21,6 +21,7 @@ class NetworkRelay(tfr.FriendsRelay):
     def __init__(self):
         super().__init__()
         self.b = secrets.randbits(256) | 1
+        self.joined = []
         self.found = {e: discovery.hexed(pow(discovery.to_group(e), self.b, discovery.P)) for e in ON_NETWORK}
 
     def call(self, method, path, body=None, timeout=40):
@@ -33,6 +34,8 @@ class NetworkRelay(tfr.FriendsRelay):
         if body['action'] == 'resolve':
             return {'people': [{'email': e, 'username': ON_NETWORK[e][0], 'name': ON_NETWORK[e][1], 'friends': ON_NETWORK[e][2]}
                                for e in body['emails'] if e in ON_NETWORK]}
+        if body['action'] == 'status':
+            return {'discoverable': False, 'username': 'owner', 'joined': self.joined, 'at': '2026-10-21T12:00:00+00:00'}
         if body['action'] == 'discoverable':
             self.findable = body.get('emails') if body['on'] else []
             return {'discoverable': body['on'], 'addresses': ([{'email': 'owner@acme.example', 'source': 'account'}] if body['on'] else []) +
@@ -84,7 +87,7 @@ class Discovery(unittest.TestCase):
         self.assertEqual((people['nia']['status'], people['nia']['hint']), ('new', 'personal'))
         self.assertEqual([r['kind'] for r in people['nia']['reasons']], ['meeting'])
         self.assertEqual((people['sam']['hint'], people['sam']['reasons']), ('colleague', []))  # same work domain; no reason, no card
-        # A week has not passed: no second lookup
+        # A day has not passed and nobody new: no second lookup
         self.fleet.discovery_round()
         self.assertEqual(len(self.relay.sent('/discover')), 2)
         with self.store.connect() as db:
@@ -108,7 +111,61 @@ class Discovery(unittest.TestCase):
             self.fleet.discovery_step()
         self.assertEqual([m.split(':', 2)[2] for m in logs.output],
                          ['network discovery failed error=URLError; tried again every round', 'network discovery works again'])
-        self.assertEqual(len(self.relay.sent('/discover')), sent + 2)  # the lookup was done once it worked: match and resolve
+        self.assertEqual(len(self.relay.sent('/discover')), sent + 1)  # the lookup was done once it worked (the people found before: not again)
+
+    def ago(self, **values):
+        self.fleet._set_network(**{k: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=v)).isoformat(timespec='seconds')
+                                   for k, v in values.items()})
+
+    def lookups(self):
+        return [b for b in self.relay.sent('/discover') if b['action'] == 'match']
+
+    def person(self, node, email, strength=1):
+        with self.store.connect() as db:
+            db.execute('INSERT INTO graph_nodes(id,kind,name,strength,signals,info) VALUES(?,?,?,?,?,?)',
+                       (node, 'person', node, strength, 3, json.dumps({'identifiers': ['email:' + email]})))
+
+    def test_daily_and_soon_after_someone_new_is_met(self):
+        self.fleet.network_action('find_on')
+        self.assertEqual(len(self.lookups()), 1)
+        ON_NETWORK['kit@kit.example'] = ('kit', 'Kit', False)
+        self.addCleanup(ON_NETWORK.pop, 'kit@kit.example')
+        self.relay.found['kit@kit.example'] = discovery.hexed(pow(discovery.to_group('kit@kit.example'), self.relay.b, discovery.P))
+        self.person('p-kit', 'kit@kit.example')  # someone new met
+        self.fleet.discovery_round()
+        self.assertEqual(len(self.lookups()), 1)  # not within NEW_EVERY of the last look
+        self.ago(new_at=discovery.NEW_EVERY + 1)
+        self.fleet.discovery_round()
+        self.assertEqual(len(self.lookups()[-1]['items']), 1)  # only Kit, and only Kit is looked up by address
+        self.assertEqual(self.relay.sent('/discover')[-1], {'action': 'resolve', 'emails': ['kit@kit.example']})
+        self.assertEqual(self.people()['kit']['status'], 'new')
+        self.ago(new_at=discovery.NEW_EVERY + 1)
+        self.fleet.discovery_round()
+        self.assertEqual(len(self.lookups()), 2)  # nobody new: nothing
+        resolves = len([b for b in self.relay.sent('/discover') if b['action'] == 'resolve'])
+        self.ago(last=86400 + 1)
+        self.fleet.discovery_round()
+        with self.store.connect() as db:
+            contacts = self.fleet.network_contacts(db)
+        self.assertEqual(len(self.lookups()[-1]['items']), len(contacts))  # the daily one: everyone
+        self.assertEqual(len([b for b in self.relay.sent('/discover') if b['action'] == 'resolve']), resolves)  # all known: not again this week
+        self.assertEqual(self.fleet.network_view()['last'][:10], dt.datetime.now(dt.timezone.utc).date().isoformat())
+
+    def test_someone_newly_findable_looks_up_the_contacts_in_their_bucket(self):
+        self.fleet.network_action('find_on')
+        self.relay.joined = [discovery.bucket('zed@zed.example')]
+        self.ago(new_at=discovery.NEW_EVERY + 1)
+        self.fleet.discovery_round()
+        status = [b for b in self.relay.sent('/discover') if b['action'] == 'status'][-1]
+        self.assertTrue(status['joined_since'])
+        self.assertEqual(len(self.lookups()), 2)
+        same = [e for e in ('nia@nia.example', 'lou@lou.example', 'sam@acme.example', 'zed@zed.example') if discovery.bucket(e) == self.relay.joined[0]]
+        self.assertEqual(len(self.lookups()[-1]['items']), len(same))
+        self.assertEqual(self.lookups()[-1]['buckets'], self.relay.joined)
+        self.assertEqual(self.fleet.network_settings()['joined_since'], '2026-10-21T12:00:00+00:00')  # the Network's clock
+        self.ago(new_at=discovery.NEW_EVERY + 1)
+        self.fleet.discovery_round()
+        self.assertEqual(len(self.lookups()), 2)  # asked hourly only, and those buckets are done
 
     def test_connect_later_never(self):
         self.fleet.network_action('find_on')
