@@ -211,7 +211,7 @@ def reconnect(config, secrets):
             out.append(f'{account["id"]}: sign in to Google again (hosted Google access does not move along)')
         elif not secrets and account.get('credential'):
             out.append(f'{account["id"]}: its {service} key or token')
-    out.append('your model: sign in to ChatGPT again, or paste your API key')
+    out.append('your model: sign in to ChatGPT or your Claude plan again, or paste your API key')
     if not secrets:
         out.append('Telegram: your bot token (the people allowed to talk to it are kept)')
     if not secrets and network_identity(config):

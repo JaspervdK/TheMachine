@@ -1011,6 +1011,17 @@ class ModelResets(unittest.TestCase):
         consume = [json.loads(l) for l in self.log.read_text().splitlines() if 'consume' in l]
         self.assertEqual(consume[0]['params']['idempotencyKey'], click)
 
+    def test_a_claude_plan_through_claude_code_is_named_as_such(self):
+        path = Path(self.config['openclaw_config'])
+        self.assertFalse(assistant.model_status(self.config, {'providers': []}, None, None)['claude_plan'])
+        path.write_text(json.dumps({'agents': {'defaults': {'model': {'primary': 'anthropic/claude-sonnet-9-1'},
+                                                            'models': {'anthropic/*': {'agentRuntime': {'id': 'claude-cli'}}}}}}))
+        self.assertTrue(assistant.model_status(self.config, {'providers': []}, None, None)['claude_plan'])
+        path.write_text(json.dumps({'agents': {'defaults': {'model': 'anthropic/claude-sonnet-9-1',
+                                                            'models': {'anthropic/claude-sonnet-9-1': {'agentRuntime': {'id': 'openclaw'}},
+                                                                       'anthropic/*': {'agentRuntime': {'id': 'claude-cli'}}}}}}))
+        self.assertFalse(assistant.model_status(self.config, {'providers': []}, None, None)['claude_plan'])  # an API key route
+
     def test_without_a_codex_cli_nothing_is_known(self):
         self.assertIsNone(assistant.model_resets({'codex': str(Path(self.dir.name) / 'missing')}, self.reply))
         self.assertIsNone(assistant.model_resets({'codex': False}, self.reply))

@@ -13,6 +13,8 @@ They resolve their model the same way your chats do: `agents.defaults.model.prim
 
 Inspect the current model with `openclaw models status`, and available configured models with `openclaw models list`. To choose another, use `openclaw models set <model-id-or-alias>` with a value that installation actually lists. Inspect fallback commands with `openclaw models fallbacks --help`; keep existing fallbacks unless you intend to change them. Do not copy a model name from an old screenshot or assume a model available on one machine is available on another.
 
+To use your own Claude plan (Pro, Max or Team), install Claude Code with Anthropic's installer, sign in with `claude auth login`, then run `openclaw models auth login --provider anthropic --method cli --set-default`. OpenClaw then runs Claude models through Claude Code and never reads its sign-in; usage counts against your plan, and Settings → Model says "Uses your Claude plan". Sign out with `claude auth logout`.
+
 The Assistant has no separate model switch. A change applies to new OpenClaw turns; it does not change an already-running turn. No Assistant-service restart is needed just to choose a model.
 
 ## A provider of your own

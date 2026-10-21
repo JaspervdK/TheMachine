@@ -76,6 +76,12 @@ try{
  const runs=await page.locator('#review-runs').textContent();
  assert.match(runs,/ChatGPT limit reached, resets at/);
  assert.equal(await page.locator('#review-runs a',{hasText:'Open ChatGPT'}).count(),1);
+ // A Claude plan through Claude Code says so, and offers no ChatGPT reset.
+ status={model:'anthropic/claude-sonnet-9-1',provider:'anthropic',chatgpt:false,claude_plan:true,windows:[],resets:null,can_reset:false,usage_page:null,checked_at:new Date().toISOString()};
+ await page.evaluate(()=>refresh());
+ await page.evaluate(()=>{for(const x of document.querySelectorAll('main>section'))x.hidden=x.id!=='settings'});
+ await page.locator('#model-panel',{hasText:'Uses your Claude plan'}).waitFor();
+ assert.doesNotMatch(await page.locator('#model-panel').textContent(),/ChatGPT/);
  // Nothing known: no Model section at all.
  status=null;await page.evaluate(()=>refresh());
  await page.evaluate(()=>{for(const x of document.querySelectorAll('main>section'))x.hidden=x.id!=='settings'});

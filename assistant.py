@@ -5488,6 +5488,29 @@ def openclaw_model(config):
     return model.strip()[:80] if isinstance(model, str) and model.strip() else None
 
 
+def claude_plan_route(config):
+    """Whether OpenClaw runs the default model through the installed Claude Code (its Claude CLI route), so usage
+    counts against the Claude plan Claude Code is signed in to. Read from openclaw.json; Claude Code's own sign-in is
+    never read."""
+    path = Path(config.get('openclaw_config') or Path.home() / '.openclaw' / 'openclaw.json')
+    try:
+        defaults = json.loads(path.read_text()).get('agents', {}).get('defaults', {})
+        model, models = defaults.get('model'), defaults.get('models') or {}
+    except (OSError, ValueError, AttributeError):
+        return False
+    model = model.get('primary') if isinstance(model, dict) else model
+    if not isinstance(model, str) or not isinstance(models, dict):
+        return False
+    if model.startswith('claude-cli/'):
+        return True
+
+    def runtime(key):
+        entry = models.get(key)
+        found = entry.get('agentRuntime') if isinstance(entry, dict) else None
+        return found.get('id') if isinstance(found, dict) and found.get('id') not in (None, 'default') else None
+    return (runtime(model) or (runtime('anthropic/*') if model.startswith('anthropic/') else None)) == 'claude-cli'
+
+
 class CodexAppServer:
     """The Codex CLI's own app-server (its supported JSON-RPC interface) with the Codex CLI's own ChatGPT sign-in:
     it can read the usage limit resets and use one, which OpenClaw does not offer. No model call; nothing here sees a
@@ -5594,7 +5617,7 @@ def model_status(config, reply, usage, resets, checked_at=None):
     full = [w for w in windows if w['used'] >= 100 and (w['reset'] or now_s + 1) > now_s]
     reached = bool(full) or (resets or {}).get('allowed') is False
     return {'model': model, 'provider': (model or '').split('/')[0] or (entry or {}).get('provider'),
-            'chatgpt': bool(entry and entry.get('accountEmail')),
+            'chatgpt': bool(entry and entry.get('accountEmail')), 'claude_plan': claude_plan_route(config),
             'plan': re.sub(r'^self_serve_', '', str((entry or {}).get('plan') or ''))[:40].replace('_', ' ') or None,
             'windows': windows, 'limit_reached': reached,
             'limit_resets_at': max((w['reset'] for w in full if w['reset']), default=None) if reached else None,
