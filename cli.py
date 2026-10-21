@@ -688,6 +688,13 @@ def cmd_skills_propose(config, args):
     print('Already proposed or on.' if out.get('duplicate') else 'Proposed: it waits for the owner\'s Approve on the dashboard (Settings, Skills).')
 
 
+def cmd_task_import(config, args):
+    """A task link someone sent by email: adding it is the owner's own step, so it opens on the dashboard."""
+    invite_id, key = assistant.task_invites.parse_link(args.link)
+    root = dashboard_url(config) or 'http://127.0.0.1:' + str(config.get('port', 8787)) + '/'
+    print(f'Open this on your dashboard to add the task: {root}#task={invite_id}.{key}')
+
+
 def cmd_raw(config, args):
     out_json(call(config, args.action, json.loads(args.args) if args.args else {}))
 
@@ -781,6 +788,8 @@ def parser():
     c.add_argument('--description', required=True, help='one line: when to use it')
     c.add_argument('--file', required=True, help='markdown file with the instructions, or - for stdin')
     c.add_argument('--why', help='one line for the owner: what repeated work this comes from')
+    c = add('task-import', 'Add a task someone sent you by email, from its link (opens your dashboard to confirm)', cmd_task_import)
+    c.add_argument('link', help="the task link from the email, in quotes: 'https://…/t/…#k=…'")
     c = add('raw', 'Call any non-owner service action with JSON args', cmd_raw)
     c.add_argument('action')
     c.add_argument('args', nargs='?', help='JSON object')

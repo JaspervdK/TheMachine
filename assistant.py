@@ -43,6 +43,7 @@ import graph
 import enrichment
 import fleet
 import skills
+import task_invites
 import google_api
 import next_actions
 import browser_login
@@ -338,7 +339,8 @@ class SourceError(Exception):
 # authenticated dashboard may record them; never the local CLI the agent can run.
 OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
-FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_split', 'fleet_split_dismiss', 'fleet_split_adjust'}
+FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_split', 'fleet_split_dismiss',
+                         'fleet_split_adjust', 'task_import'}
 OWNER_ACTIONS |= FLEET_REQUEST_ACTIONS
 # Friends (friends.py): adding, accepting, removing and blocking friends, and asking a friend when they are free.
 FRIEND_ACTIONS = {'fleet_friend', 'fleet_availability', 'fleet_network'}  # fleet_network: finding people on the Network (discovery.py)
@@ -6499,6 +6501,10 @@ class App:
                 except (sqlite3.Error, ValueError) as error:
                     LOG.error('fleet status error=%s', type(error).__name__)
             return result if args.get('full') else compact_status(result)
+        if name == 'task_import':  # a task link someone sent this owner by email (task_invites.py)
+            if not owner_dashboard:
+                raise ValueError('Add a task link from the dashboard')
+            return self.task_import(str(args.get('link') or ''))
         if name.startswith('fleet_') or name in FAMILY_ACTIONS:
             return self.fleet_action(name, args, owner_dashboard)
         if name == 'related':
@@ -6988,7 +6994,7 @@ class App:
         message_id = str(result.get('messageId') or '')
         return message_id if re.fullmatch(r'\d+', message_id) else None
 
-    def fleet_card(self, kind, ask_id, name, title, body, evidence, action=None, due=None, into=None, family=False):
+    def fleet_card(self, kind, ask_id, name, title, body, evidence, action=None, due=None, into=None, family=False, via=None):
         """A card for a Fleet request the owner accepted (fleet_requests.py), made from this Machine's own data. Its
         first evidence is a Fleet event on one of the owner's work accounts, marked reviewed so no model reads it by
         itself; an intro also gets its double-opt-in draft, which goes out only with the owner's own Send. A Family's
@@ -6996,13 +7002,15 @@ class App:
         accounts = fleet.work_accounts(self.config)
         if family:  # a personal account first
             accounts = [a['id'] for a in self.config.get('accounts', []) if a['id'] not in accounts] + accounts
+        elif via and not accounts:  # a task by email can land on an install with only personal accounts
+            accounts = [a['id'] for a in self.config.get('accounts', [])]
         with self.store.connect() as db:
             own = [r['account_id'] for r in db.execute(f"SELECT account_id FROM events WHERE id IN ({','.join('?' * len(evidence)) or 'NULL'})", evidence)]
         account = next((a for a in own if a in accounts), accounts[0] if accounts else None)
         if not account:
             raise ValueError('this Machine has no account' if family else 'this Machine has no work account')
         stamp, source_id = now(), 'fleet:' + str(ask_id)
-        meta = {'sender_display': f"{name} (your {'Family' if family else 'Fleet'})", 'fleet_kind': kind}
+        meta = {'sender_display': f"{name} ({via or ('your Family' if family else 'your Fleet')})", 'fleet_kind': kind}
         with self.store.connect() as db:
             db.execute('INSERT OR IGNORE INTO events(account_id,source_id,kind,occurred_at,title,body,metadata,deleted,content_hash,version,analyzed_version,ingested_at) '
                        "VALUES(?,?,'fleet.request',?,?,?,?,0,?,1,1,?)",
@@ -7016,7 +7024,8 @@ class App:
                     db.execute('UPDATE suggestions SET event_ids=?,body=? WHERE id=?',
                                (json.dumps([*ids, event_id]), ((row['body'] or '') + '\n\n' + body[:700])[:2400], into))
             return into
-        card = self.store.suggest('fleet:' + str(ask_id), title[:90], body[:700], [event_id, *[e for e in evidence if e != event_id]], when='now', work=not family, due=due)
+        card = self.store.suggest('fleet:' + str(ask_id), title[:90], body[:700], [event_id, *[e for e in evidence if e != event_id]], when='now',
+                                  work=not family and account in fleet.work_accounts(self.config), due=due)
         if action and not card.get('duplicate'):
             with self.store.connect() as db:
                 row = db.execute('SELECT account_ids FROM suggestions WHERE id=?', (card['id'],)).fetchone()
@@ -7026,6 +7035,61 @@ class App:
                                            f"introduction. Read it, change it if you like, and send it yourself.", next_action=draft,
                                outcome={'state': 'needs_you', 'needs': 'read and send the intro email'})
         return card['id']
+
+    def handoff_email(self, card_id, email, title, summary):
+        """Hand a card to someone who is not on the Network: an ordinary email draft on the card, from the card's Gmail
+        account, for the owner to read and send. It carries a task link: the task sealed with a key only the link has,
+        so a Machine of their own (if they get one) starts with it. Only the title, summary and due date go along."""
+        email = email.strip()
+        if not task_invites.EMAIL.fullmatch(email) or len(email) > 254:
+            raise ValueError('Give their email address')
+        found = self.fleet.handoff_draft(card_id)
+        me = str(self.config.get('owner_name') or '').strip()
+        task = task_invites.clean({'kind': 'handoff', 'title': title.strip() or found['title'], 'summary': summary.strip() or found['summary'],
+                                   'due': found.get('due') or '', 'from_name': me})
+        with self.store.connect() as db:
+            row = db.execute('SELECT status,account_ids FROM suggestions WHERE id=?', (found['suggestion_id'],)).fetchone()
+        allowed = json.loads(row['account_ids'] or '[]')
+        gmail = [a for a in self.config.get('accounts', []) if a.get('service', 'gmail') == 'gmail' and a.get('transport') in ('gog', 'broker')]
+        order = [a for a in gmail if a['id'] in allowed] + [a for a in gmail if a['id'] not in allowed]
+        sealed, key = task_invites.seal(task)
+        made = None
+        for account in order:
+            try:
+                made = made or self.fleet.relay.call('POST', '/task-invite', {'action': 'create', 'kind': 'handoff', 'sealed': sealed})
+                subject, body = task_invites.draft(task, '', me, made['url'] + '#k=' + key)
+                action = next_actions.validate({'kind': 'email', 'label': 'Send', 'account_id': account['id'], 'to': [email],
+                                                'subject': subject, 'body': body}, self.config, allowed)
+                break
+            except ValueError as error:
+                if 'Gmail account' not in str(error):
+                    raise
+        else:
+            raise ValueError('This card has no Gmail account to send from')
+        with self.store.connect() as db:
+            db.execute("UPDATE suggestions SET status='accepted' WHERE id=? AND status='pending'", (found['suggestion_id'],))
+        self.store.prepare(found['suggestion_id'], f'An email handing this to {email}. It has a link that brings the task to a Machine of '
+                                                   'their own, if they want one. Read it, change it if you like, and send it yourself.',
+                           next_action=action, outcome={'state': 'needs_you', 'needs': 'read and send the handoff email'})
+        return {'card_id': found['suggestion_id'], 'invite_id': made['id']}
+
+    def task_import(self, link):
+        """Add a task someone sent by email (task_invites.py) as a card, and say who sent it so the owner can connect
+        with them on the Network. Works without being on the Network: the link alone opens it."""
+        invite_id, key = task_invites.parse_link(link)
+        network = getattr(self, 'fleet', None)
+        if network:  # signed in, so the Network can count it as added by this Machine
+            found = network.relay.call('POST', '/task-invite', {'action': 'claim', 'id': invite_id})
+        else:
+            found = task_invites.claim(task_invites.network_url(self.config, fleet), invite_id)
+        task = task_invites.unseal(str(found.get('sealed') or ''), key)
+        who = found.get('from') or {}
+        name = ' '.join(str(who.get('name') or task.get('from_name') or 'Someone').split())[:60]
+        body = (task.get('summary') or task['title']) + (f"\n\nThey'd like it by {task['due']}." if task.get('due') else '')
+        body += f'\n\n{name} sent this by email. Answer them there.'
+        card_id = self.fleet_card('task', 'task:' + invite_id, name, task['title'], body, [], due=task.get('due'), via='by email')
+        username = who.get('username') if isinstance(who.get('username'), str) and re.fullmatch(r'[a-z0-9][a-z0-9-]{1,28}[a-z0-9]', who['username']) else None
+        return {'card_id': card_id, 'from': {'name': name, 'username': username}, 'can_connect': bool(network and username)}
 
     def fleet_tell(self, text, anchor):
         """How the owner's own Fleet request went (an intro, a handoff, a follow-up split): a phone notification, and a
@@ -7079,6 +7143,9 @@ class App:
                                         str(args.get('note') or ''))
         if name == 'fleet_handoff_draft':  # what a handoff of this card would send, to read and edit first
             return self.fleet.handoff_draft(str(args.get('suggestion_id') or ''))
+        if name == 'fleet_handoff_email':  # someone not on the Network: an email draft on the card, sent by the owner
+            return self.handoff_email(str(args.get('suggestion_id') or ''), str(args.get('email') or ''), str(args.get('title') or ''),
+                                      str(args.get('summary') or ''))
         if name == 'fleet_handoff':
             return self.fleet.hand_off(str(args.get('suggestion_id') or ''), str(args.get('fleet') or ''), str(args.get('member_id') or ''),
                                        str(args.get('title') or ''), str(args.get('summary') or ''), str(args.get('contact') or '') or None)
