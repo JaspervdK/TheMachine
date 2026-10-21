@@ -18,7 +18,7 @@ import urllib.request
 KINDS = {'shortcut.move': 'Shortcut'}
 SETUP = {
     'label': 'Shortcut',
-    'what': 'Story pipeline moves with previous and new states, owners, deadlines and story context.',
+    'what': 'Stories that change state, with their owners and deadlines.',
     'account': {'id': 'shortcut', 'service': 'shortcut', 'transport': 'api',
                 'boundary': 'work', 'credential': 'shortcut', 'poll_seconds': 300},
     'ask': [('workspace', 'Shortcut workspace URL or slug')],

@@ -133,3 +133,13 @@ class ConnectorSetup(unittest.TestCase):
                 self.assertLessEqual(len(what), 120)
                 self.assertNotIn('\n', what)
 
+
+    def test_every_source_on_the_add_list_says_what_it_brings(self):
+        # The dashboard's Add tab and a hosted setup page show this line under each name, built-in sources included.
+        import onboarding
+        for source in onboarding.catalog({'accounts': []}):
+            with self.subTest(source=source['name']):
+                what = source.get('what')
+                self.assertTrue(isinstance(what, str) and what.strip(), f"{source['name']}: no 'what' line")
+                self.assertLessEqual(len(what), 70, 'one short line, so it fits a tile in two lines')
+                self.assertNotIn('—', what)

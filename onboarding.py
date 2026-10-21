@@ -42,6 +42,15 @@ SERVICES = {'gmail': 'gmail', 'calendar': 'calendar', 'outlook': 'outlook', 'out
             'android': 'android', 'whatsapp': 'whatsapp', 'gateway': 'gateway'}
 LABELS = {'gmail': 'Gmail', 'calendar': 'Google Calendar', 'outlook': 'Outlook', 'outlook_calendar': 'Outlook Calendar', 'slack': 'Slack', 'salesflare': 'Salesflare CRM',
           'android': 'Android notifications', 'whatsapp': 'WhatsApp', 'gateway': 'OpenClaw Gateway log'}
+# What each built-in source brings in, in one short line (a connector's own is SETUP['what']). The dashboard's Add tab
+# and a hosted control plane's setup page show it under the name.
+WHAT = {'gmail': 'Your email, what comes in and what you send.', 'calendar': 'Your meetings, so you go in prepared and follow up.',
+        'outlook': 'Your Outlook email, what comes in and what you send.',
+        'outlook_calendar': 'Your Outlook meetings, so you go in prepared and follow up.',
+        'slack': 'Your direct messages, mentions and the threads you are in.',
+        'salesflare': 'Accounts, contacts and deals, so it knows who matters.',
+        'android': 'The notifications on your Android phone, through the OpenClaw app.',
+        'whatsapp': 'Your WhatsApp chats, as a linked device.', 'gateway': "Your server's own log, so The Machine spots its own trouble."}
 # Microsoft 365 and Outlook.com (ms_graph.py): your own app registration and a device-code sign-in. A hosted control
 # plane adds them with "transport": "broker" instead.
 MICROSOFT = {'outlook': {'id': 'work-outlook', 'service': 'outlook', 'transport': 'graph', 'email': 'alex@example.com',
@@ -621,9 +630,9 @@ def plugin(service):
 
 def setup_of(service):
     """What `connect` asks for a non-built-in source: its connector's SETUP, or assistant.SETUPS
-    for installs that build those sources in."""
+    for installs that build those sources in. A built-in one has only its 'what'."""
     if service in LABELS:
-        return {}
+        return {'what': WHAT[service]}
     return getattr(plugin(service), 'SETUP', None) or (getattr(assistant(), 'SETUPS', None) or {}).get(service) or {}
 
 
