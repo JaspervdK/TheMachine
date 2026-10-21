@@ -126,6 +126,24 @@ class FirstImport(unittest.TestCase):
         self.assertEqual((state['mode'], state['phase']), ('incremental', 'scan'))
         self.assertNotIn('step', state)
 
+    def test_first_import_begun_in_name_order_continues_by_activity(self):
+        done = {'id': 'CA', 'name': 'aaa-announcements', 'type': 'channel', 'threads': [], 'last_scan': f'{self.now - 600:.6f}'}
+        rest = [{'id': c, 'name': n, 'type': k, 'threads': []} for c, n, k in
+                [('CB', 'busy', 'channel'), ('DA', 'DM U2', 'dm'), ('DO', 'DM U3', 'dm')]]
+        self.store.commit_page('slack', {'mode': 'bootstrap', 'phase': 'scan', 'channels': [done] + rest, 'index': 1,
+                                         'after': f'{self.now - 7 * DAY:.6f}', 'next_discovery': self.now + DAY}, [])
+        fake, calls = self.source()
+        class Live(a.Slack):  # the old order is only left on a real connection
+            def __init__(self): self.account = {'user_id': 'U1'}
+            def profile(self): pass
+            def get(self, method, params=None): return {} if method == 'users.info' else fake.get(method, params)
+        self.run_all(Live())
+        reads = [p['channel'] for m, p in calls if m == 'conversations.history']
+        self.assertEqual(reads, ['DA', 'CB', 'DA', 'CB'])  # CA was already read; DO has nothing this week
+        state = self.store.checkpoint('slack')
+        self.assertEqual(state['mode'], 'incremental')
+        self.assertEqual({c['id']: c for c in state['channels']}['CA']['last_scan'], done['last_scan'])
+
 
 if __name__ == '__main__':
     unittest.main()

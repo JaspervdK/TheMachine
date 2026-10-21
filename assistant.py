@@ -4295,6 +4295,13 @@ def sync_slack(store, config, account, source=None):
         store.commit_page(account['id'], state, [])
         return {'mode': state['mode'], 'events': 0, 'more': True}
 
+    if (state['mode'] == 'bootstrap' and state['phase'] == 'scan' and 'step' not in state and not state.get('scan')
+            and state.get('channels') and isinstance(source, Slack)):
+        # A first import begun in the old name order: the rest of it follows activity. Conversations already read
+        # stay read.
+        state.update(phase='triage', triage=0)
+        store.commit_page(account['id'], state, [], record_sync=False)
+
     if state['phase'] == 'triage':
         # conversations.info isn't held to Slack's one-read-a-minute limit. A direct message shows its newest
         # message; a channel or group only when you last read it, which stands in for its activity.
@@ -4521,7 +4528,7 @@ def slack_first_import_plan(config, state):
     window = now - config.get('bootstrap_days', 7) * 86400
     for c in state['channels']:
         seen = slack_activity(c)
-        if c['type'] == 'dm' and seen < window:
+        if c['type'] == 'dm' and seen < window and not c.get('last_scan'):
             c['first'] = 'skip'
             c.update(last_scan=f'{now:.6f}', next_full=now + 86400)
             if seen:
