@@ -13,7 +13,9 @@ They resolve their model the same way your chats do: `agents.defaults.model.prim
 
 Inspect the current model with `openclaw models status`, and available configured models with `openclaw models list`. To choose another, use `openclaw models set <model-id-or-alias>` with a value that installation actually lists. Inspect fallback commands with `openclaw models fallbacks --help`; keep existing fallbacks unless you intend to change them. Do not copy a model name from an old screenshot or assume a model available on one machine is available on another.
 
-To use your own Claude plan (Pro, Max or Team), install Claude Code with Anthropic's installer, sign in with `claude auth login`, then run `openclaw models auth login --provider anthropic --method cli --set-default`. OpenClaw then runs Claude models through Claude Code and never reads its sign-in; usage counts against your plan, and Settings → Model says "Uses your Claude plan". Sign out with `claude auth logout`.
+To use your own Claude plan (Pro, Max or Team), install Claude Code with Anthropic's installer and sign in with `claude auth login`. That adds Claude's models: `openclaw models list` shows them as `claude-cli/*`, and OpenClaw runs them through Claude Code without reading its sign-in. Pick one as main model or fallback like any other; your current main model stays until you do. (`openclaw models auth login --provider anthropic --method cli --set-default` also makes a Claude model the main model; it needs a terminal.) Usage counts against your plan, and with a Claude model as main model Settings → Model says "Uses your Claude plan". Sign out with `claude auth logout`.
+
+The thinking level (`agents.defaults.thinkingDefault`) applies to fallbacks too: OpenClaw passes it on to whichever model answers, mapped to the nearest level that model supports. Claude Code gets it as its `--effort`. Set `params.thinking` on one model's entry in `agents.defaults.models` to give that model its own level.
 
 The Assistant has no separate model switch. A change applies to new OpenClaw turns; it does not change an already-running turn. No Assistant-service restart is needed just to choose a model.
 
