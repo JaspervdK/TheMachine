@@ -43,6 +43,7 @@ import graph
 import message_seal
 import enrichment
 import fleet
+import work_removal
 import skills
 import task_invites
 import google_api
@@ -6934,6 +6935,7 @@ class App:
                                 'morning': lambda: WORK_HOURS['morning']}
             self.fleet.search = lambda accounts, query, limit: self.related(accounts, query=query, limit=limit)[0]
             self.fleet.notify_brief = self.fleet_notify_brief
+            self.fleet.remove_work = self.fleet_remove_work
         # Skills (skills.py): the owner's how-tos, written to the OpenClaw workspace; shared ones come in through the Fleet.
         self.skills = skills.Skills(self.store.connect, config.get('openclaw_workspace') or WORKSPACE, self.fleet, config=config)
         self.skills.finder = self.skills_find_start
@@ -9245,6 +9247,8 @@ class App:
             dirty = self.graph_dirty.wait(min(wait, GRAPH_CHECK_SECONDS))
             if self.stop.is_set():
                 return
+            with contextlib.suppress(Exception):
+                work_removal.prune(self.config)  # a work removal's safety copy goes after its days
             try:
                 fresh = self.graph_freshness()
             except Exception:
@@ -9276,6 +9280,16 @@ class App:
             except Exception as error:
                 LOG.error('enrichment error=%s', type(error).__name__)
                 wait = 3600
+
+    def fleet_remove_work(self, item):
+        """The control plane, through the Network: remove a Work Fleet's company data (work_removal.py), then restart."""
+        if not getattr(self, 'config_path', None):
+            raise ValueError('This service cannot save its settings')
+        result = work_removal.remove(self.config_path, item.get('domains') or [], item.get('companies') or [], store=self.store)
+        LOG.info('work removal accounts=%s events=%s cards=%s', len(result['accounts']), result['events'], result['cards'])
+        if result['accounts']:
+            result['restarting'] = restart_self(5)
+        return result
 
     def graph_build(self):
         with self.store.connect() as db:
@@ -9661,6 +9675,12 @@ class App:
             self.skills.sync()  # the workspace has the skills that are on, also after edits made while this was off
         signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
         signal.signal(signal.SIGINT, lambda *_: self.stop.set())
+        try:  # a work removal that was going on: what a sync stored meanwhile goes too; old safety copies go
+            if work_removal.settle(self.config, self.store):
+                self.graph_dirty.set()
+            work_removal.prune(self.config)
+        except Exception as error:  # noqa: BLE001 - never stops the service
+            LOG.error('work removal settle error=%s', type(error).__name__)
         for account in self.config['accounts']:
             threading.Thread(target=self.collector, args=(account,), daemon=True).start()
         threading.Thread(target=self.delivery_worker, daemon=True).start()

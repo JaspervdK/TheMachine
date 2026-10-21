@@ -216,6 +216,27 @@ Each person answers with one Machine per Fleet, so teammates never get two answe
 (say a hosted one and one at home), you pick which one answers in your account. Removing someone from a Fleet takes
 effect at once, and how often a Machine can ask is limited.
 
+## Leaving a Work Fleet with your Machine
+
+When a Work Fleet's owner or admin removes you and you keep your Machine, your work data for that company does not stay
+with you. Your Machine disconnects that company's accounts and deletes what they brought in; your personal sources stay.
+
+- **Which accounts:** those whose address is at the company's email domain (the domain of the Fleet's owner and
+  admins, or one its members share, such as `acme.com`, also `eu.acme.com`), and the accounts in that company's work boundary (`work:Acme`, matched to
+  the Fleet's name or the domain) that have no address elsewhere, such as the company Slack, Intercom, Salesflare or
+  GitHub. An account filed under that company with an address elsewhere (a personal Gmail) stays.
+- **What goes:** their messages and events, the cards and drafts made only from them (a card that also used a personal
+  source stays), their promises, graph and search entries and sync state, and their own secret when no other account
+  uses it. Google and Microsoft access through your hosted Machine's account page is revoked.
+- **First a safety copy:** config.json and the database go into `work-removal-backups/` next to the database, readable
+  only by you, and are deleted after 7 days.
+- **How it arrives:** a hosted Machine gets it from the control plane; a self-hosted one asks the Network every 10
+  minutes (`GET /removals`), also when it is in no Fleet any more, and reports the counts back. A self-hosted Machine
+  says it can do this when it joins (`remove_work` in `/me`); an older one cannot, and the confirmation says so.
+- You get an email once it is done: "Your work accounts from Acme were disconnected and their data removed."
+
+The code is in `work_removal.py`.
+
 ## A self-hosted Machine in a Fleet
 
 A Machine you run yourself can be your Machine in a Fleet, next to teammates on hosted Machines. It needs an account

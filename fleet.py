@@ -111,6 +111,7 @@ DOMAIN = re.compile(r'(?:[a-z0-9-]+\.)+[a-z]{2,}')
 MONTH = re.compile(r'\d{4}-\d{2}')
 DAY = re.compile(r'\d{4}-\d{2}-\d{2}')
 DIRECTORY_EVERY, CLAIMS_EVERY, MEETINGS_EVERY, OFF_WAIT = 600, 120, 300, 600
+REMOVALS_EVERY = 600  # how often a Machine asks whether a Work Fleet it left wants its company data removed
 DELIVERY_EVERY = 120  # how often the open questions' delivery state is asked (network.py)
 MEETING_DAYS, APPROVAL_DAYS = 7, 3
 # A waiting question tells the owner once: after it settled for NOTIFY_SETTLE seconds, so questions that
@@ -1522,6 +1523,9 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         # notify_brief(text, url) tells the owner their brief is ready (phone, Telegram) and returns the Telegram id.
         self.last['briefs'] = 0.0
         self.notify_brief = None
+        # remove_work(item) removes a Work Fleet's company data from this Machine and returns the counts (work_removal.py)
+        self.remove_work = None
+        self.last['removals'] = None
         with self.connect() as db:
             ensure(db)
 
@@ -1541,7 +1545,8 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         if refresh or not self.meta('directory') or stamp - self.last['directory'] > DIRECTORY_EVERY:
             # A self-hosted Machine's addresses, for its teammates' "who knows", and its dashboard's address, for the
             # Open your dashboard button on its owner's Account page
-            me = {'emails': account_emails(self.config), 'dashboard': dashboard_address(self.config)}
+            # remove_work: it removes a Work Fleet's company data when asked, after its owner leaves (removals_round)
+            me = {'emails': account_emails(self.config), 'dashboard': dashboard_address(self.config), 'remove_work': True}
             if self.meta('me_sent') != me:
                 try:
                     self.relay.call('POST', '/me', me, timeout=30)
@@ -2529,9 +2534,42 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
             return
         self.set_meta('network_delivery', {i: bool(v.get('delivered')) for i, v in found.items() if isinstance(v, dict)})
 
+    def removals_round(self, clock=None):
+        """Removed from a Work Fleet, or left it, while keeping this Machine: the control plane asks, through the
+        Network, to remove that company's work accounts and what they brought in (work_removal.py). This also works
+        once this Machine is in no Fleet any more. Each request is done once and its counts reported back."""
+        import time
+        stamp = (clock or time.monotonic)()
+        if not self.remove_work or (self.last['removals'] is not None and stamp - self.last['removals'] < REMOVALS_EVERY):
+            return []
+        self.last['removals'] = stamp
+        try:
+            found = self.relay.call('GET', '/removals', timeout=30)
+        except (Off, Unavailable, OSError, ValueError):
+            return []
+        done = []
+        for item in (found or {}).get('removals', [])[:5]:
+            if not isinstance(item, dict) or not isinstance(item.get('id'), str):
+                continue
+            try:
+                result = {'ok': True, **self.remove_work(item)}
+            except Exception as error:  # noqa: BLE001 - reported, so the control plane can say it did not happen
+                LOG.error('work removal error=%s', type(error).__name__)
+                result = {'ok': False, 'error': type(error).__name__}
+            try:
+                self.relay.call('POST', '/removals', {'id': item['id'], 'result': result}, timeout=30)
+            except (Off, Unavailable, OSError, ValueError):
+                pass  # asked again next round: removing twice finds nothing the second time
+            done.append(item['id'])
+        return done
+
     def run(self, stop):
         backoff = away = 0
         while not stop.is_set():
+            try:
+                self.removals_round()
+            except Exception as error:  # noqa: BLE001 - never stops the Fleet
+                LOG.error('work removal round error=%s', type(error).__name__)
             try:
                 self.step()
                 self.off, backoff, away = False, 0, 0

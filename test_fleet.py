@@ -410,12 +410,12 @@ class Fleet(unittest.TestCase):
         self.assertEqual(fleet.settings({'fleet_relay_url': 'https://old.example', 'credentials': {'fleet': '/t'}}), relay)
 
     def test_a_self_hosted_machine_tells_its_work_addresses_only(self):
-        self.assertEqual(self.relay.sent('/me'), [{'emails': ['owner@acme.example'], 'dashboard': None}])
+        self.assertEqual(self.relay.sent('/me'), [{'emails': ['owner@acme.example'], 'dashboard': None, 'remove_work': True}])
         self.fleet.directory(refresh=True)
         self.assertEqual(len(self.relay.sent('/me')), 1)  # only again when they change
         self.fleet.config = dict(self.fleet.config, dashboard_host='Desk.Example')  # its own https address, for the Account page's link
         self.fleet.directory(refresh=True)
-        self.assertEqual(self.relay.sent('/me')[-1], {'emails': ['owner@acme.example'], 'dashboard': 'https://desk.example/'})
+        self.assertEqual(self.relay.sent('/me')[-1], {'emails': ['owner@acme.example'], 'dashboard': 'https://desk.example/', 'remove_work': True})
         self.assertEqual(fleet.dashboard_address({'dashboard_host': 'a.example', 'dashboard_path': '/assistant/'}), 'https://a.example/assistant/')
 
     def test_pairing_trades_the_code_for_a_token_and_says_why_not(self):
