@@ -1,6 +1,6 @@
 # Third-party notices
 
-The Machine is MIT licensed (see [LICENSE](LICENSE)). It does not copy or bundle third-party source code: it runs on top of software you install yourself, which keeps its own licence. This file lists that software and its licence, for convenience.
+The Machine is MIT licensed (see [LICENSE](LICENSE)). It does not copy or bundle third-party source code (one font aside, below): it runs on top of software you install yourself, which keeps its own licence. This file lists that software and its licence, for convenience.
 
 ## OpenClaw
 
@@ -40,3 +40,7 @@ Installed from their own package sources only when you use the feature that need
 | Python | runs the service | PSF License |
 | Tailscale | private dashboard access | BSD-3-Clause |
 | [`wacli`](https://github.com/openclaw/wacli) | local WhatsApp store and owner-approved WhatsApp sends | MIT, Copyright (c) 2026 Peter Steinberger |
+
+## Source Serif 4
+
+The dashboard's headings use Source Serif 4 by Adobe, bundled unmodified as `brand/fonts/source-serif-4-latin.woff2` (the Latin subset Google Fonts serves). It is licensed under the SIL Open Font License 1.1; the full licence is in [brand/fonts/OFL.txt](brand/fonts/OFL.txt).
