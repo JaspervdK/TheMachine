@@ -18,6 +18,7 @@
 | `dashboard_aliases`, `dashboard_alias_path` | `[]`, `/assistant/` | Extra host names and their path |
 | `port` | `8787` | Local API and dashboard port on 127.0.0.1 |
 | `database` | — | SQLite file; tokens and keys sit next to it |
+| `message_protection` | unset | `true` seals message contents in the database, `false` opens them again, unset leaves them as they are ([below](#message-protection)) |
 | `credentials` | — | Name → file path of each secret: `api-token`, `owner-token`, `gog-password`, `google-broker` and `microsoft-broker` (with a broker), and one per source credential. systemd `LoadCredential` with the same names takes precedence |
 | `app_dir` | `~/.openclaw/workspace/tools/personal-assistant` | This checkout; the plugin reads `AGENTS.md`/`PREPARATION.md` here and protects it from edits |
 | `fix_dir` | `~/.cache/the-machine/fixes` | Where Do it clones The Machine to fix it ([The Machine fixes itself](../README.md#the-machine-fixes-itself)) |
@@ -69,3 +70,23 @@ Every account has `id`, `service`, `transport` and `boundary`, plus optional `sc
 
 - **Android:** the phone's own status notices ("… is displaying over other apps", "Charging this device via USB", USB/wireless debugging, serial console; storage and security warnings still come through). App notifications stay even if one account from that service is connected: the phone may also use personal mailboxes or other workspaces not collected here. When you connect a source that also has a phone app (Gmail, Slack, WhatsApp, …), setup asks once whether to skip that app's notifications; yes adds an `exclude` rule with its `packages` to the Android account, which you can also write yourself.
 - **Calendar:** unchanged instances of recurring placeholders: Lunch, Block(ed), Busy, Focus (time), Deep work, Home, Office, Commute, Gym, Stand up / Standup / Daily standup, Happy birthday!. A moved or one-off "Lunch with Ann" still counts.
+
+## Message protection
+
+With `"message_protection": true` the service encrypts what messages say, from every source, in its database:
+subjects, bodies, attachments' names, quoted text and other metadata of email, chats, notifications, tickets,
+transcripts and calendar events, plus the text derived from them (card text, drafts and their edits, preparation
+tool calls and results, Fleet and Network questions and answers). The key is `message-content.key`, next to the
+database, readable only by the service user. The dashboard, search, embeddings and reviews work as before: search
+uses a keyed hash of each word.
+
+What stays readable, for support and to improve The Machine: feedback, facts and rules, skills, profile and notes,
+card states and times, errors, sync health and logs. `python3 learnings.py --database ... --workspace ...` exports
+exactly that, without the key.
+
+Turning it on or off rewrites the database once at start: a copy is made first, kept only if the change fails.
+Exports open the messages and leave the key out. The key does not stop someone with root on the machine, who can
+read it; it stops the database file, its copies and tools without the key. Not covered: OpenClaw's own session
+transcripts and caches, WhatsApp's `wacli` store, browser profiles, promises' text and Network replies waiting to
+go out.
+

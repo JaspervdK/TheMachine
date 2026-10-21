@@ -40,6 +40,7 @@ import uuid
 from zoneinfo import ZoneInfo
 import embeddings
 import graph
+import message_seal
 import enrichment
 import fleet
 import skills
@@ -1720,9 +1721,14 @@ class Store:
     accounts = []  # configured accounts with their boundaries, set by App (Work/Personal labels)
     config = {}  # the service's config, set by App (browser and dashboard addresses for a card waiting on a sign-in)
 
-    def __init__(self, path):
+    def __init__(self, path, protect=None):
+        """`protect`: seal message contents (True), open them again (False), or keep what the database has (None).
+        See message_seal.py."""
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        key = message_seal.load_key(self.path)
+        self.sealer = message_seal.Sealer(key) if key else None
+        self.protected, self._sealed_schema = False, None
         with self.connect() as db:
             db.executescript('''
               PRAGMA journal_mode=WAL;
@@ -1943,6 +1949,54 @@ class Store:
             graph.ensure(db)
             if 'project' not in {r[1] for r in db.execute('PRAGMA table_info(suggestions)')}:
                 db.execute('ALTER TABLE suggestions ADD COLUMN project TEXT')
+        try:
+            self.message_protection(True if protect is None and os.environ.get('MESSAGE_PROTECTION_TEST') else protect)
+        except Exception as error:  # the app keeps running as it was; the next start tries again
+            with self.connect() as db:
+                sealed = message_seal.is_protected(db)
+            if sealed and not self.sealer:
+                raise
+            self.protected = sealed
+            LOG.error('Message protection left as it was (%s): %s', 'sealed' if sealed else 'plain', error)
+
+    def message_protection(self, protect):
+        """Bring the database to the wanted state: sealed message contents, or plain. A change is one transaction,
+        after a consistent copy of the database (removed once the change is checked), then a VACUUM so no page keeps
+        the old text. Returns what changed, or None."""
+        with self.connect() as db:
+            sealed = message_seal.is_protected(db)
+            if sealed and not self.sealer:
+                raise message_seal.SealError(f'The messages in {self.path} are sealed and {message_seal.key_path(self.path)} is missing')
+            if sealed and protect is not False:
+                self.protected = True
+                return None
+            if not sealed and not protect:
+                return None
+        if not self.sealer:
+            self.sealer = message_seal.Sealer(message_seal.load_key(self.path, create=True))
+        copy = self.path.with_name(self.path.name + '.before-protection')
+        copy.unlink(missing_ok=True)
+        with contextlib.closing(sqlite3.connect(self.path, timeout=60)) as source, contextlib.closing(sqlite3.connect(copy)) as target:
+            source.backup(target)
+        os.chmod(copy, 0o600)
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            changed = message_seal.protect(db) if protect else message_seal.unprotect(db) or {}
+            if protect and message_seal.leftovers(db):
+                raise message_seal.SealError('Some message contents could not be sealed; nothing was changed')
+        self.protected = bool(protect)
+        with self.connect() as db:  # every sealed value opens with this key before the copy goes
+            for table, column, _ in message_seal.sealed_columns(db):
+                for _ in db.execute(f'SELECT {column} FROM {table}'):
+                    pass
+        with contextlib.closing(sqlite3.connect(self.path, timeout=60)) as db:
+            db.execute('PRAGMA secure_delete=ON')
+            db.execute('VACUUM')
+            db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        copy.unlink()
+        self.protected = bool(protect)
+        LOG.info('message contents %s: %s', 'sealed' if protect else 'opened', changed)
+        return changed
 
     def ensure_monotonic_event_ids(self):
         # Purged evidence IDs remain in review/suggestion provenance. Never let
@@ -2060,8 +2114,18 @@ class Store:
 
     @contextlib.contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=20)
+        db = sqlite3.connect(self.path, timeout=20, factory=message_seal.Connection)
         db.row_factory = sqlite3.Row
+        db.protected = self.protected
+        if self.sealer:
+            message_seal.attach(db, self.sealer)
+            db.execute('PRAGMA secure_delete=ON')  # a deleted or replaced message leaves no copy in a free page
+            if self.protected and db.execute('PRAGMA schema_version').fetchone()[0] != self._sealed_schema:
+                # a table made since (a migration, joining a Fleet): its guards, and anything it got meanwhile
+                with db:
+                    message_seal.ensure_triggers(db)
+                    message_seal.leftovers(db, seal=True)
+                self._sealed_schema = db.execute('PRAGMA schema_version').fetchone()[0]
         db.execute('PRAGMA foreign_keys=ON')
         try:
             with db:
@@ -2198,6 +2262,8 @@ class Store:
             for event in events:
                 if event['account_id'] != account:
                     raise ValueError('Event account does not match the checkpoint boundary')
+                if os.environ.get('MESSAGE_SEAL_AUDIT') and (leaks := message_seal.plain_leaks(event, state)):
+                    raise AssertionError(f"{event['kind']} keeps message text in the clear in {', '.join(leaks)}")
                 digest_event = event
                 if event['kind'] == 'android.notification' and event['metadata'].get('transport') == 'existing_openclaw_feed':
                     digest_event = {**event, 'metadata':{k:v for k,v in event['metadata'].items()
@@ -2210,8 +2276,10 @@ class Store:
                         db.execute('UPDATE events SET metadata=? WHERE id=?', (encoded(event['metadata']),old['id']))
                     continue
                 changed.add(event['source_id'])
-                values = (event['kind'], event['occurred_at'], event['title'], event['body'],
-                          encoded(event['metadata']), int(event['deleted']), digest, now())
+                seal = self.sealer.seal if self.protected else (lambda value: value)
+                metadata = self.sealer.seal_json(encoded(event['metadata'])) if self.protected else encoded(event['metadata'])
+                values = (event['kind'], event['occurred_at'], seal(event['title']), seal(event['body']),
+                          metadata, int(event['deleted']), digest, now())
                 if old:
                     db.execute('UPDATE events SET kind=?,occurred_at=?,title=?,body=?,metadata=?,deleted=?,content_hash=?,ingested_at=?,version=version+1,deferrals=0 WHERE id=?',
                                (*values, old['id']))
@@ -2297,7 +2365,7 @@ class Store:
         if query:
             sql += ' AND e.id IN (SELECT rowid FROM event_search WHERE event_search MATCH ?)'
             # Treat search input as words, not arbitrary FTS operators.
-            args.append(' AND '.join('"' + word.replace('"', '""') + '"' for word in query.split()))
+            args.append(message_seal.match(self, query.split(), ' AND '))
         if event_ids is not None:
             if not event_ids:
                 return []
@@ -6679,7 +6747,7 @@ class App:
             set_work_hours(None)
         self.config = config
         self.config_path = Path(config_path) if config_path else None  # where Work hours are saved
-        self.store = Store(config['database'])
+        self.store = Store(config['database'], protect=config.get('message_protection'))
         self.store.exclusions = {a['id']: rules for a in config['accounts'] if (rules := (a.get('exclude') or []) + default_exclusions(config, a))}
         self.store.owner_user_ids = {a['user_id'] for a in config['accounts'] if a.get('service') == 'slack' and a.get('user_id')}
         self.store.accounts = config['accounts']

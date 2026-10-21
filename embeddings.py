@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
+import message_seal
+
 SCHEMA = '''CREATE TABLE IF NOT EXISTS event_vectors(event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
   version INTEGER NOT NULL,model TEXT NOT NULL,dims INTEGER NOT NULL,vector BLOB NOT NULL)'''
 BODY_CHARS = 2000
@@ -174,7 +176,7 @@ def fts_ids(db, accounts, query, limit):
     return [r[0] for r in db.execute(
         'SELECT e.id FROM event_search JOIN events e ON e.id=event_search.rowid WHERE event_search MATCH ? '
         'AND e.account_id IN (' + marks + ') AND e.deleted=0 ORDER BY event_search.rank LIMIT ?',
-        (' OR '.join('"' + w.replace('"', '""') + '"' for w in words), *accounts, limit))]
+        (message_seal.match(db, words, ' OR '), *accounts, limit))]
 
 
 def related(connect, settings, accounts, event_ids=(), query='', limit=8, floor=None, exclude=(), timeout=30, query_floor=None):

@@ -30,6 +30,9 @@ Never include actual tokens, messages or a production database.
 - The dashboard's sign-in dialog fills sites in the assistant's browser on the owner's behalf and can save
   those passwords encrypted in the data folder. They never go to the model or the logs, but the key sits next
   to them for the service user: protect that user's account and disk (full-disk encryption) accordingly.
+- `message_protection` encrypts message contents from every source in the database, with a key next to it for
+  the service user ([configuration](docs/configuration.md#message-protection)). It protects copies of the
+  database and tools without the key, not against root on the machine. Hosted Machines turn it on.
 - Backups contain private evidence and may include secrets. Protect them like the live data.
 - Keep the operating system patched. On a dedicated Ubuntu server, let `unattended-upgrades` install the
   `-security` pockets daily, and reboot when `/run/reboot-required` appears, at a quiet hour, then check that

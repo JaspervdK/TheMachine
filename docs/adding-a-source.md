@@ -80,6 +80,8 @@ Use this common event shape; optional metadata is source-specific. Check parsing
 | `metadata` | JSON with what reviews need: `source_url` (an https link to open the original, shown as Open), sender, thread or conversation IDs, `from_me` for the owner's own messages. |
 | `deleted` | `True` when the item was removed at the source. |
 
+Message text goes in `title`, `body` and metadata only. With [message protection](configuration.md#message-protection) on, `commit_page` seals all three; only the lookup keys `thread_id`, `from`, `to`, `labels`, `from_me`, `user_id`, `channel_id`, `chat_id`, `conversation_id` and `notification_key_hash` stay readable, so keep text out of those, `source_id`, `kind` and your cursor. `MESSAGE_SEAL_AUDIT=1` makes `commit_page` refuse an event that does (`test_message_seal.py` runs every connector suite that way). Store only through `commit_page`, never with your own SQL.
+
 When an item changes, send it again with the same `source_id`: the service stores a new version and reviews see it again. Unchanged items are skipped by content hash, so rereading is cheap and safe.
 
 ## 4. Checkpoints
@@ -113,6 +115,7 @@ After fixture tests, the owner can run `assistant connect <service>`: setup veri
 
 - [ ] Read-only credential for exactly this account, with the least access that works.
 - [ ] Stable `source_id`; `kind` listed in `KINDS`.
+- [ ] Message text only in `title`, `body` and metadata, never in ids, lookup keys or the cursor.
 - [ ] Events and cursor committed together; replays don't duplicate.
 - [ ] Failures raise `SourceError` with a content-free label.
 - [ ] Fixture tests for parsing, replays, expired cursors and errors.

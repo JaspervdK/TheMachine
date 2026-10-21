@@ -23,6 +23,7 @@ from contextlib import closing
 from contextlib import contextmanager
 from pathlib import Path
 
+import message_seal
 import portable
 
 FORMAT = 1
@@ -135,7 +136,7 @@ def plan(config_path, workspace=None, openclaw_home=None, left_out=None):
     items = [('file', config_path, 'config/config.json')]
     for path, relative in _files(data, left_out=left_out):
         resolved = path.resolve()
-        if path == config_path or resolved in hosted or path.name == 'machine-token':
+        if path == config_path or resolved in hosted or path.name in ('machine-token', message_seal.KEY_NAME):
             continue
         if path.suffix in ('.sqlite', '.db'):
             items.append(('db', path, f'data/{relative}'))
@@ -276,6 +277,7 @@ def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=
                     copy.unlink(missing_ok=True)
                     with closing(sqlite3.connect(path, timeout=30)) as source_db, closing(sqlite3.connect(copy)) as target:
                         source_db.backup(target)  # a consistent copy while the service keeps writing
+                    _open_messages(copy, path)
                     yield name, copy
                 else:
                     yield name, path
@@ -290,6 +292,20 @@ def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=
             plain.unlink(missing_ok=True)
         os.chmod(sealed, 0o600)
         return sealed, manifest
+
+
+def _open_messages(copy, original):
+    """An export holds message contents in the clear (it is the owner's), so it opens anywhere without their key."""
+    key = message_seal.load_key(original)
+    with closing(sqlite3.connect(copy, factory=message_seal.Connection)) as db:
+        if not message_seal.is_protected(db):
+            return
+        if not key:
+            raise MoveError('The messages in this database are sealed and their key is missing; nothing was exported.')
+        message_seal.attach(db, message_seal.Sealer(key))
+        with db:
+            message_seal.unprotect(db)
+        db.execute('VACUUM')
 
 
 def _openssl(args, passphrase, decrypt=False):
