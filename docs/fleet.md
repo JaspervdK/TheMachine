@@ -291,7 +291,9 @@ A match becomes a card in Suggestions only when there is something concrete to d
 them, or a meeting with them in the next two weeks; the card says which. Someone at your own work domain is suggested
 as a colleague, anyone else as a friend or family, for you to pick; nothing is guessed from what you write. **Connect**
 sends an ordinary friend request, which they still accept, and sharing then follows the rules you set for that friend.
-**Not now** hides them for 30 days unless something new comes up; **Never suggest** hides them for good. What was
+**Not now** hides them for 30 days unless something new comes up; **Never suggest** hides them for good. Someone in a
+Work or Family Fleet with you is connected already and never suggested, nor offered as a Connect on a task they sent
+you; if one of you leaves that Fleet, they can be suggested again. A friendship you already have stays as it is. What was
 checked, and every switch you flip, is kept in the Fleet activity history (see What happens in your Fleet).
 
 **Leave the Network** turns both switches off, removes every friend and withdraws open requests. Your Fleets stay.

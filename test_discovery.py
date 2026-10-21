@@ -177,6 +177,32 @@ class Discovery(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.fleet.network_action('connect', 'zed@zed.example')
 
+    def test_someone_in_a_fleet_together_is_not_suggested_until_they_leave(self):
+        work = self.relay.directory['fleets'][0]
+        work['members'].append({'member_id': 'nia1', 'name': 'Nia North', 'role': 'member', 'emails': ['nia@nia.example'], 'username': 'nia'})
+        self.fleet.directory(refresh=True)
+        self.fleet.network_action('find_on')
+        self.assertNotIn('nia', self.people())  # connected already through the Fleet: no card, not under the Network block
+        self.assertEqual(self.people()['lou']['status'], 'connected')  # a friendship stays as it is
+        with self.store.connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM network_people WHERE username='nia'").fetchone())
+        # Known by username only (another address of theirs matched): the same
+        work['members'][-1]['emails'] = ['nia@work.example']
+        self.fleet.directory(refresh=True)
+        self.fleet.discovery_round(force=True)
+        self.assertNotIn('nia', self.people())
+        # Nia leaves the Fleet: suggestable again, with the meeting as the reason
+        work['members'].pop()
+        self.fleet.directory(refresh=True)
+        self.fleet.discovery_round(force=True)
+        self.assertEqual((self.people()['nia']['status'], [r['kind'] for r in self.people()['nia']['reasons']]), ('new', ['meeting']))
+        # Back in a Family Fleet: hidden again at once, before the next lookup
+        self.relay.directory['fleets'].append({'id': 'fl_' + 'f' * 16, 'kind': 'family', 'name': 'Home', 'secret': 's' * 64, 'asks': [], 'members': [
+            {'member_id': 'me2', 'name': 'Owner', 'role': 'owner', 'me': True, 'emails': ['owner@gmail.com']},
+            {'member_id': 'nia2', 'name': 'Nia North', 'role': 'member', 'emails': ['nia@nia.example']}]})
+        self.fleet.directory(refresh=True)
+        self.assertNotIn('nia', self.people())
+
     def test_later_comes_back_only_with_something_new(self):
         self.fleet.network_action('find_on')
         self.fleet.network_action('later', 'nia@nia.example')

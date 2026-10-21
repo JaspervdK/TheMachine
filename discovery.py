@@ -9,6 +9,9 @@ Two switches, both off until the owner turns them on:
   of the mail and calendar accounts this Machine connected (it says which; each can be turned off in the Fleet tab).
   The Network keeps those blinded only, and an address that is someone else's sign-in finds nobody.
 
+Someone in a Work or Family Fleet with the owner is connected already: never suggested (nor by the Network, which
+leaves them out of a lookup), until one of them leaves that Fleet. A friendship with them stays as it is.
+
 A match becomes a card under Suggestions only when connecting has a concrete use now: an open card with them, or a
 meeting with them soon. Other matches wait quietly in the Fleet tab's Network block. The card suggests what they are
 to the owner from structure only: the same work email domain as the owner's work accounts reads as a colleague;
@@ -109,6 +112,25 @@ class Discovery:
         found.update(values)
         self.set_meta('network', found)
         return found
+
+    def fleet_mates(self):
+        """Who is in a Work or Family Fleet with the owner, by username and by address: connected already, so never
+        suggested as a friend. From the directory, so someone who leaves the Fleet is suggestable again."""
+        names, emails = set(), set()
+        for f in self.fleets().values():
+            if f.get('kind') == 'friends':
+                continue
+            for m in f.get('members') or []:
+                if m.get('me'):
+                    continue
+                if isinstance(m.get('username'), str) and m['username']:
+                    names.add(m['username'].lower())
+                emails |= {normal(e) for e in m.get('emails') or [] if isinstance(e, str)} | {normal(m.get('account_email'))}
+        return names, emails - {''}
+
+    def in_my_fleet(self, mates, username, email=''):
+        names, emails = mates
+        return str(username or '').lower() in names or normal(email) in emails
 
     def network_contacts(self, db):
         """The strongest people in the relationship graph with an address, the owner's own addresses left out."""
@@ -236,9 +258,14 @@ class Discovery:
                 self._set_network(last=now(), new_at=now())
             self._set_network(joined_buckets=[])
         friends = {m.get('username') for m in self.teammates(self.friends_ref())} if self.friends_ref() else set()
+        mates = self.fleet_mates()
         with self.connect() as db:
             ensure(db)
             for row in db.execute("SELECT * FROM network_people WHERE status IN ('new','requested','later')").fetchall():
+                if row['status'] != 'requested' and row['username'] not in friends and self.in_my_fleet(mates, row['username'], row['email']):
+                    # In a Fleet together: connected already, no friend suggestion. Found again once one of them leaves it
+                    db.execute('DELETE FROM network_people WHERE email=?', (row['email'],))
+                    continue
                 status = 'connected' if row['username'] in friends else row['status']
                 if status == 'later' and row['decided_at'] and row['decided_at'] < (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=LATER_DAYS)).isoformat(timespec='seconds'):
                     status = 'new'
@@ -363,9 +390,11 @@ class Discovery:
         found = self.network_settings()
         with self.connect() as db:
             ensure(db)
+            mates = self.fleet_mates()
             people = [{**{k: r[k] for k in ('email', 'username', 'name', 'hint', 'role', 'relation', 'status', 'found_at')},
                        'reasons': json.loads(r['reasons'] or '[]')}
-                      for r in db.execute("SELECT * FROM network_people WHERE status<>'never' ORDER BY found_at DESC LIMIT 200")]
+                      for r in db.execute("SELECT * FROM network_people WHERE status<>'never' ORDER BY found_at DESC LIMIT 200")
+                      if r['status'] not in ('new', 'later') or not self.in_my_fleet(mates, r['username'], r['email'])]
         findable, off, account = set(found.get('findable') or []), set(found.get('address_off') or []), found.get('account_email')
         addresses = [{'email': account, 'account': True, 'on': True, 'findable': account in findable}] if account else []
         addresses += [{'email': e, 'account': False, 'on': e not in off, 'findable': e in findable} for e in self.own_addresses() if e != account]

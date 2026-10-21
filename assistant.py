@@ -7371,7 +7371,12 @@ class App:
             except (ValueError, OSError):
                 LOG.warning('task invite local card saved; remote addition receipt unavailable')
         username = who.get('username') if isinstance(who.get('username'), str) and re.fullmatch(r'[a-z0-9][a-z0-9-]{1,28}[a-z0-9]', who['username']) else None
-        return {'card_id': card_id, 'from': {'name': name, 'username': username}, 'can_connect': bool(network and username)}
+        connected = False
+        if network and username:  # a friend already, or in a Work or Family Fleet together: nothing to connect
+            ref = network.friends_ref()
+            friends = {str(m.get('username') or '').lower() for m in network.teammates(ref)} if ref else set()
+            connected = username in friends or network.in_my_fleet(network.fleet_mates(), username)
+        return {'card_id': card_id, 'from': {'name': name, 'username': username}, 'can_connect': bool(network and username and not connected)}
 
     def fleet_tell(self, text, anchor):
         """How the owner's own Fleet request went (an intro, a handoff, a follow-up split): a phone notification, and a

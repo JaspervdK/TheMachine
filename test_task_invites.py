@@ -90,6 +90,12 @@ class ByEmail(unittest.TestCase):
             self.app.action('task_import', {'link': link}, owner_dashboard=False)
         added = self.app.action('task_import', {'link': link}, owner_dashboard=True)
         self.assertEqual((added['from'], added['can_connect']), ({'name': 'Owner Example', 'username': 'owner'}, True))
+        # From someone in a Fleet with them: connected already, so no Connect
+        self.relay.directory['fleets'][0]['members'][1]['username'] = 'owner'
+        self.app.fleet.directory(refresh=True)
+        self.assertFalse(self.app.action('task_import', {'link': link}, owner_dashboard=True)['can_connect'])
+        self.relay.directory['fleets'][0]['members'][1].pop('username')
+        self.app.fleet.directory(refresh=True)
         new = self.card_row(added['card_id'])
         self.assertEqual((new['title'], new['due'], new['status']), ('Send Sam the pricing', '2026-11-03', 'pending'))
         self.assertIn('sent this by email', new['body'])
