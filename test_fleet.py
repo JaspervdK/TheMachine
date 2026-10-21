@@ -402,9 +402,9 @@ class Fleet(unittest.TestCase):
         self.assertIsNone(fleet.settings({'fleet': {'url': 'http://evil.example'}}))
         self.assertIsNone(fleet.settings({'fleet': {'url': 'http://evil.example'}, 'credentials': {'fleet': '/t'}}))
         self.assertTrue(fleet.settings(CONFIG))
-        # Self-hosted: the built-in relay once paired; an older fleet_relay_url changes nothing
-        relay = {'url': fleet.RELAY + '/api/fleet'}
-        self.assertTrue(fleet.RELAY.startswith('https://'))
+        # Self-hosted: the built-in Network once paired; an older fleet_relay_url changes nothing
+        relay = {'url': fleet.NETWORK + '/api/fleet'}
+        self.assertTrue(fleet.NETWORK.startswith('https://'))
         self.assertIsNone(fleet.settings({'fleet_relay_url': 'https://relay.example/'}))
         self.assertEqual(fleet.settings({'credentials': {'fleet': '/t'}}), relay)
         self.assertEqual(fleet.settings({'fleet_relay_url': 'https://old.example', 'credentials': {'fleet': '/t'}}), relay)
@@ -426,12 +426,38 @@ class Fleet(unittest.TestCase):
                 raise urllib.error.HTTPError(request.full_url, 403, 'no', {}, io.BytesIO(b'{"error":"That code is wrong"}'))
             return io.BytesIO(b'{"token":"fd_x","label":"Laptop"}')
 
-        with patch.object(fleet.urllib.request, 'urlopen', opener), patch.object(fleet, 'RELAY', 'https://relay.example'):
+        with patch.object(fleet.urllib.request, 'urlopen', opener), patch.object(fleet, 'NETWORK', 'https://network.example'):
             self.assertEqual(fleet.pair('ABCD-EFGH', 'Laptop', ['owner@acme.example'])['token'], 'fd_x')
             with self.assertRaisesRegex(ValueError, 'That code is wrong'):
                 fleet.pair('BAD1-BAD1', 'Laptop', [])
-        self.assertEqual(seen[0], ('https://relay.example/api/fleet/pair', {'code': 'ABCD-EFGH', 'label': 'Laptop', 'emails': ['owner@acme.example']}))
+        self.assertEqual(seen[0], ('https://network.example/api/fleet/pair', {'code': 'ABCD-EFGH', 'label': 'Laptop', 'emails': ['owner@acme.example']}))
 
+    def test_pairing_falls_back_to_the_old_address(self):
+        import io
+        import urllib.error
+        from unittest.mock import patch
+        seen = []
+
+        def opener(request, timeout=None):
+            seen.append(request.full_url)
+            if request.full_url.startswith(fleet.NETWORK):
+                raise urllib.error.URLError('no route')
+            return io.BytesIO(b'{"token":"fd_x","label":"Laptop"}')
+
+        with patch.object(fleet.urllib.request, 'urlopen', opener):
+            self.assertEqual(fleet.pair('ABCD-EFGH', 'Laptop', [])['token'], 'fd_x')
+        self.assertEqual(seen, [fleet.NETWORK + '/api/fleet/pair', fleet.RELAY + '/api/fleet/pair'])
+
+
+class Renamed(unittest.TestCase):
+    """The relay is called the Network inside too; the old names keep working for Machines that still use them."""
+    def test_old_names_and_the_old_address(self):
+        self.assertIs(fleet.Relay, fleet.NetworkClient)
+        self.assertEqual(fleet.NETWORK, 'https://network.themachine.computer')
+        self.assertEqual(fleet.RELAY, 'https://relay.themachine.computer')
+        paired = {'credentials': {'fleet': '/t'}, 'network_urls': ['https://second.example/api/fleet', 'http://evil.example']}
+        self.assertEqual(fleet.endpoints(paired), ['https://second.example/api/fleet', fleet.RELAY + '/api/fleet'])
+        self.assertEqual(fleet.endpoints({'fleet': {'url': 'https://hosted.example/api/fleet'}}), [])
 
 
 A, B = 'fl_' + 'a' * 16, 'fl_' + 'b' * 16

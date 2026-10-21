@@ -68,6 +68,8 @@ class CliTests(unittest.TestCase):
    saved=json.loads(path.read_text());token=Path(saved['credentials']['fleet'])
    self.assertEqual(('fleet_relay_url' in saved,token.read_text().strip(),oct(token.stat().st_mode&0o777)),(False,'fd_secret','0o600'))
    self.assertNotIn('fd_secret',out.getvalue())
+   with patch.object(cli.assistant.fleet,'pair',return_value={'token':'fd_secret','label':'Laptop'}),contextlib.redirect_stdout(io.StringIO()):
+    cli.main(['--config',str(path),'fleet-pair','ABCD-EFGH','--network','https://ignored.example'])  # the new name of --relay
    with self.assertRaises(SystemExit):cli.main(['--config',str(Path(d)/'none.json'),'fleet-pair','X'])
 
 if __name__=='__main__':unittest.main()

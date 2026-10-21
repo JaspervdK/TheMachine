@@ -31,6 +31,12 @@ its own implementation of the same standard algorithms.
 - Your Machine can use more than one Network endpoint (`network_urls` in `config.json`) and switches to the next one
   when one is away.
 
+## Addresses
+
+The Network lives at `network.themachine.computer`. Its old address, `relay.themachine.computer`, keeps working and is
+tried when the new one can't be reached, so Machines from before the rename carry on. Older names keep working too:
+`Relay` in code, `--relay` on `fleet-pair` (now `--network`; both are ignored).
+
 ## Roadmap
 
 | Phase | What | State |

@@ -153,7 +153,8 @@ def where(error):
     return ' < '.join(f'{f.name}:{f.lineno}' for f in reversed(frames[-3:])) or '?'
 
 
-RELAY = 'https://relay.themachine.computer'  # The Fleet's relay
+NETWORK = 'https://network.themachine.computer'  # The Machine Network
+RELAY = 'https://relay.themachine.computer'  # its old address, still served: tried when NETWORK is away (docs/network.md)
 
 
 def reachable(url):
@@ -161,12 +162,21 @@ def reachable(url):
 
 
 def settings(config):
-    """The relay to use: the hosted setup's `fleet`, else RELAY once this Machine is paired (an older
+    """The Network to use: the hosted setup's `fleet`, else NETWORK once this Machine is paired (an older
     `fleet_relay_url` in the config is not needed and is ignored)."""
     found = config.get('fleet')
     if isinstance(found, dict):
         return found if reachable(found.get('url')) else None
-    return {'url': RELAY + '/api/fleet'} if (config.get('credentials') or {}).get('fleet') else None
+    return {'url': NETWORK + '/api/fleet'} if (config.get('credentials') or {}).get('fleet') else None
+
+
+def endpoints(config):
+    """More Network endpoints to fail over to: config network_urls, then the old address when the Network's own is used."""
+    found = [u for u in config.get('network_urls', []) if reachable(u)]
+    url = (settings(config) or {}).get('url') or ''
+    if url.startswith(NETWORK + '/'):
+        found.append(RELAY + url[len(NETWORK):])
+    return found
 
 
 def account_emails(config):
@@ -177,19 +187,25 @@ def account_emails(config):
 
 
 def pair(code, label, emails, timeout=30):
-    """A self-hosted Machine trades the pairing code from its owner's account for its own relay token: {token, label}."""
-    request = urllib.request.Request(RELAY + '/api/fleet/pair', method='POST', headers={'Content-Type': 'application/json'},
-                                     data=json.dumps({'code': code, 'label': label, 'emails': emails}).encode())
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            found = json.loads(response.read() or b'{}')
-    except urllib.error.HTTPError as error:
-        with error:
-            try:
-                message = json.loads(error.read() or b'{}').get('error') or ''
-            except ValueError:
-                message = ''
-        raise ValueError(message or f'The Network said {error.code}') from None
+    """A self-hosted Machine trades the pairing code from its owner's account for its own Network token: {token, label}.
+    NETWORK first, its old address RELAY when that cannot be reached."""
+    for base in (NETWORK, RELAY):
+        request = urllib.request.Request(base + '/api/fleet/pair', method='POST', headers={'Content-Type': 'application/json'},
+                                         data=json.dumps({'code': code, 'label': label, 'emails': emails}).encode())
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                found = json.loads(response.read() or b'{}')
+            break
+        except urllib.error.HTTPError as error:
+            with error:
+                try:
+                    message = json.loads(error.read() or b'{}').get('error') or ''
+                except ValueError:
+                    message = ''
+            raise ValueError(message or f'The Network said {error.code}') from None
+        except (urllib.error.URLError, OSError):
+            if base == RELAY:
+                raise
     if not isinstance(found.get('token'), str) or not found['token']:
         raise ValueError('The Network gave no token')
     return found
@@ -244,8 +260,8 @@ def day(value):
     return str(value or '')[:10] if DAY.fullmatch(str(value or '')[:10]) else None
 
 
-class Relay:
-    """The Fleet relay (The Machine Network), with this Machine's token. `others` are more Network endpoints for the
+class NetworkClient:
+    """The Machine Network (once called the relay), with this Machine's token. `others` are more Network endpoints for the
     same API (config network_urls): when one is away (502/503/504, or no connection) the next is tried, and the one
     that answered is used first from then on (docs/network.md)."""
     def __init__(self, url, token, others=()):
@@ -287,6 +303,9 @@ class Relay:
                 except ValueError:
                     message = ''
             raise ValueError(message or f'The Network said {error.code}') from None
+
+
+Relay = NetworkClient  # its name before the rename, for code that still says Relay
 
 
 # ---------------------------------------------------------------- answering (deterministic, read-only)
@@ -1155,7 +1174,7 @@ def brief_text(view, today=None, hidden=()):
 class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, family.Family):
     def __init__(self, connect, config, token, relay=None):
         self.connect, self.config = connect, config
-        self.relay = relay or Relay(settings(config)['url'], token, [u for u in config.get('network_urls', []) if reachable(u)])
+        self.relay = relay or NetworkClient(settings(config)['url'], token, endpoints(config))
         if relay is None or config.get('network_keys'):  # end-to-end sealing, an outbox and delivery state (network.py)
             self.relay = network.wrap(self.relay, self, config)
         self.lock = threading.Lock()

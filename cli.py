@@ -774,7 +774,7 @@ def parser():
     c = add('fleet-pair', 'Pair this Machine with your account for a Fleet, with a code from that account', cmd_fleet_pair)
     c.add_argument('code', help='the pairing code, like ABCD-EFGH')
     c.add_argument('--label', help='a name for this Machine there (default: this computer\'s name)')
-    c.add_argument('--relay', help=argparse.SUPPRESS)  # ignored: commands copied from before the relay was built in
+    c.add_argument('--network', '--relay', help=argparse.SUPPRESS)  # ignored: commands copied from before the Network was built in
     add('skills', 'Skills your agent follows: yours, proposed and shared ones (edit them on the dashboard: Settings, Skills)', cmd_skills)
     c = add('skills-propose', 'Propose a skill from repeated work; it stays off until the owner approves it on the dashboard', cmd_skills_propose)
     c.add_argument('--name', required=True, help='short name, like "Answer pricing questions"')
