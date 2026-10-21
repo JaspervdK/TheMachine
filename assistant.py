@@ -8105,10 +8105,13 @@ class App:
 
     def promise_step(self, limit=3):
         """Once a minute: close promises answered meanwhile, then turn the due ones that are still
-        open into cards, prepared ahead when allowed. At most PROMISE_CARDS_PER_DAY a day."""
+        open into cards, prepared ahead when allowed. At most PROMISE_CARDS_PER_DAY a day. With reviews off
+        (a new install, the first look's promises included) they wait: no card and nothing prepared until reviews are on."""
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             self.store.settle_promises(db)
+            if not (self.config.get('review_worker') or {}).get('enabled'):
+                return
             since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=1)).isoformat()
             room = PROMISE_CARDS_PER_DAY - db.execute("SELECT count(*) FROM promises WHERE status='carded' AND updated_at>=?", (since,)).fetchone()[0]
             due = [dict(r) for r in db.execute("SELECT p.*,e.occurred_at made_at FROM promises p JOIN events e ON e.id=p.event_id "

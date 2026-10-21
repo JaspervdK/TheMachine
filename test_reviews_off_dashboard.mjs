@@ -7,9 +7,9 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 // Reviews still off: every tab says so at the top with the way to turn them on (hosted: the setup step; self-hosted:
 // the command), and Signal reviews shows one line for it instead of a first-look row next to "No reviews yet".
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
-let on=false,manage='https://control.example/setup';
+let on=false,manage='https://control.example/setup',cards=[];
 const live=()=>({runs:[],queue:null,first_look:{state:'waiting',why:'sources',days:7}});
-const state=()=>({suggestions:[],promises:[],connectors:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},
+const state=()=>({suggestions:cards,promises:[],connectors:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},
  review_runs:[],review_live:live(),reviews_on:on,manage_url:manage});
 const errors=[];
 const server=createServer((req,res)=>{const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
@@ -34,6 +34,10 @@ try{
  assert.ok(text.includes('Reviews are off.')&&text.includes('first look at your last 7 days')&&text.includes('it starts once a source'),text);
  assert.ok(!(await page.locator('#analyses').textContent()).includes('No reviews yet'));
  await page.close();
+ cards=[{id:'s1',title:'Reply to Sam',body:'',status:'pending',scope:'work',created_at:'2026-10-21T10:00:00+00:00',event_ids:[],account_ids:[]}];
+ page=await open();  // cards from the first look: the notice says where they came from
+ assert.match(await page.locator('#needs-you').textContent(),/Reviews are off: the cards here come from a one-time first look/);
+ await page.close();cards=[];
  manage=null;page=await open();  // self-hosted: the command instead of a link
  assert.match(await page.locator('#needs-you').textContent(),/install\.sh --activate/);
  assert.equal(await page.locator('#review-live code').textContent(),'./install.sh --activate');

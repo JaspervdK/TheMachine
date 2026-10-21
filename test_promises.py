@@ -48,7 +48,7 @@ class Promises(unittest.TestCase):
     def app(self):
         app = object.__new__(a.App)
         app.store = self.store
-        app.config = {'accounts': [GMAIL, SLACK], 'digest_at': '08:30'}
+        app.config = {'accounts': [GMAIL, SLACK], 'digest_at': '08:30', 'review_worker': {'enabled': True}}
         return app
 
     def record(self, **args):
@@ -136,6 +136,20 @@ class Promises(unittest.TestCase):
         self.app().promise_step()
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM suggestions').fetchone()[0], 2)
+
+    def test_reviews_off_a_due_promise_waits_without_a_card(self):
+        # A new install's first look records promises; with reviews off none becomes a card or gets prepared.
+        mine = self.app().action('promise', {'direction': 'mine', 'event_id': self.mine, 'who': 'Alex', 'what': 'send the Q3 deck', 'due': '2026-10-21'})['id']
+        self.at('2026-10-21T07:00:00+00:00')
+        off = self.app()
+        off.config['review_worker'] = {'enabled': False}
+        off.promise_step()
+        self.assertEqual(self.row(mine)['status'], 'open')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM suggestions').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM preparations').fetchone()[0], 0)
+        self.app().promise_step()  # reviews on: it comes
+        self.assertEqual(self.row(mine)['status'], 'carded')
 
     def test_cards_from_promises_are_capped_per_day(self):
         for n in range(7):
