@@ -1,5 +1,7 @@
 """Export and import: what moves, what stays behind, and that keys only travel encrypted."""
+import base64
 import io
+import os
 import json
 import shutil
 import sqlite3
@@ -10,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import message_seal
 import moving
 
 HAS_OPENSSL = shutil.which('openssl') is not None
@@ -101,6 +104,17 @@ class Moving(unittest.TestCase):
         self.assertTrue(any('sign in to Google again' in line for line in manifest['reconnect']))
         self.assertTrue(any(line.startswith('slack:') for line in manifest['reconnect']))
         self.assertIn('assistant import', self.read(path, 'README.txt'))
+
+    @unittest.skipUnless(HAS_OPENSSL, 'openssl not installed')
+    def test_a_sealed_email_attachment_is_exported_opened(self):
+        key = os.urandom(32)
+        (self.data / message_seal.KEY_NAME).write_bytes(base64.b64encode(key) + b'\n')
+        folder = self.space / 'data/assistant-attachments/job-1'
+        folder.mkdir(parents=True)
+        (folder / 'invoice.pdf').write_bytes(message_seal.Sealer(key).seal_bytes(b'%PDF invoice'))
+        path, _ = self.export()
+        self.assertEqual(self.read(path, 'workspace/data/assistant-attachments/job-1/invoice.pdf'), '%PDF invoice')
+        self.assertNotIn(message_seal.KEY_NAME, ' '.join(self.names(path)[0]))
 
     def test_keys_kept_by_hand_stay_out_without_a_passphrase(self):
         (self.data / 'old/share/gogcli/keyring').mkdir(parents=True)

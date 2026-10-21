@@ -107,6 +107,15 @@ read it; it stops the database file, its copies and tools without the key. Also 
 for the app (the Gateway's plugin seals it with the same key) and Network replies (one waiting to go out is sealed end
 to end for the asking Machine). The live look at a preparing card's browser stays in memory only.
 
+**Email attachments** a Do-it run saves (`assistant attachment --save`, Gmail and Outlook) are encrypted with the same
+key in the job's attachments folder (`data/assistant-attachments/<job id>/` in the OpenClaw workspace). The run reads a
+private copy (in the user's runtime folder, in memory, or else `open-attachments/` next to the database; mode 700)
+that is removed once the run has ended; a later run asks for one with `assistant attachment --open <path>`. Drafts
+attach them, sends and the dashboard read them, opened with the key; the draft store keeps its copy encrypted too.
+Attachments a run saved with `gog gmail attachment` itself, and those saved before this, are found in the run's own
+tool calls and encrypted in place once it has ended. Files a run makes itself (a filled-in form, a CSV, a preview)
+stay as they are. Exports hold them opened, like the messages; with protection off they are opened again in place.
+
 Not covered, because other programs own them: OpenClaw's session transcripts and caches (review and preparation turns
 include message text; OpenClaw's `session.maintenance` settings, such as `pruneAfter` and `maxDiskBytes`, bound what it
 keeps), WhatsApp's `wacli` store (`wacli store cleanup --days N` drops chats quiet that long) and browser profiles.

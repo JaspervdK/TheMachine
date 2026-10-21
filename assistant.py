@@ -41,6 +41,7 @@ import uuid
 from zoneinfo import ZoneInfo
 import embeddings
 import graph
+import mail_attachments
 import message_seal
 import enrichment
 import fleet
@@ -7232,8 +7233,13 @@ class App:
         return base64.urlsafe_b64decode(data + '=' * (-len(data) % 4)), node.get('mimeType', 'application/octet-stream'), node.get('filename') or 'image'
 
     def mail_attachment(self, args):
-        """An Outlook message's attachments for a preparation, read-only: a list, or one saved in the job's attachments
-        folder (the same one, and the same size limit, as Gmail attachments fetched with gog). Gmail stays with gog."""
+        """An email's attachments for a preparation, read-only (Gmail and Outlook): a list, or one saved in the job's
+        attachments folder, at most 18 MB. With message protection on it is kept there sealed with the message key and
+        the run reads a copy in a private folder that goes after the run (mail_attachments.py); `open` gives such a copy
+        of an attachment saved earlier."""
+        folder = Path(args.get('_folder') or mail_attachments.root(self.config))
+        if args.get('open'):
+            return mail_attachments.open_copy(self.config | {'attachment_root': str(folder)}, args['open'], args.get('job_id'))
         account = next((a for a in self.config['accounts'] if a['id'] == args.get('account_id')), None)
         message_id = str(args.get('message_id') or '')
         if args.get('event_id') is not None:
@@ -7243,38 +7249,72 @@ class App:
                 raise ValueError('No collected email with that event_id')
             account = next((a for a in self.config['accounts'] if a['id'] == row['account_id']), None)
             message_id = row['source_id']
-        if not account or account.get('service') != 'outlook':
-            raise ValueError('Give an Outlook account_id (Gmail attachments: gog gmail attachment)')
+        if not account or not next_actions.mail_account(account):
+            raise ValueError('Give the account_id of a Gmail or Outlook mailbox')
         if not message_id:
             raise ValueError('Give the message_id or event_id of the email')
+        fetch = App.outlook_attachments if next_actions.outlook(account) else App.gmail_attachments
+        found, data = fetch(self, account, message_id, args.get('save'))
+        if not args.get('save'):
+            return {'attachments': found}
+        if len(data) > next_actions.MAX_ATTACHMENT_BYTES:
+            raise ValueError('That attachment is larger than 18 MB')
+        job = str(args.get('job_id') or '')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job):
+            raise ValueError('Give the job_id of this preparation')
+        name = re.sub(r'[^\w. -]+', '_', found['name']).strip(' .') or 'attachment'
+        saved = mail_attachments.save(self.config, folder / job, name, data)
+        return saved | {'name': name, 'mime': found['mime'], 'size': len(data)}
+
+    def gmail_attachments(self, account, message_id, save=None):
+        """A Gmail message's real attachments, read live with gmail.readonly: the list, or (`save`: its part id or
+        name) that one and its bytes."""
+        try:
+            message = self.gmail_message(account['id'], message_id)[1]
+        except Exception as error:
+            raise ValueError(f'Gmail could not give the message ({type(error).__name__})') from None
+        payload = message.get('payload') or {}
+        found = [{'id': a['part'], 'name': a['name'], 'mime': a['mime'], 'size': a['size'], 'inline': False, 'kind': 'file'}
+                 for a in message_attachments(payload)]
+        if not save:
+            return found, None
+        chosen = next((a for a in found if save in (a['id'], a['name'])), None)
+        if not chosen:
+            raise ValueError('No attachment with that id or name')
+        if chosen['size'] > next_actions.MAX_ATTACHMENT_BYTES:
+            raise ValueError('That attachment is larger than 18 MB')
+        nodes = []
+        def walk(node):
+            if str(node.get('partId', '')) == chosen['id']:
+                nodes.append(node)
+            for child in node.get('parts', []):
+                walk(child)
+        walk(payload)
+        body = nodes[0].get('body') or {}
+        data = body.get('data') or gog_read(self.config, account, 'gmail', 'v1', 'gmail.users.messages.attachments.get',
+                                            {'userId': 'me', 'messageId': message_id, 'id': body['attachmentId']},
+                                            'https://www.googleapis.com/auth/gmail.readonly').get('data', '')
+        return chosen, base64.urlsafe_b64decode(data + '=' * (-len(data) % 4))
+
+    def outlook_attachments(self, account, message_id, save=None):
+        """An Outlook message's attachments through Microsoft Graph, read-only: the list, or that one and its bytes."""
         try:
             found = ms_graph.attachments(self.config, credential, account, message_id)
-            if not args.get('save'):
-                return {'attachments': [{k: a[k] for k in ('id', 'name', 'mime', 'size', 'inline', 'kind')}
-                                        | ({'note': 'a link to a cloud file: open it in the browser'} if a['kind'] == 'link' else
-                                           {'note': 'an attached email or event: not saved; read the message itself'} if a['kind'] == 'item' else {})
-                                        for a in found]}
-            chosen = next((a for a in found if args['save'] in (a['id'], a['name'])), None)
+            if not save:
+                return [{k: a[k] for k in ('id', 'name', 'mime', 'size', 'inline', 'kind')}
+                        | ({'note': 'a link to a cloud file: open it in the browser'} if a['kind'] == 'link' else
+                           {'note': 'an attached email or event: not saved; read the message itself'} if a['kind'] == 'item' else {})
+                        for a in found], None
+            chosen = next((a for a in found if save in (a['id'], a['name'])), None)
             if not chosen:
                 raise ValueError('No attachment with that id or name')
             if chosen['kind'] != 'file':
                 raise ValueError('Only file attachments can be saved; ' + ('open this cloud link in the browser' if chosen['kind'] == 'link' else 'this is an attached email or event'))
             if chosen['size'] > next_actions.MAX_ATTACHMENT_BYTES:
                 raise ValueError('That attachment is larger than 18 MB')
-            data = ms_graph.attachment(self.config, credential, account, message_id, chosen['id'])
+            return chosen, ms_graph.attachment(self.config, credential, account, message_id, chosen['id'])
         except ms_graph.GraphError as error:
             raise ValueError(f'Outlook could not give the attachment ({error})') from None
-        if len(data) > next_actions.MAX_ATTACHMENT_BYTES:
-            raise ValueError('That attachment is larger than 18 MB')
-        job = str(args.get('job_id') or '')
-        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job):
-            raise ValueError('Give the job_id of this preparation')
-        folder = Path(args.get('_folder') or WORKSPACE / 'data/assistant-attachments') / job
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        name = re.sub(r'[^\w. -]+', '_', chosen['name']).strip(' .') or 'attachment'
-        path = folder / name
-        path.write_bytes(data)
-        return {'saved': str(path), 'name': name, 'mime': chosen['mime'], 'size': len(data)}
 
     def signature_view(self):
         """Each mailbox's signature for Settings: the owner's own, or the one imported from the mailbox (cleaned HTML),
@@ -8968,6 +9008,22 @@ class App:
             except Exception as error:LOG.error('browser wait error=%s',type(error).__name__)
             try:self.watch_sign_ins()
             except Exception as error:LOG.error('sign-in watch error=%s',type(error).__name__)
+            try:self.seal_attachments()
+            except Exception as error:LOG.error('attachment seal error=%s',type(error).__name__)
+
+    def seal_attachments(self, every=60):
+        """Email attachments that ended runs took are sealed in place and the runs' readable copies removed
+        (mail_attachments.py). The first time after a start covers every earlier run; with protection off, sealed
+        attachments are opened again instead."""
+        last = self.__dict__.get('attachments_swept')
+        if last and time.monotonic() - last[0] < every:
+            return
+        started, store = now(), next_actions.attachment_store(self.config)
+        if not last and not self.store.protected and (opened := mail_attachments.open_all(self.config, store)):
+            LOG.info('email attachments opened: %s', opened)
+        if (sealed := mail_attachments.sweep(self.store.connect, self.config, since=last[1] if last else None, store=store)):
+            LOG.info('email attachments sealed: %s', sealed)
+        self.attachments_swept = (time.monotonic(), started)
 
     def flag_browser_waits(self):
         """A sent card is redrawn once when its running preparation starts waiting on the browser, so it says so and,

@@ -46,6 +46,7 @@ from contextlib import closing
 from pathlib import Path
 
 MAGIC = b'\x00\xffMC1\x00'
+FILE_MAGIC = b'\x00\xffMF1\x00'  # a sealed file: an email attachment kept on disk (mail_attachments.py)
 NONCE, TAG = 16, 16
 KEY_NAME = 'message-content.key'
 SEALED_KEY = 'mc1_sealed'
@@ -221,6 +222,25 @@ class Sealer:
         data = (int.from_bytes(sealed, 'little') ^ int.from_bytes(self._stream(nonce, len(sealed)), 'little')).to_bytes(len(sealed), 'little')
         return data.decode('utf-8')
 
+    def seal_bytes(self, data):
+        """A file's bytes sealed as a whole (FILE_MAGIC): an email attachment at rest. Same key and keystream as
+        `seal`, its own magic in the tag, so a sealed file never opens as a value and the other way round."""
+        nonce = os.urandom(NONCE)
+        sealed = (int.from_bytes(data, 'little') ^ int.from_bytes(self._stream(nonce, len(data)), 'little')).to_bytes(len(data), 'little')
+        return FILE_MAGIC + nonce + sealed + self._file_tag(nonce, sealed)
+
+    def _file_tag(self, nonce, sealed):
+        return hashlib.blake2b(FILE_MAGIC + nonce + sealed, key=self._mac, digest_size=TAG).digest()
+
+    def open_bytes(self, data):
+        """A sealed file's bytes opened; plain bytes pass as they are."""
+        if not is_sealed_bytes(data):
+            return data
+        nonce, sealed, tag = data[len(FILE_MAGIC):len(FILE_MAGIC) + NONCE], data[len(FILE_MAGIC) + NONCE:-TAG], data[-TAG:]
+        if len(nonce) != NONCE or len(tag) != TAG or not hmac.compare_digest(tag, self._file_tag(nonce, sealed)):
+            raise SealError('A sealed attachment did not open: wrong key or a damaged file')
+        return (int.from_bytes(sealed, 'little') ^ int.from_bytes(self._stream(nonce, len(sealed)), 'little')).to_bytes(len(sealed), 'little')
+
     def seal_inbox(self, text):
         """Text the Gateway's plugin writes for the app to read (INBOX), as the plugin seals it; for tests."""
         if not isinstance(text, str) or not text:
@@ -286,6 +306,18 @@ class Sealer:
 
 def is_sealed(value):
     return type(value) is bytes and value.startswith(MAGIC)
+
+
+def is_sealed_bytes(data):
+    return type(data) is bytes and data.startswith(FILE_MAGIC) and len(data) >= len(FILE_MAGIC) + NONCE + TAG
+
+
+def is_sealed_file(path):
+    try:
+        with open(path, 'rb') as handle:
+            return handle.read(len(FILE_MAGIC)) == FILE_MAGIC
+    except OSError:
+        return False
 
 
 def is_sealed_inbox(value):

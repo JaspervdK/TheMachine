@@ -8,6 +8,7 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 import hashlib
 import google_api
+import mail_attachments
 import ms_graph
 import signatures
 import html
@@ -90,6 +91,8 @@ def store_attachments(paths, config):
     if not isinstance(paths, list) or not 1 <= len(paths) <= 10:
         raise ValueError('attachments is a list of one to ten file paths')
     sources = [Path(s).resolve() for s in config.get('attachment_sources', ATTACHMENT_SOURCES)]
+    if (opened := mail_attachments.open_root(config)):  # a run's readable copy of an email attachment
+        sources.append(opened.resolve())
     store, records, total = attachment_store(config), [], 0
     for path in paths:
         if not isinstance(path, str) or '\x00' in path:
@@ -97,7 +100,7 @@ def store_attachments(paths, config):
         real = Path(path.replace('~', str(Path.home()), 1) if path.startswith('~/') else path).resolve()
         if not any(real.is_relative_to(source) for source in sources) or not real.is_file():
             raise ValueError('Attach only files you saved in workspace/data/assistant-attachments/<job id>/ or memory/assistant/')
-        data = real.read_bytes()
+        data = mail_attachments.read(real, config)  # an email attachment kept sealed opens with the message key
         total += len(data)
         if not data or total > MAX_ATTACHMENT_BYTES:
             raise ValueError('Attachments must be non-empty and at most 18 MB together')
@@ -106,10 +109,7 @@ def store_attachments(paths, config):
             raise ValueError('Give attachments a plain file name of at most 150 characters')
         digest = hashlib.sha256(data).hexdigest()
         store.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if not (store / digest).exists():
-            tmp = store / (digest + '.tmp')
-            tmp.write_bytes(data)
-            tmp.replace(store / digest)
+        mail_attachments.store_copy(config, store / digest, data, mail_attachments.from_email(real, config))
         records.append({'name': name, 'sha256': digest, 'size': len(data),
                         'type': mimetypes.guess_type(name)[0] or 'application/octet-stream'})
     if len({r['name'] for r in records}) != len(records):
@@ -118,7 +118,7 @@ def store_attachments(paths, config):
 
 
 def attachment_bytes(record, config):
-    data = (attachment_store(config) / record['sha256']).read_bytes()
+    data = mail_attachments.read(attachment_store(config) / record['sha256'], config)
     if hashlib.sha256(data).hexdigest() != record['sha256']:
         raise ValueError('An attachment changed after you reviewed it. Nothing was sent.')
     return data

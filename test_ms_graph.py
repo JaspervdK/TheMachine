@@ -509,7 +509,7 @@ class Attachments(Base):
         self.fake.files['a1']['size'] = n.MAX_ATTACHMENT_BYTES + 1
         with self.assertRaisesRegex(ValueError, '18 MB'):
             a.App.mail_attachment(app, {'event_id': event, 'save': 'a1', 'job_id': 'job-1', '_folder': str(folder)})
-        with self.assertRaisesRegex(ValueError, 'Outlook account'):
+        with self.assertRaisesRegex(ValueError, 'Gmail or Outlook mailbox'):
             a.App.mail_attachment(app, {'account_id': 'acme-outlook-calendar', 'message_id': 'm4'})
 
 

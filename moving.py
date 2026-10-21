@@ -288,6 +288,9 @@ def export(config_path, out_dir, passphrase=None, workspace=None, openclaw_home=
                 _add_bytes(archive, 'manifest.json', json.dumps(manifest, indent=2).encode())
                 _add_bytes(archive, 'README.txt', readme(manifest).encode())
                 for kind, path, entry in items:
+                    if kind != 'db' and message_seal.is_sealed_file(path):  # an email attachment kept sealed (mail_attachments.py)
+                        _add_bytes(archive, entry, _open_file(path, config))
+                        continue
                     if kind != 'db':
                         archive.add(path, entry)
                         continue
@@ -330,6 +333,14 @@ def _open_messages(copy, original):
         with db:
             message_seal.unprotect(db)
         db.execute('VACUUM')
+
+
+def _open_file(path, config):
+    """A sealed email attachment goes into the export opened, like the messages."""
+    key = message_seal.load_key(Path(config['database']).expanduser()) if config.get('database') else None
+    if not key:
+        raise MoveError(f'{path.name} is encrypted and the message key is missing; nothing was exported.')
+    return message_seal.Sealer(key).open_bytes(path.read_bytes())
 
 
 def _openssl(args, passphrase, decrypt=False):

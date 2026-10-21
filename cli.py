@@ -235,6 +235,8 @@ def cmd_events(config, args):
 
 
 def cmd_attachment(config, args):
+    if args.open:
+        return out_json(call(config, 'mail_attachment', {'open': str(Path(args.open).expanduser().resolve()), 'job_id': args.job}))
     request = {'event_id': args.event} if args.event is not None else {'account_id': args.account, 'message_id': args.message}
     if args.save:
         request.update(save=args.save, job_id=args.job)
@@ -792,12 +794,13 @@ def parser():
     c.add_argument('--query')
     c.add_argument('--limit', type=int, default=20)
     c.add_argument('--full', action='store_true')
-    c = add('attachment', "An Outlook email's attachments, read-only: list them, or save one for a preparation", cmd_attachment)
+    c = add('attachment', "An email's attachments (Gmail or Outlook), read-only: list them, or save one for a preparation", cmd_attachment)
     c.add_argument('--event', type=int, help="the collected email's event id")
-    c.add_argument('--account', help='Outlook account id (with --message)')
-    c.add_argument('--message', help='Outlook message id (with --account)')
+    c.add_argument('--account', help='Gmail or Outlook account id (with --message)')
+    c.add_argument('--message', help='message id (with --account)')
     c.add_argument('--save', help='attachment id or name to save')
     c.add_argument('--job', help='the preparation job id: saves under its attachments folder')
+    c.add_argument('--open', help='a readable copy of an encrypted attachment saved earlier (with --job)')
     add('sources', 'Connection health per source', cmd_sources)
     c = add('reviews', 'Review backlog and recent review runs', cmd_reviews)
     c.add_argument('--limit', type=int, default=10)
