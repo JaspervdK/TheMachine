@@ -335,21 +335,35 @@ class Skills:
         return {'installed_skill': shown['slug'], **({'differs': True} if shown.get('differs') else {}), **self.installed()}
 
     # -- importing from Claude and ChatGPT (Importer)
-    def import_find(self):
+    def import_find(self, token=None, sites=None):
         """Find my skills: what is on this computer, listed now; the agent's turn adds the owner's claude.ai and
-        chatgpt.com skills and marks the ones worth importing."""
-        items, errors = self.importer.find()
-        token = self.importer.keep(items, errors)
+        chatgpt.com skills and marks the ones worth importing. With `token` and `sites` (after the owner signed in to
+        one of them): the same list, and a turn that looks in just those accounts."""
+        if token:
+            sites = [s for s in (sites if isinstance(sites, list) else []) if s in IMPORT_FROM]
+            if not sites:
+                raise ValueError('Which account?')
+            scan = self.importer.scan(token)
+            if (scan['finding'] or {}).get('status') == 'running':
+                raise ValueError('Still looking in your accounts; a moment')
+            items = list(scan['items'].values())
+        else:
+            items, errors = self.importer.find()
+            token = self.importer.keep(items, errors)
         if self.finder:
             try:
                 run = self.finder(token, [{'key': i['public']['key'], 'name': i['public']['name'], 'description': i['public']['description'][:200],
                                            'group': i['public']['group'], 'blocked': bool(i['public']['blocked']),
-                                           'here': bool(i['public']['duplicate'])} for i in items])
+                                           'here': bool(i['public']['duplicate'])} for i in items], sites)
             except (ValueError, OSError) as error:
                 LOG.warning('skills find turn error=%s', type(error).__name__)
                 run = None
             if run:
-                self.importer.scans[token]['finding'] = {'run_id': run, 'status': 'running'}
+                with self.importer.lock:
+                    found = self.importer.scans[token]
+                    found['finding'] = {'run_id': run, 'status': 'running'}
+                    for site in sites or ():
+                        found['browser'].pop(site, None)  # checked again by this turn
         return self.importer.view(token)
 
     def import_upload(self, frm, data):
@@ -1578,8 +1592,16 @@ class Importer:
             if item and not item['public']['blocked']:
                 item['public']['recommended'], item['public']['why'] = True, one_line(r.get('why'), 160)
         if isinstance(browser, dict):
-            scan['browser'] = {k: one_line(v, 40) for k, v in browser.items() if k in ('claude', 'chatgpt')}
+            scan['browser'].update({k: v for k, v in browser.items() if k in IMPORT_FROM and v in ('ok', 'signed_out', 'unavailable')})
         return {'added': added}
+
+    def accounts(self, token, states):
+        """The service's own look, before the turn: is the owner signed in to claude.ai and chatgpt.com in this
+        Machine's browser ('ok', 'signed_out' or 'unavailable')? So the list can offer a sign-in right away."""
+        with self.lock:
+            scan = self.scans.get(token)
+            if scan:
+                scan['browser'].update({k: v for k, v in (states or {}).items() if k in IMPORT_FROM and v in ('ok', 'signed_out', 'unavailable')})
 
     def finished(self, token, status):
         with self.lock:

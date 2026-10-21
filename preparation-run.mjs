@@ -1,19 +1,19 @@
 // One service-started turn in the existing main agent, through the installed Gateway:
-// a preparation for an accepted suggestion, a signal review, or a profile draft (assistant profile). Each runs in its own
+// a preparation for an accepted suggestion, a signal review, a profile draft (assistant profile) or Find my skills. Each runs in its own
 // isolated session with message delivery off. No model/client credentials here.
 import {gatewayRuntime} from './openclaw-root.mjs';
 const {callGatewayFromCli}=await gatewayRuntime();
 let input=''; for await (const chunk of process.stdin) input+=chunk;
 const request=JSON.parse(input);
 const kind=request.kind || 'preparation';
-if (!/^[a-f0-9]{32}$/.test(request.job_id || '') || !['start','status','stop'].includes(request.action) || !['preparation','review','profile'].includes(kind)) {
+if (!/^[a-f0-9]{32}$/.test(request.job_id || '') || !['start','status','stop'].includes(request.action) || !['preparation','review','profile','skills'].includes(kind)) {
   throw new Error('Invalid request');
 }
-const session={preparation:'agent:main:assistant-review-preparation-', review:'agent:main:assistant-review-signals-', profile:'agent:main:assistant-review-profile-'}[kind];
+const session={preparation:'agent:main:assistant-review-preparation-', review:'agent:main:assistant-review-signals-', profile:'agent:main:assistant-review-profile-', skills:'agent:main:assistant-review-skills-'}[kind];
 const sessionId=request.session_job_id || request.job_id;
 if (!/^[a-f0-9]{32}$/.test(sessionId) || (kind!=='preparation' && sessionId!==request.job_id)) throw new Error('Invalid session');
 // Do it turns make and test real changes (2026-10-13), so they get as long as a review.
-const runSeconds={preparation:1200, review:1200, profile:900}[kind];
+const runSeconds={preparation:1200, review:1200, profile:900, skills:900}[kind];
 const scope={scopes:['operator.admin','operator.read','operator.write']};
 // Retain useful failure categories, never raw provider text, endpoints or parameters.
 function failure(result,status){

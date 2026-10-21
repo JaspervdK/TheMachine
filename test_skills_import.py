@@ -186,7 +186,7 @@ class Import(unittest.TestCase):
 
     def test_find_turn_reports_account_skills_and_recommendations(self):
         started = []
-        self.keeper.finder = lambda token, items: started.append((token, items)) or 'run1'
+        self.keeper.finder = lambda token, items, sites=None: started.append((token, items, sites)) or 'run1'
         view, items = self.found()
         self.assertEqual(view['finding'], {'run_id': 'run1', 'status': 'running'})
         listed = {i['name']: i for i in started[0][1]}
@@ -207,6 +207,14 @@ class Import(unittest.TestCase):
         self.assertFalse(after['pdf']['recommended'])  # never one its licence keeps out
         self.assertEqual(self.keeper.import_status(token)['browser'], {'claude': 'ok', 'chatgpt': 'signed_out'})
         self.assertEqual(self.keeper.import_status(token)['finding']['status'], 'ok')
+        # Signed in to ChatGPT since: the same list, a turn for just that account, which checks it again.
+        again = self.keeper.import_find(token, ['chatgpt', 'other'])
+        self.assertEqual((again['token'], started[-1][0], started[-1][2]), (token, token, ['chatgpt']))
+        self.assertEqual((again['finding']['status'], again['browser']), ('running', {'claude': 'ok'}))
+        with self.assertRaisesRegex(ValueError, 'Still looking'):
+            self.keeper.import_find(token, ['chatgpt'])
+        self.keeper.importer.accounts(token, {'chatgpt': 'signed_out', 'evil': 'ok', 'claude': 'whatever'})
+        self.assertEqual(self.keeper.import_status(token)['browser'], {'claude': 'ok', 'chatgpt': 'signed_out'})
 
 
 class FindTurn(unittest.TestCase):
@@ -222,6 +230,8 @@ class FindTurn(unittest.TestCase):
         app.store, app.config = store, {'accounts': [{'id': 'work', 'service': 'gmail'}], 'browser_lease_script': '/bin/true'}
         app.skills = a.skills.Skills(store.connect, Path(temp.name) / 'ws', home=Path(temp.name) / 'home')
         app.skills.finder = app.skills_find_start
+        checked = []
+        app.skills_accounts = lambda sites: checked.append(sites) or {'claude': 'ok', 'chatgpt': 'signed_out'}
         view = app.action('skill_import_find', {})
         run = view['finding']['run_id']
         self.assertIsNone(app.skills_find_start('t', []))  # one at a time
@@ -229,16 +239,41 @@ class FindTurn(unittest.TestCase):
         app.profile_step(runner)
         self.assertIn(f'skills run {run}', runner.requests[0]['message'])
         self.assertIn('This Machine\'s sources: gmail', runner.requests[0]['message'])
+        # Its own session kind (the browser, read-only), and the sign-in states known before the turn reads anything.
+        self.assertEqual(runner.requests[0]['kind'], 'skills')
+        self.assertEqual(checked, [['claude', 'chatgpt']])
+        self.assertIn('Not chatgpt.com: the owner is signed out there', runner.requests[0]['message'])
+        self.assertNotIn('/backend-api/hazelnuts', runner.requests[0]['message'])
+        self.assertEqual(app.action('skill_import_status', {'token': view['token']})['browser'], {'claude': 'ok', 'chatgpt': 'signed_out'})
+        with self.assertRaisesRegex(ValueError, 'Only the Find my skills turn'):
+            app.action('skills_found', {'_skills_session': a.PROFILE_SESSION_PREFIX + run, 'found': []})
         with self.assertRaisesRegex(ValueError, 'no longer active'):
             app.action('skill_import_report', {'run': 'other', 'found': []})
-        out = app.action('skill_import_report', {'run': run, 'browser': {'claude': 'signed_out'}, 'found': [
+        out = app.action('skills_found', {'_skills_session': a.SKILLS_SESSION_PREFIX + run, 'browser': {'claude': 'signed_out'}, 'found': [
             {'from': 'claude', 'name': 'follow-ups', 'description': 'Chase replies that are late.', 'body': 'Check sent mail for unanswered threads.'}]})
         self.assertEqual(out, {'added': 1})
         app.profile_step(runner)
         status = app.action('skill_import_status', {'token': view['token']})
-        self.assertEqual((status['finding']['status'], status['browser'], [i['name'] for i in status['items']]), ('ok', {'claude': 'signed_out'}, ['follow-ups']))
+        self.assertEqual((status['finding']['status'], status['browser'], [i['name'] for i in status['items']]),
+                         ('ok', {'claude': 'signed_out', 'chatgpt': 'signed_out'}, ['follow-ups']))
         with self.assertRaisesRegex(ValueError, 'no longer active'):
             app.action('skill_import_report', {'run': run, 'found': []})
+        # Looking again after signing in, while still signed out: no turn at all, and the list says so.
+        again = app.action('skill_import_find', {'token': view['token'], 'sites': ['chatgpt']})
+        self.assertEqual(app.profile_step(runner), 'ok')
+        self.assertEqual(len(runner.requests), 2)  # no new turn started
+        status = app.action('skill_import_status', {'token': again['token']})
+        self.assertEqual((status['finding']['status'], status['browser']['chatgpt']), ('ok', 'signed_out'))
+        # Signed in now: a turn for just ChatGPT, with where its skills live.
+        app.skills_accounts = lambda sites: {'chatgpt': 'ok'}
+        app.action('skill_import_find', {'token': view['token'], 'sites': ['chatgpt']})
+        runner = tp.Runner('admitted')
+        app.profile_step(runner)
+        message = runner.requests[0]['message']
+        self.assertIn('https://chatgpt.com/skills', message)
+        self.assertIn('/backend-api/hazelnuts', message)
+        self.assertNotIn('claude.ai/customize', message)
+        self.assertNotIn('Skills found on this computer', message)
 
 
 class FindPrompt(unittest.TestCase):
@@ -247,7 +282,8 @@ class FindPrompt(unittest.TestCase):
         items = [{'key': f'claude:~/.claude/skills/s{n}', 'name': f's{n}', 'description': 'd' * 200, 'group': 'yours'} for n in range(150)]
         text = assistant.skills_find_prompt('r' * 32, {'token': 't', 'items': items, 'cards': ['c' * 200] * 40, 'sources': ['gmail'], 'skills': []})
         self.assertLess(len(text), 20000)
-        self.assertIn('assistant skills-found --run ' + 'r' * 32, text)
+        self.assertIn('assistant_signals action skills_found', text)
+        self.assertIn('never return, write down or report it', text)  # ChatGPT's session token stays in the page
         self.assertIn('profile "openclaw"', text)
         self.assertIn('more', text)
 

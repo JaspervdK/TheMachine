@@ -32,13 +32,19 @@ Both use the same `SKILL.md` form. **Import** under Settings > Skills lists skil
 
 - **Find my skills** looks on this computer (Claude Code's `~/.claude/skills`, including skills and your own plugins
   synced from claude.ai, Codex's `~/.codex/skills`, and `.claude/skills` in your projects). Then your agent reads the
-  skills in your claude.ai and ChatGPT accounts, read-only, in your Machine's own browser: it never signs in or types a
-  password, and if a site is signed out the list says so. It also marks a few as **Recommended**, judged against the
-  work your Machine actually does. A hosted Machine has no such folders; there it only checks your accounts.
+  skills in your claude.ai and ChatGPT accounts, read-only, in your Machine's own browser: on claude.ai under Customize >
+  Skills, on ChatGPT the Skills library (chatgpt.com/skills). Custom GPTs, projects and custom instructions aren't
+  skills and aren't imported. It also marks a few as **Recommended**, judged against the work your Machine actually
+  does. A hosted Machine has no such folders; there it only checks your accounts.
+- **Signed out?** If your Machine's browser is signed out of ChatGPT or claude.ai, the list shows **Sign in to ChatGPT**
+  (or Claude). It opens the same sign-in dialog as for LinkedIn and X, including the one-time code the site sends; once
+  you're in, it looks in that account by itself. Your agent never signs in or types a password.
 - **From Claude** or **From ChatGPT**: upload a `.skill` or `.zip` export or a folder, or paste a `SKILL.md`.
 
-Each skill shows where it comes from, its scripts and other files, and its licence, grouped as yours, in your projects,
-from vendors and built in. One whose licence doesn't allow copying (some built-in Claude skills) can't be imported.
+The list starts short: **Recommended**, then **Yours**. The rest waits in closed groups with counts (in your projects,
+from vendors, built in), and a search box finds any of them. Each skill shows where it comes from, its scripts and other
+files, and its licence. One whose licence doesn't allow copying (some built-in Claude skills), or that you have already,
+is under **Can't import**, with why. **Import selected** and **Close** stay at the bottom of the panel.
 
 An imported skill becomes your own, instructions only, and remembers where it came from. Reference `.md` files its
 instructions point to are added to them when they fit. Scripts and other files are left out, and **Read** says what was

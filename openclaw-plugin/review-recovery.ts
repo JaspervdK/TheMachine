@@ -49,6 +49,10 @@ const codeModeRunner = (event: any, ctx: any) => event.toolKind === 'code_mode_e
 const preparationSession = (key: string) => /^agent:main:assistant-review-preparation-/.test(key || '');
 // assistant profile: one read-only turn that drafts USER.md lines from the owner's own messages.
 const profileSession = (key: string) => /^agent:main:assistant-review-profile-/.test(key || '');
+// Find my skills (Settings > Skills > Import): reads the owner's claude.ai and chatgpt.com skills in the Machine's
+// browser and reports them with assistant_signals skills_found. The browser and read-only tools; no shell, no writes.
+const skillsSession = (key: string) => /^agent:main:assistant-review-skills-/.test(key || '');
+export const SKILLS_TOOLS = new Set([...REVIEW_TOOLS, 'browser']);
 
 // Preparations are the main agent working on an accepted task, with as few restrictions as
 // possible: OpenClaw cannot show an approval prompt for these background
@@ -188,11 +192,11 @@ export function registerReviewRecovery(api: any, call: (action: string, args?: a
   const runs = new Map<string, {session: string; started: number; reviewTouched: boolean}>();
   const background = (ctx: any) => privateReviewContext(ctx) && !!ctx.runId &&
     ctx.inputProvenance?.kind !== 'external_user' &&
-    !/^agent:main:assistant-review-(?:preparation|profile)-/.test(ctx.sessionKey || '') &&
+    !/^agent:main:assistant-review-(?:preparation|profile|skills)-/.test(ctx.sessionKey || '') &&
     (/^agent:main:assistant-review[-:]/.test(ctx.sessionKey || '') ||
       (ctx.inputProvenance?.kind === 'internal_system' && ctx.inputProvenance?.sourceTool === 'notifications-event'));
   const eligible = (ctx: any) => privateReviewContext(ctx) && !!ctx.runId &&
-    !/^agent:main:assistant-review-(?:preparation|profile)-/.test(ctx.sessionKey || '') &&
+    !/^agent:main:assistant-review-(?:preparation|profile|skills)-/.test(ctx.sessionKey || '') &&
     /^agent:main:assistant-review[-:]/.test(ctx.sessionKey || '');
   const quietInstruction = 'Keep background processing silent. Save review counts, recovery, skipped/deferred signals, backlog and completion notes only through finish_analysis for the dashboard. A saved suggestion is delivered by the independent service, not by this reply. When there is no separate genuinely useful alert requiring the owner, end with exactly NO_REPLY, even after saving a new suggestion or completing a review. Do not announce starting, resuming, working, finishing or no new suggestions. Genuine actionable alerts and authorized preparation results/reminders remain enabled.';
   const instruction = 'This turn reviews the personal-assistant signals inbox. Resume an unfinished review through assistant_signals begin_analysis with the same explicit accounts, then finish_analysis after a real conclusion. Do not switch to unrelated old main-chat tasks after a provider retry. Read tools/personal-assistant/AGENTS.md. Claim once with begin_analysis limit 120 and read every page with analysis_page; finish within about fifteen minutes. The service balances accounts, oldest backlog and newer signals. For body_clipped=true read the rest with events, event_ids and body_offset. Defer only what you expect to judge better later; pass the rest as finish_analysis reviewed_ids. Publish only genuinely useful distinct suggestions; no quota or duplicate direct Telegram send. Quiet hours limit delivery, not private review. Do not claim a complete review when only a preview was assessed. ' + quietInstruction;
@@ -227,6 +231,9 @@ export function registerReviewRecovery(api: any, call: (action: string, args?: a
     if ((reviewSession(ctx.sessionKey) || profileSession(ctx.sessionKey)) && !codeModeRunner(event, ctx) &&
         (!REVIEW_TOOLS.has(plainToolName(event.toolName)) || readsSecret(event))) {
       return {block: true, blockReason: 'Signal reviews and profile drafts only read: use assistant_signals, memory lookups or read-only file tools.'};
+    }
+    if (skillsSession(ctx.sessionKey) && !codeModeRunner(event, ctx) && (!SKILLS_TOOLS.has(plainToolName(event.toolName)) || readsSecret(event))) {
+      return {block: true, blockReason: 'Find my skills reads the owner\'s accounts in the browser and reports with assistant_signals skills_found; nothing else.'};
     }
     const policy = preparationSession(ctx.sessionKey) ? preparationToolPolicy(event, ctx) : undefined;
     if (policy && 'block' in policy) return {block: true, blockReason: policy.block};

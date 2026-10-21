@@ -36,6 +36,13 @@ assert.ok(profileContext.includes('## About the owner (USER.md)'));assert.ok(!pr
 assert.equal((await hooks.before_tool_call({toolName:'write',params:{}},profileCtx)).block,true);
 assert.equal((await hooks.before_tool_call({toolName:'message',params:{}},profileCtx)).block,true);
 assert.notEqual((await hooks.before_tool_call({toolName:'assistant_signals',params:{action:'profile_evidence',args:{}}},profileCtx))?.block,true);
+// Find my skills: the browser (to read the owner's accounts) and assistant_signals (its report); no shell or writes,
+// and no review instructions.
+const skillsCtx={...ctx,sessionKey:'agent:main:assistant-review-skills-'+'c'.repeat(32),runId:'skills-run'};
+assert.equal(await hooks.before_prompt_build({},skillsCtx),undefined);
+assert.notEqual((await hooks.before_tool_call({toolName:'browser',params:{action:'open'}},skillsCtx))?.block,true);
+assert.notEqual((await hooks.before_tool_call({toolName:'assistant_signals',params:{action:'skills_found',args:{}}},skillsCtx))?.block,true);
+for(const toolName of ['exec','write','message'])assert.equal((await hooks.before_tool_call({toolName,params:{command:'ls'}},skillsCtx)).block,true);
 assert.ok((await hooks.before_prompt_build({},ctx)).prependContext.includes('exactly NO_REPLY'));
 // Codex refuses a tool call whose parameters a hook rewrote, so the hook never returns params;
 // the tool binds ownership from the run the prompt hook recorded for this session.

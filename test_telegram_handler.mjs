@@ -146,6 +146,13 @@ const handled=await beforeDispatch({content:'I fixed it already',timestamp:17916
  globalThis.fixtureCall=async(action,args)=>{assert.equal(args._profile_session,undefined);return {ok:true};};
  await mainTool.execute('test',{action:'profile_evidence',args:{_profile_session:key}});
 }
+// The Find my skills report: bound to its own skills session (sent as an upload); refused from any other session.
+{
+ const key='agent:main:assistant-review-skills-'+'d'.repeat(32);
+ globalThis.fixtureCall=async(action,args)=>{assert.equal(action,'skills_found');assert.equal(args._skills_session,key);return {added:1};};
+ await toolFactory({agentId:'main',sessionKey:key}).execute('test',{action:'skills_found',args:{_skills_session:'forged',found:[]}});
+ await assert.rejects(toolFactory({agentId:'main',sessionKey:'agent:main:assistant-review-profile-'+'d'.repeat(32)}).execute('test',{action:'skills_found',args:{found:[]}}),/Only the Find my skills turn/);
+}
 // A Fleet question: the tap goes to the service with the tapped message id; the service's message replaces the old one.
 {const saved=globalThis.fixtureCall,calls=[];const q='q_'+'c'.repeat(16);
  globalThis.fixtureCall=async(action,args)=>{calls.push([action,args]);if(args.message_id!=='321'){throw Object.assign(new Error('That Telegram message is not the one sent for this question'),{status:400});}

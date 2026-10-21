@@ -31,7 +31,7 @@ async function showResult(ctx:any,message:any,reason?:string){
 async function notReached(ctx:any){
   await ctx.respond.reply({text:'Your Machine did not answer just now, so nothing was done. Tap the button again in a minute.'}).catch(()=>{});
 }
-const TOOL_ACTIONS = ['status', 'events', 'begin_analysis', 'analysis_page', 'finish_analysis', 'suggest', 'prepare', 'preparation_blocked', 'preparation_history', 'remember_fact', 'looks_handled', 'promise', 'related', 'graph', 'profile_evidence', 'save_profile'];
+const TOOL_ACTIONS = ['status', 'events', 'begin_analysis', 'analysis_page', 'finish_analysis', 'suggest', 'prepare', 'preparation_blocked', 'preparation_history', 'remember_fact', 'looks_handled', 'promise', 'related', 'graph', 'profile_evidence', 'save_profile', 'skills_found'];
 // dismiss_handled stays for older cards; the service records that reason as done.
 const DISMISS_REASONS: Record<string,string> = {dismiss_irrelevant:'Not relevant', dismiss_handled:'Already handled', dismiss_wrong:'Wrong facts'};
 
@@ -134,7 +134,8 @@ async function call(action: string, args: Record<string, unknown> = {}) {
   const owner = OWNER_ACTIONS.has(action) ? {'X-Assistant-Owner': (await readFile(config.credentials['owner-token'] ||
     join(homedir(), '.local/share/personal-assistant/owner-token'), 'utf8')).trim()} : {};
   const response = await fetch(`http://127.0.0.1:${config.port}/api/action`, {
-    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...owner },
+    // The Find my skills report carries whole skills: sent marked as an upload, which the service takes only for it.
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...owner, ...(action === 'skills_found' ? {'X-Upload': 'skill-import'} : {}) },
     body: JSON.stringify({ action, args }), signal: AbortSignal.timeout(30000),
   });
   const result = await response.json();
@@ -172,7 +173,7 @@ export default definePluginEntry({
         const args = {...(params.args || {})};
         delete args.full;  // whole rows and full status are for the local CLI and dashboard, not size-limited tool results
         // Session and run identity are host-owned; never trust model-supplied labels.
-        delete args._review_session; delete args._review_run; delete args._profile_session;
+        delete args._review_session; delete args._review_run; delete args._profile_session; delete args._skills_session;
         if (params.action==='preparation_history') {
           const run=currentReviewRun(key);
           if (!/^agent:main:assistant-review-preparation-/.test(key) || !run) throw new Error('History belongs to the current preparation');
@@ -180,6 +181,10 @@ export default definePluginEntry({
           args.job_id=run;
         }
         if (['save_profile', 'profile_evidence'].includes(params.action) && /^agent:main:assistant-review-profile-/.test(key)) args._profile_session = key;
+        if (params.action === 'skills_found') {
+          if (!/^agent:main:assistant-review-skills-[a-f0-9]{32}$/.test(key)) throw new Error('Only the Find my skills turn reports skills');
+          args._skills_session = key;
+        }
         if (['begin_analysis', 'finish_analysis'].includes(params.action)) {
           args._review_session = key;
           const run = currentReviewRun(key);
