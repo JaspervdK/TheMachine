@@ -345,7 +345,8 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-OWNER_ACTIONS = {'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
+CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel')
+OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_split', 'fleet_split_dismiss',
                          'fleet_split_adjust', 'task_import'}
@@ -4968,6 +4969,59 @@ def same_site(a, b):
     return a == b or a.endswith('.' + b) or b.endswith('.' + a) or a.split('.')[-2:] == b.split('.')[-2:]
 
 
+PEEK_EVERY = 2  # seconds: one look per task at most this often, however many dashboards watch
+PEEK_WIDTH = 800  # pixels across: enough for a thumbnail and its larger view, small to send
+
+
+def browser_result(call):
+    """The JSON a browser step answered with (OpenClaw wraps it as text between markers), or {}."""
+    try:
+        content = json.loads(call['result'] or '{}').get('content') or []
+        text = next(c['text'] for c in content if isinstance(c, dict) and isinstance(c.get('text'), str) and '---\n' in c['text'])
+        found = json.loads(text.split('---\n', 1)[1].rsplit('\n<<<END', 1)[0])
+    except (ValueError, TypeError, AttributeError, StopIteration, IndexError, KeyError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def peek_tab(db, job_id):
+    """The tab a running preparation is on now, as (DevTools target ID, DevTools port), for the dashboard's live
+    look at it: only while its latest step is a browser step, and only a tab this run opened itself (by the target
+    ID its own `open` step answered with). None otherwise, never another task's tab or one the owner uses."""
+    try:
+        calls = db.execute('SELECT tool,params,result FROM preparation_calls WHERE job_id=? ORDER BY started_at DESC,rowid DESC LIMIT 200',
+                           (job_id,)).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    if not calls or calls[0]['tool'] != 'browser':
+        return None
+    try:
+        last = json.loads(calls[0]['params'] or '{}')
+    except ValueError:
+        return None
+    if not isinstance(last, dict) or last.get('action') == 'close':
+        return None
+    opened = []  # this run's own tabs, newest first: (target ID, port, every name OpenClaw gave it)
+    for call in calls:
+        try:
+            given = json.loads(call['params'] or '{}')
+        except ValueError:
+            continue
+        if call['tool'] != 'browser' or not isinstance(given, dict) or given.get('action') != 'open':
+            continue
+        found = browser_result(call)
+        target, ws = found.get('targetId'), urllib.parse.urlsplit(str(found.get('wsUrl') or ''))
+        if not isinstance(target, str) or not re.fullmatch(r'[A-F0-9]{32}', target) or ws.hostname not in ('127.0.0.1', 'localhost', '::1') or not ws.port:
+            continue
+        opened.append((target, ws.port, {str(found.get(k)) for k in ('targetId', 'label', 'tabId', 'suggestedTargetId') if found.get(k)}))
+    want = last.get('targetId') or last.get('label')
+    if want:
+        mine = next((t for t in opened if str(want) in t[2]), None)
+    else:
+        mine = opened[0] if opened else None
+    return (mine[0], mine[1]) if mine else None
+
+
 def browser_link(config):
     """Where the owner sees the assistant's browser: `browser_url` (a hosted machine's viewer behind its sign-in, or
     the local noVNC viewer of browser_viewer.py), else with `browser_vnc` the dashboard's own live view of this
@@ -6405,10 +6459,31 @@ class App:
         if self.fleet:
             self.fleet.skills = self.skills
 
+    MESSAGE_CACHE = 40  # source emails kept in memory for the dashboard, newest used last
+    MESSAGE_TTL = 600  # seconds
+
     def gmail_message(self, account_id, message_id):
+        """One source email, read live (read-only). Opening it on the dashboard reads it for its attachments, its
+        HTML and each embedded image, and visible cards read it ahead, so a few recent ones stay in memory for
+        MESSAGE_TTL; one read at a time per message."""
         account = next(a for a in self.config['accounts'] if a['id'] == account_id)
-        return account, gog_read(self.config, account, 'gmail', 'v1', 'gmail.users.messages.get',
-                                 {'userId': 'me', 'id': message_id, 'format': 'full'}, 'https://www.googleapis.com/auth/gmail.readonly')
+        cache = self.__dict__.setdefault('_messages', collections.OrderedDict())
+        locks = self.__dict__.setdefault('_message_locks', collections.defaultdict(threading.Lock))
+        key = (account_id, message_id)
+        with locks[key]:
+            hit = cache.get(key)
+            if hit and time.monotonic() - hit[0] < self.MESSAGE_TTL:
+                cache.move_to_end(key)
+                return account, hit[1]
+            message = gog_read(self.config, account, 'gmail', 'v1', 'gmail.users.messages.get',
+                               {'userId': 'me', 'id': message_id, 'format': 'full'}, 'https://www.googleapis.com/auth/gmail.readonly')
+            cache[key] = (time.monotonic(), message)
+            cache.move_to_end(key)
+            while len(cache) > self.MESSAGE_CACHE:
+                cache.popitem(last=False)
+        if len(locks) > 4 * self.MESSAGE_CACHE:
+            locks.clear()  # at worst one message is read twice
+        return account, message
 
     def originals(self, suggestion_id, event_id=''):
         """Source messages for the dashboard, with Gmail attachments looked up live (read-only):
@@ -6878,6 +6953,10 @@ class App:
                 raise ValueError('Only the owner sets a role here, on the dashboard; reviews use graph with node_id and role')
             # The same role as a review's confirms it: it becomes the owner's word.
             return self.graph_action({'node_id': args.get('node_id'), 'role': args.get('role') or ''}, source='owner')
+        if name in CONNECT_ACTIONS:
+            if not owner_dashboard:
+                raise ValueError('Only the owner adds a source, from the dashboard')
+            return self.connect_action(name, args)
         if name == 'browser_focus':
             if not owner_dashboard:
                 raise ValueError('Only the owner brings the browser to the front, from the dashboard')
@@ -7871,15 +7950,126 @@ class App:
                 if retried:
                     db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(run['suggestion_id'],))
 
+    def connect_action(self, name, args):
+        """Connections, Add: the sources this install can add, and adding one with the same steps as `assistant
+        connect` (onboarding.connect), its questions answered on the dashboard (onboarding.WebUI). One at a time.
+        A hosted machine's control plane signs in Google and Microsoft itself: those link to its account page."""
+        import onboarding
+        if onboarding._assistant is None:
+            onboarding._assistant = sys.modules[__name__]  # this module, not a second copy of it
+        lock = self.__dict__.setdefault('connect_lock', threading.Lock())
+        sessions = self.__dict__.setdefault('connect_sessions', {})
+        with lock:
+            for key in [k for k, v in sessions.items() if v['state'] != 'running' and time.monotonic() - v['at'] > 1800]:
+                sessions.pop(key)
+        if name == 'connect_sources':
+            manage = str(self.config.get('manage_url') or '')
+            return {'sources': onboarding.catalog(self.config), 'manage_url': manage if manage.startswith('https://') else None,
+                    'saveable': bool(getattr(self, 'config_path', None))}
+        if name == 'connect_start':
+            source = args.get('source')
+            known = {s['name']: s for s in onboarding.catalog(self.config)}
+            if source not in known or known[source]['broker']:
+                raise ValueError('That source is not added here')
+            if not getattr(self, 'config_path', None):
+                raise ValueError('This service cannot save its settings; run assistant connect ' + source + ' in a terminal')
+            with lock:
+                if any(v['state'] == 'running' for v in sessions.values()):
+                    raise ValueError('Another source is being added; finish or stop that one first')
+                key = secrets.token_hex(12)
+                session = sessions[key] = {'ui': onboarding.WebUI(), 'state': 'running', 'source': source,
+                                           'label': known[source]['label'], 'at': time.monotonic()}
+            threading.Thread(target=self.connect_run, args=(session,), daemon=True).start()
+            return {'session': key, **self.connect_view(session)}
+        session = sessions.get(args.get('session')) if isinstance(args.get('session'), str) else None
+        if not session:
+            raise ValueError('That setup has ended; start it again')
+        if name == 'connect_answer':
+            value = args.get('value')
+            if not isinstance(value, (str, bool, int)) or (isinstance(value, str) and len(value) > 4096):
+                raise ValueError('Invalid answer')
+            if not session['ui'].answer(args.get('question'), value):
+                raise ValueError('That question was already answered')
+            time.sleep(0.3)  # most steps answer at once: show what comes next
+        elif name == 'connect_cancel':
+            session['ui'].cancel()
+        return self.connect_view(session)
+
+    def connect_run(self, session):
+        import onboarding
+        try:
+            account = onboarding.connect(self.config_path, session['source'], session['ui'], restart=False)
+            session.update(account=account['id'], restarting=restart_self(3), state='done')
+        except onboarding.SetupError as error:
+            session.update(state='cancelled' if session['ui'].cancelled else 'failed', error=error.message, fix=error.fix)
+        except Exception as error:  # the step's own text could quote what was typed: only its kind
+            LOG.error('connect source=%s error=%s', session['source'], type(error).__name__)
+            session.update(state='failed', error='The setup stopped unexpectedly', fix='try again, or run assistant connect '
+                           + session['source'] + ' in a terminal on this computer')
+        session['at'] = time.monotonic()
+
+    def connect_view(self, session):
+        return {**session['ui'].view(), **{k: session.get(k) for k in ('state', 'source', 'label', 'error', 'fix', 'account', 'restarting')}}
+
     def preparation_progress(self, suggestion_id):
         with self.store.connect() as db:
             job = db.execute('SELECT job_id,session_job_id,status,started_at FROM preparations WHERE suggestion_id=?', (suggestion_id,)).fetchone()
             waiting = browser_wait(db, job['job_id'], job['status']) if job else None
         if not job:
             raise ValueError('No preparation')
-        steps = preparation_steps(job['session_job_id'] or job['job_id'], self.config.get('agent_db')) if job['status'] in ('starting', 'running') else []
+        running = job['status'] in ('starting', 'running')
+        steps = preparation_steps(job['session_job_id'] or job['job_id'], self.config.get('agent_db')) if running else []
         return {'status': job['status'], 'started_at': job['started_at'], 'steps': steps,
-                'browser': {**waiting, 'link': browser_link(self.config)} if waiting else None}
+                'browser': {**waiting, 'link': browser_link(self.config)} if waiting else None,
+                'peek': running and self.peek_target(job['job_id']) is not None}
+
+    def peek_target(self, job_id):
+        """(DevTools address, target ID) of the tab a running preparation is on now (peek_tab), in the browser this
+        install's DevTools address points at (loopback only); None when it uses another browser or none."""
+        with self.store.connect() as db:
+            tab = peek_tab(db, job_id)
+        base = (browser_login.endpoints(self.config) or [None])[0]
+        if not tab or not base or urllib.parse.urlsplit(base).port != tab[1]:
+            return None
+        return base, tab[0]
+
+    def preparation_peek(self, suggestion_id):
+        """A small, current picture of the tab a running preparation is on, for its card: {on, image (a JPEG data
+        address, or None while that tab is in the background)}. Read over DevTools without bringing anything to the
+        front; kept only in memory for PEEK_EVERY seconds and while the run lasts, never logged or stored."""
+        with self.store.connect() as db:
+            job = db.execute('SELECT job_id,status FROM preparations WHERE suggestion_id=?', (suggestion_id,)).fetchone()
+        peeks = self.__dict__.setdefault('peeks', {})
+        lock = self.__dict__.setdefault('peek_lock', threading.Lock())
+        target = self.peek_target(job['job_id']) if job and job['status'] in ('starting', 'running') else None
+        with lock:
+            for key in [k for k, v in peeks.items() if time.monotonic() - v[0] > 60 or (job and k[0] == job['job_id'] and k[1] != target)]:
+                peeks.pop(key, None)
+            if not target:
+                return {'on': False}
+            key = (job['job_id'], target)
+            if key in peeks and time.monotonic() - peeks[key][0] < PEEK_EVERY:
+                return peeks[key][1]
+            view = {'on': True, 'image': None}
+            base, tab_id = target
+            try:
+                if any(t.get('id') == tab_id for t in browser_login.browser_cdp._http(base, '/json/list', timeout=3)):
+                    with browser_login.browser_cdp.Session(base, tab_id, timeout=4) as tab:
+                        # A tab in the background has no picture until it is in front, and it is never brought there.
+                        if tab.call('Runtime.evaluate', {'expression': 'document.visibilityState', 'returnByValue': True})['result'].get('value') == 'visible':
+                            port = tab.call('Page.getLayoutMetrics').get('cssVisualViewport') or {}
+                            width, height = port.get('clientWidth') or 0, port.get('clientHeight') or 0
+                            clip = {'x': port.get('pageX', 0), 'y': port.get('pageY', 0), 'width': width, 'height': height,
+                                    'scale': min(1, PEEK_WIDTH / width)} if width and height else None
+                            shot = tab.call('Page.captureScreenshot', {'format': 'jpeg', 'quality': 60, **({'clip': clip} if clip else {})})
+                            if shot.get('data'):
+                                view['image'] = 'data:image/jpeg;base64,' + shot['data']
+                else:
+                    view = {'on': False}
+            except (browser_login.browser_cdp.CdpError, OSError, KeyError, TypeError, AttributeError, ValueError):
+                pass  # no picture this time; the card keeps its last one
+            peeks[key] = (time.monotonic(), view)
+            return view
 
     def preparation_gateway(self, request):
         try:
@@ -8674,6 +8864,11 @@ class App:
                         self.output(200, app.preparation_progress(urllib.parse.parse_qs(path.query).get('id', [''])[0]))
                     except (ValueError, sqlite3.OperationalError):
                         self.output(404, {'error': 'Progress not available'})
+                elif path.path == '/api/peek':  # the live look at a preparing card's browser tab
+                    try:
+                        self.output(200, app.preparation_peek(urllib.parse.parse_qs(path.query).get('id', [''])[0]))
+                    except (ValueError, sqlite3.OperationalError):
+                        self.output(404, {'error': 'Not available'})
                 elif path.path == '/api/originals':
                     try:
                         args = urllib.parse.parse_qs(path.query)
@@ -8782,7 +8977,7 @@ class App:
                     except OSError:
                         self.close_connection = True  # stalled or dropped client
                         return
-                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset','set_work_hours','set_signature','detect_signature')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in CONNECT_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_logins','browser_login_forget','model_usage_refresh','model_reset','set_work_hours','set_signature','detect_signature')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

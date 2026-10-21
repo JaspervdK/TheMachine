@@ -59,7 +59,7 @@ Right after the service starts, the installer walks through each source:
 
 Setup verifies a supported read before reporting the account connected. A busy/rate-limited browser source can be saved for its first sync, explicitly unverified; saved configuration is not proof a read succeeded. Afterwards you see the first sync per source: how many signals came in and from how far back.
 
-Skipped one? `assistant connect gmail` (or `slack`, `crm`, `whatsapp`, `android`, `github`, …) does the same any time. `assistant connect` on its own lists what is still missing.
+Skipped one? `assistant connect gmail` (or `slack`, `crm`, `whatsapp`, `android`, `github`, …) does the same any time, and so does the dashboard: Connections, **+ Add**. `assistant connect` on its own lists what is still missing.
 
 ### Pairing your Android phone
 

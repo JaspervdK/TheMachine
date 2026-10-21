@@ -66,7 +66,7 @@ try{
  // Connections: sources by kind; the one with a failing source shows its count and opens first.
  await page.goto(base);await page.locator('nav [data-tab="health"]').click();await page.locator('#health-tabs [role=tab]').first().waitFor();
  for(let i=0;i<100&&(await tabs(page,'#health-tabs')).length<6;i++)await page.waitForTimeout(20);
- assert.deepEqual(await tabs(page,'#health-tabs'),['Mail and calendar','Chat\n1','Other sources','Sign-ins\n1','Reviews']);
+ assert.deepEqual(await tabs(page,'#health-tabs'),['Mail and calendar','Chat\n1','Other sources','+ Add','Sign-ins\n1','Reviews']);
  assert.equal(await page.locator('#health-tabs [data-health-pane="chat"] .badge.warn').count(),1);
  assert.equal(await selected(page,'#health-tabs'),'Chat\n1');
  assert.deepEqual(await page.locator('#connectors>article:not([hidden]) h3').allInnerTexts(),['team-chat','wa']);

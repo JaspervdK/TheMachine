@@ -20,6 +20,7 @@ import shlex
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -143,6 +144,92 @@ class UI:
                 return options[int(answer) - 1][0]
             if not self.interactive:
                 return options[0][0]
+
+
+class WebUI:
+    """The same questions, answered on the dashboard while `connect` runs inside the service (Connections, Add): each
+    question waits there, up to `wait` seconds, for the owner's answer, and what it says is shown there as it goes.
+    A key typed there only goes to the step that asked for it, never into these lines or a log."""
+    interactive = True
+    web = True  # steps that need a terminal (a QR code, a browser on this computer) say what to run instead
+
+    def __init__(self, wait=900):
+        self.lines, self.question, self.wait, self.cancelled = [], None, wait, False
+        self._answer, self._asked, self._cond = None, 0, threading.Condition()
+
+    def say(self, text=''):
+        with self._cond:
+            self.lines += [line.strip() for line in str(text).splitlines() if line.strip()]
+            del self.lines[:-200]
+
+    def view(self):
+        with self._cond:
+            return {'lines': list(self.lines), 'question': dict(self.question) if self.question else None}
+
+    def answer(self, question_id, value):
+        """The owner's answer to the question showing now; False when that question is no longer asked."""
+        with self._cond:
+            if not self.question or self.question['id'] != question_id:
+                return False
+            self._answer = [value]
+            self._cond.notify_all()
+            return True
+
+    def cancel(self):
+        with self._cond:
+            self.cancelled = True
+            self._cond.notify_all()
+
+    def _ask(self, kind, prompt, default='', options=None):
+        with self._cond:
+            if self.cancelled:
+                raise SetupError('Stopped')
+            self._asked += 1
+            self.question = {'id': self._asked, 'kind': kind, 'prompt': str(prompt), 'options': options,
+                             'default': '' if kind == 'secret' else default}
+            self._answer = None
+            given = self._cond.wait_for(lambda: self._answer is not None or self.cancelled, self.wait)
+            self.question = None
+            if self.cancelled:
+                raise SetupError('Stopped')
+            if not given:
+                raise SetupError('No answer in time', 'start again')
+            return self._answer[0]
+
+    def ask(self, prompt, default=''):
+        answer = str(self._ask('ask', prompt, default) or '').strip()
+        return answer or default
+
+    def secret(self, prompt):
+        return str(self._ask('secret', prompt) or '').strip()
+
+    def yes(self, prompt, default=True):
+        return bool(self._ask('yes', prompt, bool(default)))
+
+    def choose(self, prompt, options):
+        if len(options) == 1:
+            return options[0][0]
+        picked = self._ask('choose', prompt, 0, [str(label) for _, label in options])
+        if not isinstance(picked, int) or not 0 <= picked < len(options):
+            raise SetupError('Not one of the choices', 'start again')
+        return options[picked][0]
+
+
+def catalog(config):
+    """The sources this install can add, with what each asks for and how many are connected already. `broker`:
+    a hosted machine's control plane signs it in (its account page), not this install."""
+    have = {}
+    for account in config.get('accounts', []):
+        have[account.get('service', 'gmail')] = have.get(account.get('service', 'gmail'), 0) + 1
+    brokered = {'gmail', 'calendar'} if config.get('google_broker') else set()
+    brokered |= {'outlook', 'outlook_calendar'} if config.get('microsoft_broker') else set()
+    found = []
+    for name in sources():
+        service = SERVICES.get(name, name)
+        setup = setup_of(service) or {}
+        found.append({'name': name, 'service': service, 'label': label(service), 'note': setup.get('note'), 'what': setup.get('what'),
+                      'connected': have.get(service, 0), 'broker': service in brokered})
+    return found
 
 
 def run(args, **kwargs):
@@ -871,12 +958,37 @@ def sign_in(config, account, gog, ui):
     ui.say('Signing in to Google with read-only access to Gmail and Calendar'
            + (' (open the link it prints, then paste the address you land on)' if headless() else ' (a browser opens)') + '...')
     args = [gog, 'auth', 'add', email, '--client', client, '--services', 'gmail,calendar', '--readonly', '--gmail-scope', 'readonly']
+    if getattr(ui, 'web', False):
+        return sign_in_web(config, account, gog, ui, args)
     if headless():
         args.append('--manual')
     try:
         subprocess.run(args, env=gog_env(config), timeout=900)
     except (OSError, subprocess.TimeoutExpired):
         pass
+
+
+def sign_in_web(config, account, gog, ui, args):
+    """The same read-only Google sign-in from the dashboard: gog's remote flow (the address to open, then the address
+    Google sends you back to, pasted). Only for an address gog does not hold yet: a sign-in gog already keeps is never
+    replaced from here, so its scopes stay what they are."""
+    email, service = account['email'], account.get('service', 'gmail')
+    if email.lower() in {e.lower() for e, _ in gog_accounts(gog)}:
+        raise SetupError(f'{email} is signed in to gog already, but it does not read yet',
+                         f'run this in a terminal on this computer: assistant connect {service}')
+    first = run(args + ['--remote', '--step', '1'], env=gog_env(config), timeout=60)
+    url = next(iter(re.findall(r'https://accounts\.google\.com/\S+', first.stdout + '\n' + first.stderr)), None)
+    if first.returncode or not url:
+        raise SetupError('gog could not start the Google sign-in', f'run this in a terminal on this computer: assistant connect {service}')
+    ui.say('Open this address, sign in as ' + email + ' and allow read-only access. Google then sends you to an address '
+           'that may not load: copy that whole address from the address bar.')
+    ui.say(url)
+    landed = ui.ask('The address Google sent you to').strip()
+    if not landed.startswith(('http://', 'https://')):
+        raise SetupError('That is not the address Google sent you to', 'start again')
+    second = run(args + ['--remote', '--step', '2', '--auth-url', landed], env=gog_env(config), timeout=120)
+    if second.returncode:
+        raise SetupError('Google did not accept that sign-in', 'start again; the address works only once and for a few minutes')
 
 
 def gog_calendars(config, account):
@@ -1014,6 +1126,9 @@ def step_whatsapp(config, account, ui):
     config['wacli'] = config.get('wacli') if config.get('wacli') not in (None, 'wacli') else wacli
     account['store'] = ui.ask('wacli store directory', account.get('store') or str(home() / '.local/share/wacli'))
     linked = whatsapp_linked(wacli, account['store'])
+    if not linked and getattr(ui, 'web', False):  # the QR code to scan only shows in a terminal
+        raise SetupError('WhatsApp is not linked yet', f'run this in a terminal on this computer and scan the code: '
+                         f'{wacli} --store {account["store"]} auth; then add it here again')
     if not linked and ui.yes('WhatsApp is not linked yet. Link it now? (scan the QR code in WhatsApp > Linked devices)', True):
         Path(account['store']).mkdir(parents=True, exist_ok=True)
         try:
