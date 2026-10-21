@@ -4108,6 +4108,8 @@ def sync_gmail(store, config, account):
         next_state = {**state, 'page_token': page['nextPageToken']} if page.get('nextPageToken') else {
             'mode': 'incremental', 'history_id': state['base_history'], 'after': state['after'],
             'resync_reason': state.get('resync_reason')}
+        if state['mode'] == 'bootstrap' and not page.get('nextPageToken'):
+            next_state['backfilled_at'] = now()  # the mailbox's first import is in: its first review starts now (App.mail_backfill)
     else:
         params = {'startHistoryId': state['history_id'], 'maxResults': 100}
         if state.get('page_token'):
@@ -8063,8 +8065,15 @@ class App:
                 # enough signals, or the oldest one has waited long enough.
                 waiting, oldest = db.execute('SELECT count(*),min(ingested_at) FROM events WHERE analyzed_version<version AND deferrals<?',
                                              (SET_ASIDE_AFTER,)).fetchone()
-                if not recovery and (not waiting or (waiting < settings.get('min_signals', 40) and
-                                   oldest > (stamp - dt.timedelta(minutes=settings.get('max_wait_minutes', 60))).isoformat())):
+                young = waiting and oldest > (stamp - dt.timedelta(minutes=settings.get('max_wait_minutes', 60))).isoformat()
+                # A new mailbox: its first review starts as soon as its first import is in, as one review, not one
+                # halfway through the import and another after it (never past the usual longest wait).
+                mail = self.mail_backfill(db) if not recovery else {'filling': [], 'fresh': []}
+                if mail['filling'] and young:
+                    return None
+                if not recovery and not mail['fresh'] and (not waiting or (waiting < settings.get('min_signals', 40) and young)):
+                    return None
+                if not waiting and not recovery:
                     return None
                 run = {'run_id': uuid.uuid4().hex, 'status': 'starting', 'started_at': now(), 'attempts': 0}
                 db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,planned) VALUES(?,?,?,?,?)",
@@ -8110,6 +8119,29 @@ class App:
                            (int(action == 'stop'), 'completion_unconfirmed' if action == 'stop' else None, now(), run['run_id']))
         return result
 
+    def mail_backfill(self, db):
+        """The first import of a newly connected mailbox, for when the first review of its mail starts.
+        'filling': mailboxes whose first import is still going (paging through the last days); one that failed
+        is not waited for. 'fresh': mailboxes whose first import is in and that no review has
+        finished since. Mailboxes imported before this was recorded count as reviewed."""
+        filling, fresh = [], []
+        last_ok = db.execute("SELECT max(started_at) FROM review_runs WHERE status='ok'").fetchone()[0] or ''
+        for account in self.config.get('accounts', []):
+            if account.get('service', 'gmail') not in MAIL_SERVICES:
+                continue
+            row = db.execute('SELECT state,error FROM checkpoints WHERE account_id=?', (account['id'],)).fetchone()
+            try:
+                state = json.loads(row['state'] or '{}') if row else {}
+            except (TypeError, ValueError):
+                state = {}
+            if not row or row['error']:
+                continue
+            if state.get('mode') == 'bootstrap':
+                filling.append(account['id'])
+            elif state.get('backfilled_at') and state['backfilled_at'] > last_ok:
+                fresh.append(account['id'])
+        return {'filling': filling, 'fresh': fresh}
+
     def first_look(self, db, current=None):
         """The first look: on a new install with reviews still off, one preview of the last week starts by itself
         once a model and a source are connected and the first import has settled. Read-only like any preview: its
@@ -8133,11 +8165,15 @@ class App:
         waiting, newest = db.execute(f'SELECT count(*),max(ingested_at) FROM events WHERE analyzed_version<version AND deferrals<? AND occurred_at>=? '
                                      f'AND account_id IN ({marks})', (SET_ASIDE_AFTER, since, *sources)).fetchone() if sources else (0, None)
         out = {'waiting': min(waiting, RUN_SIGNAL_BUDGET), 'days': PREVIEW_DAYS}
+        mail = self.mail_backfill(db)
         if not has_model():
             return {**out, 'state': 'waiting', 'why': 'model'}
+        if mail['filling'] and (not waiting or newest > (current - dt.timedelta(minutes=settings.get('max_wait_minutes', 60))).isoformat()):
+            return {**out, 'state': 'waiting', 'why': 'mail'}
         if not waiting:
             return {**out, 'state': 'waiting', 'why': 'sources'}
-        if waiting < RUN_SIGNAL_BUDGET and newest > (current - dt.timedelta(seconds=FIRST_LOOK_SETTLE_SECONDS)).isoformat():
+        if (waiting < RUN_SIGNAL_BUDGET and not mail['fresh'] and
+                newest > (current - dt.timedelta(seconds=FIRST_LOOK_SETTLE_SECONDS)).isoformat()):
             return {**out, 'state': 'waiting', 'why': 'settling'}
         if runs and (runs[-1]['finished_at'] or '') > (current - dt.timedelta(seconds=FIRST_LOOK_RETRY_SECONDS)).isoformat():
             return {**out, 'state': 'waiting', 'why': 'retry'}
@@ -8150,15 +8186,23 @@ class App:
             return None
         waiting, oldest = db.execute('SELECT count(*),min(ingested_at) FROM events WHERE analyzed_version<version AND deferrals<?',
                                      (SET_ASIDE_AFTER,)).fetchone()
+        current = current or dt.datetime.fromisoformat(now())
+        mail = self.mail_backfill(db)
+        first = not db.execute("SELECT 1 FROM review_runs WHERE status='ok'").fetchone()
+        hold = dt.datetime.fromisoformat(oldest) + dt.timedelta(minutes=settings.get('max_wait_minutes', 60)) if waiting else None
+        if mail['filling'] and (not hold or hold > current):
+            # The first import of a mailbox is still coming in: the review starts when it is in (at the latest at hold)
+            return {'waiting': waiting, 'planned': min(waiting, RUN_SIGNAL_BUDGET), 'starts_at': hold and hold.isoformat(),
+                    'why': 'mail', 'first': first}
         if not waiting:
             return None
-        current = current or dt.datetime.fromisoformat(now())
         last = db.execute('SELECT finished_at FROM review_runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1').fetchone()
         after_gap = dt.datetime.fromisoformat(last[0]) + dt.timedelta(seconds=settings.get('gap_seconds', 600)) if last else current
-        full = waiting >= settings.get('min_signals', 40)
-        batch = current if full else dt.datetime.fromisoformat(oldest) + dt.timedelta(minutes=settings.get('max_wait_minutes', 60))
+        full = waiting >= settings.get('min_signals', 40) or bool(mail['fresh'])
+        batch = current if full else hold
         return {'waiting': waiting, 'planned': min(waiting, RUN_SIGNAL_BUDGET), 'starts_at': max(after_gap, batch, current).isoformat(),
-                'why': 'batch' if batch >= after_gap and not full else 'gap'}
+                'why': 'mail_in' if mail['fresh'] and after_gap <= current else 'batch' if batch >= after_gap and not full else 'gap',
+                'first': first}
 
     def review_live(self):
         """What the dashboard shows of reviews while they happen: runs in progress, the next one, the first look."""
