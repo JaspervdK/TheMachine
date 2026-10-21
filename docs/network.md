@@ -21,6 +21,10 @@ how messages stay reliable, and where it's going.
   hands out the secret and knows it: equal hashes reveal matching claims, and it can test a candidate Message-ID
   obtained elsewhere. Claims are therefore not end-to-end encrypted. The secret cannot open sealed questions or
   sign as a Machine; those keys never leave your Machine. A secret unknown to the Network is on the roadmap.
+- **Finding people you know** (docs/fleet.md) is opt-in on both sides. Contacts are looked up blinded (private set
+  intersection), so the Network never sees your address book. Being findable covers your account email and the
+  addresses of the mail accounts your Machine connected, each of which you can turn off; the Network keeps those only
+  blinded and learns which addresses matched people who chose to be found.
 - **Moving your Machine.** `assistant export --keys` carries `network-keys.json` (encrypted with your passphrase) and
   `assistant import` puts it back, so your teammates and friends see the same Machine. An export without keys leaves
   them out: the import makes a new Network identity, and your teammates and friends see a key-change notice once.

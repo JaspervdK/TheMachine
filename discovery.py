@@ -5,7 +5,9 @@ Two switches, both off until the owner turns them on:
   them. Each address is hashed onto a group and blinded with a secret only this Machine knows; the Network raises
   them to its own secret and returns them with its (blinded) list of people who chose to be found; the Machine
   compares. Only the matches are then looked up by address, to learn their username and name.
-- Let people who have my email find me: the Network adds the owner's account email to that list.
+- Let people who have my email find me: the Network adds the owner's account email to that list, and the addresses
+  of the mail and calendar accounts this Machine connected (it says which; each can be turned off in the Fleet tab).
+  The Network keeps those blinded only, and an address that is someone else's sign-in finds nobody.
 
 A match becomes a card under Suggestions only when connecting has a concrete use now: an open card with them, or a
 meeting with them soon. Other matches wait quietly in the Fleet tab's Network block. The card suggests what they are
@@ -35,6 +37,8 @@ LOOKUP_DAYS = 7              # how often the Machine looks again
 LATER_DAYS = 30              # "Not now" hides a person this long, unless something new comes up with them
 MEETING_DAYS = 14
 STATUSES = ('new', 'requested', 'connected', 'later', 'never')
+MAILBOXES = ('gog', 'broker')  # transports that sign in to the owner's own mailbox or calendar (OAuth)
+ADDRESS_DAYS = 7             # how often the findable addresses are sent again (also right away when they change)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS network_people(email TEXT PRIMARY KEY,node_id TEXT,username TEXT NOT NULL,name TEXT NOT NULL,
@@ -151,10 +155,45 @@ class Discovery:
             out.append({'kind': 'meeting', 'at': meeting['occurred_at'], 'title': meeting['title'][:120]})
         return out
 
+    # -- the owner's own addresses
+    def own_addresses(self):
+        """The addresses of the mail and calendar accounts this Machine signed in to: the owner's, verifiably."""
+        found = []
+        for account in self.config.get('accounts', []):
+            email = normal(account.get('email'))
+            if '@' in email and ' ' not in email and email not in found and \
+                    (account.get('transport') in MAILBOXES or account.get('service') in ('gmail', 'calendar')):
+                found.append(email)
+        return found
+
+    def _findable_wanted(self):
+        off = set(self.network_settings().get('address_off') or [])
+        return [e for e in self.own_addresses() if e not in off]
+
+    def send_findable(self):
+        """Tell the Network which connected addresses the owner can be found by (the ones not turned off)."""
+        wanted = self._findable_wanted()
+        found = self.relay.call('POST', '/discover', {'action': 'discoverable', 'on': True, 'emails': wanted}, timeout=30) or {}
+        addresses = [a for a in found.get('addresses') or [] if isinstance(a, dict) and isinstance(a.get('email'), str)]
+        account = next((normal(a['email']) for a in addresses if a.get('source') == 'account'), self.network_settings().get('account_email'))
+        self._set_network(discoverable=bool(found.get('discoverable')), findable=[normal(a['email']) for a in addresses],
+                          findable_sent=wanted, findable_at=now(), account_email=account)
+        return found
+
+    def _findable_due(self):
+        found = self.network_settings()
+        return bool(found.get('discoverable')) and (found.get('findable_sent') != self._findable_wanted() or not found.get('findable_at') or
+                                                     found['findable_at'] < (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=ADDRESS_DAYS)).isoformat(timespec='seconds'))
+
     # -- the weekly lookup
     def discovery_round(self, force=False):
         """With "Find people I know" on: look the contacts up once a week (or now, when forced); every time, bring the
         reasons of the people found up to date, and mark the ones who became friends."""
+        if self._findable_due():
+            try:
+                self.send_findable()  # a new or removed account, or a week on
+            except Exception:  # the next round tries again
+                pass
         found = self.network_settings()
         if not found.get('find'):
             return 0
@@ -206,8 +245,8 @@ class Discovery:
 
     # -- the owner's own
     def network_action(self, do, email='', relation=''):
-        """find_on / find_off, discoverable_on / discoverable_off, connect (as friend, family or colleague), later,
-        never, leave."""
+        """find_on / find_off, discoverable_on / discoverable_off, address_on / address_off (one connected address),
+        connect (as friend, family or colleague), later, never, leave."""
         email = normal(email)
         if do in ('find_on', 'find_off'):
             self._set_network(find=do == 'find_on', asked=True)
@@ -220,16 +259,30 @@ class Discovery:
                 except Exception as error:  # the next round tries again
                     return {'find': True, 'note': f'Looking up later ({type(error).__name__})'}
             return {'find': do == 'find_on'}
+        if do in ('address_on', 'address_off'):
+            if email not in self.own_addresses():
+                raise ValueError('Not one of your connected addresses')
+            off = set(self.network_settings().get('address_off') or []) - {email} | ({email} if do == 'address_off' else set())
+            self._set_network(address_off=sorted(off))
+            if self.network_settings().get('discoverable'):
+                self.send_findable()
+            with self.connect() as db:
+                self.log(db, 'out', self.friends_ref() or 'friends', None, 'Network', 'discover',
+                         f'Findable by {email}: ' + ('on' if do == 'address_on' else 'off'), 'done')
+            return {'email': email, 'findable': email in (self.network_settings().get('findable') or [])}
         if do in ('discoverable_on', 'discoverable_off'):
-            found = self.relay.call('POST', '/discover', {'action': 'discoverable', 'on': do == 'discoverable_on'}, timeout=30)
-            self._set_network(discoverable=bool((found or {}).get('discoverable')))
+            if do == 'discoverable_on':
+                self.send_findable()
+            else:
+                found = self.relay.call('POST', '/discover', {'action': 'discoverable', 'on': False}, timeout=30)
+                self._set_network(discoverable=bool((found or {}).get('discoverable')), findable=[], findable_sent=None)
             with self.connect() as db:
                 self.log(db, 'out', self.friends_ref() or 'friends', None, 'Network', 'discover',
                          'Findable by my email: ' + ('on' if do == 'discoverable_on' else 'off'), 'done')
             return {'discoverable': self.network_settings().get('discoverable', False)}
         if do == 'leave':
             self.relay.call('POST', '/discover', {'action': 'leave'}, timeout=60)
-            self._set_network(find=False, discoverable=False, asked=True)
+            self._set_network(find=False, discoverable=False, asked=True, findable=[], findable_sent=None)
             with self.connect() as db:
                 ensure(db)
                 db.execute('DELETE FROM network_people')
@@ -263,5 +316,8 @@ class Discovery:
             people = [{**{k: r[k] for k in ('email', 'username', 'name', 'hint', 'role', 'relation', 'status', 'found_at')},
                        'reasons': json.loads(r['reasons'] or '[]')}
                       for r in db.execute("SELECT * FROM network_people WHERE status<>'never' ORDER BY found_at DESC LIMIT 200")]
+        findable, off, account = set(found.get('findable') or []), set(found.get('address_off') or []), found.get('account_email')
+        addresses = [{'email': account, 'account': True, 'on': True, 'findable': account in findable}] if account else []
+        addresses += [{'email': e, 'account': False, 'on': e not in off, 'findable': e in findable} for e in self.own_addresses() if e != account]
         return {'find': found.get('find'), 'discoverable': found.get('discoverable'), 'asked': bool(found.get('asked')),
-                'last': found.get('last'), 'people': people}
+                'last': found.get('last'), 'people': people, 'addresses': addresses}

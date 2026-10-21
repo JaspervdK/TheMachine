@@ -34,7 +34,9 @@ class NetworkRelay(tfr.FriendsRelay):
             return {'people': [{'email': e, 'username': ON_NETWORK[e][0], 'name': ON_NETWORK[e][1], 'friends': ON_NETWORK[e][2]}
                                for e in body['emails'] if e in ON_NETWORK]}
         if body['action'] == 'discoverable':
-            return {'discoverable': body['on']}
+            self.findable = body.get('emails') if body['on'] else []
+            return {'discoverable': body['on'], 'addresses': ([{'email': 'owner@acme.example', 'source': 'account'}] if body['on'] else []) +
+                    [{'email': e, 'source': 'machine'} for e in self.findable if e != 'owner@acme.example']}
         return {'left': True, 'friends_removed': 1}
 
 
@@ -62,7 +64,9 @@ class Discovery(unittest.TestCase):
     def test_off_until_turned_on(self):
         self.assertEqual(self.fleet.discovery_round(force=True), 0)
         self.assertEqual(self.relay.sent('/discover'), [])
-        self.assertEqual(self.fleet.view()['network'], {'find': None, 'discoverable': None, 'asked': False, 'last': None, 'people': []})
+        view = self.fleet.view()['network']
+        self.assertEqual(view, {'find': None, 'discoverable': None, 'asked': False, 'last': None, 'people': [], 'addresses': view['addresses']})
+        self.assertFalse(any(a['findable'] for a in view['addresses']))
 
     def test_lookup_is_blinded_and_only_matches_are_resolved(self):
         self.fleet.network_action('find_on')
@@ -117,6 +121,30 @@ class Discovery(unittest.TestCase):
         self.assertEqual(self.relay.sent('/discover')[-1], {'action': 'leave'})
         view = self.fleet.network_view()
         self.assertEqual((view['find'], view['discoverable'], view['people']), (False, False, []))
+
+    def test_findable_by_each_connected_address_and_each_can_be_turned_off(self):
+        self.assertEqual(self.fleet.own_addresses(), ['owner@acme.example', 'owner@gmail.com'])
+        self.fleet.network_action('discoverable_on')
+        self.assertEqual(self.relay.sent('/discover')[-1],
+                         {'action': 'discoverable', 'on': True, 'emails': ['owner@acme.example', 'owner@gmail.com']})
+        view = self.fleet.network_view()['addresses']
+        self.assertEqual([(a['email'], a['account'], a['on'], a['findable']) for a in view],
+                         [('owner@acme.example', True, True, True), ('owner@gmail.com', False, True, True)])
+        self.assertEqual(self.fleet.network_action('address_off', 'Owner@Gmail.com'), {'email': 'owner@gmail.com', 'findable': False})
+        self.assertEqual(self.relay.sent('/discover')[-1]['emails'], ['owner@acme.example'])
+        self.assertEqual([(a['on'], a['findable']) for a in self.fleet.network_view()['addresses']], [(True, True), (False, False)])
+        with self.assertRaises(ValueError):
+            self.fleet.network_action('address_off', 'someone@else.example')  # only the owner's own
+        # A newly connected account goes out with the next round, without asking again
+        sent = len(self.relay.sent('/discover'))
+        self.fleet.discovery_round()
+        self.assertEqual(len(self.relay.sent('/discover')), sent)  # nothing changed
+        self.fleet.config = {**self.fleet.config, 'accounts': self.fleet.config['accounts'] + [
+            {'id': 'side', 'email': 'owner@side.example', 'transport': 'gog'}, {'id': 'chat', 'email': 'owner@chat.example', 'service': 'slack'}]}
+        self.fleet.discovery_round()
+        self.assertEqual(self.relay.sent('/discover')[-1]['emails'], ['owner@acme.example', 'owner@side.example'])  # not the chat login
+        self.fleet.network_action('discoverable_off')
+        self.assertEqual(self.fleet.network_view()['addresses'][0]['findable'], False)
 
     def test_group_matches_the_network(self):
         a, items, buckets = discovery.blind(['x@example.com'], secret=7)

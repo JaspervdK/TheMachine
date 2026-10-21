@@ -267,7 +267,9 @@ Both switches are off until you turn them on, in the Fleet tab under **Network**
   themselves be found. Your Machine learns only which of its own contacts matched, the Network never sees your address
   book, and only matches are then looked up by name. Lookups are rate-limited.
 - **Let people who have my email find me** makes your account email findable that way, and only by people who already
-  have it. It needs a username.
+  have it, plus the addresses of the mail and calendar accounts your Machine signed in to. The Fleet tab lists them
+  under **Findable by**; untick any you'd rather keep out. The Network stores those only blinded. Someone's sign-in
+  email only ever finds them, and an address that two accounts list finds neither. It needs a username.
 
 A match becomes a card in Suggestions only when there is something concrete to do together: an open card that involves
 them, or a meeting with them in the next two weeks; the card says which. Someone at your own work domain is suggested

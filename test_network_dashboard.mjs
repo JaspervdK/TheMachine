@@ -17,7 +17,9 @@ const ask={...base,network:{find:null,discoverable:null,asked:false,last:null,pe
 const found={...base,network:{find:true,discoverable:true,asked:true,last:'2026-10-20T10:00:00Z',people:[
  {email:'nia@nia.example',username:'nia',name:'Nia North',hint:'personal',role:null,relation:null,status:'new',found_at:'x',reasons:[{kind:'meeting',at:soon,title:'Picnic'}]},
  {email:'sam@acme.example',username:'samb',name:'Sam Beam',hint:'colleague',role:null,relation:null,status:'new',found_at:'x',reasons:[{kind:'card',card:'s1',title:'Send the quote'}]},
- {email:'zed@zed.example',username:'zed',name:'Zed Zee',hint:'personal',role:null,relation:null,status:'new',found_at:'x',reasons:[]}]}};
+ {email:'zed@zed.example',username:'zed',name:'Zed Zee',hint:'personal',role:null,relation:null,status:'new',found_at:'x',reasons:[]}],
+ addresses:[{email:'sam@work.example',account:true,on:true,findable:true},{email:'sam.doe-with-a-long-address@personal-mail.example',account:false,on:true,findable:true},
+  {email:'sam@other.example',account:false,on:false,findable:false}]}};
 const calls=[];let shown=ask;
 const server=createServer(async(req,res)=>{res.setHeader('Content-Type','application/json');
  if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
@@ -51,6 +53,12 @@ try{
   const block=page.locator('#fleet-network');
   assert.match(await block.innerText(),/Find people I know/);assert.match(await block.innerText(),/Zed Zee/);
   assert.ok(await block.locator('[data-net-toggle="find_off"]').isChecked());
+  // Which addresses find them: the account one fixed, each connected one can be turned off
+  assert.match(await block.locator('.net-addrs').innerText(),/Findable by/);
+  assert.ok(await block.locator('[data-net-addr="sam@work.example"]').isDisabled());
+  assert.equal(await block.locator('[data-net-addr="sam@other.example"]').isChecked(),false);
+  calls.length=0;await block.locator('[data-net-addr="sam.doe-with-a-long-address@personal-mail.example"]').click();await page.waitForTimeout(200);
+  assert.deepEqual(calls[0],{action:'fleet_network',args:{do:'address_off',email:'sam.doe-with-a-long-address@personal-mail.example'}});
   calls.length=0;await block.locator('[data-net-toggle="discoverable_off"]').click();await page.waitForTimeout(200);
   assert.deepEqual(calls[0],{action:'fleet_network',args:{do:'discoverable_off'}});
   calls.length=0;await block.locator('[data-net-do="leave"]').click();await page.waitForTimeout(200);
