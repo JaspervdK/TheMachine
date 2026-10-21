@@ -61,7 +61,7 @@ class FillTest(unittest.TestCase):
         cls.chrome = subprocess.Popen([CHROME, '--headless=new', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=%d' % port,
                                        '--user-data-dir=' + cls.profile, 'about:blank'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cls.config = {'browser_cdp_url': 'http://127.0.0.1:%d' % port, 'accounts': []}
-        for _ in range(100):
+        for _ in range(600):  # a first start on macOS waits for the app check
             try:
                 urllib.request.urlopen(cls.config['browser_cdp_url'] + '/json/version', timeout=1)
                 break

@@ -29,9 +29,12 @@ window (e.g. the OpenClaw dashboard installed as an app) cannot hold tab groups,
 so every new tab failed. When needed it focuses the newest normal Chrome window
 for a moment and then restores whatever window was active.
 """
-import argparse, fcntl, json, os, subprocess, sys, time
+import argparse, json, os, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import portable  # noqa: E402
 
 STATE = Path(os.environ.get('OPENCLAW_WORKSPACE') or Path.home() / '.openclaw/workspace').expanduser() / 'data/browser-lease/lease.json'
 LOCK = STATE.with_suffix('.lock')
@@ -90,7 +93,7 @@ def describe(state):
 def try_claim(owner, minutes, exclusive, wait_until=None):
     """One attempt under the file lock. Returns (granted, state)."""
     with LOCK.open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        portable.lock(lock)
         state = read()
         holders, waiting = state['holders'], state['waiting']
         mine = holders.get(owner)
@@ -123,7 +126,7 @@ def claim(owner, minutes, exclusive=False, wait_minutes=0, sleep=time.sleep, pol
         sleep(poll)
     if not ok and exclusive:
         with LOCK.open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            portable.lock(lock)
             current = read()
             current['waiting'].pop(owner, None)
             save(current)
@@ -195,7 +198,7 @@ def main():
             print(note)
         return 0
     with LOCK.open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        portable.lock(lock)
         state = read()
         if a.action == 'status':
             print(describe(state) or 'free')

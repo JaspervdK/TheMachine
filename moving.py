@@ -23,6 +23,8 @@ from contextlib import closing
 from contextlib import contextmanager
 from pathlib import Path
 
+import portable
+
 FORMAT = 1
 APP = Path(__file__).resolve().parent
 PASSPHRASE_ENV = 'THE_MACHINE_EXPORT_PASSPHRASE'
@@ -306,7 +308,7 @@ def readme(manifest):
              'This holds what The Machine knows and how it was set up. It is yours: keep it somewhere safe.', '',
              'To run it on your own computer:',
              '  1. Install The Machine: https://github.com/Salesflare/TheMachine/blob/main/docs/getting-started.md',
-             '     Stop its service before importing: systemctl --user stop personal-assistant',
+             '     Stop its service before importing: assistant service stop',
              '  2. Put it back:  assistant import <this file>',
              '  3. Connect what the import lists, then check with:  assistant doctor', '']
     lines.append('Keys and tokens are included.' if manifest['includes_keys'] else
@@ -363,7 +365,10 @@ def _atomic_copy(source, target, mode=0o600):
     try:
         with os.fdopen(fd, 'wb') as handle, source.open('rb') as original:
             shutil.copyfileobj(original, handle)
-            os.fchmod(handle.fileno(), mode)
+            if hasattr(os, 'fchmod'):
+                os.fchmod(handle.fileno(), mode)
+            else:  # Windows: no POSIX modes; the folder's own access rules apply
+                os.chmod(name, mode)
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(target)
@@ -383,21 +388,20 @@ def _place(source, target, notes, mode=0o600):
 @contextmanager
 def offline_target(config_path):
     """Share the service's lock before touching any imported files. Never overlay an existing WAL."""
-    import fcntl
     data = Path(config_path).expanduser().parent
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (data / 'service.lock').open('a') as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock(lock, blocking=False)
         except BlockingIOError:
-            raise MoveError('Stop personal-assistant first: systemctl --user stop personal-assistant. Then import again.') from None
+            raise MoveError('Stop personal-assistant first: assistant service stop. Then import again.') from None
         try:
             if any(data.rglob('*-wal')) or any(data.rglob('*-shm')):
                 raise MoveError('The target database is still open (SQLite WAL files exist). Close its readers and stop '
                                 'personal-assistant before importing; do not delete its WAL files.')
             yield
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            portable.unlock(lock)
 
 
 def import_(archive_path, config_path, passphrase=None, workspace=None, openclaw_home=None, force=False, now=None):

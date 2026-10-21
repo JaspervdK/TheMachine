@@ -7,7 +7,7 @@ From installation to your first cards. Setup time depends on account sign-in, so
 - [ ] **OpenClaw** 2026.10.5 or later, with the Gateway running. Telegram is optional: with a bot, check that it answers you in Telegram; without one, cards reach you through the dashboard app (see Phone notifications below). No OpenClaw yet? Skip this one: the installer offers to install it and walks you through its setup (step 1).
 - [ ] **Node.js** 24.16+ (24.x) or 26.1+, and **Python 3.12+**.
 - [ ] **Tailscale** on this machine and your phone, logged in (`sudo tailscale up`), for the dashboard.
-- [ ] Your own user account, not root, with a systemd user session (a normal login; over SSH that works too).
+- [ ] Your own user account, not root. Linux: a systemd user session (a normal login; over SSH that works too). macOS: you are signed in to the desktop. Windows: see [Windows](#windows-beta).
 - [ ] Per source you want: `gog` for Gmail and Calendar, `wacli` for WhatsApp, the OpenClaw Android app paired as a node for phone notifications ([how](#pairing-your-android-phone)), a [Maton](https://maton.ai) Slack connection, a Salesflare API key, `gh` for GitHub. You can add any of them later.
 
 ## 1. Install
@@ -27,6 +27,20 @@ The wizard fills in what it can find, so most questions only need Enter:
 - **Company:** from your email address; answer "personal" if these are private accounts.
 - **Sources:** suggested from what is installed and linked here (gog, a linked WhatsApp, a paired Android phone).
 - **Email:** from the Google accounts gog already knows. Outlook: `assistant connect outlook`.
+
+### macOS (beta)
+
+The same three commands. Get the prerequisites with [Homebrew](https://brew.sh): `brew install python@3.12 node@24 git`, plus `brew install gogcli` for Gmail and Calendar, and the [Tailscale app](https://tailscale.com/download/mac). The service runs as a launchd agent (`~/Library/LaunchAgents/computer.themachine.assistant.plist`) that starts at login; its log is in `~/Library/Logs/TheMachine/assistant.log`. OpenClaw's Gateway runs as its own launchd agent (`openclaw gateway install`). Not on macOS yet: the browser viewer (`--browser-viewer`) and the Gateway log source.
+
+### Windows (beta)
+
+The Machine runs inside WSL2 (Linux), next to OpenClaw's Gateway, which OpenClaw also recommends on Windows. In PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Salesflare/TheMachine/main/install.ps1 | iex
+```
+
+It installs WSL2 if needed (once as Administrator, then a restart), Ubuntu 24.04 (it asks for a new Linux user name and password), turns on systemd, installs Git, Python, Node.js 24 and Tailscale inside it (sign it in to your tailnet when it shows a link), gets The Machine and runs `./install.sh`, which continues as below. It also starts WSL when you sign in to Windows, so the service keeps running. Already use OpenClaw's Windows Hub with its own `OpenClawGateway` distro? It installs into that one. Run commands through WSL: `wsl -- bash -lc 'assistant doctor'`. Set `THE_MACHINE_DRY_RUN=1` first to only see what it would do.
 
 ## 2. Connect your sources
 

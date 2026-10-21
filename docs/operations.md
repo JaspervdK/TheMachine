@@ -67,7 +67,8 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 
 ## Operations
 
-- **Service:** `systemctl --user status personal-assistant.service`; logs with `journalctl --user -u personal-assistant.service -n 50 --no-pager`. Enable lingering (`loginctl enable-linger $USER`) to start at boot.
+- **Service:** `assistant service status`, `restart`, `stop`, `start` and `logs` (`-n 200`, `-f`), on Linux (systemd: `systemctl --user status personal-assistant.service`, `journalctl --user -u personal-assistant.service`) and macOS (launchd: `computer.themachine.assistant`, log in `~/Library/Logs/TheMachine`). On Linux, enable lingering (`loginctl enable-linger $USER`) to start at boot.
+- **Asking for help:** `assistant support-bundle` saves versions, `assistant doctor`, the service status and logs and the Gateway's warnings in one file, with keys, tokens, passwords and addresses taken out. Inside WSL it lands on your Windows Desktop.
 - **Plugin:** after editing `openclaw-plugin/`, run `openclaw plugins reload personal-assistant-bridge --wait`; no Gateway restart needed.
 - **One collector only:** don't run `assistant.py sync-once` while the service runs. Stop the service before manual syncs or migrations and resume from the existing checkpoints. Never reset a checkpoint to get past throttling.
 - **Google sign-in expired:** a Gmail or Calendar source whose stored sign-in Google revoked shows `google_signin_expired_run_gog_auth_add` and retries hourly. Run `gog auth add <email> --client <client>` again; the next retry picks it up.

@@ -60,7 +60,8 @@ class OnboardingTest(unittest.TestCase):
         self.data.mkdir(parents=True)
         self.path = self.data / 'config.json'
         env = mock.patch.dict(os.environ, {'HOME': str(self.home), 'PATH': f'{self.bin}{os.pathsep}{os.environ["PATH"]}',
-                                           'OPENCLAW_WORKSPACE': str(self.home / 'workspace')})
+                                           'OPENCLAW_WORKSPACE': str(self.home / 'workspace'),
+                                           'ASSISTANT_SERVICE_MANAGER': 'systemd'})  # the stubs are systemd's, also on macOS
         env.start()
         self.addCleanup(env.stop)
         self.stub('systemctl', 'print("inactive")')
@@ -754,9 +755,9 @@ class WhatsAppSyncTest(unittest.TestCase):
         self.assertNotIn('read-only', text)
         self.assertIn('systemctl --user enable --now the-machine-wacli-personal-whatsapp.service', self.calls())
         unit.unlink()
-        import fcntl
+        import portable
         with open(store / 'LOCK', 'a') as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
+            portable.lock(held)
             ui = FakeUI(answers=[str(store)])
             onboarding.step_whatsapp({'wacli': wacli}, account, ui)
         self.assertFalse(unit.exists())

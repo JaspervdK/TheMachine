@@ -9,7 +9,7 @@ attributes before it is stored, shown or sent: no scripts, event handlers, frame
 from __future__ import annotations
 
 import datetime as dt
-import fcntl
+import portable
 import html
 import json
 import os
@@ -209,7 +209,7 @@ def save(config, account_id, value, source):
         raise ValueError('Signatures can only be saved with a database path in config.json')
     where.parent.mkdir(parents=True, exist_ok=True)
     with open(where.with_name(where.name + '.lock'), 'w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        portable.lock(lock)
         current = load(config)
         if source != 'owner' and (current.get(account_id) or {}).get('source') == 'owner':
             return current[account_id]
@@ -229,7 +229,7 @@ def remove(config, account_id):
     if not where or not where.exists():
         return
     with open(where.with_name(where.name + '.lock'), 'w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        portable.lock(lock)
         current = load(config)
         if current.pop(account_id, None) is None:
             return

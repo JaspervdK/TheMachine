@@ -30,7 +30,7 @@ import base64
 import datetime as dt
 import email.parser
 import email.policy
-import fcntl
+import portable
 import json
 import os
 import re
@@ -188,7 +188,7 @@ def save_signin(path, refresh_token, scopes):
     path = Path(path).expanduser()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with open(str(path) + '.lock', 'a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        portable.lock(lock)
         _write_signin(path, refresh_token, scopes)
 
 
@@ -219,7 +219,7 @@ def _direct(config, account, scope):
         raise GraphError('microsoft_graph_not_configured')
     path = credential_path(config, account)
     with open(str(path) + '.lock', 'a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        portable.lock(lock)
         saved = _saved(path)
         granted = set(saved.get('scopes') or [])
         if not ANSWERS.get(scope, {scope}) & granted:

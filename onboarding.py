@@ -9,7 +9,6 @@ after you say yes. Secrets are read without echo, written only to files with mod
 data directory, and never printed.
 """
 import datetime as dt
-import fcntl
 import getpass
 import hashlib
 import importlib.util
@@ -29,8 +28,11 @@ import urllib.request
 from contextlib import closing
 from pathlib import Path
 
+import portable
+import service
+
 ROOT = Path(__file__).resolve().parent
-UNIT_NAME = 'personal-assistant.service'
+UNIT_NAME = service.UNIT_NAME
 # Connector name -> account id in config.example.json.
 CONNECTORS = {'gmail': 'work-gmail', 'calendar': 'work-calendar', 'slack': 'work-slack',
               'crm': 'work-crm', 'android': 'personal-android', 'whatsapp': 'personal-whatsapp', 'gateway': 'openclaw-gateway'}
@@ -377,11 +379,7 @@ def telegram_from_pairing(openclaw, ui, wait=120):
 # ---------------------------------------------------------------- detection for the wizard
 
 def owner_name():
-    try:
-        import pwd
-        return pwd.getpwuid(os.getuid()).pw_gecos.split(',')[0].strip()
-    except (ImportError, KeyError):
-        return ''
+    return portable.owner_name()
 
 
 def gog_env(config):
@@ -520,8 +518,8 @@ def set_telegram(config_path, owner=None, remove_bot=False, restart=True, runner
         config['telegram_owner'] = ''
         config.pop('telegram_account', None)
     save(config_path, config)
-    if restart and shutil.which('systemctl'):
-        runner(['systemctl', '--user', 'restart', UNIT_NAME], timeout=60)
+    if restart and service.available():
+        service.restart(UNIT_NAME, run=runner)
     return notes
 
 
@@ -1034,8 +1032,8 @@ def store_busy(store):
     """Whether another wacli (such as your own sync) holds the store: then that one keeps it synced."""
     try:
         with open(Path(store) / 'LOCK', 'a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            portable.lock(lock, blocking=False)
+            portable.unlock(lock)
         return False
     except BlockingIOError:
         return True
@@ -1044,20 +1042,28 @@ def store_busy(store):
 
 
 def whatsapp_sync(wacli, account, ui):
-    """wacli only receives messages while its sync runs: keep one running as a systemd user unit, the
-    store's single writer. Sends hand off to it. Skipped when something else already syncs this store."""
-    unit = home() / '.config/systemd/user' / f"the-machine-wacli-{re.sub(r'[^A-Za-z0-9_-]', '-', account['id'])}.service"
+    """wacli only receives messages while its sync runs: keep one running as a user service (systemd on Linux,
+    launchd on macOS), the store's single writer. Sends hand off to it. Skipped when something else already syncs this store."""
+    name = f"the-machine-wacli-{re.sub(r'[^A-Za-z0-9_-]', '-', account['id'])}.service"
+    unit = service.definition_path(name, home())
     if not unit.exists() and store_busy(account['store']):
         ui.say('  WhatsApp: another wacli already keeps this store synced')
         return
-    if not shutil.which('systemctl'):
+    if not service.available():
         ui.say(f'  WhatsApp: keep it synced yourself: {wacli} --store {account["store"]} sync --follow')
         return
     if not unit.exists() and not ui.yes('Keep WhatsApp synced in the background (wacli sync as a user service)?', True):
         return
-    command = ' '.join(shlex.quote(str(part)) for part in (wacli, '--store', account['store'], 'sync', '--follow', '--presence-mode', 'quiet',
-                                                           '--max-messages', '0', '--max-db-size', '2GB', '--max-reconnect', '10m'))
+    parts = (wacli, '--store', account['store'], 'sync', '--follow', '--presence-mode', 'quiet',
+             '--max-messages', '0', '--max-db-size', '2GB', '--max-reconnect', '10m')
     unit.parent.mkdir(parents=True, exist_ok=True)
+    if service.manager() == 'launchd':
+        unit.write_text(service.plist_text(parts, unit=name, base=home(), throttle=30))
+        started = service.enable(name, run=run)
+        ui.say(f'  WhatsApp: synced by {service.label(name)}' if not started.returncode else
+               f'  WhatsApp: start it with {service.hint("enable", name)}')
+        return
+    command = ' '.join(shlex.quote(str(part)) for part in parts)
     unit.write_text('[Unit]\nDescription=The Machine: keep WhatsApp (wacli) synced\nAfter=network-online.target\n\n'
                     f'[Service]\nExecStart={command}\nRestart=always\nRestartSec=30\nMemoryMax=512M\n\n[Install]\nWantedBy=default.target\n')
     run(['systemctl', '--user', 'daemon-reload'], timeout=30)
@@ -1258,20 +1264,14 @@ def connect(config_path, name, ui, account_id=None, restart=True):
 
 def service_active(config_path=None):
     """Is the service running (and, given a config path, running with that config)?"""
-    if not shutil.which('systemctl') or run(['systemctl', '--user', 'is-active', UNIT_NAME], timeout=15).stdout.strip() != 'active':
+    if not service.active(UNIT_NAME, run=run):
         return False
     if config_path is None:
         return True
-    env = run(['systemctl', '--user', 'show', UNIT_NAME, '-p', 'Environment', '--value'], timeout=15).stdout
-    found = re.search(r'(?:^|\s)"?ASSISTANT_CONFIG=([^"\s]+)', env)
+    env = service.environment(UNIT_NAME, run=run)
     # Without ASSISTANT_CONFIG the service reads the default under its own HOME (not this process's).
-    unit_home = re.search(r'(?:^|\s)"?HOME=([^"\s]+)', env)
-    try:
-        import pwd
-        user_home = pwd.getpwuid(os.getuid()).pw_dir
-    except (ImportError, KeyError):
-        user_home = str(Path.home())
-    used = Path(found.group(1)) if found else Path(unit_home.group(1) if unit_home else user_home) / '.local/share/personal-assistant/config.json'
+    used = Path(env['ASSISTANT_CONFIG']) if env.get('ASSISTANT_CONFIG') else \
+        Path(env.get('HOME') or portable.home_of_user()) / '.local/share/personal-assistant/config.json'
     return used.expanduser().resolve() == Path(config_path).expanduser().resolve()
 
 
@@ -1296,12 +1296,12 @@ def now():
 def restart_and_sync(config, account_ids, ui, wait=90, config_path=None):
     if not service_active(config_path):
         ui.say(f'  The running service reads another config; restart the one that reads {config_path} to start syncing.'
-               if config_path and service_active() else f'  Start syncing with: systemctl --user restart {UNIT_NAME}')
+               if config_path and service_active() else f'  Start syncing with: {service.hint("restart")}')
         return False
     since = now()
-    result = run(['systemctl', '--user', 'restart', UNIT_NAME], timeout=60)
+    result = service.restart(UNIT_NAME, run=run)
     if result.returncode or not healthy(config, 30):
-        ui.say(f'  The service did not come back; see: journalctl --user -u {UNIT_NAME} -n 50')
+        ui.say(f'  The service did not come back; see: {service.hint("logs")}')
         return False
     return first_sync(config, account_ids, since, ui, wait)
 
@@ -1359,7 +1359,7 @@ def first_sync(config, account_ids, since, ui, wait=90):
 
 def dashboard_served(config):
     """The tailnet URL that proxies to this service, from `tailscale serve status`, or None."""
-    tailscale = shutil.which('tailscale')
+    tailscale = portable.tailscale()
     if not tailscale:
         return None
     try:
@@ -1403,7 +1403,7 @@ def serve_command(config):
     the installed dashboard app never collides with OpenClaw's web app or anything else on :443."""
     https = str(config.get('dashboard_host') or '').rpartition(':')[2]
     path = config.get('dashboard_path', '/').rstrip('/') or '/'
-    return ['tailscale', 'serve', '--bg', f'--https={https if https.isdigit() else 443}', '--set-path', path,
+    return ['tailscale' if shutil.which('tailscale') else portable.tailscale() or 'tailscale', 'serve', '--bg', f'--https={https if https.isdigit() else 443}', '--set-path', path,
             f'http://127.0.0.1:{config.get("port", 8787)}']
 
 
@@ -1413,7 +1413,7 @@ def serve_dashboard(config, ui):
     if served:
         ui.say(f'Dashboard: {served}')
         return served
-    if not shutil.which('tailscale'):
+    if not portable.tailscale():
         return None
     command = serve_command(config)
     if not ui.yes(f'Make the dashboard reachable on your tailnet? ({" ".join(command)})', True):
@@ -1615,13 +1615,13 @@ def doctor(config_path, workspace=None):
         if not config.get(key):
             add('✗', f'{key} is empty in config.json', './install.sh, or set it in config.json')
     # Service
-    if shutil.which('systemctl'):
+    if service.available():
         active = service_active()
         add('✓' if active else '✗', 'service ' + ('running' if active else 'not running'),
-            '' if active else f'systemctl --user restart {UNIT_NAME}; then journalctl --user -u {UNIT_NAME} -n 50')
+            '' if active else f'{service.hint("restart")}; then {service.hint("logs")}')
     up = healthy(config)
     add('✓' if up else '✗', f'health on 127.0.0.1:{config.get("port", 8787)} ' + ('OK' if up else 'not answering'),
-        '' if up else f'journalctl --user -u {UNIT_NAME} -n 50')
+        '' if up else service.hint('logs'))
     # OpenClaw bridge
     openclaw = tool(config, 'openclaw')
     if not openclaw:
@@ -1661,10 +1661,10 @@ def doctor(config_path, workspace=None):
     configured = str(config.get('telegram_account') or 'default')
     if bots and configured not in bots:
         add('✗', f'telegram_account {configured} is not a Telegram account in OpenClaw (there: {", ".join(bots)})',
-            f'set "telegram_account": "{telegram_account(owner)}" in config.json, then systemctl --user restart {UNIT_NAME}')
+            f'set "telegram_account": "{telegram_account(owner)}" in config.json, then {service.hint("restart")}')
     elif bots and owner and telegram_account(owner) != configured and len(bots) > 1:
         add('!', f'you are approved on the Telegram account {telegram_account(owner)}, but cards go out through {configured}',
-            f'set "telegram_account": "{telegram_account(owner)}" in config.json, then systemctl --user restart {UNIT_NAME}')
+            f'set "telegram_account": "{telegram_account(owner)}" in config.json, then {service.hint("restart")}')
     # Credentials (a source's own missing credential is reported with that source below)
     for name, path in sorted(config.get('credentials', {}).items()):
         path = Path(path).expanduser()
@@ -1699,7 +1699,7 @@ def doctor(config_path, workspace=None):
         elif point['last_success'] < (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).isoformat():
             add('✗' if point.get('error') else '!', f'{title}: last sync {ago(point["last_success"])}'
                 + (f'; now failing with {point["error"]}' + (f': {hint(point["error"])}' if hint(point['error']) else '') if point.get('error') else ''),
-                f'assistant connect {name}' if point.get('error') else 'assistant sources; journalctl --user -u ' + UNIT_NAME)
+                f'assistant connect {name}' if point.get('error') else 'assistant sources; ' + service.hint('logs'))
         elif point.get('error') and str(point.get('error_at') or '') >= str(point['last_success']):
             add('!', f'{title}: synced {ago(point["last_success"])}; the last try failed with {point["error"]}'
                 + (f' ({hint(point["error"])})' if hint(point['error']) else ''), '' if hint(point['error']) else f'assistant connect {name}')

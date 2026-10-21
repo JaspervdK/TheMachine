@@ -28,6 +28,9 @@ _spec = importlib.util.spec_from_file_location('onboarding', Path(__file__).reso
 onboarding = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(onboarding)
 onboarding._assistant = assistant
+import service  # noqa: E402
+import support  # noqa: E402
+
 _spec = importlib.util.spec_from_file_location('moving', Path(__file__).resolve().with_name('moving.py'))
 moving = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(moving)
@@ -75,7 +78,7 @@ def call(config, action, args=None):
             message = None
         raise CliError(message or f'Service answered HTTP {error.code}') from None
     except urllib.error.URLError:
-        raise CliError('The assistant service is not reachable. Check: systemctl --user status personal-assistant.service') from None
+        raise CliError('The assistant service is not reachable. Check: assistant service status') from None
 
 
 def local(value, fmt='%a %d %b %H:%M'):
@@ -604,8 +607,8 @@ def cmd_hours(config, args):
         raise CliError(str(error)) from None
     if changes:
         assistant.save_hours(args.config, values)
-        if not args.no_restart and assistant.shutil.which('systemctl'):
-            onboarding.run(['systemctl', '--user', 'restart', onboarding.UNIT_NAME], timeout=60)
+        if not args.no_restart and service.available():
+            service.restart(service.UNIT_NAME, run=onboarding.run)
     hours = {**values['work_hours'], 'timezone': values['timezone'], 'digest_at': values['digest_at']}
     if args.json:
         return out_json(hours)
@@ -665,7 +668,7 @@ def cmd_import(config, args):
     print('\nConnect again:')
     for line in result['reconnect']:
         print('  - ' + line)
-    print('\nThen start the service (systemctl --user start personal-assistant) and check with: assistant doctor')
+    print('\nThen start the service (assistant service start) and check with: assistant doctor')
 
 
 def cmd_fleet_pair(config, args):
@@ -709,6 +712,31 @@ def cmd_task_import(config, args):
     invite_id, key = assistant.task_invites.parse_link(args.link)
     root = dashboard_url(config) or 'http://127.0.0.1:' + str(config.get('port', 8787)) + '/'
     print(f'Open this on your dashboard to add the task: {root}#task={invite_id}.{key}')
+
+
+def cmd_service(config, args):
+    """The background service, the same on Linux (systemd) and macOS (launchd)."""
+    if not service.available():
+        raise CliError(f'no service manager here ({service.manager()}); run it yourself: python3 {assistant.ROOT / "assistant.py"} serve')
+    if args.action == 'logs':
+        shown = service.logs(lines=args.lines, follow=args.follow, run=onboarding.run)
+        if isinstance(shown, str):
+            print(shown)
+        return
+    if args.action == 'status':
+        print(service.status_text(run=onboarding.run))
+        return
+    result = {'start': service.start, 'stop': service.stop, 'restart': service.restart}[args.action](service.UNIT_NAME, run=onboarding.run)
+    if result.returncode:
+        raise CliError(f'{args.action} failed: ' + ((result.stderr or result.stdout or '').strip()[:300] or 'no details')
+                       + f'\n  see: assistant service logs')
+    print({'start': 'Started.', 'stop': 'Stopped. Start it again with: assistant service start', 'restart': 'Restarted.'}[args.action])
+
+
+def cmd_support_bundle(config, args):
+    path = support.bundle(args.config, out=args.out, doctor=onboarding.doctor)
+    print(f'Saved {path}\nIt holds versions, doctor, the service and Gateway logs and config.json without keys, tokens,\n'
+          'passwords or addresses. Look through it, then send it to whoever helps you.')
 
 
 def cmd_raw(config, args):
@@ -812,6 +840,12 @@ def parser():
     c.add_argument('--why', help='one line for the owner: what repeated work this comes from')
     c = add('task-import', 'Add a task someone sent you by email, from its link (opens your dashboard to confirm)', cmd_task_import)
     c.add_argument('link', help="the task link from the email, in quotes: 'https://…/t/…#k=…'")
+    c = add('service', 'The background service: status, start, stop, restart or its logs (systemd on Linux, launchd on macOS)', cmd_service)
+    c.add_argument('action', choices=('status', 'start', 'stop', 'restart', 'logs'))
+    c.add_argument('-n', '--lines', type=int, default=50, help='with logs: how many lines')
+    c.add_argument('-f', '--follow', action='store_true', help='with logs: keep printing new lines')
+    c = add('support-bundle', 'Save versions, doctor and recent logs in one file to send when asking for help; no keys or tokens', cmd_support_bundle)
+    c.add_argument('--out', help='folder to save it in (default: here; on Windows WSL your Windows Desktop)')
     c = add('raw', 'Call any non-owner service action with JSON args', cmd_raw)
     c.add_argument('action')
     c.add_argument('args', nargs='?', help='JSON object')
@@ -821,7 +855,7 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        args.func({} if args.func in (cmd_doctor, cmd_import) else load_config(args.config), args)
+        args.func({} if args.func in (cmd_doctor, cmd_import, cmd_service, cmd_support_bundle) else load_config(args.config), args)
     except CliError as error:
         sys.exit(f'assistant: {error}')
     except BrokenPipeError:

@@ -51,6 +51,8 @@ import next_actions
 import browser_login
 import browser_viewer
 import preparation_state
+import portable
+import service
 
 ROOT = Path(__file__).resolve().parent
 # How reviews and Do it work; edits show as markers on the hit-rate chart.
@@ -667,7 +669,13 @@ def gog_signin_command(config, account):
 def gog_token_path(config, account):
     """gog's file-keyring entry for this account's refresh token (token:<client>:<email>, base64url)."""
     name = base64.urlsafe_b64encode(f"token:{account.get('client', '')}:{account.get('email', '')}".encode()).decode().rstrip('=')
-    root = config.get('gog_keyring_dir') or Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share') / 'gogcli/keyring'
+    root = config.get('gog_keyring_dir')
+    if not root:
+        # gog keeps its data in the platform's own place: XDG on Linux, Application Support on macOS.
+        found = [Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share') / 'gogcli/keyring']
+        if sys.platform == 'darwin':
+            found.insert(0, Path.home() / 'Library/Application Support/gogcli/keyring')
+        root = next((folder for folder in found if folder.is_dir()), found[-1])
     return Path(root).expanduser() / ('_gogcli_key_v1_' + name)
 
 
@@ -4641,23 +4649,16 @@ def fault_event(account, row, config):
 
 def restart_self(delay=5):
     """Restart this service a few seconds from now, from outside its own process, so the merge result
-    is saved first. Only when it runs under systemd; returns whether a restart was scheduled."""
-    if not os.environ.get('INVOCATION_ID') or not shutil.which('systemctl'):
+    is saved first. Only when it runs under systemd or launchd; returns whether a restart was scheduled."""
+    if not service.running_as_service() or not service.available():
         return False
-    try:
-        unit = next((part for part in Path('/proc/self/cgroup').read_text().strip().split('/')[::-1] if part.endswith('.service')), None)
-    except OSError:
-        unit = None
-    unit = unit or 'personal-assistant.service'
-    try:
-        if shutil.which('systemd-run') and not subprocess.run(['systemd-run', '--user', '--quiet', '--collect', f'--on-active={delay}',
-                                                                'systemctl', '--user', 'restart', unit], capture_output=True, timeout=20).returncode:
-            return True
-        subprocess.Popen(['sh', '-c', f'sleep {int(delay)}; exec systemctl --user restart "$0"', unit], start_new_session=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    unit = None
+    if service.manager() == 'systemd':
+        try:
+            unit = next((part for part in Path('/proc/self/cgroup').read_text().strip().split('/')[::-1] if part.endswith('.service')), None)
+        except OSError:
+            unit = None
+    return service.restart_later(unit or service.UNIT_NAME, delay)
 
 
 def sync_gateway(store, config, account, source=None):
@@ -5433,7 +5434,7 @@ def tailnet_login(ip):
     if hit and hit[0] > time.monotonic():
         return hit[1]
     try:
-        out = subprocess.run(['tailscale', 'whois', '--json', ip], capture_output=True, text=True, timeout=5)
+        out = subprocess.run([portable.tailscale() or 'tailscale', 'whois', '--json', ip], capture_output=True, text=True, timeout=5)
         login = json.loads(out.stdout).get('UserProfile', {}).get('LoginName', '') if out.returncode == 0 else ''
     except (OSError, subprocess.TimeoutExpired, ValueError):
         login = ''
@@ -5527,7 +5528,7 @@ class CodexAppServer:
             return
         try:
             self.proc = popen([str(binary), 'app-server'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+                              stderr=subprocess.DEVNULL, text=True, **portable.new_group())
         except OSError:
             return
         self.timer = threading.Timer(timeout, self.close)
@@ -5566,12 +5567,7 @@ class CodexAppServer:
         if proc:
             with contextlib.suppress(OSError):
                 proc.stdin.close()
-            for sig in (signal.SIGTERM, signal.SIGKILL):  # its whole group: a child must not hold the pipe open
-                with contextlib.suppress(OSError):
-                    os.killpg(proc.pid, sig)
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    proc.wait(3)
-                    break
+            portable.end_group(proc)  # its whole group: a child must not hold the pipe open
             with contextlib.suppress(OSError, ValueError):
                 proc.stdout.close()
 
@@ -8855,10 +8851,10 @@ def main():
             print(response.read().decode())
         return
     if args.command == 'serve':
-        import fcntl
         lock = Path(config['database']).parent / 'service.lock'
+        service.trim_log()
         with lock.open('w') as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock(handle, blocking=False)
             App(config, args.config).serve()
     elif args.command == 'status':
         app = App(config)

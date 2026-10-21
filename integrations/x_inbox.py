@@ -29,12 +29,14 @@ Encrypted X Chat conversations aren't read or sent to; only the DM inbox is. Hol
 browser lease (exclusive during account selection/restoration) and always closes its own tab. Used
 by connectors/x.py and next_actions.XTransport.
 """
-import argparse, fcntl, importlib.util, json, re, subprocess, sys, time, unicodedata, urllib.parse, uuid, os
+import argparse, importlib.util, json, re, subprocess, sys, time, unicodedata, urllib.parse, uuid, os
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import browser_cdp  # noqa: E402
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))
+import portable  # noqa: E402
 
 LEASE = Path(__file__).resolve().parent / 'browser-lease.py'
 OWNER = 'x-inbox-' + str(os.getpid()) + '-' + uuid.uuid4().hex[:6]
@@ -412,7 +414,7 @@ def one_at_a_time(wait=180):
     deadline = time.time() + wait
     while True:
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock(handle, blocking=False)
             return handle
         except BlockingIOError:
             if time.time() > deadline:
@@ -507,7 +509,7 @@ def tab_guard():
     OPEN_TABS.parent.mkdir(parents=True, exist_ok=True)
     handle = OPEN_TABS.with_suffix('.lock').open('a')
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portable.lock(handle, blocking=False)
     except BlockingIOError:
         handle.close()
         raise Fail('This inbox reader already has a browser run in progress') from None

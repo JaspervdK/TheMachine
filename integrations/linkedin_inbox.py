@@ -20,12 +20,14 @@ in SENDS_LOG; a --token that already has a sent or uncertain entry is never sent
 Holds the shared browser lease (integrations/browser-lease.py) while it runs and always
 closes its own tab. Used by connectors/linkedin.py and next_actions.py.
 """
-import argparse, json, os, subprocess, sys, time, uuid, fcntl, re
+import argparse, json, os, subprocess, sys, time, uuid, re
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import browser_cdp  # noqa: E402
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))
+import portable  # noqa: E402
 
 LEASE = Path(__file__).resolve().parent / 'browser-lease.py'
 OWNER = 'linkedin-inbox-' + str(os.getpid()) + '-' + uuid.uuid4().hex[:6]
@@ -352,7 +354,7 @@ def tab_guard():
     OPEN_TABS.parent.mkdir(parents=True, exist_ok=True)
     handle = OPEN_TABS.with_suffix('.lock').open('a')
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portable.lock(handle, blocking=False)
     except BlockingIOError:
         handle.close()
         raise Fail('This inbox reader already has a browser run in progress') from None
@@ -521,7 +523,7 @@ def cmd_send(a):
     if not a.yes: return send_locked(a)
     SENDS_LOG.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
     with (SENDS_LOG.parent/'send.lock').open('a') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX)
+        portable.lock(lock)
         return send_locked(a)
 
 

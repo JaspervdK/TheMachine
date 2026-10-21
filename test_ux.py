@@ -255,7 +255,7 @@ class UX(unittest.TestCase):
         report=reports/'261011-draft.md';report.write_text('Real draft');(self.root/'secret.txt').write_text('Private')
         with self.store.connect() as db:db.execute('UPDATE suggestions SET body=?',('memory/assistant/261011-draft.md',))
         with patch.object(a,'WORKSPACE',self.root):
-            self.assertEqual(self.store.result_document(self.sid,'memory/assistant/261011-draft.md'),report)
+            self.assertEqual(self.store.result_document(self.sid,'memory/assistant/261011-draft.md'),report.resolve())
             with self.assertRaises(ValueError):self.store.result_document(self.sid,'secret.txt')
             with self.assertRaises(ValueError):self.store.result_document(self.sid,'memory/assistant/../../secret.txt')
             report.unlink();report.symlink_to(self.root/'secret.txt')

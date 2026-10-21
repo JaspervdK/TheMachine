@@ -1,5 +1,5 @@
 """Disposable data only: concurrent edits, export boundaries and attributable WhatsApp receipts."""
-import fcntl
+import portable
 import json
 import sqlite3
 import subprocess
@@ -82,6 +82,6 @@ class ExportBoundaries(unittest.TestCase):
             self.assertEqual(wal.read_text(),'uncommitted bytes');self.assertEqual(config.read_text(),'{}')
             wal.unlink()
             with (root/'service.lock').open('w') as lock:
-                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                portable.lock(lock,blocking=False)
                 with self.assertRaises(moving.MoveError):moving.import_(root/'missing.tar.gz',config,force=True)
             self.assertEqual(config.read_text(),'{}')

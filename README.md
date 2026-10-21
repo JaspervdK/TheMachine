@@ -4,15 +4,25 @@ A private assistant inbox for [OpenClaw](https://docs.openclaw.ai). It collects 
 
 Website: [themachine.computer](https://themachine.computer). Rather not run it yourself? The same Machine is also [hosted for you](https://themachine.computer/pricing) on a private server in the EU (beta); export and import move everything between the two.
 
-**Early release.** One owner per installation. Linux/systemd for managed installs. Your core assistant needs no cloud account; the optional Fleet and Friends connections use The Machine Network.
+**Early release.** One owner per installation. Runs on Linux; macOS and Windows are in beta. Your core assistant needs no cloud account; the optional Fleet and Friends connections use The Machine Network.
 
 ## Quick start
+
+**Linux and macOS (beta):**
 
 ```bash
 git clone https://github.com/Salesflare/TheMachine.git ~/.openclaw/workspace/tools/personal-assistant
 cd ~/.openclaw/workspace/tools/personal-assistant
 ./install.sh
 ```
+
+**Windows (beta),** in PowerShell. It sets up WSL2 and runs the same installer inside it:
+
+```powershell
+irm https://raw.githubusercontent.com/Salesflare/TheMachine/main/install.ps1 | iex
+```
+
+`./install.sh --dry-run` checks the prerequisites and shows what it would write, without changing anything.
 
 Follow [Getting started](docs/getting-started.md). The installer can help set up OpenClaw, connect sources and publish the owner-authenticated dashboard. Start with a preview; enable recurring reviews when ready. `assistant doctor` checks the installation without syncing your accounts.
 
@@ -50,12 +60,21 @@ Follow [Getting started](docs/getting-started.md). The installer can help set up
 
 ## Requirements
 
-- Linux with systemd user services (macOS works for development and tests, not as a managed service).
+| | Linux | macOS (beta) | Windows (beta) |
+|---|---|---|---|
+| Runs as | systemd user service | launchd agent | systemd user service inside WSL2 (Ubuntu 24.04) |
+| Install | `./install.sh` | `./install.sh` (Homebrew: `brew install python@3.12 node@24`) | `install.ps1` (above) |
+| Logs | journald | `~/Library/Logs/TheMachine` | journald inside WSL |
+| Not there yet | | Browser viewer, Gateway log source | Browser viewer |
+
+`assistant service status|restart|stop|start|logs` works the same everywhere. `assistant support-bundle` saves versions, checks and recent logs in one file, without keys or tokens, to send when you need help. Beta means it is tested in CI but not yet run for long on a real computer.
+
+- Your own user account, not root.
 - **Python 3.12+** (standard library only).
 - **Node.js 24.16+ within the 24.x series, or 26.1+** (`>=24.16.0 <25 || >=26.1.0`, matching OpenClaw's engine range). Node 22 and 25 are unsupported. The installer resolves mise/asdf shims and the installed npm package.
 - **OpenClaw 2026.10.5 or later**, with the Gateway running. Its Telegram channel (your bot) is optional: without it, cards reach you through the dashboard app. Without it, `./install.sh` in a terminal offers to install and set it up (below). CI tests 2026.10.5 and the latest release every week; see [Known limitations](#known-limitations).
 - Optional, per feature:
-  - `gog` (Google Workspace CLI) for Gmail and Calendar (OAuth per account, file keyring; `assistant connect gmail` signs you in).
+  - `gog` (Google Workspace CLI) for Gmail and Calendar (OAuth per account, file keyring on every OS, so the background service never waits on a Keychain prompt; `assistant connect gmail` signs you in).
   - Your own Microsoft Entra app registration for Outlook mail and calendar (`assistant connect outlook` signs you in with a device code).
   - **Tailscale** for dashboard access (the dashboard only serves your Tailscale identity).
   - **Caddy** only if you want the dashboard on your own domain (`deploy/Caddyfile`). Not needed: `tailscale serve` gives it an HTTPS address on your tailnet.

@@ -8,6 +8,10 @@
     ./install.sh --browser-viewer    existing install: give the assistant a browser of its own that you watch and
                                      use from yours (noVNC on 127.0.0.1:6080; see browser_viewer.py)
     ./install.sh --uninstall --purge also delete the data directory (config, database, secrets)
+    ./install.sh --dry-run           check prerequisites and show what would be written; changes nothing
+
+Linux runs the service as a systemd user unit, macOS as a launchd agent (service.py). On Windows, run
+install.ps1: it sets up WSL2 and runs this installer inside it.
 
 In a terminal, a healthy install goes on to connect each source (onboarding.py: sign-ins,
 keys and IDs, a test read and the first sync), offers the dashboard on your tailnet and a
@@ -38,13 +42,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import onboarding
+import service
 from onboarding import CONNECTORS, expand, write_private
 
 ROOT = Path(__file__).resolve().parent
 PLUGIN_ID = 'personal-assistant-bridge'
-UNIT_NAME = 'personal-assistant.service'
+UNIT_NAME = service.UNIT_NAME
 MIN_PYTHON = (3, 12)
 NODE_REQUIREMENT = '>=24.16.0 <25 or >=26.1.0 (OpenClaw 2026.10.5 or later)'
+
+
+MACOS = service.manager() == 'launchd'
 
 
 def supported_node(version):
@@ -70,7 +78,7 @@ class Paths:
         self.home = Path(home or os.environ.get('HOME') or Path.home())
         self.data = self.home / '.local/share/personal-assistant'
         self.config = Path(os.environ.get('ASSISTANT_CONFIG') or self.data / 'config.json')
-        self.unit = self.home / '.config/systemd/user' / UNIT_NAME
+        self.unit = service.definition_path(UNIT_NAME, self.home)
         self.cli = self.home / '.local/bin/assistant'
         self.workspace = Path(os.environ.get('OPENCLAW_WORKSPACE') or self.home / '.openclaw/workspace')
 
@@ -160,7 +168,7 @@ def check_prerequisites():
     facts['python'] = sys.executable
     if hasattr(os, 'geteuid') and os.geteuid() == 0:
         ok = False
-        say('  FAIL  running as root: run ./install.sh as the user who runs OpenClaw (the service is a systemd user unit)')
+        say('  FAIL  running as root: run ./install.sh as the user who runs OpenClaw (the service runs as that user)')
 
     node = resolve_tool(shutil.which('node'))
     node_version = version_tuple(run([node, '--version']).stdout) if node else None
@@ -168,7 +176,8 @@ def check_prerequisites():
         say(f'  ok    node {".".join(map(str, node_version))} ({node})')
     else:
         ok = False
-        say(f'  FAIL  need Node.js {NODE_REQUIREMENT}; install a supported version and rerun')
+        say(f'  FAIL  need Node.js {NODE_REQUIREMENT}; install a supported version and rerun'
+            + ('' if not MACOS else ' (Homebrew: brew install node@24, then put it on your PATH as brew says)'))
     facts['node'] = node
 
     openclaw = resolve_tool(shutil.which('openclaw'))
@@ -189,14 +198,17 @@ def check_prerequisites():
         ok = False
         say('  FAIL  cannot locate the OpenClaw npm package; expose its installed CLI on PATH and rerun')
 
-    for name, hint in (('gog', 'Gmail and Calendar sources: install gog (gogcli); signing in comes later in this setup'),
+    manager = {'systemd': 'systemctl', 'launchd': 'launchctl'}.get(service.manager(), 'systemctl')
+    for name, hint in (('gog', 'Gmail and Calendar sources: install gog (gogcli' + (', brew install gogcli' if MACOS else '')
+                        + '); signing in comes later in this setup'),
                        ('tailscale', 'dashboard access: install Tailscale and join your tailnet'),
                        ('caddy', 'only needed to serve the dashboard on a custom domain (see deploy/Caddyfile)'),
                        ('wacli', 'only needed for the WhatsApp source'),
-                       ('systemctl', 'needed to run the service; without systemd start `python3 assistant.py serve` yourself')):
-        found = shutil.which(name)
+                       (manager, 'needed to run the service; without it start `python3 assistant.py serve` yourself')):
+        found = onboarding.portable.tailscale() if name == 'tailscale' else shutil.which(name)
         facts[name] = found
         say(f'  {"ok   " if found else "skip "} {name}{"" if found else ": " + hint}')
+    facts['service'] = service.available()
     fresh = not Paths().config.exists()
     if fresh and not facts['tailscale'] and not (os.environ.get(ENV['tailscale_owner']) and os.environ.get(ENV['dashboard_host'])):
         ok = False
@@ -621,16 +633,43 @@ WantedBy=default.target
 """
 
 
+def service_path(facts):
+    bins = [str(Path(p).parent) for p in (facts.get('node'), facts.get('openclaw'), facts.get('gog'), facts.get('wacli')) if p]
+    home = str(Paths().home)
+    return ':'.join(dict.fromkeys(bins + [home + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin',
+                                          '/usr/sbin', '/sbin']))
+
+
+def agent_text(config, facts, config_path=None, paths=None):
+    """The launchd agent for macOS: the same program, environment and restart policy as the systemd unit."""
+    paths = paths or Paths()
+    return service.plist_text([facts.get('python') or sys.executable, str(ROOT / 'assistant.py'), 'serve'], workdir=ROOT,
+                              env={'PATH': service_path(facts), 'PYTHONUNBUFFERED': '1', 'HOME': str(paths.home),
+                                   'ASSISTANT_CONFIG': str(config_path or paths.config), 'OPENCLAW_WORKSPACE': str(paths.workspace)},
+                              base=paths.home)
+
+
 def install_unit(config, facts, paths, start):
-    text = unit_text(config, facts, paths.config)
+    launchd = service.manager() == 'launchd'
+    text = agent_text(config, facts, paths.config, paths) if launchd else unit_text(config, facts, paths.config)
     changed = not paths.unit.exists() or paths.unit.read_text() != text
     if changed:
         paths.unit.parent.mkdir(parents=True, exist_ok=True)
         paths.unit.write_text(text)
-    say(f'systemd unit: {"written" if changed else "unchanged"} {paths.unit}')
-    if not facts.get('systemctl'):
-        say('  systemctl not found: start the service with `python3 assistant.py serve`')
+    say(f'{"launchd agent" if launchd else "systemd unit"}: {"written" if changed else "unchanged"} {paths.unit}')
+    if not facts.get('service', facts.get('systemctl')):
+        say(f'  {"launchctl" if launchd else "systemctl"} not found: start the service with `python3 assistant.py serve`')
         return None if not start else False
+    if launchd:
+        if not start:
+            say('  not started (--no-start)')
+            return None
+        result = service.enable(UNIT_NAME, run=run)
+        if result.returncode != 0:
+            say('  could not start it: ' + (result.stderr or result.stdout).strip()[:300])
+            return False
+        say(f'  loaded and started; it starts at login. Log: {service.log_path()}')
+        return True
     reload = run(['systemctl', '--user', 'daemon-reload'])
     if reload.returncode != 0:
         error = (reload.stderr or reload.stdout).strip()
@@ -855,9 +894,9 @@ def guided(paths, since, ui=None):
         if ui.yes('Turn on daily reviews and Telegram cards now? (Do it acts with your accounts only when you tap it;'
                   ' see README "Security model")', previewed):
             config = activate(paths)
-            restarted = run(['systemctl', '--user', 'restart', UNIT_NAME]).returncode == 0
+            restarted = service.restart(UNIT_NAME, run=run).returncode == 0
             say('  Reviews and Telegram cards are on.' if restarted else
-                f'  Saved; restart to apply: systemctl --user restart {UNIT_NAME}')
+                f'  Saved; restart to apply: {service.hint("restart")}')
     return config
 
 
@@ -866,7 +905,7 @@ def next_steps(config, healthy, started, paths=None):
     host, path = config.get('dashboard_host', ''), config.get('dashboard_path', '/assistant/')
     lines = ['', 'Next steps:']
     if started:
-        lines.append(f'  - Health: {"OK" if healthy else "not answering yet; check journalctl --user -u " + UNIT_NAME + " -n 50"}')
+        lines.append(f'  - Health: {"OK" if healthy else "not answering yet; check " + service.hint("logs")}')
     for account in config.get('accounts', []):
         if onboarding.missing(config, account):
             lines.append(f'  - Connect {onboarding.label(account.get("service", "gmail"))}: assistant connect {onboarding.connect_name(account, config)}')
@@ -882,7 +921,7 @@ def next_steps(config, healthy, started, paths=None):
     elif not onboarding.says_how_you_write(user_md):
         lines.append('  - Let your agent draft how you write and what matters to you from your own messages: assistant profile (you see it first)')
     lines += ['  - Keep `Do it` in mind: it lets the agent act with your accounts. Read README "Security model".',
-              '  - After editing config.json: systemctl --user restart ' + UNIT_NAME]
+              '  - After editing config.json: ' + service.hint('restart')]
     if not config.get('delivery_enabled') or not config.get('review_worker', {}).get('enabled'):
         lines += ['  - See what it would suggest: ./install.sh --preview (one review of the last 7 days by your agent;',
                   '    the cards show here and on the dashboard; nothing is sent and nothing is done in your accounts)',
@@ -894,24 +933,27 @@ def next_steps(config, healthy, started, paths=None):
 # ---------------------------------------------------------------- uninstall
 
 def uninstall(paths, purge, interactive):
-    if shutil.which('systemctl'):
-        stopped = run(['systemctl', '--user', 'disable', '--now', UNIT_NAME])
+    launchd = service.manager() == 'launchd'
+    if service.available():
+        stopped = service.disable_now(UNIT_NAME, run=run)
         if stopped.returncode != 0 and paths.unit.exists():
-            say('Could not stop the service; kept files and data. Check systemctl --user status ' + UNIT_NAME)
+            say('Could not stop the service; kept files and data. Check ' + service.hint('status'))
             return 1
     elif paths.unit.exists():
-        say('Cannot stop the installed service without systemctl; kept files and data.')
+        say('Cannot stop the installed service without its service manager; kept files and data.')
         return 1
     if paths.unit.exists():
         paths.unit.unlink()
         say(f'Removed {paths.unit}')
-    for sync in sorted(paths.unit.parent.glob('the-machine-wacli-*.service')):
+    pattern = service.LABEL_PREFIX + 'wacli-*.plist' if launchd else 'the-machine-wacli-*.service'
+    for sync in sorted(paths.unit.parent.glob(pattern)):
         # The WhatsApp syncs it started; the linked wacli store itself stays.
-        if shutil.which('systemctl'):
-            run(['systemctl', '--user', 'disable', '--now', sync.name])
+        if service.available():
+            unit = 'the-machine-' + sync.stem.removeprefix(service.LABEL_PREFIX) + '.service' if launchd else sync.name
+            service.disable_now(unit, run=run)
         sync.unlink()
         say(f'Removed {sync}')
-    if shutil.which('systemctl'):
+    if shutil.which('systemctl') and not launchd:
         if run(['systemctl', '--user', 'daemon-reload']).returncode != 0:
             say('systemd daemon-reload failed; rerun uninstall after fixing the user service manager.')
             return 1
@@ -949,8 +991,34 @@ def browser_viewer_setup(paths, install=None):
     config = onboarding.load(paths.config)
     config.update(browser_url=url, browser_cdp_url=browser_viewer.CDP_URL)
     onboarding.save(paths.config, config)
-    restarted = run(['systemctl', '--user', 'try-restart', UNIT_NAME]).returncode == 0
-    say('  Cards that wait on the browser now link to it.' if restarted else f'  Saved; restart to apply: systemctl --user restart {UNIT_NAME}')
+    restarted = service.try_restart(UNIT_NAME, run=run).returncode == 0
+    say('  Cards that wait on the browser now link to it.' if restarted else f'  Saved; restart to apply: {service.hint("restart")}')
+    return 0
+
+
+WINDOWS_ROUTE = ('On Windows, The Machine runs inside WSL2 (Linux), next to OpenClaw\'s Gateway. In PowerShell:\n'
+                 '  irm https://raw.githubusercontent.com/Salesflare/TheMachine/main/install.ps1 | iex\n'
+                 'See docs/getting-started.md, "Windows".')
+
+
+def dry_run(paths):
+    """What an install would do here, without writing or starting anything."""
+    if os.name == 'nt':
+        say(WINDOWS_ROUTE)
+        return 0
+    ok, facts = check_prerequisites()
+    manager = service.manager()
+    say(f'\nDry run: nothing written. Service manager: {manager}' + (' (inside WSL2)' if manager == 'systemd' and service.wsl() else ''))
+    say(f'  config      {paths.config}' + (' (kept)' if paths.config.exists() else ' (new)'))
+    say(f'  data        {paths.data} (mode 700; secrets mode 600)')
+    say(f'  CLI         {paths.cli} -> {ROOT / "cli.py"}')
+    say(f'  plugin      openclaw plugins install --link --force --accept-capabilities {ROOT / "openclaw-plugin"}')
+    if manager == 'none':
+        say('  service     none here: start it with `python3 assistant.py serve`')
+    else:
+        text = agent_text({}, facts, paths.config, paths) if manager == 'launchd' else unit_text({}, facts, paths.config)
+        say(f'  service     {paths.unit}:\n' + '\n'.join('    ' + line for line in text.rstrip().splitlines()))
+    say('\nReady to install.' if ok else '\nFix the FAIL items above before installing.')
     return 0
 
 
@@ -964,10 +1032,16 @@ def main(argv=None):
     parser.add_argument('--activate', action='store_true', help='enable reviews and Telegram delivery on an existing install')
     parser.add_argument('--preview', action='store_true', help='existing install: one review of the last 7 days, shown only (assistant preview)')
     parser.add_argument('--browser-viewer', action='store_true', help='existing install: a browser of its own on a virtual display, viewed in yours (127.0.0.1 only)')
+    parser.add_argument('--dry-run', action='store_true', help='check prerequisites and show what would be written; changes nothing')
     parser.add_argument('--health-timeout', type=float, default=30)
     args = parser.parse_args(argv)
     interactive = not args.non_interactive and sys.stdin.isatty()
     paths = Paths()
+    if args.dry_run:
+        return dry_run(paths)
+    if os.name == 'nt':
+        say(WINDOWS_ROUTE)
+        return 1
     if args.purge and not args.uninstall:
         parser.error('--purge only works with --uninstall')
     if args.activate and (args.no_start or args.uninstall or not paths.config.exists()):
@@ -980,6 +1054,8 @@ def main(argv=None):
     if args.browser_viewer:
         if args.uninstall or not paths.config.exists():
             parser.error('--browser-viewer needs an existing installation (no --uninstall)')
+        if service.manager() != 'systemd':
+            parser.error('--browser-viewer runs on Linux only (a virtual display with systemd units)')
         return browser_viewer_setup(paths)
     if args.uninstall:
         return uninstall(paths, args.purge, interactive)

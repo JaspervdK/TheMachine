@@ -2,7 +2,7 @@
 import base64
 from contextlib import contextmanager
 import email.policy
-import fcntl
+import portable
 import datetime
 from email.message import EmailMessage
 from email.utils import format_datetime
@@ -1310,10 +1310,10 @@ class MergeTransport:
         app=app_dir(self.config)
         lock=Path(git(app,'rev-parse','--absolute-git-dir').strip())/'machine-deploy.lock'
         with lock.open('a') as handle:
-            try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            try:portable.lock(handle,blocking=False)
             except BlockingIOError:raise ValueError('Another merge or undo is running. Try this step again.') from None
             try:yield
-            finally:fcntl.flock(handle,fcntl.LOCK_UN)
+            finally:portable.unlock(handle)
 
     def proves(self, action, env):
         """Merging by itself: the fix's new tests must fail on the code without the fix."""

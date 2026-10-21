@@ -29,6 +29,50 @@ def openclaw_package(node):
     return None
 
 
+# Files that test Linux-only parts, skipped elsewhere with the reason (macOS runs natively under launchd; on
+# Windows The Machine runs inside WSL2, which is Linux, so there only the portable core is tested natively).
+BROWSER_VIEWER = 'the browser sign-in runs Chrome in the browser viewer (Xvfb and noVNC), which is Linux-only for now'
+SKIP = {
+    'test_browser_login.py': {'darwin': BROWSER_VIEWER, 'win32': BROWSER_VIEWER},
+}
+
+
+# On Windows The Machine runs inside WSL2, which is Linux, so the Linux jobs test it. Natively, Windows runs the
+# parts that do not depend on the operating system: the portable core, connectors, parsing and the Node helpers.
+WINDOWS_NATIVE = {
+    'test_portable.py', 'test_install.py', 'test_gateway.py', 'test_profile.py', 'test_connectors.py',
+    'test_new_connectors.py', 'test_connector_shortcut.py', 'test_connector_trello.py', 'test_github_stripe.py',
+    'test_salesflare.py', 'test_google_broker.py', 'test_discovery.py', 'test_enrichment.py', 'test_email_bodies.py',
+    'test_exclusions.py', 'test_gmail_exclusions.py', 'test_ingestion_recovery.py', 'test_android_coalescing.py',
+    'test_friends.py', 'test_fleet_free.py', 'test_fleet_brief.py', 'test_fleet_receipts.py', 'test_review_worker.py',
+    'test_browser_cdp.py', 'test_browser_login_recovery.py', 'test_android_feed.mjs', 'test_x_paging.mjs',
+    'test_taglines.mjs', 'test_telegram_receipt.mjs',
+}
+IN_WSL2 = 'on Windows The Machine runs inside WSL2 (Linux), which the Linux jobs test'
+
+
+def skipped(file):
+    if sys.platform == 'win32' and file.name not in WINDOWS_NATIVE:
+        return IN_WSL2
+    for platforms, reason in SKIP.get(file.name, {}).items():
+        if sys.platform.startswith(platforms):
+            return reason
+    return None
+
+
+def browsers():
+    """Chrome or Chromium, by name on PATH, then where macOS and Windows install them."""
+    for name in ('chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome', 'chrome'):
+        if found := shutil.which(name):
+            yield found
+    if sys.platform == 'darwin':
+        yield from ('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium')
+    if os.name == 'nt':
+        for base in (os.environ.get('PROGRAMFILES'), os.environ.get('PROGRAMFILES(X86)'), os.environ.get('LOCALAPPDATA')):
+            if base:
+                yield str(Path(base) / 'Google/Chrome/Application/chrome.exe')
+
+
 def main():
     node = shutil.which('node')
     if not node:
@@ -42,16 +86,25 @@ def main():
         env = {k:v for k,v in os.environ.items() if not k.startswith(('ASSISTANT_','OPENCLAW_','GOG_'))
                and k not in ('DBUS_SESSION_BUS_ADDRESS','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME')}
         env.update(HOME=home,PATH=str(Path(node).parent)+os.pathsep+os.environ.get('PATH',''))
+        if os.name == 'nt':
+            env['PYTHONUTF8'] = '1'  # the console's code page can't print everything the suites print
         package = os.environ.get('OPENCLAW_PACKAGE_DIR') or openclaw_package(node)
         if package:
             env['OPENCLAW_PACKAGE_DIR'] = package
-        browser = os.environ.get('CHROMIUM_PATH') or next(
-            (found for name in ('chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome') if (found := shutil.which(name))), None)
+        browser = os.environ.get('CHROMIUM_PATH') or next((found for found in browsers() if Path(found).exists()), None)
         if browser:
             env['CHROMIUM_PATH'] = browser
         chosen = sys.argv[1:]
         files = [ROOT / name for name in chosen] if chosen else sorted(ROOT.glob('test_*.py')) + sorted(ROOT.glob('test_*.mjs'))
         jobs = max(1, int(os.environ.get('THE_MACHINE_TEST_JOBS') or min(os.cpu_count() or 2, 8)))
+        limit = int(os.environ.get('THE_MACHINE_TEST_TIMEOUT') or 600)
+        skips = {file.name: reason for file in files if (reason := skipped(file))}
+        files = [file for file in files if file.name not in skips]
+        for name, reason in sorted(skips.items()):
+            if reason != IN_WSL2:
+                print(f'skip {name}: {reason}', flush=True)
+        if wsl2 := sum(reason == IN_WSL2 for reason in skips.values()):
+            print(f'skip {wsl2} files: {IN_WSL2}', flush=True)
 
         def run(file):
             command = [sys.executable, '-m', 'unittest', file.stem] if file.suffix == '.py' else [node, str(file)]
@@ -59,16 +112,17 @@ def main():
             own = Path(home) / file.name
             own.mkdir()
             try:
-                result = subprocess.run(command, cwd=ROOT, env={**env, 'HOME': str(own)}, timeout=600,
+                # Windows finds the home folder through USERPROFILE, not HOME.
+                result = subprocess.run(command, cwd=ROOT, env={**env, 'HOME': str(own), 'USERPROFILE': str(own)}, timeout=limit,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
                 ok, output = result.returncode == 0, result.stdout
             except subprocess.TimeoutExpired as timeout:
                 out = timeout.output or ''
-                ok, output = False, (out.decode(errors='replace') if isinstance(out, bytes) else out) + '\nTimed out after 600 s'
+                ok, output = False, (out.decode(errors='replace') if isinstance(out, bytes) else out) + f'\nTimed out after {limit} s'
             return file.name, ok, output, time.monotonic() - started
 
         failed, took = [], []
-        print(f'Running {len(files)} test files, {jobs} at a time', flush=True)
+        print(f'Running {len(files)} test files, {jobs} at a time' + (f' ({len(skips)} skipped on {sys.platform})' if skips else ''), flush=True)
         with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
             # the biggest files first, so a slow one doesn't start last and keep everyone waiting
             started = [pool.submit(run, file) for file in sorted(files, key=lambda f: -f.stat().st_size)]

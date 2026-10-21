@@ -137,7 +137,8 @@ class InstallerTest(unittest.TestCase):
 
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items() if not k.startswith(('ASSISTANT_', 'OPENCLAW_'))}
-        env.update(HOME=str(self.home), PATH=str(self.bin), ASSISTANT_PLUGIN_RETRY_WAIT='0')  # no real Gateway to wait for
+        env.update(HOME=str(self.home), PATH=str(self.bin), ASSISTANT_PLUGIN_RETRY_WAIT='0',  # no real Gateway to wait for
+                   ASSISTANT_SERVICE_MANAGER='systemd')  # the stubs are systemd's, also on macOS
         env.update(ANSWERS)
         env.update(extra)
         return env
@@ -449,7 +450,7 @@ class WizardTest(unittest.TestCase):
 
     def test_mise_shim_uses_the_installed_executable_and_package(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()  # macOS: /var is /private/var
             shim = root / 'shims/openclaw'
             binary = root / 'node/26.1/bin/openclaw'
             package = binary.parent.parent / 'lib/node_modules/openclaw'
