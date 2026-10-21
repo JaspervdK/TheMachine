@@ -1843,11 +1843,12 @@ function fleetRule(work,f,m,k,r,wide){const id=`${work.id}-${m.member_id}-${k}`.
  let ex='';
  if(wide){const own=(work.exceptions||{})[k]||[],free=work.members.filter(x=>!own.some(e=>e.member_id===x.member_id));
   const pills=own.map(e=>`<span class="fleet-ex">${esc(e.name)}: ${esc(FLEET_SEG[e.rule]||e.rule)}${!noHow&&e.details!==r.details?(e.details?', with names':', without names'):''}${e.own_scope?', own Only about':''}<button type="button" data-fleet-ex-clear="${esc(e.member_id)}" data-fleet="${esc(work.id)}" data-kind="${k}" aria-label="Remove the exception for ${esc(e.name)}" title="Back to the rule for everyone">×</button></span>`).join('');
-  const add=free.length?`<details class="fleet-ex-add"><summary>Different for someone? Add an exception</summary><span class="fleet-ex-pick"><select data-fleet-ex-member aria-label="Teammate">${free.map(x=>`<option value="${esc(x.member_id)}">${esc(x.name)}</option>`).join('')}</select>${rules.filter(v=>v!==r.rule).map(v=>`<button type="button" class="ghost" data-fleet-ex-rule="${v}" data-fleet="${esc(work.id)}" data-kind="${k}">${esc(FLEET_SEG[v])}</button>`).join('')}</span></details>`:'';
+  const add=free.length?`<details class="fleet-ex-add"><summary>Different for someone? Add an exception</summary><span class="fleet-ex-pick"><select data-fleet-ex-member aria-label="Who">${free.map(x=>`<option value="${esc(x.member_id)}">${esc(x.name)}</option>`).join('')}</select>${rules.filter(v=>v!==r.rule).map(v=>`<button type="button" class="ghost" data-fleet-ex-rule="${v}" data-fleet="${esc(work.id)}" data-kind="${k}">${esc(FLEET_SEG[v])}</button>`).join('')}</span></details>`:'';
   ex=pills||add?`<div class="fleet-ex-row">${pills}${add}</div>`:''}
  return `<div class="fleet-rule" data-fleet="${esc(work.id)}" data-member="${esc(m.member_id)}" data-kind="${k}" data-name="${esc(m.name)}"${wide?' data-wide="1"':''}><div class="fleet-rule-kind">${esc(cap(f.kinds[k]))}${FLEET_KIND_Q[k]?`<small>${esc(FLEET_KIND_Q[k])}</small>`:''}</div><div class="fleet-rule-set">${seg('fleet-rule',rules.map(v=>[v,FLEET_SEG[v]]),r.rule,`${cap(f.kinds[k])}, for ${whom}`)}${how}${scope}<p class="fleet-preview muted">${esc(fleetPreview(m.name,k,r,sc,wide))}</p>${ex}</div></div>`}
 // A Fleet's rules: one per kind of question for everyone in it, with exceptions for someone in particular.
-const fleetRules=(work,f,several)=>`<div class="fleet-rules-head"><h3>What your Machine answers${several?' in '+esc(work.name):''}</h3><p class="muted">One rule per kind of question, for everyone in ${several?esc(work.name):'your Fleet'}.</p></div><div class="fleet-rules fleet-mate">${Object.entries(work.rules||{}).map(([k,r])=>fleetRule(work,f,{member_id:'*',name:'everyone'},k,r,true)).join('')}</div>`;
+// whom: who the rules are for in the heading ("your friends"); else the Fleet's name when there are several.
+const fleetRules=(work,f,several,whom)=>`<div class="fleet-rules-head"><h3>What your Machine answers${whom?' '+esc(whom):several?' in '+esc(work.name):''}</h3><p class="muted">One rule per kind of question, for ${whom?'all '+esc(whom):'everyone in '+(several?esc(work.name):'your Fleet')}.</p></div><div class="fleet-rules fleet-mate">${Object.entries(work.rules||{}).map(([k,r])=>fleetRule(work,f,{member_id:'*',name:'everyone'},k,r,true)).join('')}</div>`;
 const fleetScopeOf=b=>({only:b.querySelector('[data-scope="only"]').value,never:b.querySelector('[data-scope="never"]').value,work_only:b.querySelector('[data-scope="work_only"]').checked});
 // The team brief (what the Fleet saw) and free questions, per Work Fleet. A teammate's free question and answers are their own words: shown as text, never acted on.
 const fleetDay=at=>esc(new Date(at).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}));
@@ -1976,18 +1977,21 @@ async function fleetView(refresh=false,cached=false){const view=$('#fleet-view')
     +(asked.length?`<div class="list">${asked.map(a=>`<article><p><strong>${esc(a.name)}</strong> · ${esc(a.question)}</p><p class="muted">${esc(a.status==='answered'?a.answer:a.status==='waiting'?'Waiting for them to allow it':a.status==='asked'?(a.delivered===false?'Not delivered yet':'Asked'):a.status)}</p></article>`).join('')}</div>`:''));
    h+=fleetBrief(f,work)+box('Ask anything','',fleetFree(f,work,several))}
   else h+=fleetIntroOffers(f,work,inFleet);
-  panes.push({id:'fleet-'+work.id,label:work.name,html:h+'</div>'})}
+  panes.push({id:'fleet-'+work.id,label:work.name,html:h+'</div>',at:work.joined_at})}
+ if(family)panes.push({id:'family',label:family.name||'Family',html:head(family,(family.people||[]).length)+familySection(f,family),at:family.joined_at});
+ // Every Fleet together, Work and Family, by when you joined or made it (the directory's order when it doesn't say); then Friends, Network, Sharing.
+ const listed=p=>f.fleets.findIndex(x=>p.id===(x.kind==='family'?'family':'fleet-'+x.id));
+ panes.sort((a,b)=>a.at&&b.at&&a.at!==b.at?(a.at<b.at?-1:1):listed(a)-listed(b));
  const fr=f.friends,friendsHtml=friendsSection(f,notices);
  if(friendsHtml)panes.push({id:'friends',label:'Friends',badge:(fr?.in||[]).length,html:friendsHtml});
  {const net=networkSection(f);if(net)panes.push({id:'network',label:'Network',html:net})}
- if(family)panes.push({id:'family',label:family.name||'Family',html:head(family,(family.people||[]).length)+familySection(f,family)});
  // Sharing: every rule in one place. What the three choices mean, once, at the top; per kind a plain question and an example.
  const friendsToo=!!fr&&(f.fleets.find(x=>x.id===fr.id)?.members||[]).length,rulesOf=works.filter(x=>x.members.length),familyToo=!!family&&family.members.length;
  if(rulesOf.length||friendsToo||familyToo){
   let h=`<dl class="fleet-legend" role="note">${[['Ask me first','You choose each time'],['Always','Answered by itself'],['Never','They get “no”'],['Names','Whether they hear who']].map(([t,d])=>`<div><dt>${t}</dt><dd>${d}</dd></div>`).join('')}</dl><p class="muted fleet-never">Never email content, never what your meetings are about. <a class="learn" href="${DOCS}fleet.md#you-decide-per-fleet" target="_blank" rel="noopener">Learn more</a></p>`;
   for(const work of rulesOf)h+=fleetRules(work,f,several);
   h+=friendRules(f);
-  if(familyToo)h+=fleetRules(family,f,true);
+  if(familyToo)h+=fleetRules(family,f,true,'your family');
   h+=box('Meetings and brief','',`<label class="fleet-option"><input type="checkbox" id="fleet-meetings"${f.ask_meetings?' checked':''}><span>${rulesOf.length?`Ask my Work ${several?'Fleets':'Fleet'}${friendsToo?', and a friend who is in the meeting,':''} about the outside people in my meetings this week`:'Ask a friend who is in one of my meetings this week about the other people in it'}<small class="muted">They see those email addresses.</small></span></label>${rulesOf.length?fleetBriefSettings(f):''}`,'fleet-settings');
   panes.push({id:'sharing',label:'Sharing',html:h})}
  panes.push({id:'activity',label:'Activity',html:(told.length?box('Lately','Who joined, asked for a server, had one started, or left.',`<div class="list">${told.map(noticeCard).join('')}</div>`):'')
@@ -2032,9 +2036,9 @@ fleetOn('submit',async e=>{const t=e.target,act=t.classList.contains('family-fre
 // and your rules per friend (the same rule component as teammates). Friends see nothing of your Fleets.
 const friendBtn=(label,attrs,cls='ghost',confirmText='')=>`<button type="button" class="${cls}" ${attrs}${confirmText?` data-confirm-text="${esc(confirmText)}"`:''}>${esc(label)}</button>`;
 const friendBusy=a=>(a.busy||[]).length?a.busy.slice(0,12).map(([s,e])=>{const o={weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'};return `${new Date(s.replace('Z',':00Z')).toLocaleString([],o)}–${new Date(e.replace('Z',':00Z')).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',hourCycle:'h23'})}`}).join(' · ')+(a.busy.length>12?' · …':''):'free the whole time';
-// Your rules per friend: under Sharing with the Fleets' rules, the same component.
+// Your rules for friends: under Sharing with the Fleets' rules, the same component: one rule for all, exceptions per friend.
 function friendRules(f){const fr=f.friends,group=fr&&f.fleets.find(x=>x.id===fr.id);if(!group||!(group.members||[]).length)return'';
- return `<div class="fleet-rules-head"><h3>What your Machine answers your friends</h3><p class="muted">Per friend and kind of question.</p></div><div class="fleet-rules">${group.members.map(m=>`<section class="fleet-mate"><h4>${esc(m.name)}</h4>${Object.entries(m.rules).map(([k,r])=>fleetRule(group,f,m,k,r)).join('')}</section>`).join('')}</div>`}
+ return fleetRules(group,f,true,'your friends')}
 function friendsSection(f,notices){const fr=f.friends,group=fr&&f.fleets.find(x=>x.id===fr.id);if(!fr||!group)return'';
  const id=x=>esc(x),people=(group.people||[]).filter(p=>!p.me),asked=f.asked.filter(a=>a.fleet===fr.id);
  let h=`<div id="fleet-friends"><div class="fleet-pane-head"><h2>Friends</h2></div><p class="muted fleet-pane-sub">${fr.username?`Your username: <strong>${esc(fr.username)}</strong>. Friends add you by it.`:'Choose your username on your account page first.'} They ask your Machine under your rules (Sharing) and see nothing of your Fleets.</p>`;

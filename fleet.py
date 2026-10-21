@@ -1626,16 +1626,20 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         return scope_of(row['scope'] if row else None)
 
     def fold_rules(self):
-        """Rules were per teammate; now there is one per kind of question for each Work Fleet, and a teammate's own choice
-        is an exception. Once per Fleet: the choice most of its teammates have becomes the Fleet's (a tie: Ask me first),
-        and whoever differs keeps theirs as an exception, so nobody's answers change. The same for Only about."""
+        """Rules were per teammate (and per friend, per family member); now there is one per kind of question for each
+        Fleet, Friends and Family, and someone's own choice is an exception. Once per group: the choice most of them have
+        becomes the group's (a tie: Ask me first), and whoever differs keeps theirs as an exception, so nobody's answers
+        change. The same for Only about. A kind that already has a rule for everyone keeps it."""
         with self.connect() as db:
-            for ref in self.work_fleets():
+            for ref, found in self.fleets().items():
                 done = 'rules_per_fleet:' + ref
                 mates = [m['member_id'] for m in self.teammates(ref)]
-                if not mates or db.execute('SELECT 1 FROM fleet_meta WHERE key=?', (done,)).fetchone():
+                if (found['kind'] not in RULE_KINDS or not mates
+                        or db.execute('SELECT 1 FROM fleet_meta WHERE key=?', (done,)).fetchone()):
                     continue
                 for kind in RULE_KINDS.get(self.kind_of(ref), ()):
+                    if db.execute('SELECT 1 FROM fleet_rules WHERE fleet=? AND member_id=? AND kind=?', (ref, ALL, kind)).fetchone():
+                        continue
                     had = {m: self.rule(db, ref, m, kind) for m in mates}
                     scoped = kind in SCOPED
                     had_scope = {m: json.dumps(self.scope(db, ref, m, kind), sort_keys=True) for m in mates} if scoped else {}
@@ -2613,6 +2617,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         for ref, found in fleets.items():
             kind = found['kind']
             out.append({'id': ref, 'kind': kind, 'label': FLEET_NAMES.get(kind, kind), 'name': found.get('name'), 'asks': list(ASKS.get(kind, ())),
+                        'joined_at': found.get('joined_at'),  # when the owner joined or made it: the Fleet tab's order
                         'people': [person(m) for m in found.get('members', [])], **self.rules_view(ref, kind, rules, scopes),
                         'members': [{'member_id': m['member_id'], 'name': label(m), 'machine': m.get('machine'),
                                      'rules': {k: (lambda r: r if r['rule'] in KIND_RULES.get(k, RULES) else {**r, 'rule': 'ask'})(

@@ -20,7 +20,8 @@ self-hosted. Your Machines coordinate over the Network, under rules each of you 
 
 ## Rules
 
-Under **Sharing**, the Family has the same rules as a Work Fleet, one per kind, with exceptions per person:
+Under **Sharing**, the Family has the same rules as a Work Fleet, one per kind for all of them, with exceptions per person
+(rules set per person before were folded once, so nobody's rule changed):
 **Ask me first**, **Always** or **Never**. The defaults are friendlier than at work, and still private:
 
 | Kind | Default | What they get |

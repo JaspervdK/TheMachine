@@ -13,7 +13,7 @@ Next to the Fleets you can have **Friends**: people whose Machines help yours on
 
 You can be in several Work Fleets, ones you started and ones you joined, and one Family Fleet. Your Machine answers in
 each and keeps them apart: each Fleet has its own people, its own rules and its own questions, and the
-Fleet tab shows each Work Fleet as its own section. Asking from a Fleet's section asks only that Fleet; "Ask the Fleet
+Fleet tab shows each Work Fleet as its own section. The Fleets come first, Work and Family together in the order you joined or made them, then Friends, Network, Sharing and Activity. Asking from a Fleet's section asks only that Fleet; "Ask the Fleet
 who knows" from the Graph tab asks each of your Work Fleets, one at a time. Leaving one Fleet leaves the others as they
 are.
 
@@ -285,8 +285,10 @@ paired with your account (see above) claims a username too.
 - **Remove or block** a friend, or block a request, at any time. Blocking is silent: their requests are dropped from
   then on. You can unblock later.
 
-What a friend's Machine can ask yours, each under the rules you set for that friend (Ask me first by default, Without
-names by default, and Always or Never per kind):
+What a friend's Machine can ask yours. Under **Sharing** there is one rule per kind for all your friends (Ask me first and
+Without names by default), with "Different for someone? Add an exception" for one friend, as in a Fleet. New friends
+follow the rule for all friends. Rules set per friend before were folded once, the same way as for teammates, so
+nobody's rule changed:
 
 1. **Who knows someone at X?**, the same short answer as for a teammate.
 2. **Meeting context**, only for a meeting that friend is in too.

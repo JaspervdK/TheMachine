@@ -5,8 +5,8 @@ import {OPENCLAW} from './openclaw-root.mjs';
 const {chromium}=await import(process.env.PLAYWRIGHT_CORE||OPENCLAW+'/node_modules/playwright-core/index.mjs');
 
 // Fleet tab, Friends: a request waiting shows Accept, Decline and Block; adding goes by exact username; a friend's
-// busy times show as times only; the rules per friend are the same three pills. Apart from the Work Fleet, and never
-// scrolls sideways (390px and 1000px).
+// busy times show as times only; the rules for friends are the Fleets' component: one rule per kind for all friends,
+// an exception per friend, examples once (not per friend). Apart from the Work Fleet, and never scrolls sideways (390px, 1280px).
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const FL='fl_'+'a'.repeat(16),FR='fr_'+'b'.repeat(16);
 const rules=()=>({relationships:{rule:'ask',details:false},meeting:{rule:'ask',details:false},intro:{rule:'ask',details:false},availability:{rule:'ask',details:false}});
@@ -15,8 +15,9 @@ const view={on:true,kinds:{relationships:'who knows someone',meeting:'meeting co
  no_details:['availability'],scoped:[],scopes:{},
  fleets:[{id:FL,kind:'work',label:'Work Fleet',name:'Acme',asks:['relationships'],people:[{member_id:'m',name:'Sam Doe',role:'owner',me:true}],members:[]},
   {id:FR,kind:'friends',label:'Friends',name:'Friends',asks:['relationships','meeting','intro','availability'],
-   people:[{member_id:'fp_me',name:'Sam Doe',me:true},{member_id:'fp_lou',name:'Lou',label:'Lou (@lou)',answers_with:'Hosted: lou.example.test'}],
-   members:[{member_id:'fp_lou',name:'Lou',rules:rules()}]}],
+   people:[{member_id:'fp_me',name:'Sam Doe',me:true},{member_id:'fp_lou',name:'Lou',label:'Lou (@lou)',answers_with:'Hosted: lou.example.test'},{member_id:'fp_kim',name:'Kim',label:'Kim (@kim)',answers_with:'Hosted: kim.example.test'}],
+   rules:rules(),exceptions:{availability:[{member_id:'fp_kim',name:'Kim (@kim)',rule:'always',details:false,own_scope:false}]},
+   members:[{member_id:'fp_lou',name:'Lou',rules:rules()},{member_id:'fp_kim',name:'Kim',rules:{...rules(),availability:{rule:'always',details:false}}}]}],
  friends:{id:FR,username:'sam',in:[{id:'frq_1',name:'Max (@max)',at:'2026-10-20T10:00:00Z'}],out:[{id:'frq_2',username:'someone',at:'2026-10-20T10:00:00Z'}],blocked:[]},
  waiting:[],asked:[{id:'x1',fleet:FR,name:'Lou',kind:'availability',question:'When are you busy, 2026-10-21?',status:'answered',busy:[['2026-10-21T09:00Z','2026-10-21T10:30Z']]}],log:[],notices:[]};
 const calls=[];
@@ -29,7 +30,7 @@ const server=createServer(async(req,res)=>{res.setHeader('Content-Type','applica
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
 try{
- for(const [scheme,width] of [['dark',390],['light',1000]]){
+ for(const [scheme,width] of [['dark',390],['light',1280]]){
   const page=await (await browser.newContext({viewport:{width,height:900},colorScheme:scheme})).newPage();
   const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
   await page.goto('http://127.0.0.1:'+server.address().port);
@@ -44,7 +45,19 @@ try{
   // The rules per friend live under Sharing, with the Fleets' rules.
   const sharing=page.locator('[data-pane="sharing"]');assert.equal(await friends.locator('.fleet-rule').count(),0);
   for(const k of ['relationships','meeting','intro','availability'])
-   assert.equal(await sharing.locator(`.fleet-rule[data-member="fp_lou"][data-kind="${k}"] [data-fleet-rule]`).count(),3,k);
+   assert.equal(await sharing.locator(`.fleet-rule[data-fleet="${FR}"][data-member="*"][data-kind="${k}"] [data-fleet-rule]`).count(),3,k);
+  assert.equal(await sharing.locator(`.fleet-rule[data-fleet="${FR}"]`).count(),4);  // one block for all friends, not one per friend
+  assert.equal(await sharing.locator('.fleet-rules-head h3').filter({hasText:'your friends'}).innerText(),'What your Machine answers your friends');
+  assert.match(await sharing.locator(`.fleet-rule[data-fleet="${FR}"][data-kind="availability"] .fleet-ex`).innerText(),/^Kim \(@kim\): Always/);
+  assert.equal(await sharing.locator(`.fleet-rule[data-fleet="${FR}"] .fleet-preview`).filter({hasText:/Lou|Kim/}).count(),0);  // examples say "they"
+  assert.doesNotMatch(await sharing.innerText(),/\u2014/);
+  // An exception for one friend: picked from the friends without one, saved for that friend only
+  await page.locator('[data-fleet-pane="sharing"]').click();calls.length=0;const meet=sharing.locator(`.fleet-rule[data-fleet="${FR}"][data-kind="meeting"]`);
+  await meet.locator('.fleet-ex-add summary').click();
+  assert.deepEqual(await meet.locator('[data-fleet-ex-member] option').evaluateAll(o=>o.map(x=>x.value)),['fp_lou','fp_kim']);
+  await meet.locator('[data-fleet-ex-member]').selectOption('fp_lou');await meet.locator('[data-fleet-ex-rule="never"]').click();await page.waitForTimeout(200);
+  assert.deepEqual(calls[0],{action:'fleet_rule',args:{fleet:FR,member_id:'fp_lou',kind:'meeting',rule:'never'}});
+  await page.locator('[data-fleet-pane="friends"]').click();
   calls.length=0;
   await friends.locator('[data-friend-do="accept"]').click();await page.waitForFunction(()=>true);
   await page.waitForTimeout(200);

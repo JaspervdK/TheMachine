@@ -24,7 +24,7 @@ const view={on:true,ask_meetings:true,brief:{every:'week',tell:false},
    exceptions:{relationships:[{member_id:'k',name:'Kim',rule:'always',details:true,own_scope:false}]}},
   {id:FR,kind:'friends',label:'Friends',name:'Friends',asks:['relationships','availability'],
    people:[{member_id:'fp_me',name:'Sam Doe',me:true},{member_id:'fp_lou',name:'Lou',label:'Lou (@lou)',answers_with:'Hosted: lou.example.test'}],
-   members:[{member_id:'fp_lou',name:'Lou',rules:frules()}]}],
+   members:[{member_id:'fp_lou',name:'Lou',rules:frules()}],rules:frules(),exceptions:{}}],
  friends:{id:FR,username:'sam',in:[{id:'frq_1',name:'Max (@max)',at}],out:[],blocked:[]},
  briefs:{[FL]:{text:'Your Fleet this week\n\nWent quiet:\n- Globex (globex.example): last touch 2026-09-01 (You)',built_at:at}},
  free:[{id:'abc',fleet:FL,at,question:'Anyone dealt with Stripe disputes?',answers:[{name:'Pat',state:'answered',text:'Yes, twice'}]}],
@@ -59,10 +59,10 @@ try{
    assert.ok(fits,`${scheme} ${width}px ${pane} scrolls sideways`);
    if(shots){await page.evaluate(()=>window.scrollTo(0,0));await page.locator('#fleet-view').screenshot({path:`${shots}/${pane.replace(/^fleet-.*/,'fleet')}-${scheme}-${width}.png`})}
   }
-  // Sharing has every rule: the Fleet's and each friend's, the legend once, and the meetings and brief options.
+  // Sharing has every rule: the Fleet's and the friends', the legend once, and the meetings and brief options.
   await page.locator('[data-fleet-pane="sharing"]').click();
   assert.equal(await page.locator('.fleet-legend').count(),1);
-  assert.equal(await page.locator('[data-pane="sharing"] .fleet-rule[data-member="fp_lou"]').count(),2);
+  assert.equal(await page.locator(`[data-pane="sharing"] .fleet-rule[data-fleet="${FR}"][data-member="*"]`).count(),2);
   assert.equal(await page.locator('[data-pane="sharing"] #fleet-meetings').count(),1);
   // Remembered: the next visit opens the same view.
   await page.reload();await page.locator('nav [data-tab="fleet"]').click();await page.locator('.fleet-tabs').waitFor();

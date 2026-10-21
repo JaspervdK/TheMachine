@@ -100,6 +100,31 @@ class Family(unittest.TestCase):
         self.assertEqual(self.family_ask('todo', {'title': 'Groceries'}, 'fq3'), 'declined')
         self.assertEqual(self.family_ask('todo', {'title': 'Groceries'}, 'fq4', member='fm_alex'), 'waiting')
 
+    def test_the_view_says_when_each_fleet_was_joined_for_the_tab_order(self):
+        self.relay.directory['fleets'][1]['joined_at'] = '2026-01-02T03:04:05Z'
+        self.fleet.directory(refresh=True)
+        joined = {f['id']: f['joined_at'] for f in self.fleet.view()['fleets']}
+        self.assertEqual(joined[FAM], '2026-01-02T03:04:05Z')
+        self.assertIsNone(joined[WORK_ID])  # an older relay doesn't say: the directory's order
+
+    def test_per_member_rules_fold_into_one_for_the_family_and_nobodys_answers_change(self):
+        with self.store.connect() as db:
+            db.execute('DELETE FROM fleet_rules WHERE fleet=?', (FAM,))
+            db.execute('DELETE FROM fleet_meta WHERE key=?', ('rules_per_fleet:' + FAM,))
+            for member, kind, rule in [('fm_robin', 'todo', 'always'), ('fm_alex', 'todo', 'always'), ('fm_alex', 'availability', 'never')]:
+                db.execute('INSERT INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
+                           (FAM, member, kind, rule, 0, NOW.isoformat()))
+        def effective():
+            with self.store.connect() as db:
+                return {(m, k): self.fleet.rule(db, FAM, m, k) for m in ('fm_robin', 'fm_alex') for k in family.KINDS}
+        before = effective()
+        self.fleet.fold_rules()
+        self.assertEqual(effective(), before)
+        group = next(f for f in self.fleet.view()['fleets'] if f['id'] == FAM)
+        self.assertEqual({k: r['rule'] for k, r in group['rules'].items()}, {'availability': 'ask', 'todo': 'always', 'event': 'ask'})  # a tie: Ask me first
+        self.assertEqual({(e['member_id'], e['rule']) for e in group['exceptions']['availability']}, {('fm_robin', 'always'), ('fm_alex', 'never')})
+        self.assertNotIn('todo', group['exceptions'])
+
     # -- availability
     def test_common_free_times_from_everyones_busy_blocks(self):
         tz = dt.timezone(dt.timedelta(hours=2))

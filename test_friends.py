@@ -66,6 +66,71 @@ class Friends(unittest.TestCase):
     def friend_ask(self, kind, question, ask_id='fq1'):
         return self.fleet.take_ask({'id': ask_id, 'fleet': 'friends', 'fleet_id': FR, 'from': 'fp_lou', 'kind': kind, 'question': question})
 
+    # -- one rule for all friends, exceptions per friend
+    def add_friends(self, *names):
+        group = self.relay.directory['fleets'][1]
+        for name in names:
+            group['members'].append({'member_id': 'fp_' + name.lower(), 'name': name, 'label': f'{name} (@{name.lower()})', 'role': 'member',
+                                     'emails': [f'{name.lower()}@{name.lower()}.example'], 'machine': True})
+
+    def old_rules(self, rows):
+        """Rules as a Machine kept them before: per friend only, nothing for all friends."""
+        with self.store.connect() as db:
+            db.execute('DELETE FROM fleet_rules WHERE fleet=?', (FR,)); db.execute('DELETE FROM fleet_scopes WHERE fleet=?', (FR,))
+            db.execute('DELETE FROM fleet_meta WHERE key=?', ('rules_per_fleet:' + FR,))
+            for member, kind, rule, details in rows:
+                db.execute('INSERT INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
+                           (FR, member, kind, rule, int(details), NOW.isoformat()))
+
+    def effective(self):
+        with self.store.connect() as db:
+            return {(m['member_id'], k): self.fleet.rule(db, FR, m['member_id'], k) for m in self.fleet.teammates(FR) for k in friends.KINDS}
+
+    def test_per_friend_rules_fold_into_one_for_all_friends_and_nobodys_answers_change(self):
+        self.add_friends('Kim', 'Max')
+        self.fleet.directory(refresh=True)
+        self.old_rules([('fp_lou', 'availability', 'always', False), ('fp_kim', 'availability', 'always', False),  # fp_max: Ask me first
+                        ('fp_lou', 'intro', 'never', False), ('fp_kim', 'intro', 'always', False),  # no majority: Ask me first
+                        ('fp_lou', 'relationships', 'always', True), ('fp_kim', 'relationships', 'always', True), ('fp_max', 'relationships', 'always', True)])
+        before = self.effective()
+        self.assertEqual(before[('fp_max', 'availability')], ('ask', False))
+        self.fleet.fold_rules()
+        self.assertEqual(self.effective(), before)
+        group = next(f for f in self.fleet.view()['fleets'] if f['id'] == FR)
+        self.assertEqual({k: r['rule'] for k, r in group['rules'].items()},
+                         {'availability': 'always', 'intro': 'ask', 'relationships': 'always', 'meeting': 'ask'})
+        self.assertTrue(group['rules']['relationships']['details'])
+        self.assertEqual({(e['member_id'], e['rule']) for e in group['exceptions']['availability']}, {('fp_max', 'ask')})
+        self.assertEqual({(e['member_id'], e['rule']) for e in group['exceptions']['intro']}, {('fp_lou', 'never'), ('fp_kim', 'always')})
+        self.assertNotIn('relationships', group['exceptions'])
+        self.assertNotIn('meeting', group['exceptions'])
+        self.fleet.fold_rules()  # once
+        self.assertEqual(self.effective(), before)
+
+    def test_a_rule_for_all_friends_already_set_is_kept(self):
+        self.add_friends('Kim')
+        self.fleet.directory(refresh=True)
+        self.old_rules([('fp_lou', 'meeting', 'always', False), ('fp_kim', 'meeting', 'always', False)])
+        with self.store.connect() as db:
+            db.execute('INSERT INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES(?,?,?,?,?,?)',
+                       (FR, fleet.ALL, 'meeting', 'never', 0, NOW.isoformat()))
+        before = self.effective()
+        self.fleet.fold_rules()
+        self.assertEqual(self.effective(), before)
+        self.assertEqual(next(f for f in self.fleet.view()['fleets'] if f['id'] == FR)['rules']['meeting']['rule'], 'never')
+
+    def test_a_friends_exception_comes_first_then_the_rule_for_all_friends(self):
+        self.fleet.set_rule(FR, fleet.ALL, 'availability', 'always')
+        self.assertEqual(self.friend_ask('availability', {'start': NOW.date().isoformat(), 'days': 2}), 'answered')
+        self.fleet.set_rule(FR, 'fp_lou', 'availability', 'never')
+        self.assertEqual(self.friend_ask('availability', {'start': NOW.date().isoformat(), 'days': 2}, 'fq2'), 'declined')
+        self.add_friends('Kim')
+        self.fleet.directory(refresh=True)
+        self.assertEqual(self.fleet.take_ask({'id': 'fq3', 'fleet': 'friends', 'fleet_id': FR, 'from': 'fp_kim', 'kind': 'availability',
+                                              'question': {'start': NOW.date().isoformat(), 'days': 2}}), 'answered')  # a new friend follows the rule
+        self.fleet.set_rule(FR, 'fp_lou', 'availability', clear=True)
+        self.assertEqual(self.friend_ask('availability', {'start': NOW.date().isoformat(), 'days': 2}, 'fq4'), 'answered')
+
     def test_the_relay_hears_this_machine_knows_friends(self):
         sent = []
         relay = fleet.Relay('https://relay.example', lambda: 't')
