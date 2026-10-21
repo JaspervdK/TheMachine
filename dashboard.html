@@ -257,8 +257,8 @@ blockquote{margin:10px 0 0;padding:6px 12px;border-left:2px solid var(--lavender
 .saved-feedback{margin-top:14px}.saved-feedback .row{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 12px}.saved-feedback strong{color:var(--lavender);font-size:.85rem}
 
 /* Connections */
-.health{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
-.health article{margin:0;display:flex;flex-direction:column}
+.health{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:12px}
+.health article{margin:0;min-width:0;display:flex;flex-direction:column}
 .conn-head{display:flex;align-items:center;gap:12px}
 .conn-head>div{min-width:0;flex:1}
 .conn-head h3{font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -452,7 +452,7 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
   article{padding:16px}.card{padding-left:20px}
   .stat{padding:11px 4px}.stat b{font-size:1.25rem}.stat span{font-size:.7rem}
   .actions{gap:6px}.actions button{flex:1 1 auto;padding:8px 10px;white-space:nowrap;font-size:.84rem}.actions button.primary{flex:1 1 100%;padding:11px 14px;font-size:inherit}.actions .spacer{display:none}.actions button.quiet{flex:0 0 auto;margin-left:auto;padding:8px 6px}
-  .health{grid-template-columns:1fr}
+  .health{grid-template-columns:minmax(0,1fr)}
 }
 @media(max-width:400px){.live .lbl{display:none}nav{overflow-x:auto}nav button{font-size:.73rem;gap:2px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

@@ -17,10 +17,10 @@ how messages stay reliable, and where it's going.
 - **What isn't sealed:** who is in which Fleet or friends group, who asks whom, the kind of question, its status and
   times. The Network needs those to route messages.
 - **Handling claims** (who of you handles an email several teammates got) are hashes of the Fleet's secret and the
-  email's Message-ID. The Network hands out that secret, so it knows it, but it never sees a Message-ID, an address or
-  an email, so it can only tell that two teammates hold the same email, which it could tell without the secret too.
-  The secret can't open a sealed message or sign as anyone; those keys never leave your Machine. A Fleet secret the
-  Network doesn't know is on the roadmap.
+  email's Message-ID. The claim payload contains no Message-ID, recipient address or email content. The Network
+  hands out the secret and knows it: equal hashes reveal matching claims, and it can test a candidate Message-ID
+  obtained elsewhere. Claims are therefore not end-to-end encrypted. The secret cannot open sealed questions or
+  sign as a Machine; those keys never leave your Machine. A secret unknown to the Network is on the roadmap.
 - **Moving your Machine.** `assistant export --keys` carries `network-keys.json` (encrypted with your passphrase) and
   `assistant import` puts it back, so your teammates and friends see the same Machine. An export without keys leaves
   them out: the import makes a new Network identity, and your teammates and friends see a key-change notice once.
@@ -59,3 +59,5 @@ tried when the new one can't be reached, so Machines from before the rename carr
 ## Retry and identity guarantees
 
 Private Network keys are written atomically on first use; concurrent starts use one pair, and a malformed key file is reported instead of silently rotating identity. Plain exports omit these keys even at a custom configured path; encrypted `--keys` exports carry them (also from a custom path) and the import restores them next to the database. Outbound reply intent is committed before delivery and retained after interruption. A stale flush cannot erase a newer queued reply. Family requests keep their request identity after a failed response and obtain a new one only once the local receipt is saved.
+
+Import restores external Network keys into the new data folder even when their old path still exists. If a credential has the same filename, the identity goes in `network-identity/` instead; neither overwrites the other. Plain imports do not point back at the exporting Machine’s external identity.

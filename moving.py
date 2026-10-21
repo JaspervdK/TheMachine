@@ -352,14 +352,29 @@ def _rebase(value, old, new):
     return value
 
 
+def _atomic_copy(source, target, mode=0o600):
+    """Replace a file through a unique sibling, never a shared or symlinked temporary name."""
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=target.name + '.import-', dir=target.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, 'wb') as handle, source.open('rb') as original:
+            shutil.copyfileobj(original, handle)
+            os.fchmod(handle.fileno(), mode)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _place(source, target, notes, mode=0o600):
     """Copy one file into place. A different file already there is kept, and the imported one sits next to it."""
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if target.exists() and target.read_bytes() != source.read_bytes():
         target = target.with_name(target.name + '.from-export')
         notes.append(f'kept your {target.name[:-len(".from-export")]}; the exported one is {target}')
-    shutil.copyfile(source, target)
-    os.chmod(target, mode)
+    _atomic_copy(source, target, mode)
 
 
 @contextmanager
@@ -452,10 +467,7 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
                 if path.is_file():
                     target = data / path.relative_to(root)
                     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    temporary = target.with_name(target.name + '.import-new')
-                    shutil.copyfile(path, temporary)
-                    os.chmod(temporary, mode)
-                    temporary.replace(target)
+                    _atomic_copy(path, target, mode)
                     restored.append(str(target))
         config = _rebase(original_config, manifest.get('data_dir'), str(data))
         config = _rebase(config, manifest.get('workspace_dir'), str(_workspace(workspace)))
@@ -474,23 +486,26 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
                 target = data / Path(path).name
                 _place(unpacked / 'secrets/elsewhere' / Path(path).name, target, notes)
                 config['credentials'][name] = str(target)
-        # Network keys from outside the data folder (inside it, the data restore above and the rebase cover them).
-        # They are this Machine's identity on the Network: the exported ones replace any a fresh install made already,
-        # so teammates and friends see the same Machine and no key-change notice.
+        # Always copy external identity keys into this installation, even on the same computer.
+        # Keep their destination separate when a credential has the same basename.
         found = config.get('network_keys')
         if found:
             name = Path(found).name
             source = next((p for p in (unpacked / 'secrets/network' / name, unpacked / 'secrets/elsewhere' / name) if p.is_file()), None)
-            if source and not (Path(found).expanduser().is_file() and Path(found).expanduser().read_bytes() == source.read_bytes()):
+            if source:
                 target = data / name
-                temporary = target.with_name(name + '.import-new')
-                shutil.copyfile(source, temporary)
-                os.chmod(temporary, 0o600)
-                temporary.replace(target)
+                credential_paths = {Path(p).expanduser().resolve() for p in (config.get('credentials') or {}).values()}
+                if target.resolve() in credential_paths or (target.exists() and target.read_bytes() != source.read_bytes()):
+                    target = data / 'network-identity' / name
+                    number = 2
+                    while target.resolve() in credential_paths or (target.exists() and target.read_bytes() != source.read_bytes()):
+                        target = data / 'network-identity' / f'{name}.{number}'
+                        number += 1
+                _atomic_copy(source, target)
                 config['network_keys'] = str(target)
                 restored.append(str(target))
-            elif not source and not Path(found).expanduser().parent.is_dir():
-                config.pop('network_keys')  # a folder this computer doesn't have: new keys go next to the database
+            elif not manifest.get('includes_keys') or not Path(found).expanduser().is_file():
+                config.pop('network_keys')  # never reuse the exporting Machine's external path in a plain import
         if config_path.exists():
             shutil.copyfile(config_path, config_path.with_name(config_path.name + '.bak'))
         fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

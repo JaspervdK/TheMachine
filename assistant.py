@@ -7054,11 +7054,22 @@ class App:
         allowed = json.loads(row['account_ids'] or '[]')
         gmail = [a for a in self.config.get('accounts', []) if a.get('service', 'gmail') == 'gmail' and a.get('transport') in ('gog', 'broker')]
         order = [a for a in gmail if a['id'] in allowed] + [a for a in gmail if a['id'] not in allowed]
-        sealed, key = task_invites.seal(task)
+        if not any(a['id'] in allowed for a in order):
+            raise ValueError('This card has no Gmail account to send from')
+        pending_key = 'pending_handoff:' + hashlib.sha256(encoded([found['suggestion_id'], email, task]).encode()).hexdigest()
+        with self.fleet.connect() as db:
+            pending = db.execute('SELECT value FROM fleet_meta WHERE key=?', (pending_key,)).fetchone()
+            if pending:
+                pending = json.loads(pending[0])
+            else:
+                sealed, key = task_invites.seal(task)
+                pending = {'sealed': sealed, 'key': key, 'request_id': uuid.uuid4().hex}
+                db.execute('INSERT INTO fleet_meta(key,value) VALUES(?,?)', (pending_key, encoded(pending)))
+        sealed, key = pending['sealed'], pending['key']
         made = None
         for account in order:
             try:
-                made = made or self.fleet.relay.call('POST', '/task-invite', {'action': 'create', 'kind': 'handoff', 'sealed': sealed})
+                made = made or self.fleet.relay.call('POST', '/task-invite', {'action': 'create', 'kind': 'handoff', 'sealed': sealed, 'request_id': pending['request_id']})
                 subject, body = task_invites.draft(task, '', me, made['url'] + '#k=' + key)
                 action = next_actions.validate({'kind': 'email', 'label': 'Send', 'account_id': account['id'], 'to': [email],
                                                 'subject': subject, 'body': body}, self.config, allowed)
@@ -7073,6 +7084,8 @@ class App:
         self.store.prepare(found['suggestion_id'], f'An email handing this to {email}. It has a link that brings the task to a Machine of '
                                                    'their own, if they want one. Read it, change it if you like, and send it yourself.',
                            next_action=action, outcome={'state': 'needs_you', 'needs': 'read and send the handoff email'})
+        with self.fleet.connect() as db:
+            db.execute('DELETE FROM fleet_meta WHERE key=?', (pending_key,))
         return {'card_id': found['suggestion_id'], 'invite_id': made['id']}
 
     def task_import(self, link):
@@ -7090,6 +7103,11 @@ class App:
         body = (task.get('summary') or task['title']) + (f"\n\nThey'd like it by {task['due']}." if task.get('due') else '')
         body += f'\n\n{name} sent this by email. Answer them there.'
         card_id = self.fleet_card('task', 'task:' + invite_id, name, task['title'], body, [], due=task.get('due'), via='by email')
+        if network:
+            try:
+                network.relay.call('POST', '/task-invite', {'action': 'added', 'id': invite_id})
+            except (ValueError, OSError):
+                LOG.warning('task invite local card saved; remote addition receipt unavailable')
         username = who.get('username') if isinstance(who.get('username'), str) and re.fullmatch(r'[a-z0-9][a-z0-9-]{1,28}[a-z0-9]', who['username']) else None
         return {'card_id': card_id, 'from': {'name': name, 'username': username}, 'can_connect': bool(network and username)}
 

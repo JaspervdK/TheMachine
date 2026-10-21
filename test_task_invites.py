@@ -98,6 +98,23 @@ class ByEmail(unittest.TestCase):
         self.assertEqual(meta['sender_display'], 'Owner Example (by email)')
         self.assertEqual(self.app.action('task_import', {'link': link}, owner_dashboard=True)['card_id'], added['card_id'])  # once
 
+    def test_failed_local_save_reuses_the_same_remote_link_and_key(self):
+        card=self.handed_card()
+        args={'suggestion_id':card,'email':'kim@other.example','title':'Help','summary':'Please help'}
+        with patch.object(self.app.store,'prepare',side_effect=RuntimeError('restart')):
+            with self.assertRaises(RuntimeError):self.app.action('fleet_handoff_email',args,owner_dashboard=True)
+        self.app.action('fleet_handoff_email',args,owner_dashboard=True)
+        sent=[r for r in self.relay.sent('/task-invite') if r['action']=='create']
+        self.assertEqual(sent[0]['request_id'],sent[1]['request_id'])
+        self.assertEqual(sent[0]['sealed'],sent[1]['sealed'])
+
+    def test_bad_opening_key_does_not_acknowledge_an_added_card(self):
+        sealed,key=task_invites.seal({'title':'Help'})
+        self.made={'sealed':sealed}
+        wrong=task_invites.seal({'title':'Wrong'})[1]
+        with self.assertRaises(ValueError):self.app.task_import(LINK_ID+'.'+wrong)
+        self.assertFalse(any(r['action']=='added' for r in self.relay.sent('/task-invite')))
+
     def test_a_machine_not_on_the_network_adds_the_link_too(self):
         sealed, key = task_invites.seal({'title': 'Plan the offsite', 'kind': 'schedule'})
         self.app.fleet = None
