@@ -35,7 +35,7 @@ try{
  await list.waitFor();
  assert.equal(await list.locator('summary .count').textContent(),'3');  // closed ones stay out
  await list.locator('summary').click();
- assert.deepEqual(await list.locator('.day-head').allTextContents(),['You promised','Promised to you']);
+ assert.deepEqual(await list.locator('.promise-head').allTextContents(),['You promised1','Promised to you2']);
  const text=await list.textContent();
  assert.ok(text.includes('To Alex Morgan: send the Q3 deck')&&text.includes('Due today'));
  assert.ok(text.includes('From Sam Lee: send the signed contract')&&text.includes('on a card now')&&text.includes('Overdue'));

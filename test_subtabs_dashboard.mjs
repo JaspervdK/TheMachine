@@ -39,7 +39,7 @@ try{
  page.on('pageerror',e=>errors.push(e.message));
  await page.goto(base);
  // Graph: People first, then Projects and Organisations; Who's who, with its count, last. The Graph tab counts it too.
- assert.equal(await page.locator('#badge-people').innerText(),'2');
+ await page.locator('#badge-people',{hasText:/^2$/}).waitFor();
  await page.locator('nav [data-tab="people"]').click();
  await page.locator('#people-view .sub-tabs').waitFor();
  assert.deepEqual(await tabs(page,'#people-view'),['People','Projects','Organisations','Who’s who\n2']);
@@ -66,7 +66,7 @@ try{
  // Connections: sources by kind; the one with a failing source shows its count and opens first.
  await page.goto(base);await page.locator('nav [data-tab="health"]').click();await page.locator('#health-tabs [role=tab]').first().waitFor();
  for(let i=0;i<100&&(await tabs(page,'#health-tabs')).length<6;i++)await page.waitForTimeout(20);
- assert.deepEqual(await tabs(page,'#health-tabs'),['Mail and calendar','Chat\n1','Phone','Other sources','Sign-ins\n1','Reviews']);
+ assert.deepEqual(await tabs(page,'#health-tabs'),['Mail and calendar','Chat\n1','Other sources','Sign-ins\n1','Reviews']);
  assert.equal(await page.locator('#health-tabs [data-health-pane="chat"] .badge.warn').count(),1);
  assert.equal(await selected(page,'#health-tabs'),'Chat\n1');
  assert.deepEqual(await page.locator('#connectors>article:not([hidden]) h3').allInnerTexts(),['team-chat','wa']);
@@ -76,6 +76,9 @@ try{
  await page.goto(base+'/#connections=reviews');await page.locator('#review-summary').waitFor({state:'attached'});
  for(let i=0;i<100&&await selected(page,'#health-tabs').catch(()=>'')!=='Reviews';i++)await page.waitForTimeout(20);
  assert.equal(await selected(page,'#health-tabs'),'Reviews');
+ // Android is in Other sources; the old phone link opens it.
+ await page.goto(base+'/#connections=phone');await page.locator('#connectors>article:not([hidden]) h3',{hasText:'phone'}).waitFor();
+ assert.deepEqual(await page.locator('#connectors>article:not([hidden]) h3').allInnerTexts(),['phone','crm']);
  await page.goto(base+'/#health');await page.locator('#health:not([hidden])').waitFor();
  // One column for every tab.
  const widths=[];

@@ -16,7 +16,8 @@ const view={on:true,kinds:{relationships:'who knows someone',meeting:'meeting co
  no_details:['handling','brief'],scoped:['relationships','meeting','handling'],scopes:{},
  fleets:[{id:FL,kind:'work',label:'Work Fleet',name:'Acme',asks:['relationships','meeting'],
   people:[{member_id:'m',name:'Sam Doe',role:'owner',me:true,answers_with:'Self-hosted: Desk',email:'sam@acme.example'},
-   {member_id:'p',name:'Sam Doe',role:'member',me:false,answers_with:'Hosted: sam.example.test',email:'sam.doe@mail.example'}],
+   {member_id:'p',name:'Sam Doe',role:'member',me:false,answers_with:'Hosted: sam.example.test',email:'sam.doe@mail.example'},
+   {member_id:'k',name:'Kim Lee',role:'member',answers_with:'Self-hosted: Laptop',email:'kim@acme.example'},{member_id:'k2',name:'Kim Lee',role:'member',answers_with:'Hosted: kim.example.test',email:'kim@acme.example'}],
   members:members.map(m=>({...m,rules:fresh()})),rules:fresh(),exceptions:{}}],
  waiting:[],asked:[],log:[],notices:[]};
 const reset=()=>{const w=view.fleets[0];w.rules=fresh();w.exceptions={relationships:[{member_id:'l',name:'Robin Vale',rule:'always',details:false,own_scope:false}]};
@@ -49,11 +50,16 @@ try{
   assert.deepEqual(await page.locator('.fleet-tabs [data-fleet-pane]').allInnerTexts(),['Acme','Sharing','Activity']);
   assert.equal(await page.locator('.fleet-pane:not([hidden])').count(),1);
   const people=await page.locator('.fleet-people li').allInnerTexts();
-  assert.match(people[0],/\(you, this Machine\)/);assert.match(people[1],/Hosted: sam\.example\.test/);
+  assert.match(people[0],/^Sam Doe\s*you\s*owner\nsam@acme\.example · Self-hosted: Desk$/);assert.match(people[1],/Hosted: sam\.example\.test/);
+  assert.equal(people[2],'Kim Lee\nkim@acme.example\nSelf-hosted: Laptop\nHosted: kim.example.test');  // one person, two Machines: the name once
+  // Each row: the name and its tags on one line, email and Machine muted below, lined up the same.
+  const rows=await page.locator('.fleet-people li').evaluateAll(l=>l.map(li=>{const n=li.querySelector('.fp-name').getBoundingClientRect(),m=li.querySelector('.fp-meta').getBoundingClientRect();return [Math.round(m.left-n.left),m.top>=n.bottom-1]}));
+  assert.ok(rows.every(r=>r[0]===0&&r[1]),JSON.stringify(rows));
   assert.equal(await page.locator('.fleet-rule').evaluateAll(x=>x.filter(r=>r.checkVisibility()).length),0);
   await page.locator('[data-fleet-pane="sharing"]').click();await page.locator('.fleet-rules-head').waitFor();
   // What the three choices mean, once, short; each kind with its question in plain words; a hint on each choice.
-  assert.match(await page.locator('.fleet-legend').innerText(),/Ask me first\s+you choose each time/);
+  assert.deepEqual(await page.locator('.fleet-legend dt').allInnerTexts(),['Ask me first','Always','Never','Names']);
+  assert.match(await page.locator('.fleet-legend').innerText(),/Ask me first\s+You choose each time/);
   assert.equal(await page.locator('.fleet-rule[data-member="*"][data-kind="relationships"] .fleet-rule-kind small').innerText(),'“Who knows someone at Acme?”');
   assert.equal(await page.locator('.fleet-rule[data-member="*"][data-kind="relationships"] label:has([data-fleet-rule][value="never"])').getAttribute('title'),'They get “no”');
   // One rule per kind for the whole Fleet, title on top and a short line under it.

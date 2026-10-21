@@ -6,7 +6,7 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 
 // The first look once cards exist: a slim strip under the counters, not loose text above the filters. Its row on
 // Connections names each account once. A running review never sits next to
-// "No reviews yet", and the summary says it once: "0 waiting · 0 reviewed · last review: not yet".
+// "No reviews yet", and the summary says it once: "0 waiting · 0 reviewed · last not yet".
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const started=new Date(Date.now()-60e3).toISOString();
 const run={run_id:'r1',status:'running',started_at:started,preview:1,auto:1,planned:67,done_count:5,account_ids:['gmail','calendar'],steps:[]};
@@ -33,7 +33,7 @@ try{
  await page.goto('http://127.0.0.1:'+server.address().port);
  await page.locator('#analyses .no-reviews').waitFor({state:'attached'});
  assert.equal(await page.locator('#analyses .no-reviews').evaluate(e=>e.hidden),false);  // Connections is another tab: check the attribute
- assert.equal(await page.locator('#review-summary').textContent(),'0 waiting · 0 reviewed · last review not yet. The next one starts when new signals come in.');
+ assert.equal(await page.locator('#review-summary').textContent(),'0 waiting · 0 reviewed · last not yet. Next one when new signals come in.');
  // A running first look: no "No reviews yet" beside it, the accounts named once
  runs=[run];await page.evaluate(()=>refresh());
  assert.equal(await page.locator('#review-live .review-live').count(),1);

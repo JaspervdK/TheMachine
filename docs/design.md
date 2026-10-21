@@ -72,7 +72,7 @@ Observed on claude.ai, claude.com and anthropic.com (public pages, light and dar
 - **Section heads**: the serif heading and its count as a small pill on one line, a one-line explainer below.
 - **Cards**: surface, 1px line, 14px radius; a slim tone mark at the top left for urgency; title in sans 600;
   body in secondary text; actions left to right, one primary.
-- **Buttons**: primary (mint fill), secondary (lifted fill and hairline), quiet (text, soft fill on hover).
+- **Buttons**: primary (mint fill), secondary (lifted fill and hairline), quiet (text; on hover a rounded soft tint with room around the text, its negative margin keeping the layout still). Links styled as buttons match the others: no underline, same height, centred.
   8px radius, 500 weight.
 - **Chips**: round, sunken fill, 12px sans 500, with a 6px dot in the tone colour.
 - **Inputs**: hairline, 8px radius, mint border and soft ring on focus.
