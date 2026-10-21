@@ -346,7 +346,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel')
+CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel', 'connect_remove')
 OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_split', 'fleet_split_dismiss',
@@ -6845,6 +6845,17 @@ def sign_in_help(service, error, manage):
             if manage and site else None}
 
 
+def reconnect_help(account, manage):
+    """How a connection is signed in again or disconnected from its card: `account_page` when a hosted machine's
+    account page holds its sign-in (Google and Microsoft there), else `connect_name`, the Add step that redoes it here."""
+    if not account:
+        return {}
+    service = account.get('service', 'gmail')
+    if manage and account.get('transport') == 'broker':
+        return {'account_page': urllib.parse.urljoin(manage, '#microsoft' if service in MICROSOFT_SERVICES else '#google')}
+    return {'connect_name': 'crm' if service == 'salesflare' else service}
+
+
 def needs_you(config):
     """What only the owner can fix, for the top of the dashboard: sources that are not fully set up, and notes that a
     hosting layer leaves in `needs_you_file` (a JSON list of {id, text, url}). Connections whose sign-in fails are added
@@ -7170,6 +7181,9 @@ class App:
             by_id = {a['id']: a for a in self.config['accounts']}
             for connector in result['connectors']:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
+                connector.update(reconnect_help(by_id.get(connector['id']), result['manage_url']))
+                if result['manage_url']:
+                    continue  # a hosted machine: no terminal there, its account page signs in again
                 if 'google_signin_expired' in (connector.get('error') or '') and connector['id'] in by_id:
                     connector['sign_in_command'] = gog_signin_command(self.config, by_id[connector['id']])
                 elif 'microsoft_signin_expired' in (connector.get('error') or '') and by_id.get(connector['id'], {}).get('transport') == 'graph':
@@ -8520,19 +8534,45 @@ class App:
             manage = str(self.config.get('manage_url') or '')
             return {'sources': onboarding.catalog(self.config), 'manage_url': manage if manage.startswith('https://') else None,
                     'saveable': bool(getattr(self, 'config_path', None))}
-        if name == 'connect_start':
-            source = args.get('source')
-            known = {s['name']: s for s in onboarding.catalog(self.config)}
-            if source not in known or known[source]['broker']:
-                raise ValueError('That source is not added here')
+        manage = str(self.config.get('manage_url') or '')
+        hosted = manage.startswith('https://')
+        if name in ('connect_start', 'connect_remove') and args.get('account') is not None:
+            account = next((a for a in self.config['accounts'] if a['id'] == args.get('account')), None)
+            if not account:
+                raise ValueError('That account is not connected here')
+            if 'account_page' in reconnect_help(account, manage if hosted else None):
+                raise ValueError('Your account page signs this one in and out')
+        if name == 'connect_remove':
             if not getattr(self, 'config_path', None):
-                raise ValueError('This service cannot save its settings; run assistant connect ' + source + ' in a terminal')
+                raise ValueError('This service cannot save its settings')
+            with lock:
+                if any(v['state'] == 'running' for v in sessions.values()):
+                    raise ValueError('A source is being set up; finish or stop that first')
+                try:
+                    onboarding.disconnect(self.config_path, account['id'])
+                except onboarding.SetupError as error:
+                    raise ValueError(error.message) from None
+            LOG.info('connect removed account=%s', account['id'])
+            return {'removed': account['id'], 'restarting': restart_self(3)}
+        if name == 'connect_start':
+            # `name`, since the dashboard's requests carry their own `source` (always "dashboard")
+            source = args.get('name') if isinstance(args.get('name'), str) else args.get('source')
+            known = {s['name']: s for s in onboarding.catalog(self.config)}
+            again = args.get('account') is not None
+            if source not in known or (known[source]['broker'] and not again):
+                raise ValueError('That source is not added here')
+            if again and source != reconnect_help(account, None)['connect_name']:
+                raise ValueError('That account is not a ' + known[source]['label'] + ' account')
+            if not getattr(self, 'config_path', None):
+                raise ValueError('This service cannot save its settings' + ('' if hosted else '; run assistant connect ' + source + ' in a terminal'))
             with lock:
                 if any(v['state'] == 'running' for v in sessions.values()):
                     raise ValueError('Another source is being added; finish or stop that one first')
                 key = secrets.token_hex(12)
-                session = sessions[key] = {'ui': onboarding.WebUI(), 'state': 'running', 'source': source,
-                                           'label': known[source]['label'], 'at': time.monotonic()}
+                ui = onboarding.WebUI()
+                ui.reconnect = again
+                session = sessions[key] = {'ui': ui, 'state': 'running', 'source': source, 'account_id': account['id'] if again else None,
+                                           'label': known[source]['label'], 'at': time.monotonic(), 'hosted': hosted}
             threading.Thread(target=self.connect_run, args=(session,), daemon=True).start()
             return {'session': key, **self.connect_view(session)}
         session = sessions.get(args.get('session')) if isinstance(args.get('session'), str) else None
@@ -8552,7 +8592,7 @@ class App:
     def connect_run(self, session):
         import onboarding
         try:
-            account = onboarding.connect(self.config_path, session['source'], session['ui'], restart=False)
+            account = onboarding.connect(self.config_path, session['source'], session['ui'], account_id=session.get('account_id'), restart=False)
             session.update(account=account['id'], restarting=restart_self(3), state='done')
         except onboarding.SetupError as error:
             session.update(state='cancelled' if session['ui'].cancelled else 'failed', error=error.message, fix=error.fix)
@@ -8563,7 +8603,11 @@ class App:
         session['at'] = time.monotonic()
 
     def connect_view(self, session):
-        return {**session['ui'].view(), **{k: session.get(k) for k in ('state', 'source', 'label', 'error', 'fix', 'account', 'restarting')}}
+        view = {**session['ui'].view(), **{k: session.get(k) for k in ('state', 'source', 'label', 'error', 'fix', 'account', 'restarting')}}
+        if session.get('hosted') and re.search(r'\bterminal\b|\bassistant connect\b', view.get('fix') or ''):
+            view['fix'] = 'try again, or get help from your account page'  # a hosted machine has no terminal to run it in
+        view['reconnect'] = session.get('account_id')  # the account signing in again, if that is what this is
+        return view
 
     def preparation_progress(self, suggestion_id):
         with self.store.connect() as db:

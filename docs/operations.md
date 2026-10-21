@@ -71,7 +71,7 @@ If you want different house rules, edit your checkout's `AGENTS.md`/`PREPARATION
 - **Asking for help:** `assistant support-bundle` saves versions, `assistant doctor`, the service status and logs and the Gateway's warnings in one file, with keys, tokens, passwords and addresses taken out. Inside WSL it lands on your Windows Desktop.
 - **Plugin:** after editing `openclaw-plugin/`, run `openclaw plugins reload personal-assistant-bridge --wait`; no Gateway restart needed.
 - **One collector only:** don't run `assistant.py sync-once` while the service runs. Stop the service before manual syncs or migrations and resume from the existing checkpoints. Never reset a checkpoint to get past throttling.
-- **Google sign-in expired:** a Gmail or Calendar source whose stored sign-in Google revoked shows `google_signin_expired_run_gog_auth_add` and retries hourly. Run `gog auth add <email> --client <client>` again; the next retry picks it up.
+- **Google sign-in expired:** a Gmail or Calendar source whose stored sign-in Google revoked shows `google_signin_expired_run_gog_auth_add` and retries hourly. Press **Reconnect** on its card (it asks Google for the same access again), or run the command the card shows under **Or use a terminal**; the next retry picks it up.
 - **Backups:** use SQLite's backup API (`sqlite3 events.sqlite ".backup copy.sqlite"`); never copy the live file without its WAL.
 - **Rollback:** disable a source by removing its account from `config.json`; disable reviews with `review_worker.enabled: false`; stop delivery with `delivery_enabled: false`; disable the plugin with `openclaw plugins disable personal-assistant-bridge`. Keep the database.
 

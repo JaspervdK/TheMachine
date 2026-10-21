@@ -161,6 +161,7 @@ class WebUI:
     A key typed there only goes to the step that asked for it, never into these lines or a log."""
     interactive = True
     web = True  # steps that need a terminal (a QR code, a browser on this computer) say what to run instead
+    reconnect = False  # signing an existing account in again: its address, access and calendar stay as they are
 
     def __init__(self, wait=900):
         self.lines, self.question, self.wait, self.cancelled = [], None, wait, False
@@ -915,7 +916,8 @@ def step_google(config, account, ui):
     nearby = [a['email'] for a in config.get('accounts', []) if a.get('transport') == 'gog' and a.get('boundary') == account.get('boundary')
               and a['id'] != account['id'] and a.get('email') not in (None, PLACEHOLDERS['email'])]
     unused = [e for e, _ in known if e.lower() not in used]
-    email = ui.ask('Google account to read', own or next(iter(nearby + unused + [e for e, _ in known]), ''))
+    email = own if own and getattr(ui, 'reconnect', False) else \
+        ui.ask('Google account to read', own or next(iter(nearby + unused + [e for e, _ in known]), ''))
     if not email or '@' not in email:
         raise SetupError('No Google account given', 'rerun with the address you use for Gmail and Calendar')
     account['email'] = email
@@ -977,19 +979,62 @@ def sign_in(config, account, gog, ui):
         pass
 
 
+def gog_same_scopes(config, gog, email, client):
+    """Flags for `gog auth add` that ask Google for exactly the scopes this address's sign-in holds now, checked with
+    gog's own dry run, so signing in again never widens or narrows what it may do. None when they cannot be matched."""
+    listed = run([gog, 'auth', 'list', '--json', '--no-input'], env=gog_env(config), timeout=30)
+    try:
+        entry = next(a for a in json.loads(listed.stdout).get('accounts', [])
+                     if str(a.get('email', '')).lower() == email.lower() and (a.get('client') or 'default') == client)
+    except (ValueError, AttributeError, TypeError, StopIteration):
+        return None
+    have, services = set(entry.get('scopes') or []), [str(s) for s in entry.get('services') or []]
+    if not have or not services:
+        return None
+
+    def asked(flags):
+        result = run([gog, 'auth', 'add', email, '--client', client, *flags, '--dry-run', '--json', '--no-input'],
+                     env=gog_env(config), timeout=30)
+        try:
+            return set(json.loads(result.stdout)['request']['scopes'])
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    gmail = ('readonly', 'full', 'send', 'read-send') if 'gmail' in services else (None,)
+    drive = ('full', 'readonly', 'file') if 'drive' in services else (None,)
+    tries = sorted(((r, g, d) for r in (True, False) for g in gmail for d in drive),  # the dashboard's own sign-in first, then gog's default
+                   key=lambda t: 0 if t[0] and t[1] in ('readonly', None) else 1 if not t[0] and t[1] in ('full', None) and t[2] in ('full', None) else 2)
+    for readonly, gmail_mode, drive_mode in tries:
+        flags = ['--services', ','.join(services)] + (['--gmail-scope', gmail_mode] if gmail_mode else []) + (
+            ['--drive-scope', drive_mode] if drive_mode else []) + (['--readonly'] if readonly else [])
+        got = asked(flags)
+        if got is None or not got <= have:
+            continue
+        if have - got:
+            flags += ['--extra-scopes', ','.join(sorted(have - got))]
+        if asked(flags) == have:
+            return flags
+    return None
+
+
 def sign_in_web(config, account, gog, ui, args):
     """The same read-only Google sign-in from the dashboard: gog's remote flow (the address to open, then the address
-    Google sends you back to, pasted). Only for an address gog does not hold yet: a sign-in gog already keeps is never
-    replaced from here, so its scopes stay what they are."""
+    Google sends you back to, pasted). An address gog holds already (signing in again after it expired) asks for exactly
+    the scopes it has now, never others; when those cannot be matched it stops and says what to run instead."""
     email, service = account['email'], account.get('service', 'gmail')
-    if email.lower() in {e.lower() for e, _ in gog_accounts(gog)}:
-        raise SetupError(f'{email} is signed in to gog already, but it does not read yet',
-                         f'run this in a terminal on this computer: assistant connect {service}')
+    again = email.lower() in {e.lower() for e, _ in gog_accounts(gog)}
+    if again:
+        ui.say('Checking what this Google sign-in may do now, to ask for the same again...')
+        same = gog_same_scopes(config, gog, email, account['client'])
+        if same is None:
+            raise SetupError(f'{email} is signed in to gog already, with access this page cannot ask for again',
+                             f'run this in a terminal on this computer: assistant connect {service}')
+        args = [gog, 'auth', 'add', email, '--client', account['client'], *same, '--force-consent']
     first = run(args + ['--remote', '--step', '1'], env=gog_env(config), timeout=60)
     url = next(iter(re.findall(r'https://accounts\.google\.com/\S+', first.stdout + '\n' + first.stderr)), None)
     if first.returncode or not url:
         raise SetupError('gog could not start the Google sign-in', f'run this in a terminal on this computer: assistant connect {service}')
-    ui.say('Open this address, sign in as ' + email + ' and allow read-only access. Google then sends you to an address '
+    ui.say('Open this address, sign in as ' + email + (' and allow access again.' if again else ' and allow read-only access.') + ' Google then sends you to an address '
            'that may not load: copy that whole address from the address bar.')
     ui.say(url)
     landed = ui.ask('The address Google sent you to').strip()
@@ -1014,8 +1059,8 @@ def gog_calendars(config, account):
 
 def pick_calendar(config, account, ui):
     """Your own calendar unless you pick a shared one (a partner's, a team's)."""
-    calendars = gog_calendars(config, account) if ui.interactive else []
-    if len(calendars) < 2:
+    calendars = gog_calendars(config, account) if ui.interactive and not getattr(ui, 'reconnect', False) else []
+    if len(calendars) < 2:  # signing in again keeps the calendar it reads
         return
     name = lambda c: c.get('summaryOverride') or c.get('summary') or c['id']
     calendars.sort(key=lambda c: (not c.get('primary'), not c.get('selected'), name(c).lower()))
@@ -1288,19 +1333,20 @@ def step_microsoft(config, account, ui):
         app['tenant'] = ui.ask('Tenant (common, organizations, consumers or your tenant ID)', app.get('tenant') or 'common')
     nearby = [a['email'] for a in config.get('accounts', []) if a.get('transport') == 'graph' and a['id'] != account['id']
               and a.get('email') not in (None, PLACEHOLDERS['email'])]
-    email = ui.ask('Microsoft account to read', own or next(iter(nearby), '')).strip().lower()
+    again = bool(own) and getattr(ui, 'reconnect', False)  # signing in again: the same address and the same access
+    email = own.lower() if again else ui.ask('Microsoft account to read', own or next(iter(nearby), '')).strip().lower()
     if '@' not in email:
         raise SetupError('No Microsoft account given', 'rerun with the address you use for Outlook')
     account['email'] = email
     name = ms_graph.credential_name(email)
     account['credential'] = name
     path = Path(config.setdefault('credentials', {}).setdefault(name, str(data_dir(config) / name))).expanduser()
-    send = ui.yes('Also send what you approve (and snooze those threads)?', True)
-    wanted = set(ms_graph.SCOPES_READ) | (set(ms_graph.SCOPES_SEND) if send else set())
     try:
         granted = set(json.loads(path.read_text()).get('scopes') or []) if path.exists() else set()
     except (OSError, ValueError):
         granted = set()
+    send = 'Mail.Send' in granted if again and granted else ui.yes('Also send what you approve (and snooze those threads)?', True)
+    wanted = set(ms_graph.SCOPES_READ) | (set(ms_graph.SCOPES_SEND) if send else set())
     if wanted <= {s for g in granted for s, answers in ms_graph.ANSWERS.items() if g in answers} and check(config, account) is None:
         ui.say(f'  {email} is already signed in')
         return
@@ -1404,6 +1450,18 @@ def connect(config_path, name, ui, account_id=None, restart=True):
     ui.say(f'  ✓ {label(service)} connected')
     if restart:
         restart_and_sync(config, [account['id']], ui, config_path=config_path)
+    return account
+
+
+def disconnect(config_path, account_id):
+    """Stop reading one account: it leaves config.json (the old file is kept as config.json.bak). What it already
+    brought in stays, and so do sign-ins and keys, which other accounts or tools may share. Returns the account."""
+    config = load(config_path)
+    account = next((a for a in config.get('accounts', []) if a.get('id') == account_id), None)
+    if not account:
+        raise SetupError('That account is not connected here')
+    config['accounts'] = [a for a in config['accounts'] if a.get('id') != account_id]
+    save(config_path, config)
     return account
 
 

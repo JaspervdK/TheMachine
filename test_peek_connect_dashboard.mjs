@@ -26,7 +26,7 @@ const server=createServer(async(req,res)=>{
  if(url.pathname==='/api/email'){const id=url.searchParams.get('id');hits.email[id]=(hits.email[id]||0)+1;res.end(JSON.stringify({html:'<p id=hello>Hello</p>',images:{}}));return}
  if(url.pathname==='/api/action'){let body='';for await(const b of req)body+=b;const {action,args}=JSON.parse(body);posts.push({action,args});
   if(action==='connect_sources'){res.end(JSON.stringify({saveable:true,manage_url:null,sources:[{name:'gmail',service:'gmail',label:'Gmail',connected:1,broker:false},{name:'crm',service:'salesflare',label:'Salesflare CRM',connected:0,broker:false},{name:'github',service:'github',label:'GitHub',connected:0,broker:false,what:'Review requests and mentions.'}]}));return}
-  if(action==='connect_start'){session={session:'s1',state:'running',label:'Salesflare CRM',source:args.source,lines:['Salesflare: create an API key in Salesflare’s settings (API keys).'],question:{id:1,kind:'secret',prompt:'Salesflare API key',default:''}};res.end(JSON.stringify(session));return}
+  if(action==='connect_start'){session={session:'s1',state:'running',label:'Salesflare CRM',source:args.name,lines:['Salesflare: create an API key in Salesflare’s settings (API keys).'],question:{id:1,kind:'secret',prompt:'Salesflare API key',default:''}};res.end(JSON.stringify(session));return}
   if(action==='connect_poll'){res.end(JSON.stringify(session));return}
   if(action==='connect_answer'){session={...session,question:null,state:'done',account:'acme-crm',restarting:true,lines:[...session.lines,'Salesflare: owner@example.org','✓ Salesflare CRM connected']};res.end(JSON.stringify(session));return}
   res.end('{}');return}

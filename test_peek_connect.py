@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -183,7 +184,7 @@ class WebConnectTest(unittest.TestCase):
     def test_questions_are_answered_on_the_dashboard_and_the_source_is_saved(self):
         typed = {}
 
-        def connect(path, name, ui, restart=True):
+        def connect(path, name, ui, account_id=None, restart=True):
             self.assertFalse(restart)  # the service restarts itself after, not in the middle
             ui.say('Salesflare: create an API key')
             typed['key'] = ui.secret('Salesflare API key')
@@ -220,7 +221,7 @@ class WebConnectTest(unittest.TestCase):
     def test_stop_and_setup_errors_show_with_their_fix(self):
         from onboarding import SetupError
 
-        def connect(path, name, ui, restart=True):
+        def connect(path, name, ui, account_id=None, restart=True):
             if name == 'whatsapp':
                 raise SetupError('WhatsApp is not linked yet', 'run this in a terminal on this computer and scan the code: wacli --store /x auth')
             ui.ask('Anything')
@@ -279,12 +280,118 @@ class WebSignInTest(unittest.TestCase):
             self.assertTrue(all('--readonly' in c and '--gmail-scope readonly' in c for c in calls if c.startswith('auth add')))
             self.assertIn('--step 2 --auth-url http://127.0.0.1:1/oauth2/callback?code=fake-code', calls[-1])
 
-    def test_an_address_gog_already_holds_is_never_signed_in_again_from_here(self):
+    def held(self, folder, scopes):
+        """A gog that already holds owner@example.org with these scopes; its dry run answers like gog's own."""
+        log = Path(folder) / 'calls'
+        script = Path(folder) / 'gog'
+        script.write_text('#!' + sys.executable + '\nimport json, sys\nargs = sys.argv[1:]\n'
+                          'open(%r, "a").write(" ".join(args) + "\\n")\n' % str(log) +
+                          'if args[:2] == ["auth", "list"]:\n'
+                          '    print(json.dumps({"accounts": [{"email": "owner@example.org", "client": "default", "services": ["gmail", "calendar"], '
+                          '"scopes": %r}]}))\n' % sorted(scopes) +
+                          'elif "--dry-run" in args:\n'
+                          '    ro = "--readonly" in args\n'
+                          '    mode = args[args.index("--gmail-scope") + 1] if "--gmail-scope" in args else "full"\n'
+                          '    got = {"email", "openid", "gmail." + ("readonly" if mode == "readonly" else "modify"), "calendar" + (".readonly" if ro else "")}\n'
+                          '    if "--extra-scopes" in args: got |= set(args[args.index("--extra-scopes") + 1].split(","))\n'
+                          '    print(json.dumps({"dry_run": True, "request": {"scopes": sorted(got)}}))\n'
+                          'elif "--step" in args and args[args.index("--step") + 1] == "1":\n'
+                          '    print("Open: https://accounts.google.com/o/oauth2/auth?client_id=x")\n')
+        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+        return str(script), log
+
+    def test_signing_in_again_asks_for_exactly_the_access_it_has(self):
         with tempfile.TemporaryDirectory() as folder:
-            gog, log = self.gog(folder, ['owner@example.org'])
+            have = {'email', 'openid', 'gmail.modify', 'calendar', 'drive.extra'}  # a wider sign-in made in a terminal
+            gog, log = self.held(folder, have)
+            ui = onboarding.WebUI(wait=5)
+            done = threading.Thread(target=onboarding.sign_in, args=({}, {'email': 'Owner@example.org', 'client': 'default'}, gog, ui))
+            done.start()
+            for _ in range(200):
+                if ui.view()['question']:
+                    break
+                time.sleep(0.02)
+            ui.answer(ui.view()['question']['id'], 'http://127.0.0.1:1/oauth2/callback?code=fake-code')
+            done.join(5)
+            real = [c for c in log.read_text().splitlines() if c.startswith('auth add') and '--dry-run' not in c]
+            self.assertEqual(len(real), 2)
+            for call in real:  # gog's default (full Gmail, no --readonly) plus what that leaves out: the same, not read-only
+                self.assertIn('--services gmail,calendar --gmail-scope full --extra-scopes drive.extra --force-consent', call)
+                self.assertNotIn('--readonly', call)
+
+    def test_access_it_cannot_ask_for_again_is_left_to_a_terminal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            gog, log = self.held(folder, {'email', 'openid', 'gmail.metadata'})  # nothing here asks for exactly that
             with self.assertRaisesRegex(onboarding.SetupError, 'already'):
-                onboarding.sign_in({}, {'email': 'Owner@example.org', 'client': 'default'}, gog, onboarding.WebUI(wait=1))
-            self.assertFalse([c for c in log.read_text().splitlines() if c.startswith('auth add')])
+                onboarding.sign_in({}, {'email': 'owner@example.org', 'client': 'default'}, gog, onboarding.WebUI(wait=1))
+            self.assertFalse([c for c in log.read_text().splitlines() if c.startswith('auth add') and '--dry-run' not in c])
+
+
+class ReconnectDisconnectTest(unittest.TestCase):
+    """A connection's card signs it in again (the same steps as Add, for that account) or disconnects it; a hosted
+    machine's account page does both for the Google and Microsoft accounts it signs in."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / 'config.json'
+        accounts = [{'id': 'work-gmail', 'service': 'gmail', 'email': 'owner@example.org', 'transport': 'gog', 'client': 'default'},
+                    {'id': 'work-slack', 'service': 'slack', 'transport': 'maton'},
+                    {'id': 'hosted-outlook', 'service': 'outlook', 'email': 'owner@example.org', 'transport': 'broker'}]
+        self.path.write_text(json.dumps({'accounts': accounts, 'database': str(Path(self.temp.name) / 'events.sqlite')}))
+        self.app = object.__new__(assistant.App)
+        self.app.config, self.app.config_path = json.loads(self.path.read_text()), self.path
+
+    def finish(self, view):
+        for _ in range(200):
+            if view['state'] != 'running':
+                return view
+            time.sleep(0.02)
+            view = self.app.action('connect_poll', {'session': view['session']}, owner_dashboard=True)
+        self.fail('still running')
+
+    def test_the_dashboard_names_the_source_since_its_requests_carry_their_own(self):
+        seen = {}
+
+        def connect(path, name, ui, account_id=None, restart=True):
+            seen.update(name=name, account=account_id, again=ui.reconnect)
+            return {'id': account_id or 'new'}
+        with patch.object(onboarding, 'connect', connect), patch.object(assistant, 'restart_self', return_value=True):
+            view = self.finish(self.app.action('connect_start', {'name': 'outlook', 'source': 'dashboard'}, owner_dashboard=True))
+            self.assertEqual((view['state'], seen), ('done', {'name': 'outlook', 'account': None, 'again': False}))
+            view = self.finish(self.app.action('connect_start', {'name': 'gmail', 'account': 'work-gmail', 'source': 'dashboard'}, owner_dashboard=True))
+            self.assertEqual((view['state'], view['reconnect'], seen), ('done', 'work-gmail', {'name': 'gmail', 'account': 'work-gmail', 'again': True}))
+        with self.assertRaisesRegex(ValueError, 'not a Slack'):
+            self.app.action('connect_start', {'name': 'slack', 'account': 'work-gmail'}, owner_dashboard=True)
+        with self.assertRaisesRegex(ValueError, 'not connected'):
+            self.app.action('connect_start', {'name': 'gmail', 'account': 'gone'}, owner_dashboard=True)
+
+    def test_disconnect_takes_it_out_of_the_settings_and_keeps_the_rest(self):
+        with self.assertRaises(ValueError):
+            self.app.action('connect_remove', {'account': 'work-slack'})  # not from the dashboard
+        with patch.object(assistant, 'restart_self', return_value=True) as restart:
+            self.assertEqual(self.app.action('connect_remove', {'account': 'work-slack'}, owner_dashboard=True),
+                             {'removed': 'work-slack', 'restarting': True})
+        restart.assert_called_once()
+        self.assertEqual([a['id'] for a in json.loads(self.path.read_text())['accounts']], ['work-gmail', 'hosted-outlook'])
+        self.assertIn('work-slack', self.path.with_name('config.json.bak').read_text())
+        with self.assertRaisesRegex(ValueError, 'not connected'):
+            self.app.action('connect_remove', {'account': 'work-slack'}, owner_dashboard=True)
+
+    def test_hosted_google_and_microsoft_sign_in_and_out_on_the_account_page_and_no_terminal_shows(self):
+        manage = 'https://cp.example.org/setup'
+        self.assertEqual(assistant.reconnect_help(self.app.config['accounts'][2], manage), {'account_page': 'https://cp.example.org/setup#microsoft'})
+        self.assertEqual(assistant.reconnect_help(self.app.config['accounts'][1], manage), {'connect_name': 'slack'})
+        self.assertEqual(assistant.reconnect_help(self.app.config['accounts'][2], None), {'connect_name': 'outlook'})
+        self.app.config['manage_url'] = manage
+        for name in ('connect_remove', 'connect_start'):
+            with self.assertRaisesRegex(ValueError, 'account page'):
+                self.app.action(name, {'name': 'outlook', 'account': 'hosted-outlook'}, owner_dashboard=True)
+
+        def connect(path, name, ui, account_id=None, restart=True):
+            raise onboarding.SetupError('Slack is not connected', 'run this in a terminal on this computer: assistant connect slack')
+        with patch.object(onboarding, 'connect', connect):
+            view = self.finish(self.app.action('connect_start', {'name': 'slack', 'account': 'work-slack'}, owner_dashboard=True))
+        self.assertEqual((view['state'], view['fix']), ('failed', 'try again, or get help from your account page'))
 
 
 if __name__ == '__main__':
