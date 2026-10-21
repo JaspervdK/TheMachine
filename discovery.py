@@ -283,6 +283,8 @@ class Discovery:
         emails = [c[0] for c in contacts]
         a, items, buckets = blind(emails)
         answer = self.relay.call('POST', '/discover', {'action': 'match', 'items': items, 'buckets': buckets}, timeout=120)
+        if not isinstance(answer, dict) or not isinstance(answer.get('items'), list) or len(answer['items']) != len(items) or not isinstance(answer.get('found'), list):
+            raise ValueError('The Network match response was incomplete; contacts remain pending')
         hits = matches(emails, items, a, answer)
         with self.connect() as db:
             known = {r[0] for r in db.execute('SELECT email FROM network_people')}

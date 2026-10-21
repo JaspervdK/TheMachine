@@ -64,6 +64,22 @@ class Discovery(unittest.TestCase):
     def people(self):
         return {p['username']: p for p in self.fleet.network_view()['people']}
 
+    def test_incomplete_match_response_does_not_commit_negative_matches(self):
+        real = self.relay.call
+        for answer in ({}, {'items': [], 'found': []}):
+            with self.subTest(answer=answer):
+                def incomplete(method, path, body=None, timeout=40):
+                    return answer if path == '/discover' and body['action'] == 'match' else real(method, path, body, timeout)
+                self.relay.call = incomplete
+                result = self.fleet.network_action('find_on')
+                self.assertIn('Looking up later', result['note'])
+                with self.store.connect() as db:
+                    self.assertEqual(db.execute('SELECT count(*) FROM network_looked').fetchone()[0], 0)
+                self.assertIsNone(self.fleet.network_settings().get('last'))
+        self.relay.call = real
+        self.fleet.discovery_round()
+        self.assertIn('nia', self.people())
+
     def test_unresolved_matches_remain_eligible_after_rate_limit(self):
         real = self.relay.call
         def limited(method, path, body=None, timeout=40):
