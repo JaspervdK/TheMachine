@@ -433,7 +433,7 @@ else: sys.stderr.write("HTTP 401"); sys.exit(1)''')
         slack = dict(EXAMPLE['work-slack'], email='alex@acme.test', credential_variable='MATON_WORK_KEY', connection_id='conn-slack', team_id='T1', user_id='U1')
         self.config(slack)
         onboarding.write_private(self.data / 'maton-slack.env', 'MATON_WORK_KEY=mk\n')
-        ui = FakeUI(answers=['acct_123', '1', '1'])  # account, through Maton, the saved key; the connection is found
+        ui = FakeUI(answers=['1', 'acct_123', '1', '1'])  # Work · Acme, account, through Maton, the saved key; the connection is found
         with mock.patch.object(onboarding.assistant().load_connector('stripe').Source, 'get', return_value={'id': 'acct_123'}), \
                 mock.patch.object(onboarding, 'maton_connections', return_value=['conn-stripe']):
             onboarding.connect(self.path, 'stripe', ui, restart=False)
@@ -477,6 +477,7 @@ elif args[:2] == ["api", "call"]:
         two = self.saved()['accounts'][-1]
         self.assertEqual((two['id'], two['boundary'], two['email'], two['client']), ('two-gmail', 'work:Two', 'me@two.test', 'mine'))
         self.assertNotIn('excluded_terms', two)
+        self.assertEqual(two['boundary_by'], 'owner')  # the owner's own marking, which a Work Fleet's removal follows
         self.assertNotIn('personal:whatsapp', ui.text())
         self.assertNotIn('auth add', self.calls())
         ui = FakeUI(answers=['2', '', '2'])  # Two, its own Google account, then the shared team calendar

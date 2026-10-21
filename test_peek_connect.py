@@ -377,6 +377,24 @@ class ReconnectDisconnectTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'not connected'):
             self.app.action('connect_remove', {'account': 'work-slack'}, owner_dashboard=True)
 
+    def test_work_or_personal_marks_the_sign_in_and_its_address_also_hosted(self):
+        self.app.config['manage_url'] = 'https://cp.example.org/setup'  # the account page signs it in; marking stays here
+        with self.assertRaises(ValueError):
+            self.app.action('connect_scope', {'account': 'work-gmail', 'boundary': 'personal'})  # not from the dashboard
+        with patch.object(assistant, 'restart_self', return_value=True):
+            self.assertEqual(self.app.action('connect_scope', {'account': 'hosted-outlook', 'boundary': 'personal'}, owner_dashboard=True),
+                             {'changed': ['work-gmail', 'hosted-outlook'], 'restarting': True})
+            saved = {a['id']: a for a in json.loads(self.path.read_text())['accounts']}
+            self.assertEqual({k: (a.get('boundary'), a.get('boundary_by')) for k, a in saved.items()},
+                             {'work-gmail': ('personal:me', 'owner'), 'hosted-outlook': ('personal:me', 'owner'), 'work-slack': (None, None)})
+            self.app.action('connect_scope', {'account': 'work-slack', 'boundary': 'work:Acme'}, owner_dashboard=True)
+            self.assertEqual(json.loads(self.path.read_text())['accounts'][1]['boundary'], 'work:Acme')
+            for bad in ('', 'owner:system', '<b>', 7):
+                with self.assertRaises(ValueError):
+                    self.app.action('connect_scope', {'account': 'work-slack', 'boundary': bad}, owner_dashboard=True)
+            with self.assertRaisesRegex(ValueError, 'not connected'):
+                self.app.action('connect_scope', {'account': 'gone', 'boundary': 'personal'}, owner_dashboard=True)
+
     def test_hosted_google_and_microsoft_sign_in_and_out_on_the_account_page_and_no_terminal_shows(self):
         manage = 'https://cp.example.org/setup'
         self.assertEqual(assistant.reconnect_help(self.app.config['accounts'][2], manage), {'account_page': 'https://cp.example.org/setup#microsoft'})

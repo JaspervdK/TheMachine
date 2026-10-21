@@ -347,7 +347,7 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel', 'connect_remove')
+CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel', 'connect_remove', 'connect_scope')
 OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_split', 'fleet_split_dismiss',
@@ -4246,6 +4246,7 @@ class Store:
                 failures_24h = db.execute("SELECT count(*) FROM sync_activity WHERE account_id=? AND status='failed' AND at>=?",(account['id'],cutoff)).fetchone()[0]
                 result['connectors'].append({'sync_activity':activity,'last_failure':dict(last_failure) if last_failure else None,
                                              'failures_24h':failures_24h,'id': account['id'], 'email': account.get('email', ''), 'boundary': account['boundary'],
+                                             'boundary_by': account.get('boundary_by'),
                                              'service': account.get('service', 'gmail'),
                                              'poll_seconds':account.get('poll_seconds',300),
                                              'display_name': account.get('display_name') or account.get('email') or account['id'],
@@ -8557,6 +8558,23 @@ class App:
                 raise ValueError('That account is not connected here')
             if 'account_page' in reconnect_help(account, manage if hosted else None):
                 raise ValueError('Your account page signs this one in and out')
+        if name == 'connect_scope':
+            # Work (with its company) or Personal, for a sign-in and the accounts on the same address: the owner's
+            # own marking, which a Work Fleet's removal follows (work_removal.py). Also for one the account page signs in.
+            account = next((a for a in self.config['accounts'] if a['id'] == args.get('account')), None)
+            if not account:
+                raise ValueError('That account is not connected here')
+            if not getattr(self, 'config_path', None):
+                raise ValueError('This service cannot save its settings')
+            if not isinstance(args.get('boundary'), str):
+                raise ValueError('Pick work with a company name, or personal')
+            with lock:
+                try:
+                    changed = onboarding.set_boundary(self.config_path, account['id'], args['boundary'])
+                except onboarding.SetupError as error:
+                    raise ValueError(error.message) from None
+            LOG.info('connect scope accounts=%s', len(changed))
+            return {'changed': changed, 'restarting': restart_self(3)}
         if name == 'connect_remove':
             if not getattr(self, 'config_path', None):
                 raise ValueError('This service cannot save its settings')

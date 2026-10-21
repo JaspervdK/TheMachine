@@ -218,13 +218,22 @@ effect at once, and how often a Machine can ask is limited.
 
 ## Leaving a Work Fleet with your Machine
 
-When a Work Fleet's owner or admin removes you and you keep your Machine, your work data for that company does not stay
-with you. Your Machine disconnects that company's accounts and deletes what they brought in; your personal sources stay.
+When you leave a Work Fleet, or its owner or admin removes you, and you keep your Machine, your work data for that
+company does not stay with you. Your Machine disconnects that company's accounts and deletes what they brought in; your
+personal sources stay. The invite page says so before you join, and the confirmation before you leave.
 
-- **Which accounts:** those whose address is at the company's email domain (the domain of the Fleet's owner and
-  admins, or one its members share, such as `acme.com`, also `eu.acme.com`), and the accounts in that company's work boundary (`work:Acme`, matched to
-  the Fleet's name or the domain) that have no address elsewhere, such as the company Slack, Intercom, Salesflare or
-  GitHub. An account filed under that company with an address elsewhere (a personal Gmail) stays.
+- **Work or personal is yours to mark.** Each sign-in and account is Work (with its company) or Personal: pick it in
+  the dashboard (Connections, a card's Details, and when you add one with + Add) or, on a hosted Machine, on the setup
+  page next to each Google, Microsoft and other account. It is the account's `boundary` (`work:Acme` or `personal:me`),
+  marked as your own choice (`boundary_by: owner`); all accounts on the same address follow it.
+- **Which accounts:** your marking first: what you marked Work for that company goes, whatever its address, and what
+  you marked Personal (or another company's) stays. Unmarked ones: those whose address is at the company's email domain
+  (the domain of the Fleet's owner and admins, or one its members share, such as `acme.com`, also `eu.acme.com`), and
+  the accounts in that company's work boundary (`work:Acme`, matched to the Fleet's name or the domain) that have no
+  address elsewhere, such as the company Slack, Intercom, Salesflare or GitHub. An unmarked account filed under that
+  company with an address elsewhere (a personal Gmail) stays.
+- **Their sign-ins go too** on a self-hosted Machine: a Google sign-in in gog's keyring (`gog auth remove`) and an
+  Outlook sign-in's token file. A sign-in that a staying account uses is never touched.
 - **What goes:** their messages and events, the cards and drafts made only from them (a card that also used a personal
   source stays), their promises, graph and search entries and sync state, and their own secret when no other account
   uses it. Google and Microsoft access through your hosted Machine's account page is revoked.

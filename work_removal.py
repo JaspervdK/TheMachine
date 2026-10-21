@@ -6,8 +6,12 @@ What goes:
 - the accounts whose address is at one of the company's email domains (alex@acme.com, also @eu.acme.com);
 - the accounts in that company's boundary (work:Acme, matched to the Fleet's name or a company domain) that have no
   address elsewhere: the company Slack, Intercom, Salesflare or GitHub org;
+- the accounts the owner marked Work for that company themselves (onboarding.set_boundary), whatever their address;
+  one they marked Personal never goes;
 - what they brought in: their messages and events, the cards and drafts made only from those, the promises, graph
-  entries, search entries and sync state that came from them, and their own secrets when no other account uses them.
+  entries, search entries and sync state that came from them, and their own secrets when no other account uses them;
+- their own sign-ins on this Machine: a Google one in gog's keyring, an Outlook one's token file. Never a sign-in an
+  account that stays uses.
 
 First a copy of config.json and the database goes into work-removal-backups/ next to the database (private, removed
 after BACKUP_DAYS), so a mistake can be undone. The accounts leave config.json, then their data goes, then the
@@ -51,20 +55,38 @@ def _at(address, domains):
     return any(host == d or host.endswith('.' + d) for d in domains)
 
 
+def _named(name, names):
+    """A boundary's company name is the Fleet's company: the same, or one holds the other (Acme, Acme HQ)."""
+    name = _norm(name)
+    return bool(name) and any(name == n or (min(len(name), len(n)) >= 4 and (n in name or name in n)) for n in names)
+
+
+def marked(account):
+    """The owner marked this sign-in Work (with its company) or Personal themselves (onboarding.set_boundary)."""
+    return account.get('boundary_by') == 'owner'
+
+
 def matching(config, domains=(), companies=()):
-    """The accounts to remove: [(account, why)], why 'address' or 'boundary'. An account in the company's boundary
-    with an address outside its domains (someone's personal Gmail filed under work) stays."""
+    """The accounts to remove: [(account, why)], why 'marked', 'address' or 'boundary'. The owner's own marking comes
+    first: one they marked Work for this company goes, one they marked Personal (or another company) stays, whatever
+    its address. Unmarked: an account at the company's domains goes; one in the company's boundary goes when it has no
+    address elsewhere (someone's personal Gmail filed under work stays)."""
     domains = _clean_domains(domains)
     names = {_norm(c) for c in companies or [] if _norm(c)} | {_norm(d.split('.')[0]) for d in domains}
     names.discard('')
     accounts = [a for a in config.get('accounts', []) if isinstance(a, dict) and a.get('id')]
-    by_address = [a for a in accounts if any(_at(e, domains) for e in _addresses(a))]
-    boundaries = {str(a.get('boundary')) for a in by_address if str(a.get('boundary') or '').startswith('work:')}
+    at_company = [a for a in accounts if any(_at(e, domains) for e in _addresses(a))]
+    # The company's boundaries: the work ones its addresses are in (not one the owner marked as another company's),
+    # and the ones named like it (Acme, Acme HQ)
+    boundaries = {str(a.get('boundary')) for a in at_company if str(a.get('boundary') or '').startswith('work:') and not marked(a)}
     boundaries |= {str(a.get('boundary')) for a in accounts if str(a.get('boundary') or '').startswith('work:')
-                   and _norm(str(a['boundary']).split(':', 1)[1]) in names}
+                   and _named(str(a['boundary']).split(':', 1)[1], names)}
     out = []
     for a in accounts:
-        if a in by_address:
+        if marked(a):
+            if str(a.get('boundary') or '') in boundaries:
+                out.append((a, 'marked'))
+        elif a in at_company:
             out.append((a, 'address'))
         elif str(a.get('boundary') or '') in boundaries and all(_at(e, domains) for e in _addresses(a)):
             out.append((a, 'boundary'))
@@ -205,31 +227,73 @@ def _chunks(db, sql, values, size=500):
     return out
 
 
+def _credential(account):
+    name = account.get('credential')
+    if not name and account.get('transport') == 'graph' and account.get('email'):
+        import ms_graph
+        name = ms_graph.credential_name(account['email'])  # an Outlook sign-in with this install's own app
+    return name
+
+
 def _drop_secrets(config, removed):
-    """A removed account's own secret (its credential), when no account that stays uses it."""
-    kept = {a.get('credential') for a in config.get('accounts', [])}
+    """A removed account's own secret (its credential: also an Outlook sign-in's token file), when no account that
+    stays uses it."""
+    kept = {_credential(a) for a in config.get('accounts', [])}
     dropped = []
     for account in removed:
-        name = account.get('credential')
+        name = _credential(account)
         if not name or name in kept or name in CORE_CREDENTIALS or name not in (config.get('credentials') or {}):
             continue
         path = Path(str(config['credentials'].pop(name))).expanduser()
-        with contextlib.suppress(OSError):
-            path.unlink()
+        for item in (path, Path(str(path) + '.lock')):
+            with contextlib.suppress(OSError):
+                item.unlink()
         dropped.append(name)
     return dropped
 
 
-def remove(config_path, domains=(), companies=(), restart=None, store=None):
-    """The whole removal: backup, accounts out of config.json, their data deleted, a note for settle, then restart()
-    (when given). Returns {accounts: [{id, service, email}], events, cards, drafts, graph, backup, kept_days}."""
+def _forget_google(config, removed, run=None):
+    """A removed account's Google sign-in in gog's keyring (gog auth remove), when no account that stays signs in with
+    the same address and client. Only these: a sign-in that stays is never touched. Returns how many went."""
+    import subprocess
+    run = run or subprocess.run
+    kept = {(str(a.get('email') or '').lower(), a.get('client')) for a in config.get('accounts', []) if a.get('transport') == 'gog'}
+    gone = 0
+    for key in dict.fromkeys((str(a.get('email') or '').lower(), a.get('client')) for a in removed if a.get('transport') == 'gog'):
+        if '@' not in key[0] or key in kept:
+            continue
+        account = {'email': key[0], 'client': key[1] or ''}
+        try:
+            import assistant
+            env = {**os.environ, 'GOG_KEYRING_BACKEND': 'file', 'GOG_KEYRING_PASSWORD': assistant.credential(config, 'gog-password')}
+            env.pop('DBUS_SESSION_BUS_ADDRESS', None)
+            done = run([config.get('gog') or 'gog', 'auth', 'remove', key[0], *(['--client', key[1]] if key[1] else []), '--force', '--no-input'],
+                       env=env, capture_output=True, text=True, timeout=60).returncode == 0
+        except Exception:  # noqa: BLE001 - no gog, no keyring password: the token file goes below
+            done = False
+        try:
+            import assistant
+            path = assistant.gog_token_path(config, account)
+            if path.is_file():
+                path.unlink()
+                done = True
+        except Exception:  # noqa: BLE001
+            pass
+        gone += done
+    return gone
+
+
+def remove(config_path, domains=(), companies=(), restart=None, store=None, run=None):
+    """The whole removal: backup, accounts out of config.json with their own sign-ins (gog keyring, Outlook token
+    file; personal ones stay), their data deleted, a note for settle, then restart() (when given). Returns
+    {accounts: [{id, service, email}], events, cards, drafts, graph, secrets, signins, backup, kept_days}."""
     import onboarding
     config_path = Path(config_path)
     config = onboarding.load(config_path)
     prune(config)
     found = [a for a, _ in matching(config, domains, companies)]
     out = {'accounts': [{'id': a['id'], 'service': a.get('service', 'gmail'), 'email': (_addresses(a) or [''])[0]} for a in found],
-           'events': 0, 'cards': 0, 'drafts': 0, 'graph': 0, 'secrets': 0}
+           'events': 0, 'cards': 0, 'drafts': 0, 'graph': 0, 'secrets': 0, 'signins': 0}
     if not found:
         return out
     folder = backup(config_path, config)
@@ -237,6 +301,8 @@ def remove(config_path, domains=(), companies=(), restart=None, store=None):
     config['accounts'] = [a for a in config['accounts'] if a.get('id') not in ids]
     out['secrets'] = len(_drop_secrets(config, found))
     onboarding.save(config_path, config)
+    outlook = {_credential(a) for a in found if a.get('transport') == 'graph'} - {_credential(k) for k in config['accounts']}
+    out['signins'] = _forget_google(config, found, run) + len(outlook - {None})
     Path(config_path).with_name(config_path.name + '.bak').unlink(missing_ok=True)  # it still lists them
     onboarding.write_private(_data_dir(config) / PENDING, json.dumps({'accounts': ids, 'at': time.time()}))
     out.update(purge(config, ids, store))

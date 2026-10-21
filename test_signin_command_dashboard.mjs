@@ -59,6 +59,17 @@ try{
  await page.locator('#connectors [data-disconnect="work-gmail"]').click();
  await page.locator('#toast',{hasText:'Disconnected.'}).waitFor();
  assert.deepEqual(actions.find(a=>a[0]==='connect_remove')[1],{account:'work-gmail'});
+ // Details: Work (with its company) or Personal, the owner's own marking (a guess until then). Another company asks its name.
+ assert.match(await page.locator('#connectors .conn-head small').textContent(),/Email · Work · Example/);
+ assert.match(await page.locator('#connectors .conn-scope').textContent(),/Guessed/);
+ await page.locator('#connectors select[data-scope="work-gmail"]').selectOption('personal:me');
+ await page.locator('#toast',{hasText:'Saved.'}).waitFor();
+ assert.deepEqual(actions.find(a=>a[0]==='connect_scope')[1],{account:'work-gmail',boundary:'personal:me'});
+ await page.waitForTimeout(800);
+ page.once('dialog',d=>{assert.equal(d.message(),'Company name');d.accept('Other Co')});
+ await page.locator('#connectors select[data-scope="work-gmail"]').selectOption('');
+ for(let i=0;i<50&&actions.filter(a=>a[0]==='connect_scope').length<2;i++)await page.waitForTimeout(100);
+ assert.deepEqual(actions.filter(a=>a[0]==='connect_scope')[1][1],{account:'work-gmail',boundary:'work:Other Co'});
  const connection=connectors[0],failure=connection.sync_activity[0];
  Object.assign(connection,{error:null,retry_at:null,failures:0,last_success:new Date().toISOString(),last_sync_signals:1,total:247});
  delete connection.sign_in_command;

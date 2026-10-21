@@ -38,6 +38,18 @@ class Matching(unittest.TestCase):
         self.assertEqual(work_removal.matching({'accounts': ACCOUNTS}, ['example.org'], ['Nobody']), [])
         self.assertEqual(work_removal.matching({'accounts': ACCOUNTS}, ['not a domain', '@'], []), [])
 
+    def test_the_owners_own_marking_comes_first(self):
+        accounts = [dict(a) for a in ACCOUNTS] + [
+            {'id': 'acme-personal', 'service': 'gmail', 'email': 'alex.home@acme.com', 'boundary': 'personal:me', 'boundary_by': 'owner'},
+            {'id': 'marked-work', 'service': 'gmail', 'email': 'alex.acme@gmail.com', 'boundary': 'work:Acme', 'boundary_by': 'owner'},
+            {'id': 'marked-other', 'service': 'gmail', 'email': 'alex@acme.com', 'boundary': 'work:Othercorp', 'boundary_by': 'owner'}]
+        found = {a['id']: why for a, why in work_removal.matching({'accounts': accounts}, ['acme.com'], ['Acme'])}
+        self.assertEqual(found, {'acme-gmail': 'address', 'acme-calendar': 'address', 'acme-intercom': 'boundary', 'marked-work': 'marked'})
+        # A company named otherwise on the Machine: marked Work at its domain is enough
+        renamed = [{'id': 'hq', 'service': 'gmail', 'email': 'alex@acme.com', 'boundary': 'work:Acme HQ', 'boundary_by': 'owner'},
+                   {'id': 'hq-slack', 'service': 'slack', 'boundary': 'work:Acme HQ', 'boundary_by': 'owner'}]
+        self.assertEqual({a['id'] for a, _ in work_removal.matching({'accounts': renamed}, ['acme.com'], ['Acme Inc'])}, {'hq', 'hq-slack'})
+
 
 class Removal(unittest.TestCase):
     def setUp(self):
@@ -116,6 +128,49 @@ class Removal(unittest.TestCase):
         self.assertEqual(settled['events'], 1)
         self.assertEqual(self.rows("SELECT COUNT(*) FROM events WHERE account_id='acme-gmail'"), [(0,)])
         self.assertIsNone(work_removal.settle(json.loads(self.path.read_text()), self.store))  # once
+
+    def test_work_sign_ins_go_personal_ones_stay(self):
+        token = self.dir / 'microsoft-alex-acme-com'
+        token.write_text('{}')
+        Path(str(token) + '.lock').write_text('')
+        keyring = self.dir / 'keyring'
+        keyring.mkdir()
+        config = json.loads(self.path.read_text())
+        config['gog_keyring_dir'] = str(keyring)
+        config['credentials'].update({'microsoft-alex-acme-com': str(token), 'gog-password': str(self.dir / 'gog-password')})
+        (self.dir / 'gog-password').write_text('pw')
+        for a in config['accounts']:
+            if a['id'] in ('acme-gmail', 'personal-gmail', 'side-gmail'):
+                a.update(transport='gog', client='mine')
+        config['accounts'].append({'id': 'acme-outlook', 'service': 'outlook', 'transport': 'graph', 'email': 'alex@acme.com',
+                                   'credential': 'microsoft-alex-acme-com', 'boundary': 'work:Acme'})
+        self.path.write_text(json.dumps(config))
+        for email in ('alex@acme.com', 'alex@gmail.com'):
+            assistant.gog_token_path(config, {'email': email, 'client': 'mine'}).write_text('token')
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            self.assertEqual(kwargs['env']['GOG_KEYRING_PASSWORD'], 'pw')
+            return type('Done', (), {'returncode': 0})()
+        result = work_removal.remove(self.path, ['acme.com'], ['Acme'], store=self.store, run=run)
+        self.assertEqual(result['signins'], 2)
+        self.assertEqual(calls, [['gog', 'auth', 'remove', 'alex@acme.com', '--client', 'mine', '--force', '--no-input']])
+        self.assertFalse(assistant.gog_token_path(config, {'email': 'alex@acme.com', 'client': 'mine'}).exists())
+        self.assertTrue(assistant.gog_token_path(config, {'email': 'alex@gmail.com', 'client': 'mine'}).exists())
+        self.assertFalse(token.exists())
+        self.assertFalse(Path(str(token) + '.lock').exists())
+        self.assertNotIn('microsoft-alex-acme-com', json.loads(self.path.read_text())['credentials'])
+
+    def test_marked_personal_at_the_company_domain_stays_with_its_sign_in(self):
+        config = json.loads(self.path.read_text())
+        for a in config['accounts']:
+            if a['id'] == 'acme-gmail':
+                a.update(transport='gog', client='mine', boundary='personal:me', boundary_by='owner')
+        self.path.write_text(json.dumps(config))
+        result = work_removal.remove(self.path, ['acme.com'], ['Acme'], store=self.store, run=lambda *a, **k: self.fail('kept'))
+        self.assertNotIn('acme-gmail', [a['id'] for a in result['accounts']])
+        self.assertEqual(result['signins'], 0)
+        self.assertIn('acme-gmail', [a['id'] for a in json.loads(self.path.read_text())['accounts']])
 
     def test_no_match_changes_nothing(self):
         before = self.path.read_text()

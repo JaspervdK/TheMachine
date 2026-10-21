@@ -66,7 +66,7 @@ PLACEHOLDERS = {'email': 'alex@example.com', 'connection_id': '00000000-0000-000
 # Per-account identity: never copied when a new account starts from one you already have.
 IDENTITY = {'id', 'email', 'owner_emails', 'display_name', 'connection_id', 'team_id', 'user_id', 'slack_host', 'node_id',
             'identity_sha256', 'store', 'calendar_id', 'handle', 'login', 'url', 'workspace_id', 'stripe_account',
-            'exclude', 'excluded_terms', 'scope', 'browser_profile', 'browser_cdp', 'connected_at'}
+            'exclude', 'excluded_terms', 'scope', 'browser_profile', 'browser_cdp', 'connected_at', 'boundary_by'}
 # The source is set up but can't serve right now (shared browser in use, rate limit): saved anyway, and the
 # collector's own retry reads it, instead of failing setup over a moment's contention.
 BUSY = ('x_browser_busy', 'linkedin_browser_busy', 'x_rate_limited', 'outlook:microsoft_signin_pending', 'microsoft_broker_busy')
@@ -732,6 +732,50 @@ def ask_boundary(ui, default):
     return boundary_label(ui.ask('Company name, or "personal" (stored as work:<Company> or personal:<name>)', default), default)
 
 
+def scope_label(boundary):
+    """How a boundary reads to the owner: work:Acme is Work · Acme, personal:me is Personal."""
+    kind, _, name = str(boundary or '').partition(':')
+    if kind == 'work' and name:
+        return 'Work · ' + name
+    if kind == 'personal':
+        return 'Personal' if name in ('', 'me') else 'Personal · ' + name
+    return str(boundary or '')
+
+
+def same_signin(config, account):
+    """The accounts that share this one's sign-in (its address: Gmail and Calendar of one Google account), itself included."""
+    email = str(account.get('email') or account.get('handle') or '').strip().lower()
+    if '@' not in email:
+        return [account]
+    return [a for a in config.get('accounts', []) if a is account or str(a.get('email') or a.get('handle') or '').strip().lower() == email]
+
+
+def set_boundary(config_path, account_id, boundary):
+    """The owner marks a sign-in Work (work:<Company>) or Personal: this account and the others on the same address
+    get that boundary, marked as the owner's own choice (boundary_by: owner), which a Work Fleet's removal follows
+    (work_removal.py). Returns the ids changed."""
+    config = load(config_path)
+    account = next((a for a in config.get('accounts', []) if a.get('id') == account_id), None)
+    if not account:
+        raise SetupError('That account is not connected here')
+    if str(account.get('boundary') or '').startswith('owner:'):
+        raise SetupError('This source belongs to your server itself')
+    text = str(boundary or '').strip()
+    if not text or len(text) > 80 or not re.fullmatch(r'[^\x00-\x1f<>]+', text):
+        raise SetupError('Pick work with a company name, or personal')
+    label = boundary_label(text, default='')
+    if not label or label.startswith('owner:'):
+        raise SetupError('Pick work with a company name, or personal')
+    changed = []
+    for a in same_signin(config, account):
+        if str(a.get('boundary') or '').startswith('owner:'):
+            continue
+        a['boundary'], a['boundary_by'] = label, 'owner'
+        changed.append(a['id'])
+    save(config_path, config)
+    return changed
+
+
 def boundaries(config, service):
     """Boundaries a new account of this service could belong to, ones it does not cover yet first.
     Device and system boundaries (phone, WhatsApp, Gateway) are not offered for other sources."""
@@ -743,6 +787,13 @@ def boundaries(config, service):
     # Boundaries with a mailbox or calendar (a company, a person) first, ones this source does not cover yet before
     # ones it does, then the busiest.
     return sorted(dict.fromkeys(known), key=lambda b: (b not in people, b in covered, -known.count(b)))
+
+
+def mark(account, ui):
+    """Work or personal as the owner answered it: their own marking (boundary_by), unless nobody was asked (a terminal
+    without input, or a form that left it to a guess: ui.marks false)."""
+    if getattr(ui, 'interactive', True) and getattr(ui, 'marks', True):
+        account['boundary_by'] = 'owner'
 
 
 def new_account(config, service, account_id=None, ui=None):
@@ -771,13 +822,15 @@ def new_account(config, service, account_id=None, ui=None):
     options = boundaries(config, service)
     if service in ('android', 'whatsapp', 'gateway') and not same:
         pass  # keep the example's device boundary
-    elif same or len(options) > 1:
-        choice = ui.choose('Which part of your life is this account', [(b, b) for b in options] + [(None, 'something else')]) if options else None
+    elif same or options:
+        # Work (which company) or personal: the owner's own choice, which a Work Fleet's removal follows
+        choice = ui.choose('Which part of your life is this account', [(b, scope_label(b)) for b in options]
+                           + [(None, 'Another company, or personal')]) if options else None
         account['boundary'] = choice or ask_boundary(ui, account.get('boundary') if ':' in str(account.get('boundary')) else 'work:Main')
-    elif options:
-        account['boundary'] = options[0]
+        mark(account, ui)
     elif str(account.get('boundary', '')).startswith('work') or ':' not in str(account.get('boundary', '')):
         account['boundary'] = ask_boundary(ui, account['boundary'] if ':' in str(account.get('boundary', '')) else 'work:Main')
+        mark(account, ui)
     taken = {a['id'] for a in config.get('accounts', [])}
     suffix = 'crm' if service == 'salesflare' else service.replace('_', '-')
     # Your ids follow <boundary name>-<source> (acme-gmail): name this one the same way.

@@ -62,7 +62,7 @@
 | `enrichment` | off | Optional [organisation data](../README.md#organisation-data-optional-enrichment): `provider` or `url`, `headers`, `key_file`/`key_env`, `fields`, `per_day` (50) |
 | `accounts` | `[]` | Sources, below |
 
-Every account has `id`, `service`, `transport` and `boundary`, plus optional `scope` (`work`/`personal`, overrides the label the boundary implies), `poll_seconds` and `exclude` (noise rules, below). `config.example.json` has one complete example per built-in source; each plugin in `connectors/` (GitHub, Stripe, X, LinkedIn, RSS) shows its own at the top of its file.
+Every account has `id`, `service`, `transport` and `boundary` (`work:<Company>` or `personal:<name>`), plus optional `boundary_by` (`owner`: you marked it Work or Personal yourself, in the dashboard or on the setup page; leaving a Work Fleet follows it, see [Fleet](fleet.md#leaving-a-work-fleet-with-your-machine)), `scope` (`work`/`personal`, overrides the label the boundary implies), `poll_seconds` and `exclude` (noise rules, below). `config.example.json` has one complete example per built-in source; each plugin in `connectors/` (GitHub, Stripe, X, LinkedIn, RSS) shows its own at the top of its file.
 
 **Noise rules (`exclude`).** A list of rules; an item matching all conditions of any rule is never stored, and stored copies are removed. Conditions: `channels` (Slack channel names), `bots_only`, `packages` (Android package names), `chats` (WhatsApp chat IDs), `senders` (email address substrings), `routine_recurring` (unchanged instances of recurring calendar events), `titles` (exact titles) and `text` (regexes over title and body).
 
