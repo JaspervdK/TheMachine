@@ -176,6 +176,87 @@ class Requests(unittest.TestCase):
             self.fleet.annotate(db, suggestions)
         self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'accepted'})
 
+    # -- a handoff the preparation wrote, and the card while it is with them
+    HANDOFF_TEXT = 'Confirmed P1: the export leaks rows. Can you get someone on this today? [Report](https://tracker.example/1)'
+
+    def with_kim(self):
+        """A second teammate with their own Machine, after Pat: the one the card's handoff is for."""
+        self.relay.directory['fleets'][0]['members'].append({'member_id': 'kim1', 'name': 'Kim Doe', 'role': 'member', 'machine': True,
+                                                             'emails': ['kim@acme.example'], 'account_email': 'kim@acme.example'})
+        self.fleet.directory(refresh=True)
+
+    def ready_card(self, actions, key='k-ready'):
+        card = self.handed_card(key=key, title='Export leaks rows', body='Drafted a short handoff to Kim asking the team to own it. Nothing sent.')
+        with self.store.connect() as db:
+            db.execute("UPDATE suggestions SET status='prepared',next_action=? WHERE id=?", (json.dumps({'kind': 'menu', 'actions': actions}), card))
+        return card
+
+    def test_the_handoff_form_holds_the_message_for_them_not_what_the_machine_did(self):
+        self.with_kim()
+        for n, action in enumerate(({'kind': 'handoff', 'label': 'Hand off to Kim', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': self.HANDOFF_TEXT},
+                       {'kind': 'slack', 'label': 'Send to Kim', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': self.HANDOFF_TEXT, 'delegate': True},
+                       {'kind': 'slack', 'label': 'Send to Kim', 'user_id': 'U0123ABCD', 'to_name': 'Kim Doe', 'body': self.HANDOFF_TEXT, 'delegate': True})):
+            with self.subTest(kind=action['kind']):
+                draft = self.fleet.handoff_draft(self.ready_card([action], f'k-{n}'))
+                self.assertEqual(draft['summary'], self.HANDOFF_TEXT)  # the drafted message itself, never "Drafted a short handoff..."
+                self.assertEqual([m['member_id'] for m in draft['fleets'][0]['members']], ['kim1', 'pat1'])  # who it is for comes first
+        # a hand-off message to someone outside the Fleet is not a Fleet handoff: the card's own text, members as listed
+        draft = self.fleet.handoff_draft(self.ready_card([{'kind': 'slack', 'to_email': 'ann@other.example', 'to_name': 'Ann', 'body': 'Hi Ann', 'delegate': True}], 'k-ann'))
+        self.assertNotEqual(draft['summary'], 'Hi Ann')
+        self.assertEqual([m['member_id'] for m in draft['fleets'][0]['members']], ['pat1', 'kim1'])
+
+    def test_a_preparation_learns_who_is_in_the_fleet_and_how_to_hand_it_to_them(self):
+        self.with_kim()
+        card = self.ready_card([])
+        lines = self.fleet.lines(card)
+        self.assertIn('Kim Doe <kim@acme.example>', lines)
+        self.assertNotIn('Pat', lines)  # no Machine of their own
+        self.assertIn("kind:'handoff'", lines)
+        self.assertEqual(self.fleet.teammate({'to_email': 'KIM@acme.example'})[1]['member_id'], 'kim1')
+        self.assertIsNone(self.fleet.teammate({'to_email': 'ann@other.example'}))
+        personal = self.handed_card(key='k-home', title='Dentist', body='Book it')
+        with self.store.connect() as db:
+            db.execute('UPDATE suggestions SET account_ids=? WHERE id=?', (json.dumps(['home']), personal))
+        self.assertEqual(self.fleet.teammate_lines(personal), '')  # a personal card is nobody's in the Fleet
+        action = a.next_actions.validate({'kind': 'handoff', 'label': 'Hand off to Kim', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe',
+                                          'body': self.HANDOFF_TEXT}, CONFIG, ['work'])
+        self.assertEqual(a.next_actions.preview(action), 'Hand off to Kim Doe through The Machine\n\n' + self.HANDOFF_TEXT)
+        for bad in ({'label': 'Send to Kim'}, {'body': ''}, {'body': 'x' * 1001}, {'send_now': True}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                a.next_actions.validate({'kind': 'handoff', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': 'Take it', **bad}, CONFIG, ['work'])
+
+    def test_a_handed_off_card_leaves_ready_and_waits_until_their_machine_answers(self):
+        self.with_kim()
+        self.fleet.close_card = lambda card_id, why, key: self.store.decide(card_id, 'complete', why, key, 'fleet')
+        self.fleet.wait_card = lambda card_id, why, key: self.store.decide(card_id, 'snooze', why, key, 'fleet', snooze_option='3d', work=True)
+        self.fleet.wake_card = lambda card_id, key: self.store.decide(card_id, 'accept', '', key, 'fleet')
+        slack = {'kind': 'slack', 'label': 'Send to Kim', 'revision': 'r1', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': self.HANDOFF_TEXT, 'delegate': True}
+        link = {'kind': 'open', 'label': 'Open the report', 'revision': 'r2', 'url': 'https://tracker.example/1'}
+        view = lambda card: (lambda s: (self.fleet.annotate(db, s), s[0])[1])([{**self.card_row(card), 'next_actions': [slack, link]}])
+        for answer, status in (('declined', 'prepared'), ('expired', 'prepared'), ('accepted', 'completed'), ('done', 'completed')):
+            with self.subTest(answer=answer):
+                with self.store.connect() as db:
+                    db.execute('DELETE FROM fleet_out')
+                card = self.ready_card([slack, link], 'k-' + answer)
+                self.fleet.hand_off(card, self.ref, 'kim1', 'Export leaks rows', self.HANDOFF_TEXT)
+                row = self.card_row(card)
+                self.assertEqual((row['status'], row['resume_status']), ('snoozed', 'prepared'))  # out of Ready, under Later
+                self.assertGreater(row['snoozed_until'], a.now())  # back by itself if their Machine stays quiet
+                with self.store.connect() as db:
+                    shown = view(card)
+                    ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
+                self.assertEqual(shown['fleet_handoff'], {'name': 'Kim Doe', 'stage': 'asked'})
+                self.assertEqual(shown['next_actions'], [link])  # no Review and send while it is with them
+                if answer == 'expired':
+                    self.fleet.take_answer({'id': ask_id, 'status': 'expired'})
+                else:
+                    self.fleet.take_answer({'id': ask_id, 'status': 'answered' if answer != 'declined' else 'declined',
+                                            **({'answer': {'stage': answer}} if answer != 'declined' else {})})
+                self.assertEqual(self.card_row(card)['status'], status)
+                with self.store.connect() as db:
+                    shown = view(card)
+                self.assertEqual(len(shown['next_actions']), 2 if status == 'prepared' else 1)  # declined: hand it on another way
+
     def test_a_handoff_on_something_they_already_have_joins_that_card(self):
         mine = self.handed_card(key='k-own', title='Price the 40 seats for Sam', body='Sam asked what 40 seats cost.')
         with self.store.connect() as db:

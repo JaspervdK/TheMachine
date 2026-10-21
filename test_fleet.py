@@ -40,7 +40,7 @@ class FakeRelay:
             found, self.inbox = self.inbox, {'asks': [], 'answers': []}
             return found
         if path == '/ask':
-            return {'ids': {'pat1': 'ask-' + str(len(self.calls))}}
+            return {'ids': {((body or {}).get('to') or ['pat1'])[0]: 'ask-' + str(len(self.calls))}}
         if path == '/claim':
             if body.get('release'):
                 self.claims.pop(body['key'], None)

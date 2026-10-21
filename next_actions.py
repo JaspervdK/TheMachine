@@ -175,7 +175,7 @@ def visible_actions(value):
 def label(value):
     if value['kind'] == 'x' and not value.get('label'):
         return 'Reply on X' if value.get('reply_to') else 'Send'
-    return value.get('label') or {'email':'Send','email_demo':'Send','linkedin':'Send','slack':'Send','whatsapp':'Send','merge':'Merge fix','prepare':'Prepare next step','open':'Open original'}.get(value['kind'],'Continue')
+    return value.get('label') or {'email':'Send','email_demo':'Send','linkedin':'Send','slack':'Send','whatsapp':'Send','merge':'Merge fix','prepare':'Prepare next step','open':'Open original','handoff':'Hand off'}.get(value['kind'],'Continue')
 
 
 def preview(value):
@@ -189,6 +189,8 @@ def preview(value):
         return value['preview'] + ('\n\n' + value['url'] if value.get('url') else '')
     if value['kind'] == 'whatsapp':
         return 'WhatsApp message to ' + value['to_name'] + '\n\n' + value['body']
+    if value['kind'] == 'handoff':
+        return 'Hand off to ' + value['to_name'] + ' through The Machine\n\n' + value['body']
     if value['kind'] == 'slack':
         return 'Slack message to ' + value['to_name'] + (' (' + value['to_email'] + ')' if value.get('to_email') else '') + '\n\n' + value['body'] + delegate_note(value)
     return email_preview(value) if value['kind'] in ('email','email_demo') else value['instructions']
@@ -475,10 +477,32 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
         if not isinstance(body, str) or not body.strip() or len(body) > 4000 or '\x00' in body:
             raise ValueError('Provide the concrete WhatsApp message, at most 4000 characters')
         result['body'] = body.strip()
+    elif value.get('kind') == 'handoff':
+        # Hand the task to a teammate in the owner's Work Fleet, through The Machine (docs/fleet.md): their
+        # Machine gets it as a handoff to accept. Nothing goes by itself: the button opens the Fleet handoff
+        # form with this text, for the owner to read, edit and send. The caller checks they are a teammate.
+        if set(value) - {'kind', 'label', 'to_email', 'to_name', 'body'}:
+            raise ValueError('Unsupported handoff fields')
+        result = {'kind': 'handoff'}
+        if value.get('label'):
+            if not value['label'].startswith('Hand off'):
+                raise ValueError('Handoff button labels say Hand off, such as Hand off to Sam')
+            result['label'] = value['label']
+        if not isinstance(value.get('to_email'), str) or len(value['to_email']) > 254 or not re.fullmatch(r'[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+', value['to_email']):
+            raise ValueError('to_email is the teammate’s work email, as in the Fleet')
+        result['to_email'] = value['to_email'].lower()
+        name = value.get('to_name')
+        if not isinstance(name, str) or not 2 <= len(name.strip()) <= 100 or '\n' in name:
+            raise ValueError('Give to_name: the teammate’s name')
+        result['to_name'] = name.strip()
+        body = value.get('body')
+        if not isinstance(body, str) or not body.strip() or len(body.strip()) > 1000 or '\x00' in body:
+            raise ValueError('Provide the handoff message itself (what they need to know), at most 1000 characters')
+        result['body'] = body.strip()
     elif value.get('kind') == 'merge':
         result = merge_action(value, config)
     else:
-        raise ValueError('Only email drafts, LinkedIn, Slack, X and WhatsApp messages, local preparation and original-page links are supported; no payments or arbitrary writes')
+        raise ValueError('Only email drafts, LinkedIn, Slack, X and WhatsApp messages, Fleet handoffs, local preparation and original-page links are supported; no payments or arbitrary writes')
     result['revision'] = hashlib.sha256(canonical(result).encode()).hexdigest()[:12]
     return result
 

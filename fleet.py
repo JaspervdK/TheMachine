@@ -2616,7 +2616,10 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         self.annotate_requests(db, suggestions)
 
     def lines(self, suggestion_id):
-        """What teammates' Machines said about this card's meeting, for a preparation."""
+        """What teammates' Machines said about this card's meeting, for a preparation; and who it can be handed to."""
+        return self.meeting_lines(suggestion_id) + self.teammate_lines(suggestion_id)
+
+    def meeting_lines(self, suggestion_id):
         if self.request_lines(suggestion_id):
             return self.request_lines(suggestion_id)
         with self.connect() as db:

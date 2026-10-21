@@ -177,6 +177,7 @@ class Requests:
     from this Machine's own evidence (and a draft, for an intro); tell(text, anchor) tells the owner how their own
     request went (phone, Telegram)."""
     make_card = tell = close_card = None
+    wait_card = wake_card = None  # a handed-off card waits under Later until their Machine answers (assistant.py)
 
     # -- a teammate asks this owner
     def is_request(self, ask_id):
@@ -335,14 +336,77 @@ class Requests:
         team = {e for ref in self.work_fleets() for m in self.teammates(ref) for e in m.get('emails', [])}
         contact = next((a for m in mails for _, a in graph.addresses(json.loads(m['metadata'] or '{}').get('from'))
                         if a not in mine | team and not graph.bulk(a)), '')
-        summary = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', re.sub(r'[*_`#>]', '', card['body'] or ''))
+        # What goes to them is the message itself: the handoff text the card's preparation wrote for a teammate (or its
+        # hand-off message to them), never the card's own account of what The Machine did ("Drafted a handoff...").
+        ready = self.handoff_text(card)
+        summary = ready['body'] if ready else re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', re.sub(r'[*_`#>]', '', card['body'] or ''))
+        first = lambda m: not (ready and self.is_person(m, ready))  # the teammate that text is for comes first, so it's the default
+        fleets = [f for f in [{'id': ref, 'name': self.fleets()[ref].get('name'),
+                   'members': sorted(({'member_id': m['member_id'], 'name': fleet.label(m), '_first': first(m)} for m in self.teammates(ref)
+                                      if (ref, m['member_id']) not in givers), key=lambda m: m['_first'])}  # not back to who handed it to you
+                  for ref in self.work_fleets() if self.teammates(ref) and 'handoff' in self.fleets()[ref].get('asks', fleet.ASKS['work'])]
+                  if f['members']]
+        fleets.sort(key=lambda f: f['members'][0]['_first'])
+        for f in fleets:
+            for m in f['members']:
+                m.pop('_first')
         return {'suggestion_id': card['id'], 'title': fleet.clean(card['title'], 120), 'summary': fleet.clean(summary, 1000),
-                'contact': contact, 'due': card['due'] if 'due' in card.keys() else None,
-                'fleets': [f for f in [{'id': ref, 'name': self.fleets()[ref].get('name'),
-                            'members': [{'member_id': m['member_id'], 'name': fleet.label(m)} for m in self.teammates(ref)
-                                        if (ref, m['member_id']) not in givers]}  # not back to who handed it to you
-                           for ref in self.work_fleets() if self.teammates(ref) and 'handoff' in self.fleets()[ref].get('asks', fleet.ASKS['work'])]
-                           if f['members']]}
+                'contact': contact, 'due': card['due'] if 'due' in card.keys() else None, 'fleets': fleets}
+
+    @staticmethod
+    def is_person(member, action):
+        """Whether a message's recipient is this teammate: their email in the Fleet, else (a Slack message by user id) their name."""
+        emails = {str(e).lower() for e in [*(member.get('emails') or []), member.get('account_email') or ''] if e}
+        to = {str(a).lower() for a in [action.get('to_email'), *(action.get('to') or [])] if a}
+        if to:
+            return bool(to & emails)
+        name = ' '.join(str(action.get('to_name') or '').split()).lower()
+        return bool(name) and name in {' '.join(str(member.get(k) or '').split()).lower() for k in ('name', 'label')}
+
+    def teammate(self, action):
+        """The Work Fleet teammate a message or handoff is for, as (Fleet id, member), else None."""
+        return next(((ref, m) for ref in self.work_fleets() for m in self.teammates(ref) if self.is_person(m, action)), None)
+
+    def handoff_text(self, card):
+        """The message a card already holds for a teammate: a Fleet handoff its preparation wrote, else a hand-off message
+        (delegate) to someone in a Work Fleet. {'to_name', 'body', ...} or None."""
+        try:
+            value = json.loads(card['next_action'] or 'null') if 'next_action' in card.keys() else None
+        except ValueError:
+            return None
+        acts = (value.get('actions') or []) if isinstance(value, dict) and value.get('kind') == 'menu' else [value] if isinstance(value, dict) else []
+        acts = [a for a in acts if isinstance(a, dict) and a.get('body')]
+        return next((a for a in acts if a.get('kind') == 'handoff'), None) or \
+            next((a for a in acts if a.get('delegate') and self.teammate(a)), None)
+
+    def handoff_people(self):
+        """Teammates with their own Machine in the Work Fleets that take handoffs: {email: name}."""
+        people = {}
+        for ref in self.work_fleets():
+            if 'handoff' not in self.fleets()[ref].get('asks', fleet.ASKS['work']):
+                continue
+            for m in self.teammates(ref):
+                email = m.get('account_email') or next(iter(m.get('emails') or []), '')
+                if m.get('machine') and email and fleet.clean(m.get('name'), 80):
+                    people.setdefault(email.lower(), fleet.clean(m.get('name'), 80))
+        return people
+
+    def teammate_lines(self, suggestion_id):
+        """For a preparation of a work card: who the owner can hand it to through The Machine, and how."""
+        with self.connect() as db:
+            card = db.execute('SELECT account_ids FROM suggestions WHERE id=?', (str(suggestion_id),)).fetchone()
+        if not card or not set(json.loads(card['account_ids'] or '[]')) & set(fleet.work_accounts(self.config)):
+            return ''
+        people = self.handoff_people()
+        if not people:
+            return ''
+        return ("\n\nThe owner's teammates in their Work Fleet, each with their own Machine: "
+                + '; '.join(f'{n} <{e}>' for e, n in list(people.items())[:20]) + '. '
+                "When the task is for one of them (theirs to do, their area), hand it to their Machine: next action "
+                "{kind:'handoff',label:'Hand off to <first name>',to_email:<their email above>,to_name:<their name>,body:<the message "
+                "itself, written to them: what, why, by when, the link>}. The owner reads and edits it before it goes. A Slack message "
+                "or email to them (delegate:true) can be a second choice. Your result says you prepared a handoff to them "
+                "through The Machine. Anyone else gets a Slack message or email as usual.")
 
     def hand_off(self, card_id, fleet_ref, member_id, title, summary, contact=None):
         """Hand a card to a teammate, with the summary exactly as the owner read and edited it. Their card says how it went."""
@@ -360,7 +424,14 @@ class Requests:
         keys = self.message_keys(card_id, fleet_ref)
         if keys:
             question['messages'] = keys
-        return self.ask('handoff', question, context='handoff:' + str(card_id), fleet=fleet_ref, to=[member_id])
+        sent = self.ask('handoff', question, context='handoff:' + str(card_id), fleet=fleet_ref, to=[member_id])
+        if self.wait_card:  # it's with them now: the card leaves Ready and waits under Later until their Machine answers
+            try:
+                self.wait_card(str(card_id), f"Handed off to {fleet.label(self.member(fleet_ref, member_id))}",
+                               'fleet-handoff-wait-' + '-'.join(sorted((sent or {}).get('ids', {}).values()) or [str(card_id), fleet.now()]))
+            except ValueError as error:
+                LOG.info('fleet handoff wait skipped error=%s', error)
+        return sent
 
     def message_keys(self, card_id, fleet_ref):
         """The card's emails as sha256(Fleet secret + Message-ID), as handling claims send them: the teammate's Machine
@@ -420,11 +491,19 @@ class Requests:
                             if (answer or {}).get('what'):
                                 p['what'] = answer['what']
                     db.execute('UPDATE fleet_splits SET parts=?,updated_at=? WHERE id=?', (json.dumps(parts), fleet.now(), split['id']))
-        if row['kind'] == 'handoff' and stage == 'accepted' and self.close_card and str(row['context'] or '').startswith('handoff:'):
+        if row['kind'] == 'handoff' and stage in ('accepted', 'adjusted', 'done') and self.close_card and str(row['context'] or '').startswith('handoff:'):
             try:  # it's theirs now: the owner's card is done, saying to whom (Undo or Reopen bring it back)
                 self.close_card(row['context'][8:], f"Handed off to {row['name']}", 'fleet-handoff-' + str(row['id']))
             except ValueError as error:
                 LOG.info('fleet handoff close skipped error=%s', error)
+        elif row['kind'] == 'handoff' and stage in ('declined', 'expired') and self.wake_card and str(row['context'] or '').startswith('handoff:'):
+            with self.connect() as db:  # not theirs after all: back to Ready, to hand it on another way
+                waiting = db.execute("SELECT 1 FROM suggestions WHERE id=? AND status='snoozed'", (row['context'][8:],)).fetchone()
+            if waiting:
+                try:
+                    self.wake_card(row['context'][8:], 'fleet-handoff-back-' + str(row['id']))
+                except ValueError as error:
+                    LOG.info('fleet handoff wake skipped error=%s', error)
         if stage == 'waiting' or not self.tell:
             return
         what = {'intro': f"your intro request ({question.get('about')})", 'handoff': f"your handoff: {question.get('title')}",
@@ -631,6 +710,9 @@ class Requests:
         for s in suggestions:
             if handed.get(s['id']):
                 s['fleet_handoff'] = handed[s['id']]
+                if handed[s['id']]['stage'] not in (STAGES['declined'], 'expired') and s.get('next_actions'):
+                    # with them: nothing left to send it again (only links); a decline brings the sends back
+                    s['next_actions'] = [a for a in s['next_actions'] if a.get('kind') == 'open']
             ids = s.get('event_ids')
             ids = json.loads(ids) if isinstance(ids, str) else ids or []
             split = next((splits[i] for i in ids if i in splits), None)

@@ -108,6 +108,8 @@ A Slack direct message from the owner's own account: `{kind:slack,label:Send to 
 
 When the owner asks to hand the task to someone ("ask Sam", "let the accountant handle it"), or the card offered it, write the message so it stands on its own (what, by when, the link or attachment) and add `delegate:true`, with `wait_days` (1-14, default 3) for how long to wait. Use a Slack message for a colleague, an email with exactly one To address for anyone else (add `to_name`). After the owner's Send, the card waits for their reply: it closes when they answer and comes back if they don't.
 
+When that person is a teammate in the owner's Work Fleet (the job lists them, each with their own Machine), hand it to their Machine instead: `{kind:handoff,label:Hand off to Sam,to_email:<their email as listed>,to_name:<their name>,body:<the message itself>}`. The body is what they get, written to them (what, why, by when, the link), never a description of what you did. The owner reads and edits it in the handoff form before it goes; the card then waits under Later until their Machine answers. A Slack message or email to them may be a second choice; your result says you prepared a handoff through The Machine.
+
 ### Fixing The Machine itself
 
 A card about The Machine's own error (a machine.fault signal) or another bug in it is fixed in a copy, never in the running code:

@@ -55,9 +55,16 @@ default, Always accept, Never), and nothing happens on your side until you accep
    ..." with **Accept** and **Decline**; accepting makes the follow-up card on their side, with your summary quoted. If
    they already have an open card on it (the same email, recognised by a key of its Message-ID, or else the one open
    card on email from the same contact), your handoff joins that card instead of making a second one. The card's own
-   emails travel only as those keys. Your card says "Handed off to <teammate>" and how it went; once they accept, it is
-   marked done for you, still saying to whom (Undo brings it back). A card handed to you can't be handed straight back to
-   whoever gave it; to others it can.
+   emails travel only as those keys. Your card says "Handed off to <teammate>" and how it went. While it waits for them
+   it leaves Ready and sits under Later, with nothing to send again; it comes back by itself after three work days if
+   their Machine stays quiet. Once they accept (or mark it done), it is marked done for you, still saying to whom (Undo
+   brings it back); if they decline, it is back in Ready to hand on another way. A card handed to you can't be handed
+   straight back to whoever gave it; to others it can.
+
+   When a task is a teammate's to do, the review offers to hand it to their Machine, and Do it prepares the handoff
+   itself: **Hand off to <teammate>** leads the card and opens this form with that teammate picked and the message
+   written to them already in it (a Slack message or email to them can be a second choice). What goes is always the
+   message for them, never the card's own note of what The Machine did.
 
    **Someone not on the Network.** Pick **Someone else, by email** and give their address: instead of a Fleet request,
    the card gets an ordinary email draft from its Gmail account, for you to read, change and send yourself (it never

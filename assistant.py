@@ -5444,6 +5444,7 @@ def controls(row, root=''):
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
                 buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
             elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
+            elif action['kind']=='handoff' and root:buttons.append({'label':next_actions.label(action),'action':{'type':'url','url':f"{root}#task-{row['id']}"}})  # the Fleet handoff form is on the dashboard
     if row['status'] in ('prepared','completed') and any(a['kind']=='merge' and (a.get('state') or row.get('action_status') or {}).get('undo_until','')>now() for a in actions):
         buttons.append({'label':'Undo merge','action':{'type':'callback','value':f"assistant:{row['id']}:unmerge"}})  # a merged fix stays reversible for a day
     buttons+=[{'label':label,'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}} for label,choice in choices]
@@ -6447,6 +6448,10 @@ class App:
             self.fleet.make_card, self.fleet.tell = self.fleet_card, self.fleet_tell  # Fleet requests (fleet_requests.py)
             # A handoff the teammate accepted is theirs now: the owner's card is done, saying to whom (Undo brings it back).
             self.fleet.close_card = lambda card_id, why, key: self.store.decide(card_id, 'complete', why, key, 'fleet')
+            # Handed off and not answered yet: the card waits under Later (back in 3 work days if their Machine stays quiet);
+            # a decline brings it back to Ready.
+            self.fleet.wait_card = lambda card_id, why, key: self.store.decide(card_id, 'snooze', why, key, 'fleet', snooze_option='3d', work=True)
+            self.fleet.wake_card = lambda card_id, key: self.store.decide(card_id, 'accept', '', key, 'fleet')
             self.fleet.retell_notice = lambda message_id, message: threading.Thread(
                 target=self.fleet_retell, args=(message_id, message), daemon=True).start()
             # Briefs and free questions keep to the owner's hours; a free question is searched with the Machine's own search.
@@ -6861,6 +6866,9 @@ class App:
                     "SELECT e.account_id,e.metadata FROM events e JOIN json_each(?) ids ON ids.value=e.id WHERE e.kind='whatsapp.message' ORDER BY e.occurred_at",(row['event_ids'],))
                     for m in (json.loads(r[1]),) if m.get('chat_id')}
             action=next_actions.validate(args.get('next_actions',args.get('next_action')),self.config,json.loads(row['account_ids']),options,threads,x_threads,whatsapp_chats)
+            for item in next_actions.actions(action):
+                if item['kind']=='handoff' and not (getattr(self,'fleet',None) and self.fleet.teammate(item)):
+                    raise ValueError('Hand off through The Machine only to a teammate in a Work Fleet (their email as listed); use a Slack message or email for anyone else')
             if any(item['kind']=='email_demo' for item in next_actions.actions(action)):
                 with self.store.connect() as db:
                     evidence=db.execute('SELECT e.kind,e.metadata FROM events e JOIN suggestions s ON s.id=? JOIN json_each(s.event_ids) ids ON ids.value=e.id',(args['suggestion_id'],)).fetchall()
@@ -8304,6 +8312,14 @@ class App:
             request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text(),
                                                self.store.slipped(run['run_id']), self.store.promises_text(),
                                                self.store.unnamed_text(run['run_id']), self.store.role_text(run['run_id']))
+            if getattr(self, 'fleet', None):
+                try:  # who a task can go to through The Machine (Hand it off)
+                    people = sorted(set(self.fleet.handoff_people().values()))[:20]
+                    if people:
+                        request['message'] += ("\n\nTeammates in the owner's Work Fleet, each with their own Machine: " + ', '.join(people)
+                                               + ". A task that is one of theirs is offered as a handoff to their Machine (Hand it off).")
+                except Exception as error:
+                    LOG.error('fleet teammates error=%s', type(error).__name__)
         receipt = runner(request)
         result = receipt.get('status', 'unavailable')
         with self.store.connect() as db:
