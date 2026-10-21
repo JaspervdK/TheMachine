@@ -34,10 +34,18 @@ UNIT_NAME = 'personal-assistant.service'
 # Connector name -> account id in config.example.json.
 CONNECTORS = {'gmail': 'work-gmail', 'calendar': 'work-calendar', 'slack': 'work-slack',
               'crm': 'work-crm', 'android': 'personal-android', 'whatsapp': 'personal-whatsapp', 'gateway': 'openclaw-gateway'}
-SERVICES = {'gmail': 'gmail', 'calendar': 'calendar', 'slack': 'slack', 'crm': 'salesflare', 'salesflare': 'salesflare',
+SERVICES = {'gmail': 'gmail', 'calendar': 'calendar', 'outlook': 'outlook', 'outlook_calendar': 'outlook_calendar',
+            'outlook-calendar': 'outlook_calendar', 'slack': 'slack', 'crm': 'salesflare', 'salesflare': 'salesflare',
             'android': 'android', 'whatsapp': 'whatsapp', 'gateway': 'gateway'}
-LABELS = {'gmail': 'Gmail', 'calendar': 'Google Calendar', 'slack': 'Slack', 'salesflare': 'Salesflare CRM',
+LABELS = {'gmail': 'Gmail', 'calendar': 'Google Calendar', 'outlook': 'Outlook', 'outlook_calendar': 'Outlook Calendar', 'slack': 'Slack', 'salesflare': 'Salesflare CRM',
           'android': 'Android notifications', 'whatsapp': 'WhatsApp', 'gateway': 'OpenClaw Gateway log'}
+# Microsoft 365 and Outlook.com (ms_graph.py): your own app registration and a device-code sign-in. A hosted control
+# plane adds them with "transport": "broker" instead.
+MICROSOFT = {'outlook': {'id': 'work-outlook', 'service': 'outlook', 'transport': 'graph', 'email': 'alex@example.com',
+                         'boundary': 'work:Acme'},
+             'outlook_calendar': {'id': 'work-outlook-calendar', 'service': 'outlook_calendar', 'transport': 'graph',
+                                  'email': 'alex@example.com', 'calendar_id': 'primary', 'boundary': 'work:Acme',
+                                  'exclude': []}}
 # Values in config.example.json that mean "not filled in yet".
 PLACEHOLDERS = {'email': 'alex@example.com', 'connection_id': '00000000-0000-0000-0000-000000000000',
                 'team_id': 'T00000000', 'user_id': 'U00000000', 'node_id': 'replace-with-your-openclaw-node-id',
@@ -52,6 +60,7 @@ BUSY = ('x_browser_busy', 'linkedin_browser_busy', 'x_rate_limited')
 # Phone apps whose notifications repeat a source. Setup offers to skip them on the Android account, never by
 # default: the phone app may also show inboxes or workspaces that nothing here reads.
 PHONE_APPS = {'gmail': ['com.google.android.gm'], 'calendar': ['com.google.android.calendar'],
+              'outlook': ['com.microsoft.office.outlook'], 'outlook_calendar': ['com.microsoft.office.outlook'],
               'whatsapp': ['com.whatsapp', 'com.whatsapp.w4b'], 'slack': ['com.Slack'], 'salesflare': ['org.salesflare.app'],
               'linkedin': ['com.linkedin.android'], 'x': ['com.twitter.android'], 'github': ['com.github.android'],
               'stripe': ['com.stripe.android.dashboard']}
@@ -61,6 +70,13 @@ HINTS = (
     ('connection_identity_mismatch', 'Maton answered for a different connection; check connection_id'),
     ('gmail:HTTP_403', 'enable the Gmail API in your Google Cloud project, or authorize again'),
     ('calendar:HTTP_403', 'enable the Google Calendar API in your Google Cloud project, or authorize again'),
+    ('outlook:microsoft_signin_expired', 'the Microsoft sign-in expired or was revoked: connect the account again'),
+    ('outlook:not_signed_in', 'sign in to Microsoft: assistant connect outlook'),
+    ('microsoft_graph_not_configured', 'set your app registration: assistant connect outlook'),
+    ('microsoft_scope_not_granted', 'the Microsoft account did not grant this; connect it again'),
+    ('microsoft_broker', 'the control plane could not give a Microsoft token; connect the account again from your account page'),
+    ('outlook:HTTP_403', 'Microsoft refused: check the app registration\'s API permissions, then connect again'),
+    ('outlook', 'Microsoft Graph did not answer as expected; it retries by itself'),
     ('gmail', 'gog could not read Gmail: authorize again, and check the keyring password file'),
     ('calendar', 'gog could not read the calendar: authorize again, and check the keyring password file'),
     ('slack_invalid_auth', 'Maton rejected the API key'),
@@ -547,10 +563,20 @@ def missing(config, account):
     names = [account['credential']] if account.get('credential') else []
     if account.get('transport') == 'gog':
         names.append('gog-password')
-    if account.get('transport') == 'broker':
+    microsoft = account.get('service') in MICROSOFT
+    if account.get('transport') == 'broker' and microsoft:
+        if not (config.get('microsoft_broker') or {}).get('url'):
+            return 'microsoft_broker url is not set'
+        names.append('microsoft-broker')
+    elif account.get('transport') == 'broker':
         if not (config.get('google_broker') or {}).get('url'):
             return 'google_broker url is not set'
         names.append('google-broker')
+    if account.get('transport') == 'graph':
+        if not (config.get('microsoft_graph') or {}).get('client_id'):
+            return 'microsoft_graph client_id is not set'
+        if not account.get('credential'):
+            return 'not signed in to Microsoft yet'
     for name in names:
         path = config.get('credentials', {}).get(name)
         if not path or not Path(path).expanduser().exists():
@@ -615,7 +641,7 @@ def boundaries(config, service):
     known = [a['boundary'] for a in config.get('accounts', []) if a.get('boundary') and ':' in a['boundary']
              and not a['boundary'].startswith('owner:') and (a.get('service', 'gmail') not in devices or a.get('service') == service)]
     covered = {a.get('boundary') for a in siblings(config, service)}
-    people = {a.get('boundary') for a in config.get('accounts', []) if a.get('service', 'gmail') in ('gmail', 'calendar', 'slack', 'salesflare')}
+    people = {a.get('boundary') for a in config.get('accounts', []) if a.get('service', 'gmail') in ('gmail', 'calendar', 'outlook', 'outlook_calendar', 'slack', 'salesflare')}
     # Boundaries with a mailbox or calendar (a company, a person) first, ones this source does not cover yet before
     # ones it does, then the busiest.
     return sorted(dict.fromkeys(known), key=lambda b: (b not in people, b in covered, -known.count(b)))
@@ -631,6 +657,9 @@ def new_account(config, service, account_id=None, ui=None):
         first_ask = next(iter(setup_of(service).get('ask', [])), ('',))[0]
         account = {k: v for k, v in same[-1].items() if k not in IDENTITY and k != first_ask}
         template_id = None
+    elif service in MICROSOFT:
+        account = dict(MICROSOFT[service])
+        template_id = account['id']
     elif service in LABELS:
         name = next(k for k, v in SERVICES.items() if v == service)
         example = json.loads((ROOT / 'config.example.json').read_text())
@@ -652,7 +681,7 @@ def new_account(config, service, account_id=None, ui=None):
     elif str(account.get('boundary', '')).startswith('work') or ':' not in str(account.get('boundary', '')):
         account['boundary'] = ask_boundary(ui, account['boundary'] if ':' in str(account.get('boundary', '')) else 'work:Main')
     taken = {a['id'] for a in config.get('accounts', [])}
-    suffix = 'crm' if service == 'salesflare' else service
+    suffix = 'crm' if service == 'salesflare' else service.replace('_', '-')
     # Your ids follow <boundary name>-<source> (acme-gmail): name this one the same way.
     yours = any(a['id'] == f"{slug(str(a.get('boundary', '')).split(':', 1)[-1])}-{'crm' if a.get('service') == 'salesflare' else a.get('service', 'gmail')}"
                 for a in config.get('accounts', []))
@@ -722,9 +751,9 @@ def check(config, account):
     a = assistant()
     service = account.get('service', 'gmail')
     try:
-        if service == 'gmail':
+        if service in ('gmail', 'outlook'):
             a.Gmail(config, account).profile()
-        elif service == 'calendar':
+        elif service in ('calendar', 'outlook_calendar'):
             a.Calendar(config, account).profile()
         elif service == 'slack':
             a.Slack(config, account).profile()
@@ -1105,13 +1134,61 @@ def step_plugin(config, account, ui):
         store_secret(config, account, ui, setup['secret'], setup.get('family'))
 
 
-STEPS = {'gmail': step_google, 'calendar': step_google, 'slack': step_slack, 'salesflare': step_salesflare,
+def step_microsoft(config, account, ui):
+    """Outlook mail or calendar. Hosted: the control plane's broker already holds the sign-in. Yourself: your own Entra app
+    registration and a device-code sign-in; mail and calendar of one address share it."""
+    import ms_graph
+    own = account.get('email') if account.get('email') not in (None, '', PLACEHOLDERS['email']) else ''
+    if account.get('transport') == 'broker':
+        if not own:
+            raise SetupError('No Microsoft account given', 'connect it from your account page')
+        return
+    app = config.setdefault('microsoft_graph', {})
+    if not app.get('client_id'):
+        explain(ui, 'Microsoft needs your own app registration once. In the Entra admin center (entra.microsoft.com), App '
+                    'registrations, New registration: pick the account types you need, no redirect URI. Then Authentication: '
+                    'Allow public client flows, Yes. Then API permissions, Microsoft Graph, Delegated: User.Read, Mail.Read and '
+                    'Calendars.Read; add Mail.ReadWrite and Mail.Send to send what you approve.')
+        app['client_id'] = ui.ask('Application (client) ID')
+        if not re.fullmatch(r'[0-9a-fA-F-]{36}', app.get('client_id') or ''):
+            config.pop('microsoft_graph', None)
+            raise SetupError('No app registration given', 'rerun: assistant connect outlook')
+        app['tenant'] = ui.ask('Tenant (common, organizations, consumers or your tenant ID)', app.get('tenant') or 'common')
+    nearby = [a['email'] for a in config.get('accounts', []) if a.get('transport') == 'graph' and a['id'] != account['id']
+              and a.get('email') not in (None, PLACEHOLDERS['email'])]
+    email = ui.ask('Microsoft account to read', own or next(iter(nearby), '')).strip().lower()
+    if '@' not in email:
+        raise SetupError('No Microsoft account given', 'rerun with the address you use for Outlook')
+    account['email'] = email
+    name = ms_graph.credential_name(email)
+    account['credential'] = name
+    path = Path(config.setdefault('credentials', {}).setdefault(name, str(data_dir(config) / name))).expanduser()
+    send = ui.yes('Also send what you approve (and snooze those threads)?', True)
+    wanted = set(ms_graph.SCOPES_READ) | (set(ms_graph.SCOPES_SEND) if send else set())
+    try:
+        granted = set(json.loads(path.read_text()).get('scopes') or []) if path.exists() else set()
+    except (OSError, ValueError):
+        granted = set()
+    if wanted <= {s for g in granted for s, answers in ms_graph.ANSWERS.items() if g in answers} and check(config, account) is None:
+        ui.say(f'  {email} is already signed in')
+        return
+    try:
+        refresh, granted, signed_in = ms_graph.device_signin(app, sorted(wanted - ({'Mail.Read'} if send else set())), ui.say)
+    except ms_graph.GraphError as error:
+        raise SetupError(f'Microsoft sign-in failed: {error}', 'rerun: assistant connect outlook')
+    if signed_in != email:
+        raise SetupError(f'You signed in as {signed_in}, not {email}', 'rerun and sign in with ' + email)
+    ms_graph.save_signin(path, refresh, granted)
+    ui.say('  signed in; the sign-in is saved to ' + str(path))
+
+
+STEPS = {'gmail': step_google, 'calendar': step_google, 'outlook': step_microsoft, 'outlook_calendar': step_microsoft, 'slack': step_slack, 'salesflare': step_salesflare,
          'whatsapp': step_whatsapp, 'android': step_android, 'gateway': step_gateway}
 
 
 def sources():
     extra = getattr(assistant(), 'connector_services', None)
-    return sorted({*SERVICES} - {'salesflare'}) + (extra() if extra else sorted(getattr(assistant(), 'SETUPS', None) or {}))
+    return sorted({*SERVICES} - {'salesflare', 'outlook-calendar'}) + (extra() if extra else sorted(getattr(assistant(), 'SETUPS', None) or {}))
 
 
 def offer_phone_skip(config, account, ui):

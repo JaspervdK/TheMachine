@@ -8,6 +8,7 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 import hashlib
 import google_api
+import ms_graph
 import html
 from html.parser import HTMLParser
 import json
@@ -18,6 +19,7 @@ import shutil
 import re
 import subprocess
 import tempfile
+import time
 import unicodedata
 from urllib.parse import urlsplit
 
@@ -26,8 +28,25 @@ SEND_SCOPES = {'https://www.googleapis.com/auth/gmail.send',
                'https://www.googleapis.com/auth/gmail.modify', 'https://mail.google.com/'}
 
 
+def mail_account(account):
+    """A mailbox that can send what the owner approves: Gmail (gog or broker) or Outlook (broker or own app)."""
+    service = account.get('service', 'gmail')
+    return (service == 'gmail' and account.get('transport') in ('gog', 'broker')) or (
+        service == 'outlook' and account.get('transport') in ('broker', 'graph'))
+
+
+def outlook(account):
+    return account.get('service') == 'outlook'
+
+
 def granted_scopes(config, credential, account):
-    """The Google scopes the owner granted this account: from gog's own list, or from the broker."""
+    """The scopes the owner granted this account: from gog's own list, or from the broker (Graph's short names for
+    an Outlook account)."""
+    if outlook(account):
+        try:
+            return ms_graph.scopes(config, credential, account)
+        except ms_graph.GraphError:
+            raise ValueError('I could not verify Outlook permissions. Nothing was sent.') from None
     if account.get('transport') == 'broker':
         try:
             return google_api.scopes(config, credential, account)
@@ -275,16 +294,15 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
             raise ValueError('Unsupported email fields')
         if not isinstance(value.get('signature', True), bool):
             raise ValueError('signature is true (default: the Gmail signature is added) or false')
-        # Any of the owner's Gmail accounts for the same company (or the same address) as the task's signals: a task
+        # Any of the owner's Gmail or Outlook accounts for the same company (or the same address) as the task's signals: a task
         # that came from a calendar or Slack still sends from that company's mailbox.
         task_accounts = [a for a in config['accounts'] if a['id'] in allowed_accounts]
         boundaries = {a.get('boundary') for a in task_accounts if a.get('boundary')}
         emails = {str(a.get('email') or '').lower() for a in task_accounts if a.get('email')}
-        account = next((a for a in config['accounts'] if a['id'] == value.get('account_id')
-                        and a.get('service', 'gmail') == 'gmail' and a.get('transport') in ('gog', 'broker')), None)
+        account = next((a for a in config['accounts'] if a['id'] == value.get('account_id') and mail_account(a)), None)
         if not account or (account['id'] not in allowed_accounts and account.get('boundary') not in boundaries
                            and str(account.get('email') or '').lower() not in emails):
-            raise ValueError('Use a Gmail account of this task’s company')
+            raise ValueError('Use a Gmail or Outlook account of this task’s company')
         result = {'kind': 'email', 'account_id': account['id'], 'from': account['email']}
         if value.get('label'):
             if value['label']!='Send' and not value['label'].startswith('Send '):raise ValueError('Email button labels must say Send, such as Send reply')
@@ -311,13 +329,14 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
                 raise ValueError('Subject cannot contain another header')
             result[field] = closing_spaced(text) if field == 'body' else text
         # The real Gmail signature is added at send time; the body ends at the name.
-        result['signature'] = value.get('signature', True)
+        result['signature'] = value.get('signature', True) and not outlook(account)  # Graph can't read Outlook's signature
         if value.get('attachments'):
             result['attachments'] = store_attachments(value['attachments'], config)
         for field in ('thread_id', 'in_reply_to', 'references'):
             if value.get(field):
                 text = value[field]
-                pattern = r'[a-fA-F0-9]{1,64}' if field == 'thread_id' else r'<[^\s<>\r\n]+>' if field == 'in_reply_to' else r'<[^\s<>\r\n]+>(?: <[^\s<>\r\n]+>)*'
+                # A Gmail thread ID is hex; an Outlook conversation ID is base64
+                pattern = (r'[A-Za-z0-9+/=_-]{1,400}' if outlook(account) else r'[a-fA-F0-9]{1,64}') if field == 'thread_id' else r'<[^\s<>\r\n]+>' if field == 'in_reply_to' else r'<[^\s<>\r\n]+>(?: <[^\s<>\r\n]+>)*'
                 if not isinstance(text, str) or len(text) > 1000 or not re.fullmatch(pattern, text):
                     raise ValueError('Invalid email thread header')
                 result[field] = text
@@ -628,7 +647,7 @@ class EmailTransport:
         self.signatures = {}
 
     def account(self, action):
-        if action['kind']!='email':raise ValueError('Only a real owner-approved email can use the Gmail transport')
+        if action['kind']!='email':raise ValueError('Only a real owner-approved email can use the email transport')
         account = next(a for a in self.config['accounts'] if a['id'] == action['account_id'])
         if account['email'].lower() != action['from'].lower():
             raise ValueError('The sender account changed; review the draft again')
@@ -642,6 +661,8 @@ class EmailTransport:
 
     def preflight(self, action):
         account = self.account(action)
+        if outlook(account):
+            return self.outlook_preflight(action, account)
         if not (granted_scopes(self.config, self.credential, account) & SEND_SCOPES):
             raise ValueError('Gmail is connected read-only. Sending permission needs to be enabled for this account; nothing was sent.')
         profile = self.read(self.config, account, 'gmail', 'v1', 'gmail.users.getProfile',
@@ -669,8 +690,56 @@ class EmailTransport:
             self.signatures[key] = send_as.get('signature') or ''
         return self.signatures[key]
 
+    def outlook_preflight(self, action, account):
+        if 'Mail.Send' not in granted_scopes(self.config, self.credential, account):
+            raise ValueError('Outlook is connected read-only. Connect it again with sending on; nothing was sent.')
+        profile = self.read(self.config, account, 'gmail', 'v1', 'gmail.users.getProfile', {'userId': 'me'}, 'User.Read')
+        if profile.get('emailAddress', '').lower() != action['from'].lower():
+            raise ValueError('Outlook sender identity could not be verified. Nothing was sent.')
+        for record in action.get('attachments', []):
+            try:
+                attachment_bytes(record, self.config)
+            except OSError:
+                raise ValueError(f"The attachment {record['name']} is missing. Nothing was sent.")
+
+    def outlook_send(self, action, job, account):
+        """A draft from the exact MIME (so the Message-ID and reply headers stay ours), then that draft is sent: its
+        immutable ID is the sent message's. Without Mail.ReadWrite, sendMail with the MIME, then Sent Items."""
+        mime = base64.b64encode(mime_bytes(action, job, '', self.config))
+        call = lambda *args, **kwargs: ms_graph.call(self.config, self.credential, account, *args, **kwargs)
+        rejected = lambda error: error.category == 'outlook' and error.status and 400 <= error.status < 500 and error.status not in (408, 429)
+        try:
+            granted = ms_graph.scopes(self.config, self.credential, account)
+        except ms_graph.GraphError:
+            return {'not_sent': True}
+        if 'Mail.ReadWrite' in granted:
+            try:
+                draft = call('messages.create', {}, body=mime, content_type='text/plain', write=True)
+            except ms_graph.GraphError as error:
+                # No draft, so nothing can have gone out: a definite refusal, or try again shortly.
+                return {'rejected': error.status} if rejected(error) else {'not_sent': True}
+            if not draft.get('id'):
+                return {'not_sent': True}
+            try:
+                call('messages.send', {'id': draft['id']}, body=b'', content_type='application/json', write=True)
+            except ms_graph.GraphError as error:
+                return {'rejected': error.status} if rejected(error) else {}
+            return {'message_id': draft['id']}
+        try:
+            call('sendMail', {}, body=mime, content_type='text/plain', write=True)
+        except ms_graph.GraphError as error:
+            return {'rejected': error.status} if rejected(error) else {}
+        for _ in range(4):  # sendMail answers 202 without an ID: find it in Sent Items
+            time.sleep(3)
+            found = self.reconcile(action, job)
+            if found:
+                return found
+        return {}
+
     def send(self, action, job):
         account = self.account(action)
+        if outlook(account):
+            return self.outlook_send(action, job, account)
         request = {'raw': base64.urlsafe_b64encode(mime_bytes(action, job, self.signature(action, account), self.config)).decode().rstrip('=')}
         if action.get('thread_id'):
             request['threadId'] = action['thread_id']
@@ -703,6 +772,8 @@ class EmailTransport:
         return {'message_id': result['id']} if result.get('id') else {}
 
     def reconcile(self, action, job):
+        if outlook(self.account(action)) and not job.get('rfc_message_id'):
+            return {}
         result = self.read(self.config, self.account(action), 'gmail', 'v1', 'gmail.users.messages.list',
                            {'userId': 'me', 'q': 'in:sent rfc822msgid:' + job['rfc_message_id'], 'maxResults': 2},
                            'https://www.googleapis.com/auth/gmail.readonly')
@@ -1449,6 +1520,8 @@ class ThreadSnooze:
 
     def snooze(self, account_id, thread_id, sent_message_id):
         account = self.account(account_id)
+        if outlook(account):
+            return OutlookSnooze(self.config, self.credential).snooze(account, thread_id, sent_message_id)
         if not self.allowed(account):
             return 'no_permission'
         messages=self.thread(account,thread_id).get('messages',[])
@@ -1465,6 +1538,8 @@ class ThreadSnooze:
 
     def wake(self, account_id, thread_id):
         account = self.account(account_id)
+        if outlook(account):
+            return OutlookSnooze(self.config, self.credential).wake(account, thread_id)
         label = self.label(account)
         labels = self.thread_labels(account, thread_id)
         if label not in labels:
@@ -1473,4 +1548,79 @@ class ThreadSnooze:
         add = [] if 'INBOX' in labels else ['INBOX', 'UNREAD']
         self.write(account, 'gmail.users.threads.modify', {'userId': 'me', 'id': thread_id},
                    {'addLabelIds': add, 'removeLabelIds': [label]})
+        return 'returned'
+
+
+class OutlookSnooze:
+    """Outlook's own snooze has no API either: the thread's Inbox messages move to a "Snoozed" folder, and back to the
+    Inbox when it's time (unread, unless a reply already came in). Message IDs are immutable, so they survive the moves."""
+
+    def __init__(self, config, credential):
+        self.config, self.credential = config, credential
+
+    def call(self, account, method, params=None, body=None, write=False):
+        try:
+            return ms_graph.call(self.config, self.credential, account, method, params, body=body, write=write)
+        except ms_graph.GraphError:
+            raise RuntimeError(f'{method} failed') from None
+
+    def allowed(self, account):
+        try:
+            return 'Mail.ReadWrite' in ms_graph.scopes(self.config, self.credential, account)
+        except ms_graph.GraphError:
+            raise RuntimeError('scopes failed') from None
+
+    def folder(self, account, create=False):
+        quoted = SNOOZE_LABEL.replace("'", "''")
+        found = self.call(account, 'folders.list', {'$filter': f"displayName eq '{quoted}'", '$select': 'id'}).get('value') or []
+        if found:
+            return found[0]['id']
+        if not create:
+            return None
+        return self.call(account, 'folders.create', {}, {'displayName': SNOOZE_LABEL, 'isHidden': False}, write=True)['id']
+
+    def messages(self, account, thread_id):
+        quoted = str(thread_id).replace("'", "''")
+        return self.call(account, 'messages.list', {'$filter': f"conversationId eq '{quoted}'", '$top': 50,
+                                                     '$select': 'id,parentFolderId,receivedDateTime,isRead'}).get('value') or []
+
+    def snooze(self, account, thread_id, sent_message_id):
+        if not self.allowed(account):
+            return 'no_permission'
+        try:
+            known = ms_graph.folders(self.config, self.credential, account)
+        except ms_graph.GraphError:
+            raise RuntimeError('folders failed') from None
+        messages = self.messages(account, thread_id)
+        sent = next((m for m in messages if m.get('id') == sent_message_id and m.get('parentFolderId') == known.get('sentitems')), None)
+        if not sent:
+            raise RuntimeError('sent_message_not_confirmed')
+        # Delayed/retried snooze must not hide a reply that already arrived.
+        if any(m.get('parentFolderId') != known.get('sentitems') and m.get('receivedDateTime', '') >= sent.get('receivedDateTime', '')
+               for m in messages if m.get('id') != sent_message_id):
+            return 'returned'
+        folder = self.folder(account, create=True)
+        for message in messages:
+            if message.get('parentFolderId') == known.get('inbox'):
+                self.call(account, 'messages.move', {'id': message['id']}, {'destinationId': folder}, write=True)
+        return 'snoozed'
+
+    def wake(self, account, thread_id):
+        folder = self.folder(account)
+        if not folder:
+            return 'returned'
+        try:
+            known = ms_graph.folders(self.config, self.credential, account)
+        except ms_graph.GraphError:
+            raise RuntimeError('folders failed') from None
+        messages = self.messages(account, thread_id)
+        snoozed = [m for m in messages if m.get('parentFolderId') == folder]
+        if not snoozed:
+            return 'returned'  # The owner already moved it; leave it where it is.
+        replied = any(m.get('parentFolderId') == known.get('inbox') for m in messages)
+        for message in snoozed:
+            self.call(account, 'messages.move', {'id': message['id']}, {'destinationId': 'inbox'}, write=True)
+        if not replied:  # A reply already brought it back: only move it. Otherwise return it unread.
+            newest = max(snoozed, key=lambda m: m.get('receivedDateTime') or '')
+            self.call(account, 'messages.update', {'id': newest['id']}, {'isRead': False}, write=True)
         return 'returned'

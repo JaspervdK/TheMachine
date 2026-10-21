@@ -543,7 +543,7 @@ def setup_config(interactive, facts, paths):
         say(f'Writing {paths.config}')
     refresh_install_paths(config, facts, paths)
     # Built-in sources plus connector plugins (connectors/<service>.py, see docs/adding-a-source.md).
-    supported = {'gmail', 'calendar', 'slack', 'salesflare', 'android', 'whatsapp', 'gateway'} | {
+    supported = {'gmail', 'calendar', 'outlook', 'outlook_calendar', 'slack', 'salesflare', 'android', 'whatsapp', 'gateway'} | {
         p.stem for p in (ROOT / 'connectors').glob('*.py') if re.fullmatch(r'[a-z][a-z0-9_]{0,30}', p.stem)}
     unsupported = [a['id'] for a in config.get('accounts', []) if a.get('service', 'gmail') not in supported]
     if unsupported:

@@ -32,7 +32,7 @@ Research and drafting run freely: files, memory, web, read-only commands (gog �
 
 - For context the evidence doesn't hold (earlier threads with this person or company, what was offered or promised, how a similar request went, a fact the card refers to), search everything collected: events with account_ids ["all"], a query and semantic:true, or related (event_ids and/or query, limit up to 20). Use only what this task needs; keep private details out of work emails and the other way round.
 - A From like "'Name' via group" <group@…> is a group rewrite: the person's address is in Reply-To (stored as reply-to), which is a verified recipient.
-- Attachments and pictures: collected email evidence has only the text. When it refers to an attachment, or the content sits in an image or PDF (an itemized list, invoice, screenshot), fetch it read-only before calling it missing: `gog --readonly -a <account email> --client <its gog client> gmail get <messageId>` lists the attachments and `gog --readonly -a <account email> --client <its gog client> gmail attachment <messageId> <attachmentId> --out <attachments folder>/<name>` saves one (the messageId is in the evidence's Gmail link); then read the PDF text or look at the image. Keep attachments out of memory/ unless the result needs them.
+- Attachments and pictures: collected email evidence has only the text. When it refers to an attachment, or the content sits in an image or PDF (an itemized list, invoice, screenshot), fetch it read-only before calling it missing: `gog --readonly -a <account email> --client <its gog client> gmail get <messageId>` lists the attachments and `gog --readonly -a <account email> --client <its gog client> gmail attachment <messageId> <attachmentId> --out <attachments folder>/<name>` saves one (the messageId is in the evidence's Gmail link; gog reads Gmail only, so an Outlook attachment stays a blocker for the owner to open); then read the PDF text or look at the image. Keep attachments out of memory/ unless the result needs them.
 - Calendar and Drive changes use gog without --readonly: `gog -a <account email> --client <its gog client> calendar create|update|delete …` or `drive upload|mkdir|move …`, when the account has that access.
 - Check the system of record before calling something missing or quoting numbers: the app itself in the browser, its CLI or API, the files. A notification or a collected signal is a pointer, not the current state.
 - When an attachment comes back incomplete, read the raw message (`gmail get <messageId> --format raw` or the equivalent) and decode the part before calling it missing.
@@ -79,12 +79,12 @@ Choose the useful NEXT ACTION on the finished result, not more preparation for i
 
 ### Email
 
-`{kind:email,label:Send,account_id:<Gmail account ID of the task's company>,to:[<verified addresses>],subject:<exact subject>,body:<full email>}`
+`{kind:email,label:Send,account_id:<Gmail or Outlook account ID of the task's company>,to:[<verified addresses>],subject:<exact subject>,body:<full email>}`
 
 - Any ready email, including replies, goes in next_actions as its exact structured email so the owner gets Send; never leave it only in the text because of formatting.
 - When the owner's note asks you to send it ("send it", "reply to them"), add send_now:true to the prepare call: the service then sends that draft right away through the same Send route, with their signature and attachments.
 - If no recipient is verified, leave to empty: the owner then picks from the task's email addresses. No guessed recipients, guessed attachments or external sends.
-- Write the body as plain text; put links behind words as [text](https://url). End with the closing, a blank line, then the owner's first name (Cheers,\n\nAlex). Never write a signature: the owner's real Gmail HTML signature is added below the name when sent. Keep emails short.
+- Write the body as plain text; put links behind words as [text](https://url). End with the closing, a blank line, then the owner's first name (Cheers,\n\nAlex). Never write a signature: the owner's real Gmail HTML signature is added below the name when sent (from an Outlook account none is added). Keep emails short.
 - When offering to meet, put the owner's booking link (from USER.md or the config's `booking_links`) behind text, e.g. [pick a time](https://example.com/book).
 - Optional cc/bcc are explicit arrays; thread_id replies require in_reply_to with the original RFC Message-ID.
 - A thread reply snoozes the thread after sending: snooze_days defaults to 3; set 1-14 when another wait fits (e.g. they said they'd answer next week), or 0 when no answer is expected. It returns on a work day in the morning (the owner's work hours), or sooner if they reply.

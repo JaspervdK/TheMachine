@@ -48,9 +48,9 @@ COPIES = 'older copies (.bak, .before-, dated .pre-)'
 REBUILDABLE = {'.git', 'node_modules', '.venv', '.venvs', 'venv', '__pycache__', '.cache', '.pytest_cache', '.mypy_cache',
                '.ruff_cache', '.tox'}
 # Tokens that only work for a hosted server; they are never exported
-HOSTED_ONLY = {'google-broker'}
+HOSTED_ONLY = {'google-broker', 'microsoft-broker'}
 # Settings a hosted server added that mean nothing elsewhere
-HOSTED_KEYS = ('google_broker', 'manage_url', 'needs_you_file')
+HOSTED_KEYS = ('google_broker', 'microsoft_broker', 'manage_url', 'needs_you_file')
 
 
 class MoveError(Exception):
@@ -204,7 +204,10 @@ def reconnect(config, secrets):
     out = []
     for account in config.get('accounts') or []:
         service = account.get('service', 'gmail')
-        if account.get('transport') == 'broker':
+        if account.get('transport') == 'broker' and service in ('outlook', 'outlook_calendar'):
+            out.append(f'{account["id"]}: sign in to Microsoft again (hosted Microsoft access does not move along): assistant connect '
+                       + service)
+        elif account.get('transport') == 'broker':
             out.append(f'{account["id"]}: sign in to Google again (hosted Google access does not move along)')
         elif not secrets and account.get('credential'):
             out.append(f'{account["id"]}: its {service} key or token')
@@ -479,7 +482,9 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
             config['enrichment'] = {'enabled': False}  # hosting did the look-ups; set up your own service to turn it on
             notes.append('organisation look-ups were done by the hosting; the profiles found so far are kept')
         for account in config.get('accounts') or []:
-            if account.get('transport') == 'broker':
+            if account.get('transport') == 'broker' and account.get('service') in ('outlook', 'outlook_calendar'):
+                account['transport'] = 'graph'  # Microsoft from here on goes through your own app registration
+            elif account.get('transport') == 'broker':
                 account['transport'] = 'gog'  # Google from here on goes through your own sign-in
         for name, path in list((config.get('credentials') or {}).items()):
             if not Path(path).expanduser().exists() and (unpacked / 'secrets/elsewhere' / Path(path).name).is_file():

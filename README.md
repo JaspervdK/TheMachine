@@ -56,6 +56,7 @@ Follow [Getting started](docs/getting-started.md). The installer can help set up
 - **OpenClaw 2026.10.5 or later**, with the Gateway running. Its Telegram channel (your bot) is optional: without it, cards reach you through the dashboard app. Without it, `./install.sh` in a terminal offers to install and set it up (below). CI tests 2026.10.5 and the latest release every week; see [Known limitations](#known-limitations).
 - Optional, per feature:
   - `gog` (Google Workspace CLI) for Gmail and Calendar (OAuth per account, file keyring; `assistant connect gmail` signs you in).
+  - Your own Microsoft Entra app registration for Outlook mail and calendar (`assistant connect outlook` signs you in with a device code).
   - **Tailscale** for dashboard access (the dashboard only serves your Tailscale identity).
   - **Caddy** only if you want the dashboard on your own domain (`deploy/Caddyfile`). Not needed: `tailscale serve` gives it an HTTPS address on your tailnet.
   - `wacli` for WhatsApp; a Maton connection for Slack (allowed to post as you, to send Slack messages); a Salesflare API key.

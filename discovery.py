@@ -37,7 +37,7 @@ LOOKUP_DAYS = 7              # how often the Machine looks again
 LATER_DAYS = 30              # "Not now" hides a person this long, unless something new comes up with them
 MEETING_DAYS = 14
 STATUSES = ('new', 'requested', 'connected', 'later', 'never')
-MAILBOXES = ('gog', 'broker')  # transports that sign in to the owner's own mailbox or calendar (OAuth)
+MAILBOXES = ('gog', 'broker', 'graph')  # transports that sign in to the owner's own mailbox or calendar (OAuth)
 ADDRESS_DAYS = 7             # how often the findable addresses are sent again (also right away when they change)
 
 SCHEMA = """
@@ -162,7 +162,7 @@ class Discovery:
         for account in self.config.get('accounts', []):
             email = normal(account.get('email'))
             if '@' in email and ' ' not in email and email not in found and \
-                    (account.get('transport') in MAILBOXES or account.get('service') in ('gmail', 'calendar')):
+                    (account.get('transport') in MAILBOXES or account.get('service') in ('gmail', 'calendar', 'outlook', 'outlook_calendar')):
                 found.append(email)
         return found
 

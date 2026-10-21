@@ -18,7 +18,7 @@
 | `dashboard_aliases`, `dashboard_alias_path` | `[]`, `/assistant/` | Extra host names and their path |
 | `port` | `8787` | Local API and dashboard port on 127.0.0.1 |
 | `database` | — | SQLite file; tokens and keys sit next to it |
-| `credentials` | — | Name → file path of each secret: `api-token`, `owner-token`, `gog-password`, `google-broker` (with a broker), and one per source credential. systemd `LoadCredential` with the same names takes precedence |
+| `credentials` | — | Name → file path of each secret: `api-token`, `owner-token`, `gog-password`, `google-broker` and `microsoft-broker` (with a broker), and one per source credential. systemd `LoadCredential` with the same names takes precedence |
 | `app_dir` | `~/.openclaw/workspace/tools/personal-assistant` | This checkout; the plugin reads `AGENTS.md`/`PREPARATION.md` here and protects it from edits |
 | `fix_dir` | `~/.cache/the-machine/fixes` | Where Do it clones The Machine to fix it ([The Machine fixes itself](../README.md#the-machine-fixes-itself)) |
 | `self_test`, `self_test_seconds`, `self_fix_push` | `scripts/test.py`, `1200`, `true` | The test command Merge now runs in the fix (a list), its time limit, and whether a merged fix is pushed |
@@ -28,6 +28,8 @@
 | `openclaw_state`, `agent_db` | OpenClaw defaults | OpenClaw state and agent transcript databases (read-only: Telegram receipts, progress steps) |
 | `gog`, `wacli` | `gog`, `wacli` | Binaries for Google and WhatsApp |
 | `google_broker` | — | `url` of a Google token broker, for accounts with `"transport": "broker"` (below) |
+| `microsoft_broker` | — | `url` of a Microsoft token broker, for Outlook accounts with `"transport": "broker"` |
+| `microsoft_graph` | — | `client_id` and `tenant` (`common`) of your own Entra app, for Outlook accounts with `"transport": "graph"` |
 | `heartbeat_job_id` | `""` | Optional OpenClaw cron job ID of your main heartbeat, for its health line |
 | `manage_url` | `""` | Optional https page where this install is set up (a hosted machine); the dashboard links to it from Settings (Account) and Add a connection |
 | `needs_you_file` | unset | Optional JSON list of `{id, text, url, action}` notes from a hosting layer; the dashboard shows them under Needs you, with sources that are not fully set up and connections that need signing in again |

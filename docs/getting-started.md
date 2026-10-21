@@ -26,7 +26,7 @@ The wizard fills in what it can find, so most questions only need Enter:
 - **Tailscale login and dashboard host:** from `tailscale status` (on a tagged machine, type the login you use on your phone).
 - **Company:** from your email address; answer "personal" if these are private accounts.
 - **Sources:** suggested from what is installed and linked here (gog, a linked WhatsApp, a paired Android phone).
-- **Email:** from the Google accounts gog already knows.
+- **Email:** from the Google accounts gog already knows. Outlook: `assistant connect outlook`.
 
 ## 2. Connect your sources
 
@@ -34,6 +34,7 @@ Right after the service starts, the installer walks through each source:
 
 | Source | What happens |
 |---|---|
+| Outlook, Outlook Calendar | Asks the client ID of your own Entra app registration (Microsoft Entra admin center, App registrations, New registration; allow public client flows), then signs you in with a device code: **read-only** mail and calendar, plus sending if you say yes. Calendar reuses the same sign-in. |
 | Gmail, Calendar | Picks your gog OAuth client (or helps you add one), stores a keyring password (typed or generated, mode 600) and signs you in with **read-only** Gmail and Calendar access. Calendar reuses the same sign-in. |
 | Slack | Asks for your Maton API key (hidden), then finds the Slack connection in Maton (asks which one if you have several), your team, user and email itself. |
 | Salesflare | Asks for an API key (hidden), then finds your user and team. |
@@ -135,7 +136,7 @@ Everything moves in one file: what The Machine knows, your settings, connectors 
 2. On your own computer, follow steps 1 above to install The Machine.
 3. Stop the target service first: `systemctl --user stop personal-assistant.service`. Close other database readers, then
    put it back: `assistant import the-machine-export-<date>.zip` (for `.tar.gz.enc` it asks the passphrase).
-4. Connect what the import lists. Always: your model, and Google (hosted Google access works through the hosting and does not move along: `assistant connect gmail --account <id>` and the same for `calendar`). Without a passphrase also every source's key and your Telegram bot token.
+4. Connect what the import lists. Always: your model, and Google or Microsoft (hosted access works through the hosting and does not move along: `assistant connect gmail --account <id>`, or `outlook`, and the same for the calendar). Without a passphrase also every source's key and your Telegram bot token.
 5. `systemctl --user start personal-assistant.service`, then `assistant doctor`.
 
 The same works between two of your own computers: `assistant export --keys` on the old one.

@@ -45,6 +45,7 @@ import fleet
 import skills
 import task_invites
 import google_api
+import ms_graph
 import next_actions
 import browser_login
 import browser_viewer
@@ -274,7 +275,7 @@ def thread_snooze_note(state):
     if state.get('snooze_status') in ('queued', 'snoozed') and until:
         return ' Thread out of your inbox until ' + dt.datetime.fromisoformat(until).astimezone(local_tz()).strftime('%a %-d %b · %H:%M') + '.'
     if state.get('snooze_status') == 'failed':
-        return ' ' + (state.get('snooze_error') or 'I couldn’t snooze the thread in Gmail.')
+        return ' ' + (state.get('snooze_error') or 'I couldn’t snooze the thread in your mailbox.')
     return ''
 
 
@@ -590,7 +591,15 @@ def owner_credential(config):
 
 def gog_read(config, account, api, version, method, params, scope):
     """Use the existing account's gog token; never authorize or write from ingestion. An account with
-    "transport": "broker" gets a short-lived token from the configured Google broker instead (google_api.py)."""
+    "transport": "broker" gets a short-lived token from the configured Google broker instead (google_api.py).
+    An Outlook account (Microsoft 365 or Outlook.com) answers the same Gmail and Calendar reads from Graph (ms_graph.py)."""
+    if account.get('service') in MICROSOFT_SERVICES:
+        try:
+            if api == 'calendar':
+                return ms_graph.calendar_call(config, credential, account, method.split('.', 1)[1], params)
+            return ms_graph.gmail_call(config, credential, account, method, params)
+        except ms_graph.GraphError as error:
+            raise SourceError(error.category, error.status, error.retry_after) from None
     if account['transport'] == 'broker':
         try:
             return google_api.call(config, credential, account, method, params, scope)
@@ -623,6 +632,26 @@ def gog_read(config, account, api, version, method, params, scope):
         raise SourceError('invalid_response')
     return data
 
+# Outlook mail and calendar: they flow through the same sync, cards and sends as Gmail and Google Calendar, and their
+# messages are stored with the same 'gmail.message' kind (it means "an email" everywhere in the app).
+MICROSOFT_SERVICES = ('outlook', 'outlook_calendar')
+MAIL_SERVICES = ('gmail', 'outlook')
+CALENDAR_SERVICES = ('calendar', 'outlook_calendar')
+
+
+def mail_account(account):
+    """An owner's mailbox we can read and send from: Gmail (gog or broker) or Outlook (broker or own app)."""
+    service = account.get('service', 'gmail')
+    return (service == 'gmail' and account.get('transport') in ('gog', 'broker')) or (
+        service == 'outlook' and account.get('transport') in ('broker', 'graph'))
+
+
+def mailbox_name(config, action):
+    """Gmail or Outlook: what an email action's account is, for the owner's messages."""
+    account = next((a for a in config.get('accounts', []) if a.get('id') == action.get('account_id')), {})
+    return 'Outlook' if account.get('service') == 'outlook' else 'Gmail'
+
+
 def gog_signin_command(config, account):
     """The command that signs a Google account in again where the assistant reads it: gog's file
     keyring, unlocked with the password file it was given. A plain `gog auth add` lands in the
@@ -642,13 +671,14 @@ def gog_token_path(config, account):
 
 
 def gog_signed_in_since(config, account, since):
-    """True when the account's stored Google sign-in was written after `since` (an ISO time)."""
-    if account.get('transport') != 'gog' or not since:
+    """True when the account's stored Google (or own-app Microsoft) sign-in was written after `since` (an ISO time)."""
+    if account.get('transport') not in ('gog', 'graph') or not since:
         return False
     try:
-        written = gog_token_path(config, account).stat().st_mtime
+        written = (ms_graph.credential_path(config, account) if account['transport'] == 'graph'
+                   else gog_token_path(config, account)).stat().st_mtime
         return written > dt.datetime.fromisoformat(since).timestamp()
-    except (OSError, ValueError):
+    except (OSError, ValueError, ms_graph.GraphError):
         return False
 
 
@@ -1455,7 +1485,7 @@ def default_exclusions(config, account):
         # the phone app. Unknown account previews stay; explicit owner exclusions
         # can still suppress a whole package when that is genuinely wanted.
         return [ANDROID_STATUS_NOTICES]
-    if account.get('service') == 'calendar':
+    if account.get('service') in CALENDAR_SERVICES:
         return [ROUTINE_CALENDAR]
     return []
 
@@ -1493,7 +1523,7 @@ def calendar_event(account, raw, timezone):
     url = urllib.parse.urlsplit(source_url)
     if url.scheme != 'https' or not (url.hostname == 'calendar.google.com' or
                                     (url.hostname == 'www.google.com' and url.path.startswith('/calendar/'))):
-        source_url = None
+        source_url = ms_graph.web_link(raw.get('webLink'))  # an Outlook event: Outlook on the web
     metadata = {'start': start, 'end': end, 'end_at': calendar_time(end, timezone),
                 'all_day': 'date' in start, 'timezone': timezone, 'status': raw.get('status'),
                 'updated': raw.get('updated'), 'location': raw.get('location'),
@@ -1652,8 +1682,8 @@ def message_event(account, raw, config=None):
     if headers.get('reply-to'):
         metadata['reply-to'] = headers['reply-to']
     metadata.update(thread_id=raw.get('threadId'), labels=sorted(raw.get('labelIds', [])),
-                    source_url='https://mail.google.com/mail/u/?authuser=' +
-                    urllib.parse.quote(account['email']) + '#all/' + raw['id'],
+                    source_url=raw.get('webLink') if account.get('service') == 'outlook' else
+                    'https://mail.google.com/mail/u/?authuser=' + urllib.parse.quote(account['email']) + '#all/' + raw['id'],
                     truncated=len(body) > 40000, quoted_history_chars=quoted,
                     quoted_history_shortened=quoted > QUOTED_HISTORY_KEPT)
     return {'account_id': account['id'], 'source_id': raw['id'], 'kind': 'gmail.message',
@@ -4667,9 +4697,9 @@ def sync_gateway(store, config, account, source=None):
 
 def sync_source(store, config, account):
     service = account.get('service', 'gmail')
-    if service == 'gmail':
+    if service in MAIL_SERVICES:
         return sync_gmail(store, config, account)
-    if service == 'calendar':
+    if service in CALENDAR_SERVICES:
         return sync_calendar(store, config, account)
     if service == 'slack':
         return sync_slack(store, config, account)
@@ -5288,7 +5318,7 @@ def card_draft(row):
     else:
         head = [{'linkedin': 'LinkedIn', 'slack': 'Slack', 'whatsapp': 'WhatsApp'}[a['kind']] + ' message to ' + a.get('to_name', '')]
     tail = []
-    if a.get('signature'): tail.append('+ your Gmail signature')
+    if a.get('signature'): tail.append('+ your Gmail signature')  # never set for Outlook: Graph can't read its signature
     if a.get('attachments'): tail.append('Attachments: ' + ', '.join(x.get('name', '') for x in a['attachments']))
     if a.get('delegate') and a.get('wait_days'):
         tail.append(f"After sending, this card waits {a['wait_days']} day{'s' if a['wait_days'] > 1 else ''} for {a['to_name'] + '’s' if a.get('to_name') else 'a'} reply.")
@@ -6475,6 +6505,9 @@ class App:
                 connector.update(sign_in_help(connector.get('service', ''), connector.get('error'), result['manage_url']))
                 if 'google_signin_expired' in (connector.get('error') or '') and connector['id'] in by_id:
                     connector['sign_in_command'] = gog_signin_command(self.config, by_id[connector['id']])
+                elif 'microsoft_signin_expired' in (connector.get('error') or '') and by_id.get(connector['id'], {}).get('transport') == 'graph':
+                    import onboarding
+                    connector['sign_in_command'] = 'assistant connect ' + onboarding.connect_name(by_id[connector['id']], self.config)
             result['model_usage'] = getattr(self, 'model_usage', None)
             result['model_status'] = getattr(self, 'model_status', None)
             result['skills'] = self.skills.view() if getattr(self, 'skills', None) else None
@@ -6903,7 +6936,7 @@ class App:
     def wait_for_retry(self, account, row):
         """Wait until the checkpoint's retry time; True when stopping. An expired Google sign-in
         is retried as soon as the owner signs in again, instead of after the full hour."""
-        expired = 'google_signin_expired' in (row['error'] or '')
+        expired = bool(re.search(r'(google|microsoft)_signin_expired', row['error'] or ''))
         while True:
             seconds = (dt.datetime.fromisoformat(row['retry_at']) - dt.datetime.fromisoformat(now())).total_seconds()
             if seconds <= 0:
@@ -7054,10 +7087,10 @@ class App:
         with self.store.connect() as db:
             row = db.execute('SELECT status,account_ids FROM suggestions WHERE id=?', (found['suggestion_id'],)).fetchone()
         allowed = json.loads(row['account_ids'] or '[]')
-        gmail = [a for a in self.config.get('accounts', []) if a.get('service', 'gmail') == 'gmail' and a.get('transport') in ('gog', 'broker')]
+        gmail = [a for a in self.config.get('accounts', []) if mail_account(a)]
         order = [a for a in gmail if a['id'] in allowed] + [a for a in gmail if a['id'] not in allowed]
         if not any(a['id'] in allowed for a in order):
-            raise ValueError('This card has no Gmail account to send from')
+            raise ValueError('This card has no Gmail or Outlook account to send from')
         pending_key = 'pending_handoff:' + hashlib.sha256(encoded([found['suggestion_id'], email, task]).encode()).hexdigest()
         with self.fleet.connect() as db:
             pending = db.execute('SELECT value FROM fleet_meta WHERE key=?', (pending_key,)).fetchone()
@@ -7077,10 +7110,10 @@ class App:
                                                 'subject': subject, 'body': body}, self.config, allowed)
                 break
             except ValueError as error:
-                if 'Gmail account' not in str(error):
+                if 'Outlook account' not in str(error):
                     raise
         else:
-            raise ValueError('This card has no Gmail account to send from')
+            raise ValueError('This card has no Gmail or Outlook account to send from')
         with self.store.connect() as db:
             db.execute("UPDATE suggestions SET status='accepted' WHERE id=? AND status='pending'", (found['suggestion_id'],))
         self.store.prepare(found['suggestion_id'], f'An email handing this to {email}. It has a link that brings the task to a Machine of '
@@ -7385,7 +7418,7 @@ class App:
                 db.execute("UPDATE action_jobs SET retry_at=?,updated_at=? WHERE id=? AND status='queued'",((dt.datetime.fromisoformat(now())+dt.timedelta(minutes=2)).isoformat(),now(),job['id']))
             return 'waiting'
         except Exception as error:
-            reason=str(error) if isinstance(error,ValueError) else 'The fix could not be checked. Nothing was merged.' if action['kind']=='merge' else ({'linkedin':'LinkedIn','slack':'Slack','x':'X','whatsapp':'WhatsApp'}.get(action['kind'],'Gmail')+' could not be checked. Nothing was sent.')
+            reason=str(error) if isinstance(error,ValueError) else 'The fix could not be checked. Nothing was merged.' if action['kind']=='merge' else ({'linkedin':'LinkedIn','slack':'Slack','x':'X','whatsapp':'WhatsApp'}.get(action['kind'],mailbox_name(self.config,action))+' could not be checked. Nothing was sent.')
             with self.store.connect() as db:
                 db.execute("UPDATE action_jobs SET status='blocked',error=?,updated_at=? WHERE id=? AND status='queued'",(reason,now(),job['id']))
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
@@ -7410,7 +7443,7 @@ class App:
             return 'waiting'
         with self.store.connect() as db:
             status='sent' if result.get('message_id') else 'failed' if result.get('rejected') else 'uncertain'
-            what,where={'linkedin':('this LinkedIn message','LinkedIn'),'slack':('this Slack message','Slack'),'x':('this X '+('reply' if action.get('reply_to') else 'message'),'X'),'whatsapp':('this WhatsApp message','WhatsApp')}.get(action['kind'],('this email','Gmail'))
+            what,where={'linkedin':('this LinkedIn message','LinkedIn'),'slack':('this Slack message','Slack'),'x':('this X '+('reply' if action.get('reply_to') else 'message'),'X'),'whatsapp':('this WhatsApp message','WhatsApp')}.get(action['kind'],('this email',mailbox_name(self.config,action)))
             error={'sent':None,'failed':f"{where} refused {what} (error {result.get('rejected')}). Nothing was sent; you can change it or tap Send again.",
                    'uncertain':f'I couldn’t confirm whether {what} was sent. I won’t resend it.'}[status]
             if action['kind']=='merge':
@@ -7559,7 +7592,8 @@ class App:
                 if row['until']<=now():status='returned'  # Too late to snooze; leave the thread alone.
                 else:status=gmail.snooze(row['account_id'],row['thread_id'],row['sent_message_id'])
             else:status=gmail.wake(row['account_id'],row['thread_id'])
-            error={'no_permission':'Gmail can’t move this thread yet: the account needs the modify permission.'}.get(status)
+            outlook=next((a for a in self.config.get('accounts',[]) if a['id']==row['account_id'] and a.get('service')=='outlook'),None)
+            error={'no_permission':'Outlook can’t move this thread yet: connect the account again with sending on.' if outlook else 'Gmail can’t move this thread yet: the account needs the modify permission.'}.get(status)
             with self.store.connect() as db:
                 db.execute('UPDATE thread_snoozes SET status=?,error=?,retry_at=NULL,updated_at=? WHERE job_id=?',
                            ('failed' if error else status,error,now(),row['job_id']))
