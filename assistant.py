@@ -7393,6 +7393,10 @@ class App:
                         delay = account.get('poll_seconds', 15)
                     self.store.failed(account['id'], error)
                     LOG.warning('sync account=%s error=%s', account['id'], error)
+                    # Enter the checkpoint wait directly so renewed sign-ins are watched.
+                    # Ordinary failures and rate limits retain their normal backoff.
+                    if re.search(r'(google|microsoft)_signin_(expired|pending)|microsoft_broker', str(error)):
+                        continue
                 except Exception as error:
                     safe = SourceError(type(error).__name__, retry_after=delay)
                     self.store.failed(account['id'], safe)

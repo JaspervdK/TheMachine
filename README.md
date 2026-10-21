@@ -195,3 +195,7 @@ MIT: [LICENSE](LICENSE). OpenClaw and optional components: [THIRD_PARTY_NOTICES.
 ## Outlook reliability
 
 Microsoft access and folder caches are isolated by account, connection and credential revision. Reconnecting invalidates old cache entries. Attachment lists follow every Graph page; responses over 40 MB fail clearly rather than creating partial files. Graph throttling preserves the requested retry wait. Signatures keep ordinary HTML after removed void tags. These are reliability checks, not new owner approvals.
+
+## Google sign-in recovery
+
+After an expired Google sign-in, use the exact reconnect command shown on Connections, on the computer that runs this collector. It pins the account/client and the same gog file keyring used by the service. The collector watches the renewed token every 15 seconds during authentication backoff; it does not sleep through the retry hour first. Ordinary throttling/network backoff remains unchanged. A successful committed sync clears the current warning, while the historical failure stays in Recent syncs/Details. Returning to the dashboard or regaining connectivity refreshes it immediately, without replacing an open form or overlapping its periodic status requests.

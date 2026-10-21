@@ -8,13 +8,14 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 // where the assistant reads it (the file keyring, by its password file's path), with a copy button. All mocked.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const command='GOG_KEYRING_BACKEND=file GOG_KEYRING_PASSWORD="$(cat /home/owner/private/keyring-password)" gog auth add owner@example.com --client existing';
+let statusCalls=0;
 const connectors=[{id:'work-gmail',service:'gmail',email:'owner@example.com',boundary:'work:Example',display_name:'owner@example.com',
  error:'gmail:google_signin_expired_run_gog_auth_add',retry_at:new Date(Date.now()+3600e3).toISOString(),failures:2,sign_in_command:command,
  sync_activity:[{at:new Date().toISOString(),status:'failed',error:'gmail:google_signin_expired_run_gog_auth_add'}]}];
 const server=createServer((req,res)=>{
  const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
- if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},connectors,review_runs:[]}));return}
+ if(url.pathname==='/api/status'){statusCalls++;res.end(JSON.stringify({suggestions:[],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},connectors,review_runs:[]}));return}
  res.statusCode=404;res.end('{}');
 });
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
@@ -36,6 +37,19 @@ try{
  await page.locator('#toast',{hasText:'Copied.'}).waitFor();
  assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),command);
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ const connection=connectors[0],failure=connection.sync_activity[0];
+ Object.assign(connection,{error:null,retry_at:null,failures:0,last_success:new Date().toISOString(),last_sync_signals:1,total:247});
+ delete connection.sign_in_command;
+ connection.sync_activity.unshift({at:new Date().toISOString(),status:'success',signals:1});
+ connection.last_failure={at:failure.at,error:failure.error};
+ const before=statusCalls;
+ await page.evaluate(()=>{dispatchEvent(new Event('pageshow'));dispatchEvent(new Event('online'));document.dispatchEvent(new Event('visibilitychange'))});
+ await page.waitForFunction(()=>document.querySelector('#connectors .connection-status')?.textContent==='Connected');
+ assert.equal(statusCalls,before+1,'resume events share one status request');
+ assert.equal(await page.locator('#connectors .signin-command').count(),0);
+ assert.equal(await page.locator('#connectors [data-copy-command]').count(),0);
+ assert.equal(await page.locator('#connectors .state-dot.t-mint').count(),1);
+ assert.match(await page.locator('#connectors').textContent(),/Last failure: Google sign-in/);
  assert.deepEqual(errors,[]);
  console.log('signin command dashboard ok');
 }finally{await browser?.close();server.close()}

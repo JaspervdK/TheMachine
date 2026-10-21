@@ -681,6 +681,47 @@ class CalendarInvariants(unittest.TestCase):
         with self.store.connect() as db:
             self.assertIsNone(db.execute('SELECT retry_at FROM checkpoints WHERE account_id=?', (self.account['id'],)).fetchone()[0])
 
+    def test_collector_notices_renewed_google_login_without_sleeping_for_the_retry_hour(self):
+        keyring = Path(self.temp.name) / 'keyring'; keyring.mkdir()
+        app = object.__new__(assistant.App)
+        app.config, app.store, app.stop = {'gog_keyring_dir': str(keyring)}, self.store, threading.Event()
+        token = assistant.gog_token_path(app.config, self.account)
+        token.write_text('old'); os.utime(token, (0, 0))
+        waits, calls = [], []
+        def wait(seconds):
+            waits.append(seconds)
+            if len(waits) == 2: token.write_text('renewed')
+            return app.stop.is_set()
+        def sync(store, config, account):
+            calls.append(account['id'])
+            if len(calls) == 1:
+                raise assistant.SourceError('calendar:google_signin_expired_run_gog_auth_add', retry_after=3600)
+            store.commit_page(account['id'], {'mode': 'incremental', 'cursor': 'kept'}, [])
+            app.stop.set()
+            return {'mode': 'incremental', 'events': 0}
+        app.stop.wait = wait
+        with patch.object(app, 'resume_wait', return_value=0), patch.object(assistant, 'sync_source', side_effect=sync):
+            app.collector(self.account)
+        self.assertEqual(calls, [self.account['id'], self.account['id']])
+        self.assertEqual(waits[:2], [15, 15])
+        with self.store.connect() as db:
+            row = db.execute('SELECT error,retry_at FROM checkpoints WHERE account_id=?', (self.account['id'],)).fetchone()
+        self.assertIsNone(row['error']); self.assertIsNone(row['retry_at'])
+        self.assertEqual(self.store.checkpoint(self.account['id'])['cursor'], 'kept')
+
+    def test_collector_still_honors_rate_limit_backoff(self):
+        app = object.__new__(assistant.App)
+        app.config, app.store, app.stop = {}, self.store, threading.Event()
+        waits = []
+        def wait(seconds):
+            waits.append(seconds); app.stop.set(); return True
+        app.stop.wait = wait
+        with patch.object(app, 'resume_wait', return_value=0), patch.object(assistant, 'sync_source',
+                side_effect=assistant.SourceError('calendar', 429, retry_after=3600)) as sync:
+            app.collector(self.account)
+        self.assertEqual(sync.call_count, 1)
+        self.assertEqual(waits, [3600])
+
     def test_shared_calendar_is_exact_and_credentials_stay_separate(self):
         account = {**self.account, 'calendar_id': 'shared@example.com', 'boundary': 'personal:shared'}
         with patch.object(assistant, 'gog_read', return_value={'id': 'shared@example.com'}) as read:
