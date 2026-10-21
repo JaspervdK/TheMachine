@@ -1,5 +1,7 @@
 # Security and privacy
 
+The short version, for people deciding whether to install: [themachine.computer/security](https://themachine.computer/security). This file is the technical detail behind it.
+
 ## Supported release
 
 Security fixes target the latest `main` revision. CI checks OpenClaw 2026.10.5 and a current release; future releases and older snapshots are not automatically certified by those tests.

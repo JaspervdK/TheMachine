@@ -140,6 +140,8 @@ Do it authorizes the offered task end to end; verified written instructions auth
 
 ## Security model
 
+In plain words: [themachine.computer/security](https://themachine.computer/security). The details:
+
 - Keep the local API on loopback and the dashboard behind the owner identity check; authenticated cloud hosting uses its own gate.
 - The CLI/agent key cannot invent owner decisions. Telegram/dashboard owner controls share one store.
 - Reviews only read. Do it permits broad task execution; plugin guards are not an OS sandbox and differ by runtime.
