@@ -292,6 +292,23 @@ class OpenClawSkills(unittest.TestCase):
         self.assertEqual(view['error'], 'OpenClaw gave an answer The Machine could not read')
         self.assertIn("first='Gateway busy, try later'", logs.output[0])
 
+    def test_when_skills_list_fails_the_gateways_own_report_is_used_and_a_failure_says_why(self):
+        real = self.oc.run
+        failed = '{\n  "ok": false,\n  "error": {"type": "cli_error", "message": "gateway timeout after 1500ms"}\n}\n'
+
+        def busy(argv, **kw):
+            if argv[1:3] == ['skills', 'list']:
+                return skills.subprocess.CompletedProcess(argv, 1, failed, '[openclaw] The CLI command failed.\n')
+            if argv[1:4] == ['gateway', 'call', 'skills.status']:
+                return real([argv[0], 'skills', 'list', '--json'], **kw)
+            return real(argv, **kw)
+        self.keeper.catalog.run = busy
+        view = self.keeper.installed(refresh=True)
+        self.assertEqual(view['error'], '')
+        self.assertIn('trello', {i['name'] for i in view['installed']})
+        self.keeper.catalog.run = lambda argv, **kw: skills.subprocess.CompletedProcess(argv, 1, failed, '[openclaw] The CLI command failed.\n')
+        self.assertEqual(self.keeper.installed(refresh=True)['error'], 'gateway timeout after 1500ms')
+
     def test_reading_and_turning_on_is_openclaws_own_and_writes_no_files(self):
         read = self.keeper.installed_get('crm-notes')
         self.assertIn('Theirs.', read['body'])

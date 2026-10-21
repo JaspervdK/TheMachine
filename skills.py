@@ -727,6 +727,12 @@ class Catalog:
 
     @staticmethod
     def _reason(done):
+        # In --json mode OpenClaw says why as {"ok": false, "error": {"message": ...}}
+        for text in (done.stdout, done.stderr):
+            said = (json_in(text, 'error') or {}).get('error')
+            said = said.get('message') if isinstance(said, dict) else said
+            if isinstance(said, str) and said.strip():
+                return one_line(said, 300)
         lines = [ANSI.sub('', line).strip() for line in f'{done.stderr or ""}\n{done.stdout or ""}'.splitlines()]
         lines = [line for line in lines if line and not line.startswith(('OpenClaw ', '🦞'))]
         return one_line(lines[-1] if lines else 'OpenClaw said no', 300)
@@ -747,7 +753,16 @@ class Catalog:
     def load(self):
         """Asks OpenClaw for every skill it has (about two seconds). Keeps the last good list when it fails."""
         try:
-            data = self._json(['skills', 'list'], key='skills')
+            try:
+                data = self._json(['skills', 'list'], key='skills')
+            except ValueError as error:
+                # `skills list` gives the Gateway 1.5 seconds, which a busy small server can miss; the Gateway's own
+                # skills.status, with time to answer, is the same report
+                LOG.warning('skills list error=%s; asking the Gateway', error)
+                try:
+                    data = self._json(['gateway', 'call', 'skills.status', '--timeout', '30000', '--params', '{}'], 60, key='skills')
+                except ValueError:
+                    raise error from None
             found = data.get('skills') if isinstance(data, dict) else None
             if not isinstance(found, list):
                 raise ValueError('OpenClaw gave an answer The Machine could not read')
