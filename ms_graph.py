@@ -1,8 +1,9 @@
 """Outlook mail and calendar (Microsoft 365 and Outlook.com) through Microsoft Graph.
 
 Two ways to get a token, per account ("transport"):
-- "broker": a service you run holds the Microsoft app and the refresh tokens (a hosted control plane, for example).
-  This machine asks it for a short-lived access token for one account and one scope, exactly like google_api.py:
+- "broker": a service you run holds the Microsoft app and its secret (a hosted control plane, for example). The refresh
+  token stays on this machine (mail_grants.py); it asks the broker for a short-lived access token for one account and
+  one scope, sending the refresh token along and keeping the rotated one the broker passes back, like google_api.py:
 
     "microsoft_broker": {"url": "https://app.example.com/api/microsoft/token"},
     "credentials": {"microsoft-broker": "~/.local/share/personal-assistant/google-broker"}
@@ -32,6 +33,7 @@ import email.parser
 import email.policy
 import portable
 import json
+import mail_grants
 import os
 import re
 import threading
@@ -135,6 +137,18 @@ def _broker(config, credential, payload, timeout=20):
         raise GraphError('microsoft_scope_not_granted' if error.code == 403 else 'microsoft_broker', error.code) from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         raise GraphError('microsoft_broker_unreachable') from None
+
+
+def _from_broker(config, credential, account, scope):
+    """An access token through the broker, sending the sign-in kept here (mail_grants.py) and keeping the rotated one."""
+    try:
+        kept = mail_grants.get(config, 'microsoft', account['email'])
+    except mail_grants.GrantError:
+        raise GraphError('microsoft_signin_unreadable') from None
+    answer = _broker(config, credential, {'email': account['email'], 'scope': scope, **({'refresh_token': kept} if kept else {})})
+    if kept and answer.get('refresh_token') and answer['refresh_token'] != kept:  # Microsoft rotates them: keep the newest
+        mail_grants.put(config, 'microsoft', account['email'], answer['refresh_token'])
+    return answer
 
 
 def _retry_after(headers):
@@ -272,7 +286,7 @@ def token(config, credential, account, scope, fresh=False):
             return hit[0]
     try:
         if account.get('transport') == 'broker':
-            answer = _broker(config, credential, {'email': account['email'], 'scope': scope})
+            answer = _from_broker(config, credential, account, scope)
         elif account.get('transport') == 'graph':
             answer, _ = _direct(config, account, scope)
         else:

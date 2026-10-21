@@ -42,7 +42,7 @@ SKIP = {
 WINDOWS_NATIVE = {
     'test_portable.py', 'test_install.py', 'test_gateway.py', 'test_profile.py', 'test_connectors.py',
     'test_new_connectors.py', 'test_connector_shortcut.py', 'test_connector_trello.py', 'test_github_stripe.py',
-    'test_salesflare.py', 'test_google_broker.py', 'test_discovery.py', 'test_enrichment.py', 'test_email_bodies.py',
+    'test_salesflare.py', 'test_google_broker.py', 'test_mail_grants.py', 'test_discovery.py', 'test_enrichment.py', 'test_email_bodies.py',
     'test_exclusions.py', 'test_gmail_exclusions.py', 'test_ingestion_recovery.py', 'test_android_coalescing.py',
     'test_friends.py', 'test_fleet_free.py', 'test_fleet_brief.py', 'test_fleet_receipts.py', 'test_review_worker.py',
     'test_browser_cdp.py', 'test_browser_login_recovery.py', 'test_android_feed.mjs', 'test_x_paging.mjs',

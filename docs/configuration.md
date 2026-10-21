@@ -28,7 +28,7 @@
 | `openclaw_package_dir` | `<node prefix>/lib/node_modules/openclaw` | Installed OpenClaw package (Gateway SDK) |
 | `openclaw_state`, `agent_db` | OpenClaw defaults | OpenClaw state and agent transcript databases (read-only: Telegram receipts, progress steps) |
 | `gog`, `wacli` | `gog`, `wacli` | Binaries for Google and WhatsApp |
-| `google_broker` | — | `url` of a Google token broker, for accounts with `"transport": "broker"` (below) |
+| `google_broker` | — | `url` of a Google token broker, for accounts with `"transport": "broker"` (below). Their refresh tokens stay on this machine, in `mail-grants.json` next to the database, sealed with the message key (docs/sources.md) |
 | `microsoft_broker` | — | `url` of a Microsoft token broker, for Outlook accounts with `"transport": "broker"` |
 | `microsoft_graph` | — | `client_id` and `tenant` (`common`) of your own Entra app, for Outlook accounts with `"transport": "graph"` |
 | `heartbeat_job_id` | `""` | Optional OpenClaw cron job ID of your main heartbeat, for its health line |

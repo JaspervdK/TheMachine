@@ -1,15 +1,16 @@
 """Gmail and Google Calendar through a token broker instead of gog.
 
-A broker is a service you run that holds the Google OAuth client and the refresh tokens (a hosted control
-plane, for example). This machine never sees either: it asks the broker for a short-lived access token for
-one account and one scope, then calls Google's REST API directly. An account uses it with
+A broker is a service you run that holds the Google OAuth client and its secret (a hosted control plane, for
+example). The account's refresh token stays on this machine (mail_grants.py): it asks the broker for a short-lived
+access token for one account and one scope, sending the refresh token along, then calls Google's REST API directly. An account uses it with
 "transport": "broker"; the broker's address and this machine's token are in the config:
 
     "google_broker": {"url": "https://app.example.com/api/google/token"},
     "credentials": {"google-broker": "~/.local/share/personal-assistant/google-broker"}
 
-The broker answers POST {"email", "scope"} with {"access_token", "expires_in", "scopes"} (the scopes the
-owner granted), POST {"email"} with {"scopes"}, and 403 for a scope that wasn't granted. Only the methods
+The broker answers POST {"email", "scope", "refresh_token"} with {"access_token", "expires_in", "scopes"} (the
+scopes the owner granted) and keeps nothing; POST {"email"} with {"scopes"}, and 403 for a scope that wasn't granted.
+An account connected before its sign-in was kept here asks without "refresh_token" until it is moved here. Only the methods
 below can be called; anything else is refused here, before a token is asked for."""
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import mail_grants
 
 READ = {
     'gmail.users.getProfile': ('GET', 'https://gmail.googleapis.com/gmail/v1/users/{userId}/profile'),
@@ -77,9 +80,15 @@ def token(config, credential, account, scope, fresh=False):
         hit = _tokens.get(key)
         if hit and not fresh and hit[1] > time.monotonic():
             return hit[0]
-    answer = _broker(config, credential, {'email': account['email'], 'scope': scope})
+    try:
+        kept = mail_grants.get(config, 'google', account['email'])
+    except mail_grants.GrantError:
+        raise BrokerError('google_signin_unreadable') from None
+    answer = _broker(config, credential, {'email': account['email'], 'scope': scope, **({'refresh_token': kept} if kept else {})})
     if not answer.get('access_token'):
         raise BrokerError('google_broker')
+    if kept and answer.get('refresh_token') and answer['refresh_token'] != kept:
+        mail_grants.put(config, 'google', account['email'], answer['refresh_token'])
     with _lock:
         _tokens[key] = (answer['access_token'], time.monotonic() + max(0, int(answer.get('expires_in') or 0) - 120))
     return answer['access_token']
