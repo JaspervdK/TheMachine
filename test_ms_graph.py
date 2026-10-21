@@ -2,9 +2,11 @@
 known calls, Gmail-shaped reads for the same sync and cards, sends from an exact-MIME draft, and snooze by folder.
 No network: urlopen is replaced by a fake broker, a fake sign-in and a fake Graph. Nothing is ever sent."""
 import base64
+import datetime as dt
 import io
 import json
 import tempfile
+import threading
 import unittest
 import urllib.error
 import urllib.parse
@@ -45,6 +47,7 @@ class FakeGraph:
     def __init__(self):
         self.granted = {'User.Read', 'Mail.Read', 'Calendars.Read'}
         self.calls, self.issued, self.fail = [], 0, {}
+        self.broker_fail = None  # (status, headers) for every token ask
         self.folders = {'inbox': INBOX, 'sentitems': SENT, 'drafts': 'f-drafts', 'deleteditems': 'f-trash', 'junkemail': 'f-junk'}
         self.snoozed = False
         self.messages = {}
@@ -66,6 +69,8 @@ class FakeGraph:
             body = json.loads(request.data)
             if 'scope' not in body:
                 return Response(json.dumps({'scopes': sorted(self.granted)}).encode())
+            if self.broker_fail:
+                raise urllib.error.HTTPError(url, self.broker_fail[0], 'no', self.broker_fail[1], io.BytesIO(b'{}'))
             if body['scope'] not in self.granted and not ms_graph.ANSWERS[body['scope']] & self.granted:
                 raise http_error(url, 403)
             self.issued += 1
@@ -191,6 +196,48 @@ class Calls(Base):
         self.fake.granted = {'User.Read'}
         ms_graph._tokens.clear()
         self.assertEqual(onboarding.check(self.config, self.cal), 'microsoft_scope_not_granted:HTTP_403')
+
+    def test_a_refused_sign_in_right_after_connecting_retries_with_backoff(self):
+        def ago(seconds):
+            return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)).isoformat()
+
+        def refused(account):
+            ms_graph._tokens.clear()
+            with self.assertRaises(ms_graph.GraphError) as caught:
+                ms_graph.token(self.config, a.credential, account, 'User.Read')
+            return caught.exception.category, caught.exception.retry_after
+
+        self.fake.broker_fail = (401, {})
+        # Microsoft may still be taking the new permissions: retried, each wait as long as the account's age
+        self.assertEqual(refused({**self.mail, 'connected_at': ago(2)}), ('outlook:microsoft_signin_pending', 30))
+        self.assertEqual(refused({**self.mail, 'connected_at': ago(300)})[1], 300)
+        error = onboarding.check(self.config, {**self.mail, 'connected_at': ago(2)})
+        self.assertTrue(error.startswith(onboarding.BUSY))  # saved anyway; the sync retries it
+        # long after connecting, or not knowing when: expired, connect again
+        self.assertEqual(refused({**self.mail, 'connected_at': ago(3600)}), ('outlook:microsoft_signin_expired', 3600))
+        self.assertEqual(refused(self.mail), ('outlook:microsoft_signin_expired', 3600))
+        # the broker itself asks to wait (a grant Microsoft is still settling)
+        self.fake.broker_fail = (503, {'Retry-After': '30'})
+        self.assertEqual(refused(self.mail), ('microsoft_broker_busy', 30))
+        self.assertTrue(onboarding.check(self.config, self.mail).startswith(onboarding.BUSY))
+
+    def test_connecting_again_ends_the_wait(self):
+        app = object.__new__(a.App)
+        app.config, app.store, app.stop = self.config, self.store, threading.Event()
+        self.store.failed(self.mail['id'], a.SourceError('outlook:microsoft_signin_expired', 401, retry_after=3600))
+        with self.store.connect() as db:
+            row = db.execute('SELECT retry_at,error,error_at FROM checkpoints WHERE account_id=?', (self.mail['id'],)).fetchone()
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            self.mail['connected_at'] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1)).isoformat()
+            return False
+        app.stop.wait = wait
+        self.assertFalse(app.wait_for_retry(self.mail, row))
+        self.assertEqual(waits, [15])
+        with self.store.connect() as db:
+            self.assertIsNone(db.execute('SELECT retry_at FROM checkpoints WHERE account_id=?', (self.mail['id'],)).fetchone()[0])
 
 
 class MailSync(Base):

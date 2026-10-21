@@ -672,7 +672,10 @@ def gog_token_path(config, account):
 
 
 def gog_signed_in_since(config, account, since):
-    """True when the account's stored Google (or own-app Microsoft) sign-in was written after `since` (an ISO time)."""
+    """True when the account's stored Google sign-in was written, or its Microsoft account connected again, after
+    `since` (an ISO time)."""
+    if account.get('service') in MICROSOFT_SERVICES and since:
+        return ms_graph.connected_since(config, account, since)
     if account.get('transport') not in ('gog', 'graph') or not since:
         return False
     try:
@@ -7016,7 +7019,7 @@ class App:
     def wait_for_retry(self, account, row):
         """Wait until the checkpoint's retry time; True when stopping. An expired Google sign-in
         is retried as soon as the owner signs in again, instead of after the full hour."""
-        expired = bool(re.search(r'(google|microsoft)_signin_expired', row['error'] or ''))
+        expired = bool(re.search(r'(google|microsoft)_signin_(expired|pending)|microsoft_broker', row['error'] or ''))
         while True:
             seconds = (dt.datetime.fromisoformat(row['retry_at']) - dt.datetime.fromisoformat(now())).total_seconds()
             if seconds <= 0:

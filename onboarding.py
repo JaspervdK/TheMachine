@@ -53,10 +53,10 @@ PLACEHOLDERS = {'email': 'alex@example.com', 'connection_id': '00000000-0000-000
 # Per-account identity: never copied when a new account starts from one you already have.
 IDENTITY = {'id', 'email', 'owner_emails', 'display_name', 'connection_id', 'team_id', 'user_id', 'slack_host', 'node_id',
             'identity_sha256', 'store', 'calendar_id', 'handle', 'login', 'url', 'workspace_id', 'stripe_account',
-            'exclude', 'excluded_terms', 'scope', 'browser_profile', 'browser_cdp'}
+            'exclude', 'excluded_terms', 'scope', 'browser_profile', 'browser_cdp', 'connected_at'}
 # The source is set up but can't serve right now (shared browser in use, rate limit): saved anyway, and the
 # collector's own retry reads it, instead of failing setup over a moment's contention.
-BUSY = ('x_browser_busy', 'linkedin_browser_busy', 'x_rate_limited')
+BUSY = ('x_browser_busy', 'linkedin_browser_busy', 'x_rate_limited', 'outlook:microsoft_signin_pending', 'microsoft_broker_busy')
 # Phone apps whose notifications repeat a source. Setup offers to skip them on the Android account, never by
 # default: the phone app may also show inboxes or workspaces that nothing here reads.
 PHONE_APPS = {'gmail': ['com.google.android.gm'], 'calendar': ['com.google.android.calendar'],
@@ -70,6 +70,8 @@ HINTS = (
     ('connection_identity_mismatch', 'Maton answered for a different connection; check connection_id'),
     ('gmail:HTTP_403', 'enable the Gmail API in your Google Cloud project, or authorize again'),
     ('calendar:HTTP_403', 'enable the Google Calendar API in your Google Cloud project, or authorize again'),
+    ('outlook:microsoft_signin_pending', 'Microsoft is still taking the new sign-in; it retries by itself'),
+    ('microsoft_broker_busy', 'Microsoft is still taking the new sign-in; it retries by itself'),
     ('outlook:microsoft_signin_expired', 'the Microsoft sign-in expired or was revoked: connect the account again'),
     ('outlook:not_signed_in', 'sign in to Microsoft: assistant connect outlook'),
     ('microsoft_graph_not_configured', 'set your app registration: assistant connect outlook'),

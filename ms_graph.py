@@ -7,6 +7,8 @@ Two ways to get a token, per account ("transport"):
     "microsoft_broker": {"url": "https://app.example.com/api/microsoft/token"},
     "credentials": {"microsoft-broker": "~/.local/share/personal-assistant/google-broker"}
 
+  The service that connects a broker account sets its "connected_at" (an ISO time) on each connect.
+
 - "graph": your own Entra app registration (public client flows on) and a device-code sign-in
   (`assistant connect outlook`). The refresh token stays in a mode-600 file named by the account's "credential":
 
@@ -74,6 +76,10 @@ WRITE = {
     'messages.update': ('PATCH', '/me/messages/{id}', 'Mail.ReadWrite'),
 }
 LINK_HOSTS = ('outlook.office.com', 'outlook.office365.com', 'outlook.live.com')
+# Right after connecting, Microsoft can refuse a fresh sign-in for a few minutes while it takes the new permissions:
+# within this window a broker account's refused sign-in is retried with backoff (each wait as long as the account's age) before it
+# counts as expired.
+SETTLE_SECONDS = 900
 _tokens: dict = {}
 _folders: dict = {}
 _lock = threading.Lock()
@@ -122,9 +128,38 @@ def _broker(config, credential, payload, timeout=20):
         error.close()
         if error.code == 401 and payload.get('scope'):
             raise GraphError('outlook:microsoft_signin_expired', 401, retry_after=3600) from None
+        if error.code in (429, 503):  # the broker says when to ask again (a grant Microsoft is still settling, say)
+            raise GraphError('microsoft_broker_busy', error.code, retry_after=_retry_after(error.headers)) from None
         raise GraphError('microsoft_scope_not_granted' if error.code == 403 else 'microsoft_broker', error.code) from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         raise GraphError('microsoft_broker_unreachable') from None
+
+
+def _retry_after(headers):
+    try:
+        return max(15, min(900, int((headers or {}).get('Retry-After') or 60)))
+    except (TypeError, ValueError):
+        return 60
+
+
+def connected_age(config, account):
+    """Seconds since a broker account was (re)connected (its "connected_at"); None when unknown."""
+    try:
+        stamp = account.get('connected_at') if account.get('transport') == 'broker' else None
+        return time.time() - dt.datetime.fromisoformat(stamp).timestamp() if stamp else None
+    except (TypeError, ValueError):
+        return None
+
+
+def connected_since(config, account, since):
+    """True when the account was connected again after `since` (an ISO time): its own-app sign-in written again, or
+    the broker account connected again."""
+    try:
+        when = (credential_path(config, account).stat().st_mtime if account.get('transport') == 'graph'
+                else time.time() - connected_age(config, account))
+        return when > dt.datetime.fromisoformat(since).timestamp()
+    except (OSError, TypeError, ValueError, GraphError):
+        return False
 
 
 def credential_path(config, account):
@@ -206,12 +241,18 @@ def token(config, credential, account, scope, fresh=False):
         hit = _tokens.get(key)
         if hit and not fresh and hit[1] > time.monotonic():
             return hit[0]
-    if account.get('transport') == 'broker':
-        answer = _broker(config, credential, {'email': account['email'], 'scope': scope})
-    elif account.get('transport') == 'graph':
-        answer, _ = _direct(config, account, scope)
-    else:
-        raise GraphError('unsupported_transport')
+    try:
+        if account.get('transport') == 'broker':
+            answer = _broker(config, credential, {'email': account['email'], 'scope': scope})
+        elif account.get('transport') == 'graph':
+            answer, _ = _direct(config, account, scope)
+        else:
+            raise GraphError('unsupported_transport')
+    except GraphError as error:
+        age = connected_age(config, account) if 'microsoft_signin_expired' in error.category else None
+        if age is not None and age < SETTLE_SECONDS:
+            raise GraphError('outlook:microsoft_signin_pending', error.status, retry_after=max(30, int(age))) from None
+        raise
     if not answer.get('access_token'):
         raise GraphError('microsoft_broker')
     with _lock:
