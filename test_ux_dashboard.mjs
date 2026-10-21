@@ -192,13 +192,17 @@ await page.setViewportSize({width:390,height:844});
 await page.screenshot({path:'/tmp/261011-assistant-scheduled-card.png',fullPage:true});
 assert.equal(await page.locator('#suggestions textarea').count(),0);
 await tap(page.locator('#task-'+ids[0]),'Change');await page.locator('#feedback-'+ids[0]).fill('Please make this shorter');await page.getByRole('button',{name:'Save changes',exact:true}).click();await page.locator('#feedback-'+ids[0]).waitFor({state:'detached'});assert.equal(posts.at(-1).feedback,'Please make this shorter');
+// Success notices clear after a few seconds; errors stay.
+await page.evaluate(()=>notice('Saved.'));assert.equal(await page.locator('#notice').textContent(),'Saved.');await page.waitForFunction(()=>$('#notice').textContent==='',null,{timeout:7000});
+await page.evaluate(()=>notice('Broke.',true));await page.waitForTimeout(5000);assert.equal(await page.locator('#notice').textContent(),'Broke.');await page.evaluate(()=>notice(''));
 // Ctrl+Enter in the change box saves like the Save changes button; plain Enter adds a new line.
 {const card=page.locator('#task-'+ids[0]);await tap(card,'Change');const box=card.locator('#feedback-'+ids[0]);
 await box.fill('First line');await box.press('Enter');await box.pressSequentially('Second line');assert.equal(await box.inputValue(),'First line\nSecond line');
 const before=posts.length;await box.press('Control+Enter');await box.waitFor({state:'detached'});assert.equal(posts.length,before+1);assert.equal(posts.at(-1).feedback,'First line\nSecond line');}
 {const card=page.locator('#task-'+ids[1]);const before=posts.length;await tap(card,'Not needed');assert.equal(posts.length,before);
 await card.getByText('Why isn’t this needed?').waitFor();await card.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal(await card.getByText('Why isn’t this needed?').count(),0);
-await tap(card,'Not needed');await card.locator('#dismiss-'+ids[1]).fill('Handled by Sam');await card.locator('[data-choice="dismiss-typed"]').click();
+// Ctrl+Enter in any filled field clicks its editor's primary button: here Confirm not needed. Empty fields do nothing.
+await tap(card,'Not needed');const note=card.locator('#dismiss-'+ids[1]);await note.press('Control+Enter');assert.equal(posts.length,before);await note.fill('Handled by Sam');await note.press('Control+Enter');
 await page.waitForFunction(n=>true,before);assert.equal(posts.at(-1).choice,'reject');assert.equal(posts.at(-1).feedback,'Handled by Sam');suggestions[1].status='accepted';await page.evaluate(()=>refresh());}
 await page.locator('#task-'+ids[1]).getByRole('button',{name:'Try again',exact:true}).click();await page.locator('#task-'+ids[1]).getByText('I’ll start shortly.',{exact:true}).waitFor();assert.equal(posts.at(-1).choice,'retry');
 await page.locator('#task-'+ids[2]).getByRole('button',{name:'Read result',exact:true}).click();await page.getByText('Full draft with',{exact:false}).waitFor();assert.equal(await page.locator('#result-content script').count(),0);await page.locator('#result-copy').click();assert.ok((await page.evaluate(()=>window.copied)).includes('Full draft with'));await page.getByRole('button',{name:'Close result'}).click();
