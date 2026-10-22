@@ -281,7 +281,7 @@ await toggle.click();assert.deepEqual(await theme(),['light','light']);assert.eq
 assert.match(await page.evaluate(()=>document.cookie),/(^|; )theme=light(;|$)/);  // shared with the hosted app's pages
 await page.waitForTimeout(400);await toggle.screenshot({path:'/tmp/261013-toggle-light.png'});
 assert.equal(await page.evaluate(()=>getComputedStyle(document.body).color),'rgb(29, 29, 27)');
-await page.reload();await page.locator('#task-'+ids[0]).waitFor();assert.deepEqual(await theme(),['light','light']);
+await page.reload();await page.locator('#settings:not([hidden])').waitFor();await page.locator('nav [data-tab="inbox"]').click();await page.locator('#task-'+ids[0]).waitFor();assert.deepEqual(await theme(),['light','light']);  // a reload stays in Settings (#settings/general)
 await page.setViewportSize({width:1100,height:900});await page.screenshot({path:'/tmp/261013-light-desktop.png'});
 {await page.setViewportSize({width:1100,height:2600});const f=await page.locator('.site-footer').evaluate(el=>[el.getBoundingClientRect().bottom,innerHeight,el.textContent]);
 assert.ok(Math.abs(f[0]-f[1])<2,'footer sits at the bottom of a short page: '+f);assert.match(f[2],/© 20\d\d The Machine\. /);await page.screenshot({path:'/tmp/261013-footer-tall.png'});}

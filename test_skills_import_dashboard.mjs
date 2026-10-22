@@ -74,7 +74,7 @@ try{
   await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
   page.on('pageerror',e=>errors.push(e.message));
   await page.goto('http://127.0.0.1:'+server.address().port);
-  await page.locator('#open-settings').click();
+  await page.locator('#open-settings').click();await page.locator('#settings-tabs [data-settings-tab="skills"]').click();
   await page.locator('#skill-import-open').click();
   await page.locator('#skill-import:not([hidden])').waitFor();
   await page.locator('#import-find').click();

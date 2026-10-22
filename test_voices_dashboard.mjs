@@ -33,7 +33,7 @@ try{
   const context=await browser.newContext({viewport:{width:390,height:844},colorScheme:scheme}),page=await context.newPage();
   page.on('pageerror',e=>errors.push(e.message));
   await page.goto('http://127.0.0.1:'+server.address().port);
-  await page.locator('#open-settings').click();
+  await page.locator('#open-settings').click();await page.locator('#settings-tabs [data-settings-tab="writing"]').click();
   const forms=page.locator('#voices .voice-form:not([data-new])');await forms.first().waitFor();
   assert.equal(await forms.count(),2);
   assert.match(await forms.nth(0).locator('.sig-head').textContent(),/Everywhere/);

@@ -29,7 +29,7 @@ try{
  await page.goto('http://127.0.0.1:'+server.address().port);
  assert.equal(await page.locator('#health #hours').count(),0);  // not on Connections any more
  await page.locator('#open-settings').click();
- await page.locator('#hours').waitFor();
+ await page.locator('#theme-toggle').waitFor();  // General first
  assert.equal(await page.locator('#open-settings').getAttribute('aria-current'),'page');
  assert.equal(await page.locator('#inbox').isHidden(),true);
  assert.equal(await page.locator('#open-settings .lbl').isHidden(),true);  // just the gear on a phone
@@ -45,9 +45,10 @@ try{
  assert.equal(await page.locator('#settings-cloud').getAttribute('target'),'_blank');
  {const r=await page.evaluate(()=>{const t=document.querySelector('#settings-more').getBoundingClientRect(),b=document.querySelector('#settings-cloud').getBoundingClientRect();return b.top>=t.bottom-1});assert.equal(r,true)}  // below the text on a phone
  // section notes sit under their titles, not off to the right
- const head=await page.locator('#settings .section-head').first().evaluate(e=>{const h=e.querySelector('h2').getBoundingClientRect(),p=e.querySelector('p').getBoundingClientRect();return {below:p.top>=h.bottom-1,left:Math.abs(p.left-h.left)<2}});
+ const head=await page.locator('#settings .section-head:visible').first().evaluate(e=>{const h=e.querySelector('h2').getBoundingClientRect(),p=e.querySelector('p').getBoundingClientRect();return {below:p.top>=h.bottom-1,left:Math.abs(p.left-h.left)<2}});
  assert.deepEqual(head,{below:true,left:true});
  assert.equal(await page.locator('.site-footer #theme-toggle, .site-footer #push-toggle').count(),0);
+ await page.locator('#settings-tabs [data-settings-tab="hours"]').click();await page.locator('#hours').waitFor();
  assert.deepEqual(await page.locator('#hours-days [aria-pressed="true"]').allTextContents(),['Mon','Tue','Wed','Thu','Fri']);
  assert.equal(await page.locator('#hours-start').inputValue(),'08:00');
  assert.equal(await page.locator('#hours-end').inputValue(),'23:00');
@@ -90,7 +91,7 @@ try{
  await page.locator('nav [data-tab="events"]').click();
  assert.equal(await page.locator('#open-settings').getAttribute('aria-current'),'false');
  assert.equal(await page.locator('#settings').isHidden(),true);
- await page.locator('#open-settings').click();const was=await page.evaluate(()=>document.documentElement.dataset.theme);
+ await page.locator('#open-settings').click();await page.locator('#settings-tabs [data-settings-tab="general"]').click();const was=await page.evaluate(()=>document.documentElement.dataset.theme);
  await page.locator('#theme-toggle').click();
  assert.notEqual(await page.evaluate(()=>document.documentElement.dataset.theme),was);
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));

@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import {OPENCLAW} from './openclaw-root.mjs';
 const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs');
 
-// Settings, Account: on a hosted Machine it comes first, with Open account and Sign out side by side. Sign out posts to
+// Settings, Account: on a hosted Machine it comes first in General, with Open account and Sign out side by side. Sign out posts to
 // /_machine/logout, which ends this dashboard's sign-in and the account's. On your own computer it stays at the bottom,
 // without Sign out. Set SHOTS=<dir> for screenshots.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
@@ -32,7 +32,7 @@ try{
   page.on('pageerror',e=>errors.push(e.message));
   await page.goto(base);await page.locator('#open-settings').click();
   await page.locator('#sign-out:not([hidden])').waitFor();
-  assert.equal(await page.evaluate(()=>document.querySelector('#settings').firstElementChild.id),'settings-account-block');
+  assert.equal(await page.evaluate(()=>document.querySelector('#settings-tabs').nextElementSibling.id),'settings-account-block');
   const box=await page.evaluate(()=>{const r=e=>document.querySelector(e).getBoundingClientRect(),o=r('#manage'),s=r('#sign-out button'),card=r('#settings-account');
    return {row:Math.abs(o.top-s.top)<4,inside:s.right<=card.right&&o.left>=card.left,height:Math.round(o.height)===Math.round(s.height),fits:document.documentElement.scrollWidth<=innerWidth}});
   assert.deepEqual(box,{row:true,inside:true,height:true,fits:true});
@@ -43,7 +43,7 @@ try{
    // On your own computer: no account page to sign out of, and the card stays last.
    hosted=false;await page.goto(base);await page.locator('#open-settings').click();await page.locator('#settings-cloud:not([hidden])').waitFor();
    assert.equal(await page.locator('#sign-out').isHidden(),true);
-   assert.notEqual(await page.evaluate(()=>document.querySelector('#settings').firstElementChild.id),'settings-account-block');
+   assert.equal(await page.evaluate(()=>document.querySelector('#settings').lastElementChild.id),'settings-account-block');
   }
   await context.close();
  }

@@ -72,7 +72,7 @@ try{
    await page.locator('#skill-look [data-look-close]').click();
   }
   // Settings > Skills: yours, then OpenClaw's grouped, each with what it still needs.
-  await page.locator('#open-settings').click();
+  await page.locator('#open-settings').click();await page.locator('#settings-tabs [data-settings-tab="skills"]').click();
   await page.locator('#skills-installed details').first().waitFor();
   assert.equal(await page.locator('#skills-yours-head').isHidden(),false);
   assert.deepEqual(await page.locator('#skills-installed details summary').allTextContents(),['Workspace 1 of 1 ready','Bundled with OpenClaw 0 of 2 ready','Other 1 of 1 ready']);

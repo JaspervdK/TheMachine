@@ -32,7 +32,7 @@ try{
  await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
  page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:'+server.address().port);
- await page.locator('#open-settings').click();
+ await page.locator('#open-settings').click();await page.locator('#settings-tabs [data-settings-tab="model"]').click();
  await page.locator('#model-panel strong').first().waitFor();
  const panel=await page.locator('#model-panel').textContent();
  assert.match(panel,/^Example Model/);  // the name as people say it; the id on hover

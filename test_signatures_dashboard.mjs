@@ -34,7 +34,7 @@ try{
   page.on('pageerror',e=>errors.push(e.message));
   page.on('dialog',d=>d.accept(d.message().startsWith('Link')?'https://example.org':'javascript:alert(1)'));
   await page.goto('http://127.0.0.1:'+server.address().port);
-  await page.locator('#open-settings').click();
+  await page.locator('#open-settings').click();await page.locator('#settings-tabs [data-settings-tab="writing"]').click();
   const forms=page.locator('#signatures .sig-form');await forms.first().waitFor();
   assert.equal(await forms.count(),2);
   const outlook=forms.nth(0),gmail=forms.nth(1);

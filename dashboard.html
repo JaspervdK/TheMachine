@@ -627,6 +627,9 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 strong.nb{white-space:nowrap}
 :is(.fleet-tabs,.sub-tabs) button{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);background:transparent;color:var(--muted);font-weight:600;font-size:.9rem;padding:6px 14px;border-radius:999px;white-space:nowrap;cursor:pointer}
 :is(.fleet-tabs,.sub-tabs) button:hover{color:var(--text)}:is(.fleet-tabs,.sub-tabs) button[aria-selected="true"]{background:var(--mint);border-color:var(--mint);color:var(--charcoal)}:is(.fleet-tabs,.sub-tabs) button[aria-selected="true"] .badge{background:#22252b26;color:var(--charcoal)}
+/* Settings tabs: the same pill row; on a hosted Machine the first pill links out to the account page */
+.sub-tabs>a.stab-out{flex:0 0 auto;display:inline-flex;align-items:center;border:1px solid var(--border);color:var(--muted);font-weight:600;font-size:.9rem;padding:6px 14px;border-radius:999px;white-space:nowrap;text-decoration:none}.sub-tabs>a.stab-out:hover{color:var(--text);border-color:var(--mint)}.sub-tabs>a.stab-out[hidden]{display:none}.stab-off{display:none!important}
+@media(max-width:600px){.sub-tabs>a.stab-out{padding:6px 11px;font-size:.85rem}}
 .fleet-pane-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;margin:0 0 14px}.fleet-pane-head h2{margin:0;font-size:1.15rem}
 .fleet-box{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:16px 20px;margin:0 0 14px;min-width:0}
 .fleet-box>h3{margin:0 0 4px;font-size:1rem}.fleet-box>.sub{margin:0 0 12px;color:var(--muted);font-size:.88rem;line-height:1.45}.fleet-box>h3+:not(.sub){margin-top:10px}
@@ -1139,8 +1142,29 @@ setInterval(async()=>{if(document.hidden)return;for(const [id,p] of peeks){if(!p
 document.addEventListener('click',e=>{const b=e.target.closest('[data-peek-open]');if(!b)return;const id=b.dataset.peekOpen,p=peeks.get(id);if(!p?.image)return;const d=$('#peek-dialog');d.dataset.task=id;$('#peek-image').src=p.image;d.showModal()});
 const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];let hoursDirty=false;
 function zones(){try{return Intl.supportedValuesOf('timeZone')}catch(e){return[]}}
-$('#open-settings').onclick=()=>{for(const b of document.querySelectorAll('nav button')){b.classList.remove('active');b.setAttribute('aria-current','false')}for(const x of document.querySelectorAll('main>section'))x.hidden=x.id!=='settings';$('#open-settings').setAttribute('aria-current','page');scrollTo(0,0)};
-$('nav').addEventListener('click',e=>{if(e.target.closest('button')?.dataset.tab)$('#open-settings').setAttribute('aria-current','false')});
+// Settings in tabs, a pill row like Graph and Connections. A hosted Machine's first pill links out to its account page.
+// Each part of Settings goes to a tab by its id; a part without one goes with the part before it (a heading with what
+// follows it). A tab with nothing to show is left out. Links: #settings, #settings/skills (or #settings=skills); the last tab is kept.
+const SETTINGS_TABS=[['general','General'],['hours','Work hours'],['writing','Writing'],['skills','Skills'],['model','Model']];
+const SETTINGS_OF={hours:'hours','settings-signatures':'writing','settings-voices':'writing','settings-skills':'skills','settings-model':'model','settings-fleet':'general','settings-account-block':'general'};
+let settingsTab=localStorage.getItem('settings-tab')||'general',settingsNow='';
+{const bar=document.createElement('div');bar.className='sub-tabs';bar.id='settings-tabs';bar.setAttribute('role','tablist');bar.setAttribute('aria-label','Settings');
+ bar.innerHTML='<a class="stab-out" id="settings-tab-account" target="_blank" rel="noopener" hidden>Account ↗</a>'+SETTINGS_TABS.map(([id,label])=>`<button type="button" role="tab" data-settings-tab="${id}" aria-selected="false">${label}</button>`).join('');
+ $('#settings').prepend(bar)}
+function settingsSync(){const s=$('#settings'),bar=$('#settings-tabs'),shown=new Set(),set=(el,k,v)=>{if(el[k]!==v)el[k]=v};if(s.firstElementChild!==bar)s.prepend(bar);
+ let tab='general';for(const el of s.children){if(el===bar)continue;tab=SETTINGS_OF[el.id]||(el.classList.contains('section-head')?SETTINGS_OF[el.nextElementSibling?.id]||'general':tab);el.dataset.stab=tab;if(!el.hidden&&!el.classList.contains('section-head'))shown.add(tab)}
+ settingsNow=shown.has(settingsTab)?settingsTab:SETTINGS_TABS.map(t=>t[0]).find(t=>shown.has(t))||'general';
+ for(const el of s.children)if(el!==bar)el.classList.toggle('stab-off',el.dataset.stab!==settingsNow);
+ for(const b of bar.querySelectorAll('[data-settings-tab]')){set(b,'hidden',!shown.has(b.dataset.settingsTab));const on=String(b.dataset.settingsTab===settingsNow);if(b.getAttribute('aria-selected')!==on)b.setAttribute('aria-selected',on)}
+ const a=$('#settings-tab-account'),url=state?.manage_url?new URL('/account',state.manage_url).href:'';set(a,'hidden',!url);if(url&&a.href!==url)a.href=url}
+new MutationObserver(settingsSync).observe($('#settings'),{childList:true,subtree:true,attributes:true,attributeFilter:['hidden']});
+const settingsHash=()=>{if(!$('#settings').hidden)history.replaceState(null,'',location.pathname+location.search+'#settings/'+settingsNow)};
+function showSettings(tab){if(SETTINGS_TABS.some(t=>t[0]===tab)){settingsTab=tab;localStorage.setItem('settings-tab',tab)}const was=!$('#settings').hidden;
+ for(const b of document.querySelectorAll('nav button')){b.classList.remove('active');b.setAttribute('aria-current','false')}for(const x of document.querySelectorAll('main>section'))x.hidden=x.id!=='settings';$('#open-settings').setAttribute('aria-current','page');
+ settingsSync();settingsHash();if(!was)scrollTo(0,0);requestAnimationFrame(()=>tabsShow($('#settings-tabs')))}
+$('#open-settings').onclick=()=>showSettings();
+$('#settings-tabs').onclick=e=>{const b=e.target.closest('[data-settings-tab]');if(!b)return;showSettings(b.dataset.settingsTab)};
+$('nav').addEventListener('click',e=>{if(!e.target.closest('button')?.dataset.tab)return;$('#open-settings').setAttribute('aria-current','false');if(location.hash.startsWith('#settings'))history.replaceState(null,'',location.pathname+location.search)});
 $('#settings-fleet-rules').onclick=()=>{document.querySelector('nav [data-tab="fleet"]').click();fleetShown.then(()=>{showFleetPane('sharing');$('#fleet-view').scrollIntoView({block:'start',behavior:'smooth'})})};
 const CLOUD='https://app.themachine.computer';
 const DOCS='https://github.com/Salesflare/TheMachine/blob/main/docs/';  // "Learn more" links next to short help texts  // the hosted service (beta): a self-hosted Machine's Fleet account lives there
@@ -1725,7 +1749,7 @@ else if(c.error&&connectorHealth(c).tone==='orange')items.push({text:`${c.displa
 if(state.skills?.waiting)items.push({text:state.skills.waiting===1?'A skill waits for you to read it.':`${state.skills.waiting} skills wait for you to read them.`,tab:'skills',action:'Show'});
 const box=$('#needs-you');box.hidden=!items.length;
 box.innerHTML=items.length?`<strong>Needs you</strong><ul>${items.map(i=>`<li><span>${esc(i.text)}</span>${i.url?`<a class="head-link" href="${esc(i.url)}"${i.blank?' target="_blank" rel="noopener"':''}>${esc(i.action||'Open')}</a>`:i.reconnect?`<button type="button" class="head-link" data-reconnect="${esc(i.reconnect.connect_name)}" data-account="${esc(i.reconnect.id)}">Reconnect</button>`:i.tab?`<button type="button" class="head-link" data-show="${esc(i.tab)}">${esc(i.action)}</button>`:i.action?`<code>${esc(i.action.replace(/^Run: /,''))}</code>`:''}</li>`).join('')}</ul>`:''}
-$('#needs-you').onclick=e=>{const b=e.target.closest('[data-show]');if(!b)return;if(b.dataset.show==='skills'){$('#open-settings').click();$('#settings-skills').scrollIntoView({block:'start',behavior:'smooth'});return}document.querySelector(`nav button[data-tab="${b.dataset.show}"]`)?.click()};
+$('#needs-you').onclick=e=>{const b=e.target.closest('[data-show]');if(!b)return;if(b.dataset.show==='skills'){showSettings('skills');return}document.querySelector(`nav button[data-tab="${b.dataset.show}"]`)?.click()};
 // Reviews while they happen (Connections, above the finished ones; the first look also on Suggestions): what each running
 // review is doing, from its own steps, and the next one. Polled every few seconds while one runs; a finished one moves to
 // the lists below.
@@ -1917,7 +1941,7 @@ c.scrollIntoView({block:'center',behavior:'smooth'});c.classList.remove('flash')
 const TAB_LINKS={inbox:'inbox',suggestions:'inbox',events:'events',graph:'people',people:'people',feedback:'feedback',connections:'health',health:'health'};
 function showTab(tab,pane){if(tab==='people'&&pane){graphPane=pane;localStorage.setItem('graph-pane',pane);graphNode='';$('#people-query').value=''}
  if(tab==='health'&&pane){healthPane=pane==='phone'?'other':pane;healthPicked=true}document.querySelector(`nav [data-tab="${tab}"]`)?.click();if(tab==='health')renderHealthTabs()}
-function openTabLink(){const m=/^#([a-z]+)(?:=([a-z]+))?$/.exec(location.hash);if(!m||!TAB_LINKS[m[1]])return;history.replaceState(null,'',location.pathname+location.search);showTab(TAB_LINKS[m[1]],m[2])}
+function openTabLink(){const st=/^#settings(?:[/=]([a-z]+))?$/.exec(location.hash);if(st){if($('#settings').hidden||st[1]&&st[1]!==settingsNow)showSettings(st[1]);return}const m=/^#([a-z]+)(?:=([a-z]+))?$/.exec(location.hash);if(!m||!TAB_LINKS[m[1]])return;history.replaceState(null,'',location.pathname+location.search);showTab(TAB_LINKS[m[1]],m[2])}
 window.addEventListener('hashchange',()=>{openSnoozeLink();openResultLink();openCardLink();openFleetLink();openTabLink()});
 function noteSplit(n){if(!n)return'';const parts=[['style','style'],['fact','missing facts'],['continue','keep going'],['new_ask','new asks'],['unsorted','not sorted']].filter(([k])=>n[k]);
 return parts.length?`<div class="notes-split"><span>Your Change notes</span><div>${parts.map(([k,t])=>`<span class="chip t-${{style:'lavender',fact:'amber',continue:'orange',new_ask:'mint',unsorted:'muted'}[k]}">${n[k]} ${t}</span>`).join('')}</div></div>`:''}
