@@ -405,7 +405,7 @@ button.node:hover{text-decoration:underline;background:none}
 .graph-back{margin:0 0 12px}
 .graph-bar{flex:none;width:52px;height:6px;border-radius:999px;background:var(--sunken);overflow:hidden}
 .graph-bar i{display:block;height:100%;background:var(--mint)}
-.graph-row .fleet-chip{flex:0 100 auto;min-width:34px}.fleet-chip .ct{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.fleet-mark{color:var(--text)}.fp-graph{font-size:.82rem;margin-left:6px}
+.graph-row .fleet-chip{flex:0 100 auto;min-width:34px}.fleet-chip .ct{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.fleet-mark{color:var(--text)}.graph-sub:is(.fleet-mark,.fleet-named){white-space:normal}.fp-graph{font-size:.82rem;margin-left:6px}
 /* Calmer layout: compact header, one slim count row, quiet empty state, matching folded rows. */
 header{padding-bottom:18px}.avatar{width:52px;height:52px}h1{font-size:1.4rem}
 .brand p{font-size:.86rem;text-wrap:balance}.brand>div{min-width:0}
@@ -2004,7 +2004,7 @@ const fleetGroups=n=>[...new Set((n.fleet?.in||[]).map(x=>({work:'Fleet',family:
 const fleetLine=n=>[n.fleet?.machine?'Has a Machine':'',...(n.fleet?.in||[]).map(x=>x.kind==='work'&&x.fleet_name?`${x.label} (${x.fleet_name})`:x.label)].filter(Boolean).join(' · ');
 const fleetChip=n=>n.fleet?`<span class="chip fleet-chip" style="--c:var(--mint)" title="${esc(fleetLine(n))}"><span class="ct">${esc(fleetGroups(n))}</span></span>`:'';
 function fleetMember(n){if(!n.fleet?.in?.length)return'';const work=n.fleet.in.find(x=>x.kind==='work'),first=n.fleet.in[0];
- return `<p class="graph-sub fleet-mark">${esc(fleetLine(n))}</p>${n.fleet.named?`<p class="graph-sub role-row"><span>Name from your ${work?'Fleet':first.kind==='family'?'Family':'Friends'}. Your messages say “${esc(n.name_from_messages||'')}”.</span><button class="ghost" data-fleet-keep="${esc(n.name)}">Keep</button></p>`:''}<div class="fleet-ask"><button class="ghost" data-fleet-member="${esc(first.member_id)}">See in Fleet</button>${work?`<button class="ghost" data-fleet-free="${esc(work.fleet)}">Ask your Fleet</button>`:''}</div>`}
+ return `<p class="graph-sub fleet-mark">${esc(fleetLine(n))}</p>${n.fleet.named?`<p class="graph-sub role-row fleet-named"><span>Name from your ${work?'Fleet':first.kind==='family'?'Family':'Friends'}. Your messages say “${esc(n.name_from_messages||'')}”.</span><button class="ghost" data-fleet-keep="${esc(n.name)}">Keep</button></p>`:''}<div class="fleet-ask"><button class="ghost" data-fleet-member="${esc(first.member_id)}">See in Fleet</button>${work?`<button class="ghost" data-fleet-free="${esc(work.fleet)}">Ask your Fleet</button>`:''}</div>`}
 function fleetAskRow(n){if(!state?.fleet?.on||!['person','org'].includes(n.kind)||n.fleet?.in?.some(x=>x.kind==='work'))return'';const about=n.kind==='org'?n.id.replace(/^org:/,''):/^email:/.test(n.id)?n.id.slice(6):n.name;
  return `<div class="fleet-ask"><button class="ghost" data-fleet-ask="${esc(about)}">Ask the Fleet who knows ${esc(n.kind==='org'?about:n.name)}</button></div>`}
 let fleetData=null,fleetShown=Promise.resolve(),fleetViewVersion=0,fleetPane=localStorage.getItem('fleet-pane')||'';
