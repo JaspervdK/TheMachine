@@ -140,6 +140,14 @@ class Voices(unittest.TestCase):
         with patch.object(a, 'now', return_value=(a.dt.datetime.fromisoformat(a.now()) + a.dt.timedelta(days=31)).isoformat()):
             self.assertIn('run_id', self.store.voice_study_due())
 
+    def test_voice_study_excludes_misattributed_style_notes(self):
+        self.study_messages()
+        decision = self.note_id()
+        with self.store.connect() as db:
+            db.execute("INSERT INTO note_kinds VALUES(?,?,'style','assistant',?)", (decision, self.chat_sid, a.now()))
+            db.execute("INSERT INTO decision_annotations(decision_id,status,reason) VALUES(?,'misattributed','wrong card')", (decision,))
+        self.assertNotIn(decision, {n['decision_id'] for n in self.store.voice_sample()['notes']})
+
     def test_a_voice_study_runs_as_a_turn_and_applies_when_it_finishes(self):
         self.study_messages()
         started = self.store.voice_study_start()
@@ -342,6 +350,97 @@ class Learned(unittest.TestCase):
             db.execute("INSERT INTO note_kinds VALUES(?,?,?,?,?)", (note, sid, 'style', 'assistant', a.now()))
         self.assertIn('less formal please', self.store.style_notes_to_learn('r1'))
         self.assertEqual(self.store.style_notes_to_learn(), '')
+
+
+class ReviewRegressions(unittest.TestCase):
+    setUp = Voices.setUp
+    note_id = Voices.note_id
+    def test_examples_and_elsewhere_replies_stay_on_the_cards_account(self):
+        private = mail('private-out', '2026-10-03T12:00:00+00:00', 'PRIVATE PERSONAL MESSAGE', **SENT)
+        private['account_id'] = 'personal'
+        self.store.accounts.append({'id': 'personal', 'service': 'gmail', 'email': 'private@example.org'})
+        self.store.commit_page('personal', {}, [private])
+        self.assertFalse(any('PRIVATE PERSONAL' in e['text'] for e in self.store.own_examples(self.sid)))
+        draft = {'kind': 'email', 'label': 'Send', 'account_id': 'work', 'to': ['sam@example.com'],
+                 'thread_id': 't1', 'subject': 'Re: Contract', 'body': 'Concrete work reply.', 'revision': 'r1'}
+        with self.store.connect() as db:
+            db.execute("UPDATE suggestions SET status='prepared',next_action=? WHERE id=?", (json.dumps(draft), self.sid))
+            db.execute("INSERT INTO preparations(suggestion_id,decision_id,job_id,status,created_at,updated_at) VALUES(?,'d','j','done',?,?)",
+                       (self.sid, '2026-10-03T09:00:00+00:00', '2026-10-03T09:00:00+00:00'))
+        with patch.object(a, 'now', return_value='2026-10-03T13:00:00+00:00'):
+            self.assertEqual(self.store.learn_sent_elsewhere(), 0)
+        with self.store.connect() as db:
+            private_id=db.execute("SELECT id FROM events WHERE source_id='private-out' AND account_id='personal'").fetchone()[0]
+        private_sid=self.store.suggest('personal-card','Private card','Private body',[private_id])['id']
+        with self.store.connect() as db:
+            db.execute("INSERT INTO draft_edits(id,suggestion_id,old_revision,new_revision,kind,before_body,after_body,source,created_at) VALUES('private-edit',?,'a','b','email','Secret private draft.','Secret private final.','dashboard',?)",(private_sid,a.now()))
+        self.assertNotIn('Secret private',self.store.style_text(self.sid))
+        # An inbound sender or arbitrary metadata value spelling SENT is not an outgoing label.
+        incoming = mail('not-sent', '2026-10-03T14:00:00+00:00', 'NOT OWNER WRITING', thread='t1')
+        incoming['metadata']['display_name'] = 'SENT'
+        self.store.commit_page('work', {}, [incoming])
+        self.assertFalse(any('NOT OWNER' in e['text'] for e in self.store.own_examples(self.sid)))
+
+    def test_undo_voice_merge_restores_previous_line_but_preserves_new_owner_edit(self):
+        decision = self.note_id()
+        for preserve in (False, True):
+            self.store.save_voice('Email', 'Original email style.', 'owner')
+            fid = self.store.remember_fact('Use lowercase in email too' + (' next time.' if preserve else '.'), decision)['id']
+            self.store.save_voice('Email', 'Original style, lowercase.', 'assistant', replaces=[fid])
+            if preserve:
+                self.store.save_voice('Email', 'Newer owner style wins.', 'owner')
+            self.store.unmerge_fact(channel='Email')
+            self.assertEqual(next(v['text'] for v in self.store.voices() if v['channel']=='Email'),
+                             'Newer owner style wins.' if preserve else 'Original email style.')
+            self.store.forget_fact(fid)
+        self.store.save_voice('Email', 'Before learned merge.', 'owner')
+        first=self.store.remember_fact('Use original merged style.',decision)['id']
+        self.store.save_voice('Email','First learned merge style.','assistant',replaces=[first])
+        self.store.save_voice('Email','Owner edit between merges.','owner')
+        second=self.store.remember_fact('And a newer merged style.',decision)['id']
+        self.store.save_voice('Email','Second learned merge style.','assistant',replaces=[second])
+        self.store.unmerge_fact(channel='Email')
+        self.assertEqual(next(v['text'] for v in self.store.voices() if v['channel']=='Email'),'Owner edit between merges.')
+        self.store.save_voice('Email', '', 'owner')
+        fid = self.store.remember_fact('Another style fact to merge.', decision)['id']
+        self.store.save_voice('Email', 'First learned email style.', 'assistant', replaces=[fid])
+        self.store.unmerge_fact(channel='Email')
+        self.assertFalse(any(v['channel']=='Email' for v in self.store.voices()))
+
+    def test_misattributed_feedback_cannot_teach_a_voice(self):
+        decision = self.note_id()
+        with self.store.connect() as db:
+            db.execute("INSERT INTO decision_annotations(decision_id,status,reason) VALUES(?,'misattributed','wrong card')", (decision,))
+        with self.assertRaisesRegex(ValueError, 'own written notes'):
+            self.store.save_voice('Slack', 'Wrong style from another card.', 'assistant', decision_id=decision)
+
+    def test_learning_offers_survive_unavailable_gateway_then_commit_after_admission(self):
+        for i in range(6):
+            self.store.remember_fact('Fact to condense number ' + str(i), self.note_id())
+        with self.store.connect() as db:
+            db.execute("INSERT INTO draft_edits(id,suggestion_id,old_revision,new_revision,kind,before_body,after_body,source,created_at) VALUES('retry-edit',?,'a','b','email','Long stiff draft.','Hey, natural reply.','dashboard',?)", (self.sid, a.now()))
+            db.execute("INSERT INTO note_kinds VALUES(?,?,?,?,?)", (self.note_id(), self.chat_sid, 'style', 'assistant', a.now()))
+            db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,attempts,planned) VALUES('review-learning','starting',?,?,0,1)", (a.now(), a.now()))
+        self.app.config.update(review_worker={'enabled': True})
+        requests=[]
+        def unavailable(request):
+            requests.append(request)
+            return {'status': 'unavailable'}
+        self.app.review_step(unavailable)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM edits_offered').fetchone()[0], 0)
+            db.execute("UPDATE review_runs SET retry_at=NULL,updated_at='2000-01-01T00:00:00+00:00' WHERE run_id='review-learning'")
+        self.assertIn('retry-edit', requests[0]['message'])
+        self.assertIn('Condense what', requests[0]['message'])
+        def admitted(request):
+            requests.append(request)
+            return {'status': 'admitted'}
+        self.app.review_step(admitted)
+        self.assertIn('retry-edit', requests[-1]['message'])
+        with self.store.connect() as db:
+            ids={r[0] for r in db.execute('SELECT edit_id FROM edits_offered')}
+        self.assertIn('retry-edit', ids)
+        self.assertTrue(any(x.startswith('condense:') for x in ids))
 
 
 if __name__ == '__main__':

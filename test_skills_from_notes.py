@@ -9,6 +9,8 @@ from pathlib import Path
 import secrets
 import tempfile
 import unittest
+import sqlite3
+from unittest.mock import patch
 
 import skills
 from test_voices import a, mail
@@ -46,7 +48,13 @@ class SkillsFromNotes(unittest.TestCase):
         out = self.propose(self.notes[:6])
         card = self.card(out['suggestion_id'])
         self.assertEqual(card['title'], 'Turn 6 notes into a skill: Listing exchanges')
-        self.assertIn('rule number 5 holds', card['body'])
+        self.assertIn('rule number 5 holds', '\n'.join(card['skill_proposal']['notes']))
+        self.assertIn('## Steps', card['skill_proposal']['body'])
+        with self.store.connect() as db:
+            row=dict(db.execute('SELECT * FROM suggestions WHERE id=?',(card['id'],)).fetchone());row.update(self.store.suggestion_result(row,db))
+        buttons=[b for block in a.controls(row,'https://fixture.invalid/')['blocks'] for b in block['buttons']]
+        self.assertTrue(any(b['label']=='Create skill' for b in buttons))
+        self.assertTrue(any(b['label']=='Read instructions' for b in buttons))
         self.assertEqual(card['labels'], {'accept': 'Create skill', 'reject': 'Not now'})
         self.assertEqual(self.propose(self.notes[:6])['duplicate'], True)  # asked once
         self.assertEqual(len(self.store.facts()), 12)  # nothing moves before the owner says so
@@ -87,6 +95,46 @@ class SkillsFromNotes(unittest.TestCase):
         self.assertIn('- Rule 4.', self.app.skills.get(mine['id'])['body'])
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT body FROM skills WHERE id='sk_theirs'").fetchone()[0], 'Theirs.')
+
+    def test_long_notes_remain_reviewable_and_skill_write_retries_once(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE facts SET text=text||?", (' More exact details to keep. ' * 8,))
+        self.app.skills.save(None, 'Existing', 'When this scenario happens.', 'Original steps for this existing skill.')
+        out=self.propose(self.notes[:6], skill='Existing')
+        card=self.card(out['suggestion_id'])
+        self.assertLessEqual(len(card['body']),700)
+        self.assertTrue(all(len(n)>200 for n in card['skill_proposal']['notes']))
+    def test_interrupted_skill_database_write_rolls_back_and_retry_adds_once(self):
+        self.app.skills.save(None, 'Existing', 'When this scenario happens.', 'Original steps for this existing skill.')
+        out=self.propose(self.notes[:6], skill='Existing')
+        self.store.decide(out['suggestion_id'],'accept','', 'yes-retry','dashboard')
+        real=self.app.skills.save
+        def interrupted(*args,**kwargs):
+            real(*args,**kwargs)
+            raise sqlite3.OperationalError('simulated interruption after skill write')
+        with patch.object(self.app.skills,'save',side_effect=interrupted):
+            with self.assertRaises(sqlite3.OperationalError): self.app.apply_skill_clusters()
+        self.assertEqual(next(s for s in self.app.skills.view()['skills'] if s['name']=='Existing')['version'],1)
+        self.app.apply_skill_clusters();self.app.apply_skill_clusters()
+        made=next(s for s in self.app.skills.view()['skills'] if s['name']=='Existing')
+        self.assertEqual(made['version'],2)
+        self.assertEqual(self.app.skills.get(made['id'])['body'].count('## Steps'),1)
+        self.assertEqual(len(made['notes']),6)
+
+    def test_snoozed_skill_bring_back_only_returns_the_card(self):
+        out=self.propose(self.notes[:6])
+        self.store.decide(out['suggestion_id'],'snooze','', 'later','dashboard')
+        with self.store.connect() as db:
+            row=dict(db.execute('SELECT * FROM suggestions WHERE id=?',(out['suggestion_id'],)).fetchone());row.update(self.store.suggestion_result(row,db))
+        labels=[b['label'] for block in a.controls(row,'https://fixture.invalid/')['blocks'] for b in block['buttons']]
+        self.assertIn('Bring back',labels)
+        self.assertNotIn('Create skill',labels)
+        self.app.action('decide',{'suggestion_id':out['suggestion_id'],'choice':'accept','decision_id':'back'},owner_dashboard=True)
+        self.assertEqual(self.card(out['suggestion_id'])['status'],'pending')
+        self.assertEqual(self.app.skills.view()['skills'],[])
+        self.assertEqual(len(self.store.facts()),12)
+        self.app.action('decide',{'suggestion_id':out['suggestion_id'],'choice':'accept','decision_id':'create'},owner_dashboard=True)
+        self.assertEqual(len(self.app.skills.view()['skills']),1)
 
 
 if __name__ == '__main__':

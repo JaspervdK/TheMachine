@@ -29,6 +29,7 @@ const server=createServer(async(req,res)=>{res.setHeader('Content-Type','applica
   if(call.action==='fleet_handoff_draft'){res.end(JSON.stringify({suggestion_id:'c1',title:'Send Sam the pricing',summary:'Sam asked for pricing.',contact:'sam@client.example',due:null,
    fleets:[{id:FL,name:'Acme',members:[{member_id:'p',name:'Pat'}]}]}));return}
   if(call.action==='fleet_handoff')card.fleet_handoff={name:'Pat',stage:'asked'};
+  if(['fleet_decide','fleet_split_adjust'].includes(call.action)){view.waiting=view.waiting.filter(x=>x.id!==call.args.id);state.fleet.waiting=view.waiting.length+1}
   res.end(JSON.stringify({status:'answered',ids:{}}));return}
  if(req.url.startsWith('/api/fleet')){res.end(JSON.stringify(view));return}
  res.statusCode=404;res.end('{}')});
@@ -57,12 +58,12 @@ try{
  assert.deepEqual(await intro.locator('.actions>button').allInnerTexts(),['Accept','Decline']);  // Always and Never wait under More
  assert.equal(await page.locator('#badge-inbox').innerText(),'4');assert.equal(await page.locator('#badge-fleet').innerText(),'');
  await intro.locator('[data-choice-f="once"]').click();
- await page.waitForTimeout(100);
+ await intro.waitFor({state:'detached'}); // Wait for the decision's refresh, not a 100ms guess.
  assert.deepEqual(calls.at(-1),{action:'fleet_decide',args:{id:'q_'+'1'.repeat(16),choice:'once'}});
  const split=page.locator('#fleet-q_'+'2'.repeat(16));
  await split.locator('input').fill('Send pricing on Friday');
  await split.locator('[data-fleet-adjust]').click();
- await page.waitForTimeout(100);
+ await split.waitFor({state:'detached'});
  assert.deepEqual(calls.at(-1),{action:'fleet_split_adjust',args:{id:'q_'+'2'.repeat(16),text:'Send pricing on Friday'}});
  // A follow-up split to send: the meeting and its day, one row per person, Send the split first.
  const proposal=page.locator('#suggestions .fleet-split-form');
@@ -74,7 +75,7 @@ try{
  assert.deepEqual(calls.at(-1),{action:'fleet_split',args:{id:'out:'+'k'.repeat(64),items:{m:'Send pricing',p:'Book the demo'}}});
  // The Fleet tab keeps people, rules and asks; it only points to Suggestions for what waits.
  await page.locator('nav [data-tab="fleet"]').click();await page.locator('.fleet-todo').waitFor();
- assert.match(await page.locator('.fleet-todo').innerText(),/3 Fleet items wait for you under Suggestions/);
+ assert.match(await page.locator('.fleet-todo').innerText(),/One Fleet item waits for you under Suggestions/);
  assert.equal(await page.locator('#fleet-view .fleet-card').count(),0);
  // After "who knows": ask that teammate for an intro, with a line why.
  const offer=page.locator('.fleet-intro-form');

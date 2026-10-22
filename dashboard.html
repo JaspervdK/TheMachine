@@ -968,10 +968,11 @@ const expandedBodies=new Set();
 const cardLinks=(html,s)=>(state.suggestions||[]).filter(o=>o.id!==s.id&&!closed(o)&&o.title.length>=12).sort((a,b)=>b.title.length-a.title.length).reduce((h,o)=>{const t=esc(o.title);return h.includes(t)?h.split(/(<a\b[\s\S]*?<\/a>|<[^>]*>)/).map((part,i)=>i%2?part:part.split(t).join(`<a class="card-link" href="#card=${esc(o.id)}">${t}</a>`)).join(''):h},html);
 function cardBody(s,section){let text=resultBody(s),lead='';const m=text.match(/^\*\*([^*\n]+)\*\*\s*\n([\s\S]+)$/);if(m){lead=m[1];text=m[2].trim()}
 const html=(lead?`<p class="lead-line">${esc(lead)}</p>`:'')+cardLinks(text.split(/\n\s*\n/).map(p=>p.trim()).filter(Boolean).map(p=>`<p>${format(p).replace(/\n/g,'<br>')}</p>`).join(''),s);
+const proposal=s.skill_proposal?`<details class="skill-notes"><summary>Read skill instructions and ${s.skill_proposal.notes.length} notes</summary><p><strong>${esc(s.skill_proposal.name)}</strong></p><div>${format(s.skill_proposal.body).replace(/\n/g,'<br>')}</div><ul>${s.skill_proposal.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul></details>`:'';
 // Short by default: the status line says where it stands; the rest folds behind Show more.
 const lines=closed(s)?2:3,rows=text.split('\n').reduce((n,l)=>n+(l.trim()?Math.ceil(l.length/62):.6),0);
-if(rows<=lines+1.5)return `<div class="body">${html}</div>`;const open=expandedBodies.has(s.id);
-return `<div class="body${open?'':' clamp'}" style="--lines:${lines}">${html}</div><button type="button" class="more" data-more="${s.id}" aria-expanded="${open}">${open?'Show less':'Show more'}</button>`}
+if(rows<=lines+1.5)return `<div class="body">${html}</div>${proposal}`;const open=expandedBodies.has(s.id);
+return `<div class="body${open?'':' clamp'}" style="--lines:${lines}">${html}</div><button type="button" class="more" data-more="${s.id}" aria-expanded="${open}">${open?'Show less':'Show more'}</button>${proposal}`}
 const snoozedUntil=v=>new Date(v).toLocaleString('en-GB',{weekday:'short',day:'numeric',month:'short'})+', '+new Date(v).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
 const backLabel=v=>'Back '+new Date(v).toLocaleString([],{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'})+' · '+ago(v);
 const sourceText=v=>{const t=String(v||'').replace(/^Source:\s*/i,'');return t.charAt(0).toUpperCase()+t.slice(1)};
@@ -1197,9 +1198,15 @@ async function voiceSave(f,text){const out=f.querySelector('[role=status]'),chan
  try{if(!channel)throw Error('Name the channel.');if(f.dataset.new!==undefined&&!text)throw Error('Say how you write there.');
   for(const b of f.querySelectorAll('button'))b.disabled=true;
   const r=await request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'set_voice',args:{channel,text}})});
-  state.voices=r.voices;voiceDirty=false;renderVoices();notice(text?'Saved.':'Removed.')}
+  const pending=[...$('#voices').querySelectorAll('.voice-form')].filter(form=>form!==f&&form.dataset.dirty==='1')
+   .map(form=>({channel:form.dataset.channel,new:form.dataset.new!==undefined,text:form.querySelector('textarea').value,name:form.querySelector('input')?.value}));
+  state.voices=r.voices;voiceDirty=false;renderVoices();
+  for(const edit of pending){const form=[...$('#voices').querySelectorAll('.voice-form')].find(form=>edit.new?form.dataset.new!==undefined:form.dataset.channel===edit.channel);
+   if(!form)continue;form.querySelector('textarea').value=edit.text;if(edit.new)form.querySelector('input').value=edit.name;
+   form.dataset.dirty='1';const button=form.querySelector('.primary');if(button)button.hidden=false;voiceDirty=true}
+  notice(text?'Saved.':'Removed.')}
  catch(err){out.textContent=err.message;for(const b of f.querySelectorAll('button'))b.disabled=false}}
-$('#voices').addEventListener('input',e=>{const f=e.target.closest('.voice-form');if(!f)return;voiceDirty=true;f.querySelector('[role=status]').textContent='';const b=f.querySelector('.primary');if(b)b.hidden=false});
+$('#voices').addEventListener('input',e=>{const f=e.target.closest('.voice-form');if(!f)return;f.dataset.dirty='1';voiceDirty=true;f.querySelector('[role=status]').textContent='';const b=f.querySelector('.primary');if(b)b.hidden=false});
 $('#voices').addEventListener('submit',e=>{e.preventDefault();voiceSave(e.target,e.target.querySelector('textarea').value.trim())});
 $('#voices').addEventListener('click',e=>{const b=e.target.closest('[data-voice-remove]');if(b)voiceSave(b.closest('.voice-form'),'')});
 // Signatures: one card per mailbox with a small rich editor. The signature is edited inside a sandboxed frame (no
