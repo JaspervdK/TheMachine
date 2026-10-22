@@ -24,6 +24,14 @@ const cards=[
  // The service's own failure and a sign-in keep their usual lead
  {id:'e1',title:'Collect the invoices',body:'x',status:'instructions',scope:'work',created_at:now,event_ids:[5],preparation_status:'blocked',preparation_error:'ai_run_failed',
   preparation_reason:'I tried twice but couldn’t finish this. Tap Try again, or change the request.'},
+ // Stopped to ask with named questions, after a Try again that changed nothing: quick picks, no Try again
+ {id:'o1',title:'Finish the partner listing',body:'Your draft is kept.',status:'instructions',scope:'work',created_at:now,event_ids:[7],preparation_status:'blocked',preparation_cause:'retry',
+  preparation_reason:'Finishing the listing needs your notes and one choice.',preparation_browser:{since:now,link:'https://example.com/b'},
+  preparation_details:'Read /home/owner/.openclaw/workspace/memory/assistant/261022-listing.md and doc 1CLX9Q28esUdnW7YB2q72G5otQBzTZH7XW, run 9c3aed05-3d87-4c9a-adff-55b38d27277a.',
+  preparation_questions:[{question:'What did you notice when you tried the tool?'},{question:'Which score fills the gap?',options:['3.9','4.0']}]},
+ // The same stop without named questions, as runs wrote them before: Answer still leads, no second Try again
+ {id:'r1',title:'Finish the other listing',body:'x',status:'instructions',scope:'work',created_at:now,event_ids:[8],preparation_status:'blocked',preparation_cause:'retry',preparation_error:null,
+  preparation_reason:'Your draft is preserved; finishing the listing still needs your testing notes and a choice of score.'},
  {id:'g1',title:'Download the statements',body:'x',status:'instructions',scope:'work',created_at:now,event_ids:[6],preparation_status:'blocked',
   preparation_reason:'The bank needs your code: complete sign-in in the tab, then tap Continue.'}];
 const posts=[];
@@ -65,6 +73,23 @@ try{
   assert.deepEqual((await page.locator('#task-h1 .actions > button').allTextContents()).slice(0,3),['Answer','Hand to someone else','Mark done']);
   assert.equal(await page.locator('#task-h1 [data-choice="retry"]').count(),1);
   assert.deepEqual(await primary('e1'),['Try again']);assert.deepEqual(await primary('g1'),['Continue']);
+  // Named questions: each its own line with quick picks; no Try again after a fruitless one; details collapsed and plain
+  assert.deepEqual(await page.locator('#task-o1 .ask-q p').allTextContents(),['What did you notice when you tried the tool?','Which score fills the gap?']);
+  assert.deepEqual(await page.locator('#task-o1 .pick').allTextContents(),['3.9','4.0']);
+  assert.deepEqual(await primary('o1'),['Answer']);assert.equal(await page.locator('#task-o1 [data-choice="retry"]').count(),0);
+  assert.equal(await page.locator('#task-o1 details.tech summary').textContent(),'Technical details');
+  assert.equal(await page.locator('#task-o1 details.tech').getAttribute('open'),null);
+  {const tech=await page.locator('#task-o1 details.tech pre').textContent();for(const gone of ['/home/','1CLX9Q28','9c3aed05'])assert.ok(!tech.includes(gone),gone)}
+  assert.equal(await page.locator('#task-o1').innerText().then(t=>t.includes('needs your notes and one choice')),false);
+  assert.deepEqual(await primary('r1'),['Answer']);assert.equal(await page.locator('#task-r1 [data-choice="retry"]').count(),0);
+  assert.match(await line('r1'),/^Needs you: Your draft is preserved/);
+  // A pick fills the answer box; another pick for the same question replaces it; the box takes the rest
+  await page.locator('#task-o1 .pick[data-pick="4.0"]').click();
+  assert.equal(await page.locator('#feedback-o1').inputValue(),'Which score fills the gap? 4.0');
+  await page.locator('#task-o1 .pick[data-pick="3.9"]').click();
+  assert.equal(await page.locator('#feedback-o1').inputValue(),'Which score fills the gap? 3.9');
+  assert.equal(await page.locator('#task-o1 .pick[data-pick="3.9"]').getAttribute('aria-pressed'),'true');
+  await page.locator('#task-o1 [data-choice="cancel-change"]').click();
   // The button row fits the card on a phone
   assert.ok(await page.locator('#task-q1 .actions').evaluate(a=>[...a.children].every(c=>c.getBoundingClientRect().right<=a.closest('article').getBoundingClientRect().right+1)));
   // Answer opens the answer box under the question

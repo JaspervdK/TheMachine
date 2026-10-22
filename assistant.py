@@ -2077,7 +2077,7 @@ class Store:
             if 'action_id' not in preparation_columns:
                 db.execute('ALTER TABLE preparations ADD COLUMN action_id TEXT')
                 db.execute("UPDATE preparations SET action_id=(SELECT id FROM action_jobs WHERE approval_id=preparations.decision_id AND suggestion_id=preparations.suggestion_id AND status='local_preparation')")
-            for column in ['details', 'started_at']:
+            for column in ['details', 'started_at', 'questions']:
                 if column not in preparation_columns:
                     db.execute('ALTER TABLE preparations ADD COLUMN ' + column + ' TEXT')
             if 'auto_retries' not in preparation_columns:
@@ -3910,7 +3910,7 @@ class Store:
             if payload['kind']!='finish':continue
             payload['finish_result']={'state':'uncertain','body':'Replaced by new work before its result was saved.','at':now()}
             db.execute("UPDATE action_jobs SET status='finish_uncertain',payload=?,updated_at=? WHERE id=?",(encoded(payload),now(),left['id']))
-        db.execute("INSERT INTO preparations(suggestion_id,decision_id,job_id,status,created_at,updated_at) VALUES(?,?,?,'queued',?,?) ON CONFLICT(suggestion_id) DO UPDATE SET decision_id=excluded.decision_id,job_id=excluded.job_id,status='queued',created_at=excluded.created_at,updated_at=excluded.updated_at,error=NULL,reason=NULL,details=NULL,started_at=NULL,retry_at=NULL,attempts=0,auto_retries=0",
+        db.execute("INSERT INTO preparations(suggestion_id,decision_id,job_id,status,created_at,updated_at) VALUES(?,?,?,'queued',?,?) ON CONFLICT(suggestion_id) DO UPDATE SET decision_id=excluded.decision_id,job_id=excluded.job_id,status='queued',created_at=excluded.created_at,updated_at=excluded.updated_at,error=NULL,reason=NULL,details=NULL,questions=NULL,started_at=NULL,retry_at=NULL,attempts=0,auto_retries=0",
                    (suggestion_id,decision_id,uuid.uuid4().hex,now(),now()))
         db.execute('UPDATE preparations SET session_job_id=coalesce(?,job_id) WHERE suggestion_id=?',(session_job_id,suggestion_id))
         db.execute('UPDATE preparations SET action_id=? WHERE suggestion_id=?',(action_id,suggestion_id))
@@ -4384,18 +4384,20 @@ class Store:
                 elif new:found.append((job['suggestion_id'],f"A new error ({new['kind']}) showed up right after the merge, so I undid it."))
         return found
 
-    def preparation_blocked(self, suggestion_id, job_id, reason, details=None, note_kind=None):
+    def preparation_blocked(self, suggestion_id, job_id, reason, details=None, note_kind=None, questions=None):
         if not reason.strip() or len(reason)>400:
             raise ValueError('Give a short, specific blocker')
         if details is not None and (not isinstance(details,str) or len(details)>2000):
             raise ValueError('Keep blocker details under 2000 characters')
+        questions = blocker_questions(questions, strict=True)
         with self.connect() as db:
             job=db.execute('SELECT * FROM preparations WHERE suggestion_id=?',(suggestion_id,)).fetchone()
             if not job or job['job_id']!=job_id or job['status'] not in ('starting','running'):
                 raise ValueError('Preparation cancelled or replaced')
             if note_kind:
                 self.tag_note(suggestion_id, note_kind, db)
-            db.execute("UPDATE preparations SET status='blocked',reason=?,details=?,updated_at=? WHERE suggestion_id=?",(reason,(details or '').strip() or None,now(),suggestion_id))
+            db.execute("UPDATE preparations SET status='blocked',reason=?,details=?,questions=?,updated_at=? WHERE suggestion_id=?",
+                       (reason,(details or '').strip() or None,encoded(questions) if questions else None,now(),suggestion_id))
             db.execute("UPDATE deliveries SET status='queued',reminder=1,needs_edit=1,error=NULL WHERE suggestion_id=? AND status IN ('queued','sent','uncertain')",(suggestion_id,))
         return {'status':'blocked','reason':reason}
 
@@ -4608,11 +4610,12 @@ class Store:
                                              **(dict(row) if row else {}), **dict(counts), **channel_health})
             # Newest first: the dashboard shows the top few and says when each happened.
             result['deliveries'] = [dict(r) for r in db.execute('SELECT * FROM deliveries ORDER BY updated_at DESC,rowid DESC')]
-            jobs={r['suggestion_id']:dict(r) for r in db.execute('SELECT * FROM preparations')}
+            jobs={r['suggestion_id']:dict(r) for r in db.execute('SELECT p.*,d.choice cause FROM preparations p LEFT JOIN decisions d ON d.id=p.decision_id')}
             for suggestion in result['suggestions']:
                 job=jobs.get(suggestion['id'])
                 if job: suggestion.update(preparation_status=job['status'],preparation_reason=job['reason'],preparation_error=job['error'],
-                                          preparation_details=job['details'],preparation_started_at=job['started_at'],preparation_retried=job['auto_retries']>0)
+                                          preparation_details=job['details'],preparation_started_at=job['started_at'],preparation_retried=job['auto_retries']>0,
+                                          preparation_questions=blocker_questions(job.get('questions')),preparation_cause=job.get('cause'))
                 suggestion.update(self.suggestion_result(suggestion, db))
             counts = db.execute('SELECT count(*) total,sum(analyzed_version<version) pending,sum(analyzed_version=0) first_review,coalesce(sum(analyzed_version<version AND deferrals>=?),0) set_aside FROM events', (SET_ASIDE_AFTER,)).fetchone()
             result['review_health'] = {**dict(counts), 'last_completed': db.execute("SELECT max(finished_at) FROM analyses WHERE status='complete'").fetchone()[0]}
@@ -6300,7 +6303,7 @@ def card(row):
     elif row.get('preparation_status') == 'blocked' and (row.get('preparation_browser') or {}).get('sign_in'):
         status='Waiting for you to sign in: '+row['preparation_reason'].rstrip('.')+'. Sign in through Sign in and I carry on by myself.'
     elif row.get('preparation_status') == 'blocked' and row['status'] not in ('completed','rejected','snoozed') and not row.get('handled_hint') and ask_blocked(row):
-        status='Needs you: '+sentence(row['preparation_reason'])
+        status='Needs you: '+sentence(ask_text(row))
     elif row.get('preparation_status') == 'blocked': status='I’m stuck: '+(row.get('preparation_reason') or 'Preparation did not finish. I’ll keep this in your list.')
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed','undoing','undone')),None)
     if action_state and (row['status']=='prepared' or (row['status']=='completed' and action_state.get('status')=='sent')):
@@ -6408,12 +6411,49 @@ def sentence(text):
     return text if text.endswith(('.', '?', '!', '…')) else text + '.'
 
 
+def blocker_questions(value, strict=False):
+    """A blocker's asks for the owner: up to 3 short questions, each with up to 4 quick-pick options when it is a clear
+    choice; [] when there are none. strict (a run saving them): raises on anything malformed; otherwise (stored JSON) []."""
+    if not value:
+        return []
+    try:
+        items = json.loads(value) if isinstance(value, str) else value
+        if not isinstance(items, list) or len(items) > 3:
+            raise ValueError
+        out = []
+        for item in items:
+            item = {'question': item} if isinstance(item, str) else item
+            question = str(item.get('question') or '').strip()
+            options = [str(o).strip() for o in item.get('options') or [] if str(o).strip()]
+            if not question or len(question) > 200 or len(options) > 4 or any(len(o) > 60 for o in options):
+                raise ValueError
+            out.append({'question': question, **({'options': options} if options else {})})
+        return out
+    except (ValueError, TypeError, AttributeError):
+        if not strict:
+            return []
+        raise ValueError('questions: at most 3 of {question (max 200 chars), options (at most 4, max 60 chars each)}')
+
+
 def ask_blocked(row):
-    """A run that stopped to ask the owner: a blocker it wrote itself (no error of the service's own), not a sign-in
-    and not waiting in the browser. Same rule as askBlocked() in dashboard.html."""
+    """A run that stopped to ask the owner: a blocker it wrote itself (no error of the service's own), not a sign-in.
+    One that names its questions counts even after a browser step; otherwise not while it waits in the browser. Same
+    rule as askBlocked() in dashboard.html."""
     reason = str(row.get('preparation_reason') or '').strip()
-    return bool(row.get('preparation_status') == 'blocked' and reason and not row.get('preparation_error')
-                and not row.get('preparation_browser') and retry_label(reason) != 'Continue')
+    if row.get('preparation_status') != 'blocked' or not reason or row.get('preparation_error') or retry_label(reason) == 'Continue':
+        return False
+    return bool(blocker_questions(row.get('preparation_questions'))) or not row.get('preparation_browser')
+
+
+def ask_text(row):
+    """What a run that stopped to ask needs, for the Needs you line: its questions, else its blocker."""
+    questions = blocker_questions(row.get('preparation_questions'))
+    return ' '.join(q['question'] for q in questions) if questions else str(row.get('preparation_reason') or '').strip()
+
+
+def retry_pointless(row):
+    """Try again already ran without new input and stopped asking again: retrying alone won't help."""
+    return row.get('preparation_cause') == 'retry' and ask_blocked(row)
 
 
 def ask_question(row, actions):
@@ -6423,7 +6463,7 @@ def ask_question(row, actions):
     if row['status'] in ('completed', 'rejected', 'snoozed') or row.get('handled_hint'):
         return ''
     if ask_blocked(row):
-        return str(row['preparation_reason']).strip()
+        return ask_text(row)
     if row['status'] != 'prepared' or row.get('preparation_status') == 'blocked' or any(a.get('kind') != 'open' for a in actions):
         return ''
     try:
@@ -6454,7 +6494,7 @@ def controls(row, root=''):
     else:
         choices = [('Do it','accept'),('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
-    if ask_question(row,actions):choices=[('Answer','other'),*([(retry_label(row.get('preparation_reason')),'retry')] if row.get('preparation_status')=='blocked' else []),('Mark done','complete'),('Snooze','snooze'),('Not needed','reject')]
+    if ask_question(row,actions):choices=[('Answer','other'),*([(retry_label(row.get('preparation_reason')),'retry')] if row.get('preparation_status')=='blocked' and not retry_pointless(row) else []),('Mark done','complete'),('Snooze','snooze'),('Not needed','reject')]
     buttons=[]
     link=(row.get('preparation_browser') or {}).get('link') or ''
     signin=(row.get('preparation_browser') or {}).get('signin_url') or ''
@@ -6970,7 +7010,7 @@ def deliver(store, config):
 
 
 FEEDBACK_COLUMN = "(SELECT feedback FROM decisions f WHERE f.suggestion_id=s.id AND f.feedback!='' AND NOT EXISTS (SELECT 1 FROM decision_annotations a WHERE a.decision_id=f.id) ORDER BY f.rowid DESC LIMIT 1) requested_feedback"
-EDIT_ROWS = ('SELECT s.*,d.message_id,d.edit_failures,p.status preparation_status,p.reason preparation_reason,p.error preparation_error,'+FEEDBACK_COLUMN+' FROM suggestions s '
+EDIT_ROWS = ('SELECT s.*,d.message_id,d.edit_failures,p.status preparation_status,p.reason preparation_reason,p.error preparation_error,p.questions preparation_questions,(SELECT choice FROM decisions WHERE id=p.decision_id) preparation_cause,'+FEEDBACK_COLUMN+' FROM suggestions s '
              'JOIN deliveries d ON s.id=d.suggestion_id LEFT JOIN preparations p ON s.id=p.suggestion_id '
              'WHERE d.needs_edit=1 AND d.message_id IS NOT NULL')
 
@@ -7014,7 +7054,7 @@ def deliver_one(store, config, edit_cards=True):
                    ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=3)).isoformat(),))
         retry_cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).isoformat()
         store.settle_awaiting(db)
-        rows = db.execute("SELECT s.*,d.reminder,d.message_id,d.previous_message_ids,p.status preparation_status,p.reason preparation_reason,p.error preparation_error,"+FEEDBACK_COLUMN+" FROM suggestions s JOIN deliveries d ON s.id=d.suggestion_id LEFT JOIN preparations p ON s.id=p.suggestion_id WHERE d.status='queued' AND (d.error IS NULL OR d.updated_at<?) AND ((s.status='pending' AND s.handled_hint IS NULL) OR (d.reminder=1 AND s.status IN ('accepted','prepared','instructions'))) AND ((d.reminder=1 AND s.early=0) OR s.deliver_after IS NULL OR s.deliver_after<=?) ORDER BY d.reminder DESC,s.created_at LIMIT 1",(retry_cutoff,now())).fetchall()
+        rows = db.execute("SELECT s.*,d.reminder,d.message_id,d.previous_message_ids,p.status preparation_status,p.reason preparation_reason,p.error preparation_error,p.questions preparation_questions,(SELECT choice FROM decisions WHERE id=p.decision_id) preparation_cause,"+FEEDBACK_COLUMN+" FROM suggestions s JOIN deliveries d ON s.id=d.suggestion_id LEFT JOIN preparations p ON s.id=p.suggestion_id WHERE d.status='queued' AND (d.error IS NULL OR d.updated_at<?) AND ((s.status='pending' AND s.handled_hint IS NULL) OR (d.reminder=1 AND s.status IN ('accepted','prepared','instructions'))) AND ((d.reminder=1 AND s.early=0) OR s.deliver_after IS NULL OR s.deliver_after<=?) ORDER BY d.reminder DESC,s.created_at LIMIT 1",(retry_cutoff,now())).fetchall()
         if not rows:
             return
         row = dict(rows[0])
@@ -7148,7 +7188,7 @@ For this job:
 - outcome:'done' only when the task itself is complete and nothing is left for the owner but to check it; outcome:'answered' when you only answered their question, explained or planned, and the task itself is still to do (the card then offers Do it again); outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'your_step' with step:'submit' (or pay, book, sign, confirm, order, apply) when everything is ready but that final click is left for them, e.g. a form you filled in and didn't submit (the card says so and links to the page in this Machine's browser by itself; no link of your own needed); outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose); when that is a question for them, write needs as the question itself, ending in "?" (the card then leads with Answer). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
 - When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card ("always…", signatures, formatting, tone with this kind of person) also becomes a draft rule: assistant_signals remember_fact args text=<the rule, general>, decision_id=<that note's decision>, kind=draft. A fact note that holds beyond this card goes in remember_fact as a fact.
 - When the owner's note means they want this task itself back later (remind me about it next week, later, on Tuesday), that is this card's snooze, not a reminder: save with outcome:'snoozed' and snooze_until:<their local date and time, e.g. 2026-10-27T09:00, or a date alone for their morning>, and a one-line body. The card leaves their list and comes back then. Do not also add an automation, cron job or reminder for it. A separate reminder about something else, or a recurring one, stays an automation. Their time zone is {getattr(local_tz(),'key','UTC')}; it is now {dt.datetime.fromisoformat(now()).astimezone(local_tz()).strftime('%a %Y-%m-%d %H:%M')} there.
-- Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>.''' + owner_details(config) + (f'''
+- Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>. Block only on what you truly can't know (their first-hand notes, a fact only they have, a call with no sensible default); a minor judgment call with an obvious sensible default you make yourself and name in one line of the result. When only the owner can unblock it, also give questions=[{{question:<one short plain question>, options:[<2-4 short choices, only when it is a clear choice>]}}] (at most 3). Each question must make sense on its own to someone who hasn't seen your work: plain words, what it is about and why it matters, no jargon or internal terms, e.g. {{question:'What did you notice when you tried OnePageCRM? A few lines on what you tried and what stood out are enough.'}}. The card shows them with quick picks and an Answer box. No paths, IDs or tool names in reason or questions.''' + owner_details(config) + (f'''
 
 Facts the owner told you earlier (true unless they say otherwise now):
 {facts}''' if facts else '') + (f'''
@@ -8277,7 +8317,7 @@ class App:
                 raise ValueError('Only the owner can remove a fact, on the dashboard')
             return self.store.forget_fact(args['id'])
         if name == 'preparation_blocked':
-            return self.store.preparation_blocked(args['suggestion_id'],args['job_id'],args['reason'],args.get('details'),args.get('note_kind'))
+            return self.store.preparation_blocked(args['suggestion_id'],args['job_id'],args['reason'],args.get('details'),args.get('note_kind'),args.get('questions'))
         if name == 'refresh_card':
             with self.store.connect() as db:
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(args['suggestion_id'],))

@@ -475,7 +475,7 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .card .body{font-size:1.02rem;line-height:1.55;color:var(--text)}
 .card .source{font-size:.86rem;color:var(--muted)}.card .note{font-size:.92rem;color:var(--muted)}
 .card .note.handled{color:var(--mint);font-weight:600}
-.card .note.status-line{margin:2px 0 6px;font-weight:600}.card a.card-link{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.card .note.status-line{margin:2px 0 6px;font-weight:600}.ask-line .ask-q p{margin:4px 0}.ask-line .reason-chips{margin:6px 0 8px}.card a.card-link{color:inherit;text-decoration:underline;text-underline-offset:2px}
 .card .saved-feedback blockquote{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
 .card .meta time{font-size:.8rem;color:var(--muted)}.card .read-original{font-size:.85rem}
 .card .chip{font-size:.78rem}.chip.scope{--c:var(--muted)}
@@ -1052,8 +1052,10 @@ const sentence=t=>{t=String(t).trim();return /[.?!…]$/.test(t)?t:t+'.'};
 // ask the owner: a blocker it wrote itself (no error of the service's own), not a sign-in and not waiting in the browser.
 // A result that left the final click (submit, pay, book) to the owner: what that click is, or ''. Same rule as card() in assistant.py.
 const finalStep=s=>{if(s.status!=='prepared'||s.handled_hint)return '';try{const o=JSON.parse(s.outcome||'{}');return o.state==='your_step'&&o.step||''}catch{return ''}};
-const askBlocked=s=>s.preparation_status==='blocked'&&!s.preparation_error&&!s.preparation_browser&&!!String(s.preparation_reason||'').trim()&&retryLabel(s.preparation_reason)!=='Continue';
-const askQuestion=(s,smart,hint)=>{if(closed(s)||s.status==='snoozed'||hint)return '';if(askBlocked(s))return String(s.preparation_reason).trim();
+// One that names its questions counts even after a browser step. Same rules as ask_blocked(), ask_text() and
+// retry_pointless() in assistant.py.
+const askBlocked=s=>s.preparation_status==='blocked'&&!s.preparation_error&&!!String(s.preparation_reason||'').trim()&&retryLabel(s.preparation_reason)!=='Continue'&&(!!s.preparation_questions?.length||!s.preparation_browser);
+const askQuestion=(s,smart,hint)=>{if(closed(s)||s.status==='snoozed'||hint)return '';if(askBlocked(s))return s.preparation_questions?.length?s.preparation_questions.map(q=>q.question).join(' '):String(s.preparation_reason).trim();
  if(s.status!=='prepared'||s.preparation_status==='blocked'||smart.some(a=>a.kind!=='open'))return '';
  try{const o=JSON.parse(s.outcome||'{}'),q=String(o.needs||'').trim();return o.state==='needs_you'&&/\?$/.test(q)?q:''}catch{return ''}};
 // A draft's Send opens the preview first: the button says so.
@@ -1064,7 +1066,9 @@ const answered=s.status==='prepared'&&(()=>{try{return JSON.parse(s.outcome||'{}
 const smart=taskActions(s);
 const handled=!closed(s)&&s.handled_hint?(()=>{try{return JSON.parse(s.handled_hint)}catch{return {}}})():{},hint=handled.reason||'';
 const ask=askQuestion(s,smart,hint);
-const choices=ask?[['answer','Answer'],...(s.preparation_status==='blocked'?[['retry',retryLabel(s.preparation_reason)]]:[]),['complete','Mark done'],['snooze','Snooze'],['reject','Not needed']]:s.status==='pending'?[['accept','Do it'],['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']]:s.status==='snoozed'?[['accept','Bring back'],['snooze','Change time'],['reject','Not needed']]:[...(s.preparation_status==='blocked'?[['retry',retryLabel(s.preparation_reason)]]:answered?[['accept','Do it']]:[]),['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']];
+// Try again already ran without anything new and stopped asking again: retrying alone won't help, so it isn't offered.
+const retryPointless=s.preparation_cause==='retry'&&askBlocked(s);
+const choices=ask?[['answer','Answer'],...(s.preparation_status==='blocked'&&!retryPointless?[['retry',retryLabel(s.preparation_reason)]]:[]),['complete','Mark done'],['snooze','Snooze'],['reject','Not needed']]:s.status==='pending'?[['accept','Do it'],['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']]:s.status==='snoozed'?[['accept','Bring back'],['snooze','Change time'],['reject','Not needed']]:[...(s.preparation_status==='blocked'?[['retry',retryLabel(s.preparation_reason)]]:answered?[['accept','Do it']]:[]),['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']];
 const notes=smart.map(a=>({action:a,state:a.state||s.action_status})).filter(x=>actionNote(x.state,x.action.kind));
 const undo=closed(s)&&s.undo_until&&Date.parse(s.undo_until)>Date.now();
 const status=s.preparation_status==='blocked'&&!closed(s)&&s.status!=='snoozed'?'Needs your help':['accepted','instructions'].includes(s.status)?'Preparing':label(s.status);
@@ -1076,7 +1080,7 @@ const statusLine=(()=>{const line=(text,cls='')=>`<p class="note status-line${cl
  if(closed(s)||s.status==='snoozed')return '';let o=null;if(s.status==='prepared'&&s.outcome)try{o=JSON.parse(s.outcome)}catch{}
  if(o?.state==='already_done')return line('Looks done already. Mark it done if that’s right.',' outcome done');
  if(hint)return line((handled.fleet?'Done: ':'Looks handled: ')+hint,' handled');
- if(ask&&s.preparation_status==='blocked')return line('Needs you: '+sentence(ask),' outcome');
+ if(ask&&s.preparation_status==='blocked')return askLine(s,ask);
  if(s.early&&s.status==='accepted')return line('Preparing this ahead, so it arrives ready.');
  // A send on its way or done has its own line below; the result's needs line no longer holds.
  if(smart.some(a=>sendBusy(a.state||s.action_status)&&!['local_preparation'].includes((a.state||s.action_status)?.status)))return '';
@@ -1108,10 +1112,16 @@ const elapsed=v=>{const t=Math.max(0,Math.floor((Date.now()-new Date(v))/1000));
 // A preparation that waits on the browser (a sign-in, a captcha, a code) offers it: the viewer when this install has one
 // (with the task's tab brought to the front there too), otherwise its tab brought to the front on this computer.
 const browserLink=(id,b)=>!b?'':`<button type="button" class="browser-link" data-signin data-task="${esc(id)}" data-page="${esc(b.page||'')}">${b.sign_in?'Sign in':'Sign in here'}</button> `+(b.link?`<a class="browser-link" href="${esc(b.link)}" target="_blank" rel="noopener" data-browser-focus="${esc(id)}"${b.sign_in?` data-task="${esc(id)}"`:''} data-page="${esc(b.page||'')}" data-quiet>Open the browser</a>`:`<button type="button" class="browser-link" data-browser-focus="${esc(id)}"${b.sign_in?` data-task="${esc(id)}"`:''} data-page="${esc(b.page||'')}">Open the browser</button>`);
+// A run that stopped to ask: its questions as the Needs you line, each clear choice as quick picks that fill the answer box.
+function askLine(s,ask){const qs=s.preparation_questions||[];
+ if(!qs.length)return `<p class="note status-line outcome">${esc('Needs you: '+sentence(ask))}</p>`;
+ return `<div class="note status-line outcome ask-line"><span>Needs you:</span>${qs.map((q,i)=>`<div class="ask-q"><p>${esc(sentence(q.question))}</p>${q.options?.length?`<div class="reason-chips" role="group" aria-label="${esc(q.question)}">${q.options.map(o=>`<button type="button" class="reason pick" aria-pressed="false" data-id="${s.id}" data-choice="pick" data-q="${i}" data-pick="${esc(o)}">${esc(o)}</button>`).join('')}</div>`:''}</div>`).join('')}</div>`}
+// Technical details on a card that asks: without local paths or long internal IDs.
+const plainDetails=t=>String(t||'').replace(/(?:~|\/home|\/tmp|\/var|\/Users|memory|data)\/[^\s,;:)"'”]+/g,'…').replace(/\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g,'…');
 function preparationNote(s,ask=''){
 if(s.preparation_status==='queued')return `<p class="note">${s.preparation_retried?'That attempt didn’t finish, so I’m trying once more…':'I’ll start shortly.'}</p>`;
 // A blocker that asks the owner already leads as the Needs you line: not said twice.
-if(s.preparation_status==='blocked')return `${ask?'':`<p class="note">${format(s.preparation_reason||'I couldn’t finish this. You can try again or change the request.')} ${browserLink(s.id,s.preparation_browser)}</p>`}${s.preparation_details?`<details class="tech" data-tech="${s.id}" ${openTech.has(s.id)?'open':''}><summary>Details</summary><pre>${linkText(s.preparation_details)}</pre></details>`:''}`;
+if(s.preparation_status==='blocked')return `${ask?(s.preparation_browser?`<p class="note">${browserLink(s.id,s.preparation_browser)}</p>`:''):`<p class="note">${format(s.preparation_reason||'I couldn’t finish this. You can try again or change the request.')} ${browserLink(s.id,s.preparation_browser)}</p>`}${s.preparation_details?`<details class="tech" data-tech="${s.id}" ${openTech.has(s.id)?'open':''}><summary>${ask?'Technical details':'Details'}</summary><pre>${linkText(ask?plainDetails(s.preparation_details):s.preparation_details)}</pre></details>`:''}`;
 return `<p class="note">Preparing… ${s.preparation_started_at?`<span class="elapsed" data-since="${esc(s.preparation_started_at)}">${elapsed(s.preparation_started_at)}</span>`:''}${s.preparation_retried?' · second try':''} <span data-browser="${s.id}">${browserLink(s.id,s.preparation_browser)}</span></p><div class="prep"><ul class="steps" data-steps="${s.id}" aria-live="polite">${(steps.get(s.id)||[]).map(x=>`<li>${esc(x.title)}</li>`).join('')}</ul><div class="peek" data-peek="${s.id}">${peekHTML(s.id)}</div></div>`}
 // While a preparation is on the browser, its card shows that tab live: a small picture every few seconds (right of
 // the steps; below them on a phone), larger on a click. Only the tab the run opened itself; gone when it stops.
@@ -1904,6 +1914,11 @@ if(b.dataset.original){openEmail(id).catch(e=>toast(e.message,true));return}
 if(b.dataset.result){try{if(b.dataset.result==='copy')await copyResult(id);else await openResult(id)}catch(e){toast(e.message,true)}return}
 if(!b.dataset.choice)return;const choice=b.dataset.choice;
 if(choice==='send'){openSend(id);return}
+if(choice==='pick'){const s=state.suggestions.find(x=>x.id===id),q=s?.preparation_questions?.[+b.dataset.q];if(!q)return;
+ if(!changing.has(id)){changing.add(id);dismissing.delete(id);render()}
+ const t=$('#feedback-'+id);if(!t)return;const head=sentence(q.question)+' ';
+ t.value=[...t.value.split('\n').filter(l=>l.trim()&&!l.startsWith(head)),head+b.dataset.pick].join('\n');t.classList.add('filled');
+ for(const x of document.querySelectorAll(`#task-${CSS.escape(id)} .pick[data-q="${b.dataset.q}"]`))x.setAttribute('aria-pressed',String(x.dataset.pick===b.dataset.pick));t.focus();return}
 if(choice==='change'||choice==='answer'){changing.add(id);dismissing.delete(id);render();$('#feedback-'+id)?.focus();return}
 if(choice==='cancel-change'){changing.delete(id);render();return}
 if(choice==='reject'){dismissing.add(id);changing.delete(id);render();return}

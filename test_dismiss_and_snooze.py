@@ -216,3 +216,42 @@ class AnswerQuestion(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class AskConcretely(unittest.TestCase):
+    """A run that stops for the owner's input names it as short questions (quick picks for a clear choice); a Try again
+    that came back asking again isn't offered once more."""
+    setUp=ux.UX.setUp
+    def labels(self,row):return [b['label'] for block in a.controls(row)['blocks'] for b in block['buttons']]
+    def block(self,questions=None):
+        with self.store.connect() as db:db.execute("UPDATE preparations SET status='running'")
+        return self.store.preparation_blocked(self.sid,ux.UX.job(self)['job_id'],'Finishing this needs your notes and one choice.','long technical dump',None,questions)
+    def test_questions_are_stored_shown_and_cleared(self):
+        ux.UX.decide(self,'accept')
+        asks=[{'question':'What did you notice when you tried it?'},{'question':'Which score fills the gap?','options':['3.9','4.0']}]
+        self.block(asks)
+        row=ux.UX.row(self)
+        self.assertEqual(row['preparation_questions'],asks);self.assertEqual(row['preparation_cause'],'accept')
+        self.assertEqual(self.labels(row)[:3],['Answer','Try again','Mark done'])
+        self.assertTrue(a.card(row).endswith('Needs you: What did you notice when you tried it? Which score fills the gap?'))
+        # Asked even right after a browser step, because it named its questions
+        self.assertEqual(a.ask_question({**row,'preparation_browser':{'since':'x'}},[]),'What did you notice when you tried it? Which score fills the gap?')
+        # Try again without anything new, and it stops asking again: no Try again any more
+        ux.UX.decide(self,'retry','r1');self.block(asks)
+        row=ux.UX.row(self)
+        self.assertEqual(row['preparation_cause'],'retry');self.assertNotIn('Try again',self.labels(row));self.assertEqual(self.labels(row)[0],'Answer')
+        # An answer starts a new run: the old questions are gone
+        ux.UX.decide(self,'other','o1','Notes: it was quick to set up.')
+        self.assertEqual(ux.UX.row(self).get('preparation_questions'),[])
+    def test_malformed_questions_are_refused(self):
+        for bad in ([{'question':''}],[{'question':'x'*201}],[{'question':'Q?','options':['a']*5}],[{'question':'Q?'}]*4,'Q?'):
+            with self.subTest(bad=bad):
+                self.assertRaises(ValueError,a.blocker_questions,bad,True)
+        self.assertEqual(a.blocker_questions('not json'),[])
+    def test_the_prompt_asks_for_plain_questions_and_defaults_for_small_calls(self):
+        text=open(a.ROOT/'PREPARATION.md').read()
+        for words in ('questions=[{question, options}]','make sense on its own','sensible default'):
+            self.assertIn(words,text)
+        job=a.preparation_prompt({'suggestion_id':self.sid,'job_id':'j'})
+        self.assertIn("questions=[{question:<one short plain question>",job);self.assertIn('sensible default you make yourself',job)
+

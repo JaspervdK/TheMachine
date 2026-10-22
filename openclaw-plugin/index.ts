@@ -48,11 +48,12 @@ function answeredOnly(item:any){try{return item.status==='prepared'&&JSON.parse(
 // Same rule as ask_question() in assistant.py.
 function askQuestion(item:any){if(['completed','rejected','snoozed'].includes(item.status)||item.handled_hint)return '';
   const reason=String(item.preparation_reason||'').trim();
-  if(item.preparation_status==='blocked'&&reason&&!item.preparation_error&&!item.preparation_browser&&retryLabel(reason)!=='Continue')return reason;
+  const qs=Array.isArray(item.preparation_questions)?item.preparation_questions:[];
+  if(item.preparation_status==='blocked'&&reason&&!item.preparation_error&&retryLabel(reason)!=='Continue'&&(qs.length||!item.preparation_browser))return qs.length?qs.map((q:any)=>q.question).join(' '):reason;
   if(item.status!=='prepared'||item.preparation_status==='blocked'||taskActions(item).some((a:any)=>a.kind!=='open'))return '';
   try{const o=JSON.parse(item.outcome||'{}'),q=String(o.needs||'').trim();return o.state==='needs_you'&&q.endsWith('?')?q:''}catch{return ''}}
 function cardButtons(item: any) {
-  const choices = askQuestion(item) ? [['Answer', 'other'], ...(item.preparation_status==='blocked' ? [[retryLabel(item.preparation_reason),'retry']] : []), ['Mark done', 'complete'], ['Snooze', 'snooze'], ['Not needed', 'reject']] : ['completed', 'rejected'].includes(item.status) ? (item.undo_until && Date.parse(item.undo_until)>Date.now() ? [['Undo','undo']] : []) : item.status === 'snoozed'
+  const choices = askQuestion(item) ? [['Answer', 'other'], ...(item.preparation_status==='blocked'&&item.preparation_cause!=='retry' ? [[retryLabel(item.preparation_reason),'retry']] : []), ['Mark done', 'complete'], ['Snooze', 'snooze'], ['Not needed', 'reject']] : ['completed', 'rejected'].includes(item.status) ? (item.undo_until && Date.parse(item.undo_until)>Date.now() ? [['Undo','undo']] : []) : item.status === 'snoozed'
     ? [['Bring back', 'accept'], ['Change time', 'snooze'], ['Not needed', 'reject']]
     : ['accepted', 'prepared', 'instructions'].includes(item.status)
       ? item.preparation_status!=='blocked'&&answeredOnly(item)
