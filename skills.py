@@ -18,6 +18,8 @@ the same author is a new version to read and install again. Text from someone el
 who sent it."""
 from __future__ import annotations
 
+import contextlib
+
 import base64
 import datetime as dt
 import hashlib
@@ -425,26 +427,30 @@ class Skills:
         return row
 
     # -- the owner's own
-    def save(self, skill_id, name, description, body):
+    def save(self, skill_id, name, description, body, _db=None):
         if isinstance(body, str) and not (name or description) and FRONTMATTER.match(body):
             name, description, body = from_skill_md(body)
         name, description, body = validate(name, description, body)
         stamp, sha = now(), digest(name, description, body)
-        with self.connect() as db:
+        with contextlib.nullcontext(_db) if _db is not None else self.connect() as db:
             if skill_id:
                 row = self.row(db, skill_id)
                 if row['status'] not in ('on', 'off'):
                     raise ValueError('Install or approve it first')
                 if row['sha'] == sha:
-                    return self.view()
+                    return row['id'] if _db is not None else self.view()
                 slug = row['slug'] if row['name'] == name else self._slug(db, name, keep_id=row['id'])
+                saved_id = row['id']
                 db.execute('UPDATE skills SET name=?,slug=?,description=?,body=?,sha=?,version=version+1,updated_at=? WHERE id=?',
                            (name, slug, description, body, sha, stamp, row['id']))
             else:
                 if db.execute("SELECT COUNT(*) FROM skills WHERE status IN ('on','off')").fetchone()[0] >= MAX_SKILLS:
                     raise ValueError(f'At most {MAX_SKILLS} skills')
+                saved_id = 'sk_' + secrets.token_hex(8)
                 db.execute("INSERT INTO skills(id,slug,name,description,body,status,origin,sha,created_at,updated_at) VALUES(?,?,?,?,?,'on','mine',?,?,?)",
-                           ('sk_' + secrets.token_hex(8), self._slug(db, name), name, description, body, sha, stamp, stamp))
+                           (saved_id, self._slug(db, name), name, description, body, sha, stamp, stamp))
+        if _db is not None:
+            return saved_id
         self.sync()
         return self.view()
 

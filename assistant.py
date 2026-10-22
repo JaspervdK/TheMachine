@@ -2066,6 +2066,7 @@ class Store:
             # How the owner writes, a short block per channel (and All): learned from their style notes, their edits
             # and their own messages, editable in Settings. Like facts, what was learned, not what messages say.
             db.execute('CREATE TABLE IF NOT EXISTS voices(channel TEXT PRIMARY KEY,text TEXT NOT NULL,source TEXT NOT NULL,ref TEXT,updated_at TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS voice_merges(channel TEXT PRIMARY KEY,previous TEXT,merged_text TEXT NOT NULL,merged_ref TEXT)')
             # Notes about one kind of task, offered as a skill on a card (Create skill / Add to <skill> / Not now).
             # fact_ids: the notes; target_id: the owner's own skill they'd go into, else a new one with name/description/body.
             db.execute('CREATE TABLE IF NOT EXISTS skill_clusters(id TEXT PRIMARY KEY,fact_ids TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL,'
@@ -3721,13 +3722,14 @@ class Store:
         text = '\n'.join(lines)
         return text if len(text) <= limit else text[:limit] + '\n…'
 
-    def behaviour(self, days=30):
+    def behaviour(self, days=30, accounts=None):
         """What the owner did, not only what they wrote: drafts they edited before sending, cards
         they snoozed again and again, and cards they dismissed within minutes without a note."""
         since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
         with self.connect() as db:
             edits = {}
-            for r in db.execute('SELECT e.*,s.title FROM draft_edits e JOIN suggestions s ON s.id=e.suggestion_id WHERE e.created_at>=? ORDER BY e.created_at', (since,)):
+            scope = ' AND EXISTS(SELECT 1 FROM json_each(s.account_ids) WHERE value IN (' + ','.join('?' for _ in accounts) + '))' if accounts is not None else ''
+            for r in db.execute('SELECT e.*,s.title FROM draft_edits e JOIN suggestions s ON s.id=e.suggestion_id WHERE e.created_at>=?' + scope + ' ORDER BY e.created_at', (since, *(sorted(accounts) if accounts is not None else []))):
                 first = edits.setdefault(r['suggestion_id'], {'title': r['title'], 'before': r['before_body'], 'before_subject': r['before_subject'], 'at': r['created_at']})
                 first.update(after=r['after_body'], after_subject=r['after_subject'], at=r['created_at'], kind=r['kind'], source=r['source'])
             edited_revisions = {r[0] for r in db.execute('SELECT new_revision FROM draft_edits')}
@@ -3841,12 +3843,12 @@ class Store:
             lines += ['Dismissed within minutes, without a note (not worth their time):'] + [f'- {t}' for t in b['quick_dismissed'][:10]]
         return '\n'.join(lines)
 
-    def draft_edits_text(self, limit=4, chars=500, kinds=None):
+    def draft_edits_text(self, limit=4, chars=500, kinds=None, accounts=None):
         """Recent drafts the owner rewrote before sending (or answered themselves instead), for the next drafts:
         only those on the given channels (draft kinds) when given, since email edits say little about a chat."""
         clip = lambda v: v if len(v) <= chars else v[:chars] + '…'
         out = []
-        for e in [e for e in self.behaviour()['edits'] if kinds is None or e['kind'] in kinds][:limit]:
+        for e in [e for e in self.behaviour(accounts=accounts)['edits'] if kinds is None or e['kind'] in kinds][:limit]:
             subject = f"\n  Subject: {e['before_subject']} → {e['after_subject']}" if e['before_subject'] != e['after_subject'] and e['after_subject'] else ''
             changed = 'They wrote this themselves instead' if e['source'] == 'elsewhere' else 'The owner changed it to'
             out.append(f"- {e['title']}{subject}\n  Your draft: {clip(e['before'])}\n  {changed}: {clip(e['after'])}")
@@ -3927,6 +3929,19 @@ class Store:
                 raise ValueError('Nothing was merged into that')
             if not channel and not skill:
                 db.execute('UPDATE facts SET removed_at=? WHERE id=? AND removed_at IS NULL', (now(), int(fact_id)))
+            elif channel:
+                channel = voice_channel(channel)
+                saved = db.execute('SELECT * FROM voice_merges WHERE channel=?', (channel,)).fetchone()
+                current = db.execute('SELECT text,ref FROM voices WHERE channel=?', (channel,)).fetchone()
+                # Undo the learned merge, not a subsequent owner edit of this channel.
+                if saved and current and current['text'] == saved['merged_text'] and current['ref'] == saved['merged_ref']:
+                    previous = json.loads(saved['previous']) if saved['previous'] else None
+                    if previous:
+                        db.execute('UPDATE voices SET text=?,source=?,ref=?,updated_at=? WHERE channel=?',
+                                   (previous['text'], previous['source'], previous['ref'], now(), channel))
+                    else:
+                        db.execute('DELETE FROM voices WHERE channel=?', (channel,))
+                db.execute('DELETE FROM voice_merges WHERE channel=?', (channel,))
             db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'condense',?,?)", (now(), f'Undid a condense: {back} note' + ('' if back == 1 else 's') + ' back', into))
         return {'restored': back}
 
@@ -4055,14 +4070,15 @@ class Store:
                 decision_id = originals[-1]['decision_id']
             if source != 'owner':
                 if decision_id:
-                    if not db.execute("SELECT 1 FROM decisions WHERE id=? AND source IN ('telegram','dashboard') AND feedback!=''", (decision_id,)).fetchone():
+                    if not db.execute("SELECT 1 FROM decisions WHERE id=? AND source IN ('telegram','dashboard') AND feedback!='' "
+                                      "AND id NOT IN (SELECT decision_id FROM decision_annotations)", (decision_id,)).fetchone():
                         raise ValueError('A voice is learned from one of the owner’s own written notes (decision_id) or their edit of a draft (edit_id)')
                     ref = 'decision:' + str(decision_id)
                 elif edit_id and db.execute('SELECT 1 FROM draft_edits WHERE id=?', (edit_id,)).fetchone():
                     ref = 'edit:' + str(edit_id)
                 else:
                     raise ValueError('A voice is learned from one of the owner’s own written notes (decision_id) or their edit of a draft (edit_id)')
-            current = db.execute('SELECT text FROM voices WHERE channel=?', (channel,)).fetchone()
+            current = db.execute('SELECT * FROM voices WHERE channel=?', (channel,)).fetchone()
             if source == 'assistant' and current and len(text) < VOICE_KEEP * len(current['text']):
                 raise ValueError(f'Keep the whole {channel} block: rewrite it with the note worked in and only what it contradicts dropped. '
                                  f'The current block is:\n{current["text"]}')
@@ -4072,8 +4088,15 @@ class Store:
                     db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'voice',?,?)", (now(), f'Removed {channel} voice', None))
                 return {'channel': channel, 'removed': bool(current)}
             if originals:
+                # A later owner edit starts a new undo baseline; consecutive learned merges share the first one.
+                prior = db.execute('SELECT merged_text,merged_ref FROM voice_merges WHERE channel=?', (channel,)).fetchone()
+                if prior and (not current or current['text'] != prior['merged_text'] or current['ref'] != prior['merged_ref']):
+                    db.execute('DELETE FROM voice_merges WHERE channel=?', (channel,))
+                db.execute('INSERT INTO voice_merges(channel,previous,merged_text,merged_ref) VALUES(?,?,?,?) '
+                           'ON CONFLICT(channel) DO UPDATE SET merged_text=excluded.merged_text,merged_ref=excluded.merged_ref',
+                           (channel, json.dumps(dict(current)) if current else None, text, ref))
                 self.merge_originals(db, originals, 'voice:' + channel, f'{channel} voice')
-            if current and current['text'] == text:
+            if current and current['text'] == text and (not originals or current['ref'] == ref):
                 return {'channel': channel, 'text': text, 'unchanged': True, **({'merged': len(originals)} if originals else {})}
             if not current and db.execute('SELECT count(*) FROM voices').fetchone()[0] >= VOICE_MAX:
                 raise ValueError(f'At most {VOICE_MAX} voices: work this into an existing channel or All')
@@ -4229,9 +4252,12 @@ class Store:
             people = {a.lower() for e in mine for _, a in email.utils.getaddresses([str(meta(e).get(f) or '') for f in ('from', 'to', 'cc')]) if a}
             people -= {str(a.get('email', '')).lower() for a in self.accounts}
             accounts = {e.get('account_id') for e in mine}
+            if not accounts:
+                return []
             predicate, params = own_predicate(kind, ids)
             rows = db.execute(f'SELECT id,account_id,occurred_at,title,body,metadata FROM events WHERE deleted=0 AND kind=? AND ({predicate}) '
-                              'ORDER BY occurred_at DESC,id DESC LIMIT ?', (kind, *params, scan)).fetchall()
+                              f'AND account_id IN ({",".join("?" for _ in accounts)}) '
+                              'ORDER BY occurred_at DESC,id DESC LIMIT ?', (kind, *params, *sorted(accounts), scan)).fetchall()
         picked = []
         for row in rows:
             text = own_text(row['body'])
@@ -4251,7 +4277,7 @@ class Store:
         """What a draft for this card gets about how the owner writes: every channel's voice (this card's marked),
         the owner's own recent messages there, and how they changed earlier drafts on that channel."""
         with self.connect() as db:
-            kinds, _ = self.card_channels(suggestion_id, db)
+            kinds, events = self.card_channels(suggestion_id, db)
             voices = self.voices(db)
         here = [EVENT_CHANNELS[k] for k in kinds]
         parts = []
@@ -4264,7 +4290,7 @@ class Store:
             parts.append(f"The owner's own recent {examples[0]['channel']} messages, newest first. Match how these read (length, greeting, sign-off, "
                          'language, capitals, punctuation, emoji, formality), not what they say:\n' +
                          '\n'.join(f"- ({e['where']}) {e['text']}" if e['where'] else f"- {e['text']}" for e in examples))
-        edits = self.draft_edits_text(kinds=[k for k, v in DRAFT_EVENT_KINDS.items() if v in kinds] or None)
+        edits = self.draft_edits_text(kinds=[k for k, v in DRAFT_EVENT_KINDS.items() if v in kinds], accounts={e['account_id'] for e in events})
         if edits:
             parts.append(f"Earlier {here[0] + ' ' if here else ''}drafts the owner changed before sending, or answered themselves instead. Write the next drafts "
                          'the way they ended up writing these (length, tone, what they cut or added):\n' + edits)
@@ -4288,15 +4314,15 @@ class Store:
                     continue
                 kind = DRAFT_EVENT_KINDS[draft['kind']]
                 _, events = self.card_channels(row['id'], db)
-                conversations = {c for c in (conversation_of(kind, e['metadata'] if isinstance(e['metadata'], dict) else json.loads(e['metadata'] or '{}'))
-                                             for e in events if e['kind'] == kind) if c}
+                conversations = {(e.get('account_id'), c) for e in events if e['kind'] == kind
+                                 if (c := conversation_of(kind, e['metadata'] if isinstance(e['metadata'], dict) else json.loads(e['metadata'] or '{}')))}
                 if not conversations:
                     continue
                 until = (dt.datetime.fromisoformat(row['ready']) + dt.timedelta(days=days)).isoformat()
                 predicate, params = own_predicate(kind, ids)
-                found = next((e for e in db.execute(f'SELECT id,title,body,metadata FROM events WHERE deleted=0 AND kind=? AND ({predicate}) '
+                found = next((e for e in db.execute(f'SELECT id,account_id,title,body,metadata FROM events WHERE deleted=0 AND kind=? AND ({predicate}) '
                                                     'AND occurred_at>? AND occurred_at<=? ORDER BY occurred_at,id LIMIT 50', (kind, *params, row['ready'], until))
-                              if conversation_of(kind, json.loads(e['metadata'] or '{}')) in conversations), None)
+                              if (e['account_id'], conversation_of(kind, json.loads(e['metadata'] or '{}'))) in conversations), None)
                 if not found:
                     continue
                 text, before = own_text(found['body']), next_actions.draft_text(draft).strip()
@@ -4554,7 +4580,7 @@ class Store:
         db.execute("UPDATE action_jobs SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status IN ('queued','blocked')",(now(),suggestion_id))
         db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (suggestion_id,))
         cluster = db.execute("SELECT id FROM skill_clusters WHERE suggestion_id=? AND status IN ('pending','declined','failed')", (suggestion_id,)).fetchone()
-        if cluster and choice in ('accept', 'reject', 'complete'):  # a skill from notes: done here, no Do it run
+        if cluster and choice in ('accept', 'reject', 'complete') and not (choice == 'accept' and row['status'] == 'snoozed'):  # Bring back isn't Create skill
             db.execute('UPDATE skill_clusters SET status=?,updated_at=? WHERE id=?', ('accepting' if choice == 'accept' else 'declined', now(), cluster['id']))
             if choice == 'accept':
                 db.execute("UPDATE suggestions SET status='completed',completed_from='pending' WHERE id=?", (suggestion_id,))
@@ -4938,6 +4964,12 @@ class Store:
             if isinstance(url,str) and urllib.parse.urlsplit(url).scheme in ('https','http') and url not in originals:
                 originals.append(url)
         extra={'result_files':files,'original_urls':originals[:5]}
+        proposal = db.execute("SELECT * FROM skill_clusters WHERE suggestion_id=?", (suggestion['id'],)).fetchone()
+        if proposal:
+            extra['skill_proposal'] = {'name': proposal['name'], 'body': proposal['body'],
+                                      'notes': [r[0] for r in db.execute('SELECT text FROM facts WHERE id IN (' + ','.join('?' for _ in json.loads(proposal['fact_ids'])) + ') ORDER BY id', json.loads(proposal['fact_ids']))]}
+            if proposal['status'] in ('pending', 'declined', 'failed'):
+                extra['labels'] = {'accept': 'Add to ' + proposal['target_name'] if proposal['target_id'] else 'Create skill', 'reject': 'Not now'}
         action=suggestion.get('next_action');action=json.loads(action) if isinstance(action,str) else action
         if action:
             states={r['revision']:{**{k:r[k] for k in ('status','error','message_id','snooze_status','snooze_until','snooze_error') if r[k] is not None or k in ('status','error','message_id')},
@@ -6115,7 +6147,7 @@ def conversation_of(kind, m):
 def own_predicate(kind, owner_slack_ids=()):
     """SQL for "the owner wrote this" on one kind of message, with its parameters (same rule as own_message)."""
     if kind == 'gmail.message':
-        return "instr(metadata,'\"SENT\"')>0", []
+        return "EXISTS(SELECT 1 FROM json_each(json_extract(events.metadata,'$.labels')) WHERE value='SENT')", []
     if kind == 'slack.message':
         return f"json_extract(metadata,'$.user_id') IN ({','.join('?' for _ in owner_slack_ids)})", list(owner_slack_ids)
     return "json_extract(metadata,'$.from_me')=1", []
@@ -7036,6 +7068,8 @@ def controls(row, root=''):
         choices = [('Do it','accept'),('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
     if ask_question(row,actions):choices=[('Answer','other'),*([(retry_label(row.get('preparation_reason')),'retry')] if row.get('preparation_status')=='blocked' and not retry_pointless(row) else []),('Mark done','complete'),('Snooze','snooze'),('Not needed','reject')]
+    if row['status'] == 'pending' and row.get('labels'):
+        choices = [(row['labels'].get(choice, label), choice) for label, choice in choices]
     buttons=[]
     link=(row.get('preparation_browser') or {}).get('link') or ''
     signin=(row.get('preparation_browser') or {}).get('signin_url') or ''
@@ -7060,6 +7094,8 @@ def controls(row, root=''):
             elif action['kind']=='handoff' and root and not row.get('handled_hint'):buttons.append({'label':next_actions.label(action),'action':{'type':'url','url':f"{root}#task-{row['id']}"}})  # the Fleet handoff form is on the dashboard
     if row['status'] in ('prepared','completed') and any(a['kind']=='merge' and (a.get('state') or row.get('action_status') or {}).get('undo_until','')>now() for a in actions):
         buttons.append({'label':'Undo merge','action':{'type':'callback','value':f"assistant:{row['id']}:unmerge"}})  # a merged fix stays reversible for a day
+    if row.get('skill_proposal') and root:
+        buttons.append({'label':'Read instructions','action':{'type':'url','url':f"{root}#card={row['id']}"}})
     buttons+=[{'label':label,'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}} for label,choice in choices]
     # Fewer rows: up to three buttons per row that fit a phone's width, in order, so a Send
     # shares its row with Mark done. Same rule as packRows in the plugin.
@@ -9722,16 +9758,14 @@ class App:
             cards = [n['suggestion_id'] for n in notes if n['suggestion_id']]
             events = list(dict.fromkeys(i for r in db.execute('SELECT event_ids FROM suggestions WHERE id IN (' + ','.join('?' for _ in cards) + ')', cards)
                                         for i in json.loads(r['event_ids'] or '[]')))[:20] if cards else []
-        if not events:
-            raise ValueError('These notes have no cards behind them to show as evidence')
-        cluster = 'sc_' + secrets.token_hex(6)
-        title = f'Add {len(notes)} notes to {target["name"]}' if target else f'Turn {len(notes)} notes into a skill: {name}'
-        lines = '\n'.join('- ' + n['text'] for n in notes)
-        text = (f'{description}\n\nThese notes are all about this, so they could live in one skill instead of every task\'s list:\n{lines}\n\n'
-                + (f'Add to {target["name"]} adds them to that skill. ' if target else 'Create skill makes it, on, under Skills. ')
-                + 'The notes stay visible there. Not now keeps them as they are.')
-        card = self.store.suggest('skill-notes:' + cluster, title, text, events)
-        with self.store.connect() as db:
+            if not events:
+                raise ValueError('These notes have no cards behind them to show as evidence')
+            cluster = 'sc_' + secrets.token_hex(6)
+            title = sentences(f'Add {len(notes)} notes to {target["name"]}' if target else f'Turn {len(notes)} notes into a skill: {name}', 90)
+            text = (sentences(description, 250) + f"\n\nI can keep these {len(notes)} notes together in a skill. Read the full instructions and notes before deciding. "
+                    + (f'Add to {target["name"]} adds them to that skill. ' if target else 'Create skill makes it, on, under Skills. ')
+                    + 'Not now keeps them as they are.')
+            card = self.store.suggest('skill-notes:' + cluster, title, text[:700], events, _db=db)
             db.execute("INSERT INTO skill_clusters VALUES(?,?,?,?,?,?,?,?,'pending',NULL,?,?)",
                        (cluster, json.dumps(sorted(ids)), name, description, body, target and target['id'], target and target['name'], card['id'], now(), now()))
         return {'id': cluster, 'suggestion_id': card['id']}
@@ -9743,21 +9777,21 @@ class App:
             return 0
         with self.store.connect() as db:
             rows = [dict(r) for r in db.execute("SELECT * FROM skill_clusters WHERE status='accepting'")]
-        for c in rows:
+        for offered in rows:
             try:
-                if c['target_id']:
-                    with self.store.connect() as db:
-                        row = db.execute("SELECT * FROM skills WHERE id=? AND status IN ('on','off') AND origin!='shared'", (c['target_id'],)).fetchone()
-                    if not row:
-                        raise ValueError('That skill is gone')
-                    self.skills.save(row['id'], row['name'], row['description'], row['body'].rstrip() + '\n\n' + c['body'])
-                    skill_id = row['id']
-                else:
-                    self.skills.save(None, c['name'], c['description'], c['body'])
-                    with self.store.connect() as db:
-                        skill_id = db.execute("SELECT id FROM skills WHERE name=? AND origin='mine' ORDER BY created_at DESC LIMIT 1", (c['name'],)).fetchone()['id']
                 with self.store.connect() as db:
                     db.execute('BEGIN IMMEDIATE')
+                    # Dashboard and the worker can both pick the same offer; reconcile under the write lock.
+                    c = db.execute("SELECT * FROM skill_clusters WHERE id=? AND status='accepting'", (offered['id'],)).fetchone()
+                    if not c:
+                        continue
+                    if c['target_id']:
+                        row = db.execute("SELECT * FROM skills WHERE id=? AND status IN ('on','off') AND origin!='shared'", (c['target_id'],)).fetchone()
+                        if not row:
+                            raise ValueError('That skill is gone')
+                        skill_id = self.skills.save(row['id'], row['name'], row['description'], row['body'].rstrip() + '\n\n' + c['body'], _db=db)
+                    else:
+                        skill_id = self.skills.save(None, c['name'], c['description'], c['body'], _db=db)
                     ids = json.loads(c['fact_ids'])
                     moved = db.execute('UPDATE facts SET removed_at=?,merged_into=? WHERE removed_at IS NULL AND id IN (' + ','.join('?' for _ in ids) + ')',
                                        (now(), 'skill:' + skill_id, *ids)).rowcount
@@ -9767,8 +9801,10 @@ class App:
             except (ValueError, OSError) as error:
                 LOG.error('skill from notes error=%s', type(error).__name__)
                 with self.store.connect() as db:
-                    db.execute("UPDATE skill_clusters SET status='failed',updated_at=? WHERE id=?", (now(), c['id']))
-                    db.execute("UPDATE suggestions SET status='pending' WHERE id=?", (c['suggestion_id'],))
+                    db.execute("UPDATE skill_clusters SET status='failed',updated_at=? WHERE id=? AND status='accepting'", (now(), offered['id']))
+                    db.execute("UPDATE suggestions SET status='pending' WHERE id=? AND EXISTS(SELECT 1 FROM skill_clusters WHERE id=? AND status='failed')", (offered['suggestion_id'], offered['id']))
+        # Files are derived from the committed skills, never a reason to replay the database operation.
+        self.skills.sync()
         return len(rows)
 
     def style_step(self):
@@ -10508,6 +10544,7 @@ class App:
         # release custody merely because a network request timed out.
         action = 'stop' if expired or run['status'] == 'recovering' else 'start' if run['status'] == 'starting' else 'status'
         request = {'kind': 'review', 'job_id': run['run_id'], 'action': action}
+        offered_edits = []
         if request['action'] == 'start':
             self.store.note_rule_files(RULE_FILES)
             request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text(),
@@ -10524,7 +10561,7 @@ class App:
                              + (f"Current voices:\n{voices}\n" if voices else '') + lines)
                     if len(request['message']) + len(block) < 18000:  # the runner refuses over 20,000
                         request['message'] += block
-                        self.store.edits_to_learn(run['run_id'])
+                        offered_edits += re.findall(r'\(edit_id ([^)]+)\)', lines)
             except Exception as error:
                 LOG.error('edits to learn error=%s', type(error).__name__)
             try:  # style notes no voice or rule came from yet (older ones, or ones a preparation didn't keep)
@@ -10537,7 +10574,7 @@ class App:
                              + (f"Current voices:\n{voices}\n" if voices else '') + lines)
                     if len(request['message']) + len(block) < 18000:
                         request['message'] += block
-                        self.store.style_notes_to_learn(run_id=run['run_id'])
+                        offered_edits += ['note:' + value for value in re.findall(r'\(decision_id ([^)]+)\)', lines)]
             except Exception as error:
                 LOG.error('style notes error=%s', type(error).__name__)
             try:  # condense what was learned, now and then, so it stays short and doesn't contradict itself
@@ -10562,7 +10599,7 @@ class App:
                               + (f"Their own skills: {own}." if own else "They have no skills of their own yet."))
                     if len(request['message']) + len(block) < 18000:
                         request['message'] += block
-                        self.store.condense_text(run_id=run['run_id'])
+                        offered_edits.append('condense:' + now()[:10])
             except Exception as error:
                 LOG.error('condense error=%s', type(error).__name__)
             try:  # "There's a skill for this": installed skills that aren't ready here, while there is room this week
@@ -10579,10 +10616,13 @@ class App:
                                                + ". A task that is one of theirs is offered as a handoff to their Machine (Hand it off).")
                 except Exception as error:
                     LOG.error('fleet teammates error=%s', type(error).__name__)
+        # Offering learning context is not delivery: a Gateway outage must leave it eligible on retry.
         receipt = runner(request)
         result = receipt.get('status', 'unavailable')
         with self.store.connect() as db:
             if result == 'admitted':
+                db.executemany('INSERT OR IGNORE INTO edits_offered(edit_id,run_id,offered_at) VALUES(?,?,?)',
+                               [(value, run['run_id'], now()) for value in offered_edits])
                 db.execute("UPDATE review_runs SET status='running',updated_at=?,error=NULL,error_phase=NULL,retry_at=NULL,unavailable_since=NULL WHERE run_id=?", (now(), run['run_id']))
             elif result in REVIEW_TERMINAL:
                 getattr(self, 'model_usage_wake', threading.Event()).set()  # read the limits again after a run

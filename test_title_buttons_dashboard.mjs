@@ -33,6 +33,8 @@ try{
   assert.ok([...lines].some(l=>/^Professionally nosy since /.test(l)),'a start-date tagline');
   assert.ok([...lines].some(l=>l==='Day 10 of reading everything. Still not bored.'),'a day-count tagline');
   assert.ok(![...lines].some(l=>/October 9/.test(l)),'no fixed date');
+  // On mobile the fifth tab is outside the horizontal viewport: scroll it into view first.
+  await page.locator('nav').evaluate(nav=>{nav.style.scrollSnapType='none';nav.scrollLeft=nav.scrollWidth});
   await page.locator('nav [data-tab="people"]').click();
   await page.evaluate(id=>people(id),org.id);
   const edit=page.locator('#people-view .graph-detail .name-row [data-org-edit]');await edit.waitFor();
