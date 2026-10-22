@@ -179,10 +179,11 @@ suggestions[2].source_line=undefined;suggestions[2].event_ids='[3]';suggestions[
 await page.locator('#task-'+ids[2]).getByRole('button',{name:'Read email',exact:true}).waitFor();
 suggestions[0].source_line=undefined;suggestions[2].source_line=undefined;await page.evaluate(()=>refresh());}
 for(const width of [320,360,390,768]){
-await page.setViewportSize({width,height:844});
+await page.setViewportSize({width,height:844});await page.locator('#task-'+ids[0]+' .meta time').waitFor();  // laid out at the new width
 const layout=await page.locator('#task-'+ids[0]+' .meta').evaluate(el=>{
- const clock=el.querySelector('time'),box=clock.getBoundingClientRect();
- return {height:el.getBoundingClientRect().height,clockWidth:box.width,clockHeight:box.height,overflow:document.documentElement.scrollWidth>innerWidth};
+ const clock=el.querySelector('time'),box=clock.getBoundingClientRect(),hidden=[];
+ for(let e=el;e;e=e.parentElement)if(getComputedStyle(e).display==='none')hidden.push(e.tagName+'#'+e.id);
+ return {height:el.getBoundingClientRect().height,clockWidth:box.width,clockHeight:box.height,overflow:document.documentElement.scrollWidth>innerWidth,hidden};
 });
 assert.ok(layout.height<110,`Scheduled card header too tall at ${width}px: ${JSON.stringify(layout)}`);
 assert.ok(layout.clockWidth>75&&layout.clockHeight<32,`Timestamp crushed at ${width}px: ${JSON.stringify(layout)}`);
@@ -199,6 +200,7 @@ await page.evaluate(()=>notice('Broke.',true));await page.waitForTimeout(5000);a
 {const card=page.locator('#task-'+ids[0]);await tap(card,'Change');const box=card.locator('#feedback-'+ids[0]);
 await box.fill('First line');await box.press('Enter');await box.pressSequentially('Second line');assert.equal(await box.inputValue(),'First line\nSecond line');
 const before=posts.length;await box.press('Control+Enter');await box.waitFor({state:'detached'});assert.equal(posts.length,before+1);assert.equal(posts.at(-1).feedback,'First line\nSecond line');}
+{const menu=page.locator('#task-'+ids[1]+' .more-actions');await menu.locator('summary').click();await page.evaluate(()=>refresh());assert.equal(await menu.getAttribute('open'),'','a refresh keeps an opened More menu open');await menu.locator('summary').click();}
 {const card=page.locator('#task-'+ids[1]);const before=posts.length;await tap(card,'Not needed');assert.equal(posts.length,before);
 await card.getByText('Why isn’t this needed?').waitFor();await card.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal(await card.getByText('Why isn’t this needed?').count(),0);
 // Ctrl+Enter in any filled field clicks its editor's primary button: here Confirm not needed. Empty fields do nothing.

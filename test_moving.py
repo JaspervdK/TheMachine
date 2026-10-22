@@ -252,6 +252,17 @@ class Moving(unittest.TestCase):
         self.assertFalse((config_path.parent / 'machine-token').exists())
 
     @unittest.skipUnless(HAS_OPENSSL, 'openssl not installed')
+    def test_a_wrong_passphrase_that_decrypts_to_noise_is_still_a_wrong_passphrase(self):
+        # The cipher has no integrity check: about 1 in 256 wrong passphrases get past the padding check.
+        path, _ = self.export('a long example passphrase')
+        config_path, space, claw = self.target()
+        def noise(args, passphrase, decrypt=False):
+            Path(args[args.index('-out') + 1]).write_bytes(b'\x93\x07noise' * 40)
+        with patch.object(moving, '_openssl', side_effect=noise), \
+                self.assertRaisesRegex(moving.MoveError, 'Wrong export code or passphrase'):
+            moving.import_(path, config_path, passphrase='not the right one', workspace=space, openclaw_home=claw)
+
+    @unittest.skipUnless(HAS_OPENSSL, 'openssl not installed')
     def test_no_plain_copy_is_left_when_packing_fails(self):
         with patch.object(moving, 'readme', side_effect=RuntimeError('disk full')):
             with self.assertRaises(RuntimeError):

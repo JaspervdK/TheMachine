@@ -1657,6 +1657,7 @@ if(!running&&reviewWasLive){reviewWasLive=false;refresh();return}reviewWasLive=!
 function render(){renderNeedsYou();
 const finishedOpen=$('#finished-list')?.open||false,laterOpen=$('#later-list')?.open||false,promisesOpen=$('#promises-list')?.open||false;
 const drafts=Object.fromEntries([...document.querySelectorAll('#suggestions textarea,#suggestions .fleet-card input[id]')].filter(t=>t.value).map(t=>[t.id,t.value]));
+const moreOpen=[...document.querySelectorAll('#suggestions article[id] .more-actions[open]')].map(d=>d.closest('article[id]').id);  // a refresh keeps an opened More menu open
 const shown=state.suggestions.filter(s=>scopeFilter==='all'||s.scope===scopeFilter);
 const dueKey=s=>s.due||'9999',outstanding=shown.filter(s=>!closed(s)&&s.status!=='snoozed').sort((a,b)=>dueKey(a)<dueKey(b)?-1:dueKey(a)>dueKey(b)?1:(b.weight||0)-(a.weight||0)),later=shown.filter(s=>s.status==='snoozed'),finished=shown.filter(closed);
 const fleetCards=scopeFilter==='personal'?[]:fleetCardsOf(fleetData);
@@ -1675,6 +1676,7 @@ $('#suggestions').innerHTML=(outstanding.length||fleetCards.length?'':firstLookE
 // Snoozed cards are out of the way by choice: folded by default, open state kept across refreshes.
 +(later.length?`<details id="later-list" ${laterOpen?'open':''}><summary><span>Coming back later</span><span class="count">${later.length}</span></summary>${laterCards(later)}</details>`:'')+promisesList(promisesOpen)+`<details id="finished-list" ${finishedOpen?'open':''}><summary><span>Done / dismissed this week</span><span class="count">${recent.length}</span></summary>${recent.map(suggestionCard).join('')||'<p class="muted">Nothing finished or dismissed this week.</p>'}${older?`<p class="muted">${older} older ${older===1?'item is':'items are'} under Feedback.</p>`:''}</details>`;
 for(const[id,v]of Object.entries(drafts)){const t=document.getElementById(id);if(t){t.value=v;t.classList.add('filled')}}
+for(const id of moreOpen){const menu=document.getElementById(id)?.querySelector('.more-actions');if(menu)menu.open=true}
 fleetSync();
 const choiceTone={accept:'mint',complete:'mint',reject:'muted',snooze:'lavender',other:'amber',reopen:'lavender',undo:'lavender',retry:'lavender',update:'lavender'};
 {const q=state.quality;const pct=v=>v==null?'–':`${v}%`;const was=(v,prev)=>prev==null||v==null?'':`<small>${v>prev?'up':v<prev?'down':'same'} from ${prev}%</small>`;

@@ -344,6 +344,22 @@ def _open_file(path, config):
     return message_seal.Sealer(key).open_bytes(path.read_bytes())
 
 
+def _decrypt(archive_path, plain, passphrase):
+    """Opens an encrypted export with the passphrase as typed, then as an export code is written. The cipher has no
+    integrity check, so a wrong passphrase sometimes (about 1 in 256) "decrypts" to noise: only a result that starts like
+    an archive counts, the rest is a wrong passphrase, not a damaged export."""
+    for attempt in dict.fromkeys(p for p in (passphrase, _code_form(passphrase)) if p):
+        try:
+            _openssl(['-in', str(archive_path), '-out', str(plain)], attempt, decrypt=True)
+        except MoveError:
+            continue
+        with open(plain, 'rb') as file:
+            head = file.read(4)
+        if head[:2] == b'\x1f\x8b' or head == b'PK\x03\x04':  # gzip or zip
+            return
+    raise MoveError('Wrong export code or passphrase, or the file is damaged')
+
+
 def _openssl(args, passphrase, decrypt=False):
     env = {**os.environ, PASSPHRASE_ENV: passphrase}
     try:
@@ -481,12 +497,7 @@ def _import(archive_path, config_path, passphrase=None, workspace=None, openclaw
             if not passphrase:
                 raise MoveError('This export is encrypted; give its export code or passphrase')
             plain = temp / 'export.tar.gz'
-            try:
-                _openssl(['-in', str(archive_path), '-out', str(plain)], passphrase, decrypt=True)
-            except MoveError:
-                if _code_form(passphrase) in (None, passphrase):
-                    raise
-                _openssl(['-in', str(archive_path), '-out', str(plain)], _code_form(passphrase), decrypt=True)
+            _decrypt(archive_path, plain, passphrase)
         unpacked = temp / 'export'
         try:
             with (zipfile.ZipFile(plain) if zipfile.is_zipfile(plain) else tarfile.open(plain, 'r:gz')) as archive:

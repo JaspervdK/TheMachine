@@ -36,7 +36,7 @@ await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const base='http://127.0.0.1:'+server.address().port;
 const shots=process.env.SHOTS;if(shots)await mkdir(shots,{recursive:true});
 const errors=[];let browser;
-const wait=async(f,what)=>{for(let i=0;i<300;i++){if(await f())return;await new Promise(r=>setTimeout(r,25))}throw Error('timed out: '+what)};
+const wait=async(f,what)=>{for(const end=Date.now()+20000;Date.now()<end;){if(await f())return;await new Promise(r=>setTimeout(r,25))}throw Error('timed out: '+what)};
 try{
  browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
  for(const [width,height] of [[1280,900],[390,844]]){
@@ -66,10 +66,11 @@ try{
   // Let reading ahead settle first (shorter cards put more of them on screen).
   for(let last='';last!==JSON.stringify(hits);){last=JSON.stringify(hits);await page.waitForTimeout(500)}
   const seen=Object.keys(hits.email)[0];
-  const before=JSON.stringify(hits);
+  // Only the opened card counts: reading ahead may still pick up a card that scrolled into view.
+  const of=id=>JSON.stringify([hits.originals[id],hits.email[id]]),before=of(seen);
   await page.locator(`#task-${seen} .read-original`).click();
   await page.frameLocator('#email-dialog iframe').locator('#hello').waitFor();
-  assert.equal(JSON.stringify(hits),before,'opened from what was read ahead');
+  assert.equal(of(seen),before,'opened from what was read ahead');
   await page.keyboard.press('Escape');
   for(const k of Object.keys(hits))hits[k]={};
   // Connections, Add.

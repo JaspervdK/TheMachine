@@ -32,7 +32,7 @@ class Promises(unittest.TestCase):
         self.addCleanup(zone.stop)
         self.clock = patch.object(a, 'now', return_value=MONDAY)
         self.clock.start()
-        self.addCleanup(self.clock.stop)
+        self.addCleanup(lambda: self.clock.stop())  # at() swaps the patcher: stop whichever one runs last, or now() stays faked for later tests
         self.store = a.Store(Path(self.tmp.name) / 'events.sqlite')
         self.store.owner_user_ids = {'UOWNER1'}
         self.store.commit_page('work', {}, [email('theirs', '2026-10-19T08:00:00+00:00'),
