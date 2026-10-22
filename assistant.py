@@ -5931,7 +5931,8 @@ def card(row):
         status = 'Ready to approve. Nothing goes out until you do.'
     if row.get('handled_hint') and row['status'] not in ('completed','rejected') and outcome.get('state') != 'already_done':
         try:
-            status = 'Looks handled: ' + json.loads(row['handled_hint'])['reason'].rstrip('.') + '. Mark it done if so.'
+            hint = json.loads(row['handled_hint'])
+            status = ('Done: ' + hint['reason'].rstrip('.') + '.') if hint.get('fleet') else 'Looks handled: ' + hint['reason'].rstrip('.') + '. Mark it done if so.'
         except (ValueError, KeyError, TypeError):
             pass
     if row.get('preparation_status') in ('starting','running'):
@@ -6066,7 +6067,7 @@ def controls(row, root=''):
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
                 buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
             elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
-            elif action['kind']=='handoff' and root:buttons.append({'label':next_actions.label(action),'action':{'type':'url','url':f"{root}#task-{row['id']}"}})  # the Fleet handoff form is on the dashboard
+            elif action['kind']=='handoff' and root and not row.get('handled_hint'):buttons.append({'label':next_actions.label(action),'action':{'type':'url','url':f"{root}#task-{row['id']}"}})  # the Fleet handoff form is on the dashboard
     if row['status'] in ('prepared','completed') and any(a['kind']=='merge' and (a.get('state') or row.get('action_status') or {}).get('undo_until','')>now() for a in actions):
         buttons.append({'label':'Undo merge','action':{'type':'callback','value':f"assistant:{row['id']}:unmerge"}})  # a merged fix stays reversible for a day
     buttons+=[{'label':label,'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}} for label,choice in choices]

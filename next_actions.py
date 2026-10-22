@@ -249,6 +249,8 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
             or not re.fullmatch(r'[A-Za-z][A-Za-z0-9 ,’\-/]+',value['label'])
             or value['label'].lower() in ('done','mark done','dismiss','reject','snooze','change','prepare','continue','do it','yes')):
         raise ValueError('Use a short specific action label, not a generic or owner-status button')
+    if value.get('kind') in PLAIN_LINKS and isinstance(value.get('body'), str):
+        value = {**value, 'body': body_text(value['body'])}  # they arrive as plain text: a Markdown link would show raw
     if value.get('kind') == 'open':
         if set(value) - {'kind', 'url', 'label'} or urlsplit(str(value.get('url', ''))).scheme != 'https':
             raise ValueError('Use an HTTPS original-page link, not executable instructions')
@@ -594,6 +596,9 @@ def closing_spaced(body):
     return '\n'.join(lines)
 
 
+# Drafts that reach the recipient as plain text (WhatsApp, LinkedIn, X, a Fleet handoff): links go as words (URL).
+# Email and Slack keep Markdown links: the send turns them into real links (body_html, slack_text).
+PLAIN_LINKS = ('handoff', 'whatsapp', 'linkedin', 'x')
 LINK = re.compile(r'\[([^\[\]\n]{1,200})\]\((https://[^\s()<>]{1,2000})\)|(https://[^\s<>]*[^\s<>.,;:!?)\]])')
 
 

@@ -199,12 +199,100 @@ class Requests(unittest.TestCase):
                        {'kind': 'slack', 'label': 'Send to Kim', 'user_id': 'U0123ABCD', 'to_name': 'Kim Doe', 'body': self.HANDOFF_TEXT, 'delegate': True})):
             with self.subTest(kind=action['kind']):
                 draft = self.fleet.handoff_draft(self.ready_card([action], f'k-{n}'))
-                self.assertEqual(draft['summary'], self.HANDOFF_TEXT)  # the drafted message itself, never "Drafted a short handoff..."
+                # the drafted message itself, never "Drafted a short handoff..."; plain text on their side, so a link is words (URL)
+                self.assertEqual(draft['summary'], self.HANDOFF_TEXT.replace('[Report](https://tracker.example/1)', 'Report (https://tracker.example/1)'))
                 self.assertEqual([m['member_id'] for m in draft['fleets'][0]['members']], ['kim1', 'pat1'])  # who it is for comes first
         # a hand-off message to someone outside the Fleet is not a Fleet handoff: the card's own text, members as listed
         draft = self.fleet.handoff_draft(self.ready_card([{'kind': 'slack', 'to_email': 'ann@other.example', 'to_name': 'Ann', 'body': 'Hi Ann', 'delegate': True}], 'k-ann'))
         self.assertNotEqual(draft['summary'], 'Hi Ann')
         self.assertEqual([m['member_id'] for m in draft['fleets'][0]['members']], ['pat1', 'kim1'])
+
+    # -- handled elsewhere: a teammate already closed their card on the same email
+    def stripe_alert(self, status, key, next_action=None, decided=None):
+        """A card on a vendor alert that reached the team's shared address, as each teammate's copy of it has."""
+        alert = mail('work', 1, 'Vendor via Info <info@acme.example>', 'info@acme.example', message_id='<alert-7@vendor.example>')
+        self.store.commit_page('work', {}, [alert])
+        with self.store.connect() as db:
+            event_id = db.execute('SELECT id FROM events WHERE source_id=?', (alert['source_id'],)).fetchone()[0]
+            db.execute('INSERT INTO suggestions(id,dedupe_key,title,body,event_ids,account_ids,status,next_action,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                       ('c-' + key, key, 'Check the tax alert', 'Check it with the accountant.', json.dumps([event_id]), '["work"]', status,
+                        json.dumps(next_action) if next_action else None, NOW.isoformat()))
+            if decided:
+                db.execute("INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,'','dashboard',?)",
+                           ('d-' + key, 'c-' + key, decided, NOW.isoformat()))
+        return 'c-' + key
+
+    def handled(self, state):
+        return fleet.Fleet.handled_key('s' * 64, state, 'alert-7@vendor.example')
+
+    def hint(self, card):
+        found = self.card_row(card)['handled_hint']
+        return json.loads(found) if found else None
+
+    def test_a_closed_card_on_a_team_email_tells_the_fleet_only_that_it_was_handled(self):
+        card = self.stripe_alert('rejected', 'k-closed', decided='reject')
+        mine = self.stripe_alert('completed', 'k-own', decided='complete')
+        with self.store.connect() as db:  # an alert only the owner got stays out
+            db.execute("UPDATE events SET metadata=json_set(metadata,'$.from','vendor@vendor.example','$.to','owner@acme.example') "
+                       'WHERE id=(SELECT value FROM json_each((SELECT event_ids FROM suggestions WHERE id=?)))', (mine,))
+        self.fleet.handled_round()
+        self.assertEqual(self.relay.sent('/claim'), [])  # Ask me first: nothing goes out
+        self.fleet.set_rule(self.ref, 'pat1', 'handling', 'always')
+        for _ in range(3):
+            self.fleet.handled_round()
+        self.assertEqual([c['key'] for c in self.relay.sent('/claim')], [self.handled('settled')])  # Not needed: settled, not done; once
+        self.assertNotIn('alert-7', json.dumps(self.relay.calls))  # never the Message-ID, never content
+        self.assertNotIn('accountant', json.dumps(self.relay.calls))
+        with self.store.connect() as db:
+            db.execute("UPDATE suggestions SET status='pending' WHERE id=?", (card,))  # reopened: no longer handled
+        self.fleet.handled_round()
+        self.assertEqual(self.relay.sent('/claim')[-1], {'fleet': self.ref, 'key': self.handled('settled'), 'release': True})
+
+    def test_a_card_to_hand_to_the_teammate_who_already_handled_it_says_done_and_offers_no_handoff(self):
+        self.with_kim()
+        handoff = {'kind': 'handoff', 'label': 'Hand off to Kim', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': 'Can you check it?', 'revision': 'abc123def456'}
+        card = self.stripe_alert('prepared', 'k-to-kim', {'kind': 'menu', 'actions': [handoff]})
+        other = self.stripe_alert('pending', 'k-other')
+        with self.store.connect() as db:
+            db.execute("INSERT INTO deliveries(suggestion_id,status,message_id,updated_at) VALUES(?,'sent','m1',?)", (card, NOW.isoformat()))
+        self.relay.claims[self.handled('settled')] = 'kim1'  # Kim closed theirs as Not needed
+        self.fleet.handled_round()
+        self.assertEqual(self.hint(card), {'reason': 'Kim already handled this', 'event_ids': [], 'fleet': True, 'at': self.hint(card)['at']})
+        self.assertIsNone(self.hint(other))  # Not needed by Kim isn't done for a card that isn't theirs to take
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT needs_edit FROM deliveries WHERE suggestion_id=?', (card,)).fetchone()[0], 1)  # Telegram catches up
+        with self.assertRaisesRegex(ValueError, 'Kim already handled this'):
+            self.fleet.hand_off(card, self.ref, 'kim1', 'Check the tax alert', 'Can you check it?')
+        row = next(r for r in self.store.snapshot([])['suggestions'] if r['id'] == card)
+        self.assertIn('Done: Kim already handled this.', a.card(row))
+        self.relay.claims[self.handled('done')] = 'kim1'  # Mark done by Kim: done for every card on it
+        self.fleet.handled_round()
+        self.assertEqual(self.hint(other)['reason'], 'Kim already handled this')
+        self.relay.claims.clear()  # Kim reopened theirs
+        self.fleet.handled_round()
+        self.assertEqual((self.hint(card), self.hint(other)), (None, None))
+        self.fleet.set_rule(self.ref, 'kim1', 'handling', 'never')  # someone whose handling the owner doesn't want to see
+        self.relay.claims[self.handled('done')] = 'kim1'
+        self.fleet.handled_round()
+        self.assertIsNone(self.hint(other))
+
+    def test_an_owners_own_hint_is_kept_and_the_fleet_never_overwrites_it(self):
+        card = self.stripe_alert('pending', 'k-own-hint')
+        own = {'reason': 'They replied it is paid.', 'event_ids': [1], 'at': NOW.isoformat()}
+        with self.store.connect() as db:
+            db.execute('UPDATE suggestions SET handled_hint=? WHERE id=?', (json.dumps(own), card))
+        self.relay.claims[self.handled('done')] = 'pat1'
+        self.fleet.handled_round()
+        self.relay.claims.clear()
+        self.fleet.handled_round()
+        self.assertEqual(self.hint(card), own)
+
+    def test_plain_text_drafts_carry_links_as_words_and_url_while_email_keeps_a_real_link(self):
+        n, link = a.next_actions, '[the tax settings](https://vendor.example/tax)'
+        handoff = n.validate({'kind': 'handoff', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': f'Check {link} please.'}, CONFIG, ['work'])
+        self.assertEqual(handoff['body'], 'Check the tax settings (https://vendor.example/tax) please.')
+        mail_draft = n.validate({'kind': 'email', 'account_id': 'work', 'to': ['sam@client.example'], 'subject': 'Tax', 'body': f'See {link}.'}, CONFIG, ['work'])
+        self.assertEqual(mail_draft['body'], f'See {link}.')  # the send makes it a link (body_html)
 
     def test_a_preparation_learns_who_is_in_the_fleet_and_how_to_hand_it_to_them(self):
         self.with_kim()
@@ -221,7 +309,7 @@ class Requests(unittest.TestCase):
         self.assertEqual(self.fleet.teammate_lines(personal), '')  # a personal card is nobody's in the Fleet
         action = a.next_actions.validate({'kind': 'handoff', 'label': 'Hand off to Kim', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe',
                                           'body': self.HANDOFF_TEXT}, CONFIG, ['work'])
-        self.assertEqual(a.next_actions.preview(action), 'Hand off to Kim Doe through The Machine\n\n' + self.HANDOFF_TEXT)
+        self.assertEqual(a.next_actions.preview(action), 'Hand off to Kim Doe through The Machine\n\n' + self.HANDOFF_TEXT.replace('[Report](https://tracker.example/1)', 'Report (https://tracker.example/1)'))  # plain text on their side
         for bad in ({'label': 'Send to Kim'}, {'body': ''}, {'body': 'x' * 1001}, {'send_now': True}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 a.next_actions.validate({'kind': 'handoff', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': 'Take it', **bad}, CONFIG, ['work'])

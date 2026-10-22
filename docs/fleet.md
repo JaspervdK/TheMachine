@@ -34,7 +34,10 @@ their answers, and the log.
    week: how close each teammate is, their last contact and open promises. The answers show on the meeting's card
    ("From your Fleet: …") and go into its preparation.
 3. **No double replies.** When the same email reaches you and a teammate, the first one to take it on claims it. The
-   other's card says "<teammate> is on it", with **I'll handle it** to take it over.
+   other's card says "<teammate> is on it", with **I'll handle it** to take it over. Once one of you closes theirs (an
+   email that reached a teammate or a shared address like info@), the other's open card says "Done: <teammate> already
+   handled this", with **Mark done** first: when they marked it done, or when the card would hand it to them and they
+   closed it either way. It then offers no handoff. If they reopen theirs, so does yours.
 
 A Family Fleet asks three things: when everyone is free, to-dos for one another, and family plans to say yes or no to.
 See [Family](family.md). Work questions never travel in a Family.
@@ -166,7 +169,8 @@ itself:
   (anything else asks you first), **Never about** others (declined, and their people are left out of every answer),
   and **Only people from your work accounts** (on unless you turn it off). For shared emails it goes by the other
   companies on the email.
-- **Shared emails:** Always tells the Network you're on an email you both got, and shows who is on the ones they took.
+- **Shared emails:** Always tells the Network you're on an email you both got, shows who is on the ones they took, and
+  says when you closed one (done, or done or not needed). Ask me first and Always both show what they closed.
   Ask me first sends nothing by itself: the card says who else got it, with **Tell them you're on it**. Never sends
   nothing. A rule saved as Off before the three choices is Never; Share is Always.
 - **Only from your dashboard.** Rules and approvals can't be changed by Telegram, the command line, the API token or the
@@ -201,7 +205,7 @@ brings the Telegram message up to date.
 - Answers coming back are checked against the same fixed form (closeness from a short list, a year-month, whole
   numbers, short names) before they are shown or added to a preparation, where they are marked as data from
   teammates' Machines, not instructions.
-- Claims on shared emails travel as a hash keyed with the Fleet's secret, never the email.
+- Claims on shared emails, and that you closed one, travel as a hash keyed with the Fleet's secret, never the email.
 - Intros, handoffs and follow-up splits (`fleet_requests.py`) are kept to a fixed form and only shown, quoted. An
   intro draft is built by code from the owner's own graph and waits for their Send; nothing is sent, drafted or
   done before the owner accepts (or set Always accept). Telegram and phone buttons are the same Accept and Decline

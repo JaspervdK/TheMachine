@@ -29,6 +29,7 @@ import re
 
 import family
 import graph
+import next_actions
 
 LOG = logging.getLogger('personal-assistant')
 SCHEMA = '''
@@ -339,7 +340,8 @@ class Requests:
         # What goes to them is the message itself: the handoff text the card's preparation wrote for a teammate (or its
         # hand-off message to them), never the card's own account of what The Machine did ("Drafted a handoff...").
         ready = self.handoff_text(card)
-        summary = ready['body'] if ready else re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', re.sub(r'[*_`#>]', '', card['body'] or ''))
+        # A Fleet handoff is plain text on their side: a Markdown link goes as its words and the URL.
+        summary = next_actions.body_text(ready['body']) if ready else next_actions.body_text(re.sub(r'[*`#>]', '', card['body'] or ''))
         first = lambda m: not (ready and self.is_person(m, ready))  # the teammate that text is for comes first, so it's the default
         fleets = [f for f in [{'id': ref, 'name': self.fleets()[ref].get('name'),
                    'members': sorted(({'member_id': m['member_id'], 'name': fleet.label(m), '_first': first(m)} for m in self.teammates(ref)
@@ -413,6 +415,13 @@ class Requests:
         with self.connect() as db:
             latest = db.execute('SELECT id FROM decisions WHERE suggestion_id=? ORDER BY rowid DESC LIMIT 1', (str(card_id),)).fetchone()
             expected = latest['id'] if latest else None
+            hint = db.execute('SELECT handled_hint FROM suggestions WHERE id=?', (str(card_id),)).fetchone()
+        try:
+            hint = json.loads(hint['handled_hint'] or 'null') if hint else None
+        except ValueError:
+            hint = None
+        if isinstance(hint, dict) and hint.get('fleet'):  # a teammate already closed it: nothing to hand on
+            raise ValueError(fleet.clean(hint.get('reason'), 120) or 'A teammate already handled this')
         draft = self.handoff_draft(card_id)
         if not self.member(fleet_ref, member_id):
             raise ValueError('Not someone in that Fleet')

@@ -11,6 +11,8 @@ with a long poll. A Work Fleet asks three things:
 - meeting: what a teammate knows about the outside people in a meeting: closeness, last contact and open promises
   (counts; the promises themselves with details). Asked by itself only when the owner turned that on.
 - handling: who is on an email several teammates got. A hash of the Fleet's secret and the Message-ID, never the email.
+  Once the owner closes a card on such an email, a second hash says only that: done (Mark done) or settled (done or
+  Not needed). A teammate's open card on the same email then shows who already handled it (handled_round).
 - brief: "what the Fleet saw", daily or weekly. Each teammate's Machine answers with aggregate facts only (companies
   with counts and last-touch dates, which went quiet, hashes of unanswered and answered inbound emails, hashes of
   meetings with outside people); the asking Machine assembles the brief by plain code (brief_facts, assemble_brief).
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS fleet_log(id INTEGER PRIMARY KEY,at TEXT NOT NULL,dir
 CREATE TABLE IF NOT EXISTS fleet_claims(suggestion_id TEXT PRIMARY KEY,key TEXT NOT NULL,holder_id TEXT,holder_name TEXT,
   mine INTEGER NOT NULL DEFAULT 0,checked_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS fleet_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS fleet_handled(key TEXT PRIMARY KEY,suggestion_id TEXT NOT NULL,fleet TEXT NOT NULL,state TEXT NOT NULL,at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS fleet_notices(id TEXT PRIMARY KEY,fleet TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,
   version INTEGER NOT NULL,view TEXT NOT NULL,at TEXT NOT NULL,received_at TEXT NOT NULL,notified_at TEXT,
   telegram_message_id TEXT,telegram_key TEXT,decided_at TEXT,reason TEXT);
@@ -111,6 +114,8 @@ DOMAIN = re.compile(r'(?:[a-z0-9-]+\.)+[a-z]{2,}')
 MONTH = re.compile(r'\d{4}-\d{2}')
 DAY = re.compile(r'\d{4}-\d{2}-\d{2}')
 DIRECTORY_EVERY, CLAIMS_EVERY, MEETINGS_EVERY, OFF_WAIT = 600, 120, 300, 600
+HANDLED_DAYS, HANDLED_PER_ROUND = 14, 2  # closed cards announced as handled: this recent (the relay keeps claims 14 days); claims
+# a round, well under the relay's limit on claims per hour
 REMOVALS_EVERY = 600  # how often a Machine asks whether a Work Fleet it left wants its company data removed
 DELIVERY_EVERY = 120  # how often the open questions' delivery state is asked (network.py)
 MEETING_DAYS, APPROVAL_DAYS = 7, 3
@@ -2477,6 +2482,116 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
             self.log(db, 'out', fleet, None, 'your Fleet', 'handling', 'You took over an email a teammate was on', 'claimed')
         return {'mine': bool(result.get('mine'))}
 
+    # -- handled elsewhere: a teammate already closed their card on the same email
+    @staticmethod
+    def handled_key(secret, state, message_id):
+        """sha256(Fleet secret, state, Message-ID): a teammate with the same email can match it; nobody else learns anything."""
+        return hashlib.sha256((secret + '\n' + state + '\n' + message_id).encode()).hexdigest()
+
+    def shared_messages(self, db, card, ref):
+        """Message-IDs of a card's emails in this Fleet's accounts that went to the team: a teammate, or an address at the
+        team's own domain that isn't the owner's (info@, a group). Mail only the owner got stays out."""
+        ids = json.loads(card['event_ids'] or '[]')
+        accounts = self.fleet_accounts(ref)
+        if not ids or not accounts:
+            return []
+        team = {e.lower() for m in self.teammates(ref) for e in m.get('emails', [])}
+        domains = {e.rsplit('@', 1)[1] for e in team if '@' in e} - graph.FREEMAIL
+        mine, found = self.my_emails(), []
+        for event in db.execute(f"SELECT metadata FROM events WHERE kind='gmail.message' AND deleted=0 AND id IN ({','.join('?' * len(ids))}) "
+                                f"AND account_id IN ({','.join('?' * len(accounts))}) ORDER BY occurred_at DESC", (*ids, *accounts)):
+            meta = json.loads(event['metadata'] or '{}')
+            message_id = str(meta.get('message-id') or '').strip().strip('<>').lower()
+            people = {a for _, a in graph.addresses(meta.get('to')) + graph.addresses(meta.get('cc')) + graph.addresses(meta.get('from'))}
+            if message_id and (people & team or any(a not in mine and a.rsplit('@', 1)[-1] in domains for a in people)):
+                found.append(message_id)
+        return list(dict.fromkeys(found))[:5]
+
+    def handled_round(self):
+        """Tell the Fleet which shared emails the owner closed (only the hashes, in Fleets where a teammate's handling rule
+        is Always), and mark the owner's open cards a teammate already closed: done by them, or settled by the very
+        teammate the card would hand it to. Only from teammates whose handling rule isn't Never. Plain code."""
+        fleets = self.fleets()
+        with self.connect() as db:
+            rules = {ref: {m['member_id']: self.rule(db, ref, m['member_id'], 'handling')[0] for m in self.teammates(ref)} for ref in self.work_fleets()}
+            rules = {ref: found for ref, found in rules.items() if fleets.get(ref, {}).get('secret') and any(r != 'never' for r in found.values())}
+            if not rules:
+                return
+            since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=HANDLED_DAYS)).isoformat()
+            closed = db.execute("SELECT s.id,s.status,s.event_ids FROM suggestions s WHERE s.status IN ('completed','rejected') AND "
+                                '(SELECT max(created_at) FROM decisions d WHERE d.suggestion_id=s.id)>=? ORDER BY s.created_at DESC LIMIT 300', (since,)).fetchall()
+            out = {r['key']: dict(r) for r in db.execute('SELECT * FROM fleet_handled')}
+            announce, keep = [], set()
+            for card in closed:
+                for ref in [r for r in rules if 'always' in rules[r].values()]:
+                    for message_id in self.shared_messages(db, card, ref):
+                        for state in (('done', 'settled') if card['status'] == 'completed' else ('settled',)):
+                            key = self.handled_key(fleets[ref]['secret'], state, message_id)
+                            keep.add(key)
+                            if key not in out:
+                                announce.append((key, card['id'], ref, state))
+            gone = [row for key, row in out.items() if key not in keep]  # reopened, or too old to matter
+            open_cards = db.execute(f"SELECT * FROM suggestions WHERE status IN ({','.join('?' * len(OPEN_CARD))}) ORDER BY created_at DESC LIMIT 300",
+                                    OPEN_CARD).fetchall()
+            look = {ref: {} for ref in rules}
+            for card in open_cards:
+                for ref in rules:
+                    for message_id in self.shared_messages(db, card, ref):
+                        for state in ('done', 'settled'):
+                            look[ref].setdefault(self.handled_key(fleets[ref]['secret'], state, message_id), []).append((card, state))
+        budget = HANDLED_PER_ROUND
+        for row in gone[:budget]:
+            budget -= 1
+            try:
+                self.relay.call('POST', '/claim', {'fleet': row['fleet'], 'key': row['key'], 'release': True})
+            except Exception as error:
+                LOG.info('fleet handled release error=%s', type(error).__name__)
+                continue
+            with self.connect() as db:
+                db.execute('DELETE FROM fleet_handled WHERE key=?', (row['key'],))
+        for key, card_id, ref, state in announce[:max(budget, 0)]:
+            try:
+                self.relay.call('POST', '/claim', {'fleet': ref, 'key': key})
+            except Exception as error:
+                LOG.info('fleet handled announce error=%s', type(error).__name__)
+                break
+            with self.connect() as db:
+                db.execute('INSERT OR REPLACE INTO fleet_handled(key,suggestion_id,fleet,state,at) VALUES(?,?,?,?,?)', (key, card_id, ref, state, now()))
+        found = {}  # card id -> (teammate's name, whether it's theirs to settle)
+        for ref, keys in look.items():
+            if not keys:
+                continue
+            try:
+                holders = self.relay.call('POST', '/claims', {'fleet': ref, 'keys': list(keys)[:200]}).get('claims', {})
+            except Exception as error:
+                LOG.info('fleet handled lookup error=%s', type(error).__name__)
+                return  # unknown is not "nobody handled it": leave the cards as they are
+            for key, cards in list(keys.items())[:200]:
+                holder = holders.get(key) or {}
+                member = self.member(ref, holder.get('member_id')) if holder and not holder.get('mine') else None
+                if not member or rules[ref].get(member['member_id']) == 'never':
+                    continue
+                for card, state in cards:
+                    handoff = self.handoff_text(card)
+                    if state == 'done' or (handoff and self.is_person(member, handoff)):
+                        found.setdefault(card['id'], clean(fleet_requests.first_name(member.get('name')), 80) or 'A teammate')
+        with self.connect() as db:
+            for card in open_cards:
+                hint = card['handled_hint']
+                try:
+                    by_fleet = bool(hint and json.loads(hint).get('fleet'))
+                except ValueError:
+                    by_fleet = False
+                name = found.get(card['id'])
+                if name and not hint:
+                    db.execute('UPDATE suggestions SET handled_hint=? WHERE id=? AND handled_hint IS NULL',
+                               (json.dumps({'reason': f'{name} already handled this', 'event_ids': [], 'fleet': True, 'at': now()}), card['id']))
+                elif by_fleet and not name:  # they reopened theirs: so is this one
+                    db.execute('UPDATE suggestions SET handled_hint=NULL WHERE id=?', (card['id'],))
+                else:
+                    continue
+                db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (card['id'],))
+
     # -- the loop
     def step(self, wait=25):
         import time
@@ -2541,6 +2656,7 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         if stamp - self.last['claims'] > CLAIMS_EVERY or not wait:
             self.last['claims'] = stamp
             self.claims_round()
+            self.handled_round()
         if stamp - self.last['meetings'] > MEETINGS_EVERY or not wait:
             self.last['meetings'] = stamp
             self.meeting_round()

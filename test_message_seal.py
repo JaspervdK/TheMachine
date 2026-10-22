@@ -501,7 +501,7 @@ class NothingOutsideTheSealedFields(unittest.TestCase):
             'android_inbox.payload': "its text sealed by the Gateway's plugin (message_seal.INBOX); deleted once read",
             'network_outbox.body': 'matched in SQL until sent; sealed end to end in transit (network_crypto)',
             'fleet_log.what': "a log of what was shared, by kind", 'fleet_out.context': 'matched in SQL: an id',
-            'fleet_rules.rule': 'a sharing rule', 'fleet_briefs.view': 'counts and dates (fleet brief)',
+            'fleet_rules.rule': 'a sharing rule', 'fleet_handled.state': 'done or settled', 'fleet_briefs.view': 'counts and dates (fleet brief)',
             'fleet_notices.view': 'a Fleet notice', 'fleet_notices.reason': 'a reason code', 'fleet_splits.title': 'a meeting title',
             'graph_nodes.info': 'people and organisations', 'network_people.reasons': 'why someone is suggested',
         }
