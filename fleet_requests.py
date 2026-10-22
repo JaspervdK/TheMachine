@@ -702,10 +702,11 @@ class Requests:
         with self.connect() as db:
             back = db.execute("SELECT o.* FROM fleet_out o JOIN suggestions s ON s.id=substr(o.context,9) WHERE o.kind='handoff' "
                               "AND o.context LIKE 'handoff:%' AND o.answered_at>=? AND s.status IN ('snoozed','completed') "
-                              "AND (o.status IN ('declined','expired') OR json_extract(o.answer,'$.stage')='declined') "
+                              "AND o.status IN ('declined','expired','answered') "
                               "AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.id='fleet-handoff-back-'||o.id)", (since,)).fetchall()
-        for row in back:
-            self.handoff_back(row)
+        for row in back:  # answers may be sealed at rest: their stage is read here, never in SQL
+            if row['status'] != 'answered' or (json.loads(row['answer'] or 'null') or {}).get('stage') == 'declined':
+                self.handoff_back(row)
         with self.connect() as db:
             rows = db.execute("SELECT r.*,s.status AS card_status,(SELECT COUNT(*) FROM action_jobs j WHERE j.suggestion_id=r.card_id AND j.status='sent') AS sent "
                               "FROM fleet_requests r JOIN suggestions s ON s.id=r.card_id WHERE r.stage IN ('accepted','adjusted') AND r.kind IN ('intro','handoff','todo')").fetchall()
