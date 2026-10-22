@@ -113,6 +113,54 @@ class WhatsAppSend(unittest.TestCase):
   def out(_):raise ValueError('WhatsApp is signed out, or linked to another number. Nothing was sent.')
   self.assertEqual(self.app().action_step(self.transport(preflight=out,send=lambda *_:self.fail('sent'))),'blocked')
 
+ # A card that reopens with a new draft after an earlier reply went out (2026-10-22): the old send
+ # never locks the new draft, the edit is what goes out, and every lock says what is going on.
+ def revise(self,body):
+  return self.app().action('revise_draft',{'suggestion_id':self.sid,'revision':self.row()['next_action']['revision'],'body':body},owner_dashboard=True)
+ def sent_then_reopened(self):
+  self.ready();self.confirm();self.app().action_step(self.transport())
+  self.assertEqual(self.job()['status'],'sent')
+  with self.store.connect() as db:db.execute("UPDATE suggestions SET status='accepted' WHERE id=?",(self.sid,))
+  self.save(body='Second draft.')
+ def test_new_draft_after_an_earlier_reply_sends_the_edited_text(self):
+  self.sent_then_reopened()
+  self.assertEqual(self.revise('My own words')['status'],'revised')
+  self.confirm('second-send');calls=[]
+  self.app().action_step(self.transport(send=lambda action,job:(calls.append(action['body']),{'message_id':'whatsapp:3EB0BB'})[1]))
+  self.assertEqual(calls,['My own words']);self.assertEqual(self.job()['status'],'sent')
+ def test_edit_waits_while_another_draft_of_the_card_is_sending(self):
+  self.sent_then_reopened()
+  with self.store.connect() as db:db.execute("UPDATE action_jobs SET status='sending',retry_at=?",('2999-01-01T00:00:00+00:00',))
+  with self.assertRaisesRegex(ValueError,'Another draft on this card is sending right now'):self.revise('Edit')
+  with self.store.connect() as db:db.execute("UPDATE action_jobs SET retry_at=?",('2000-01-01T00:00:00+00:00',))
+  self.assertEqual(self.revise('Edit')['status'],'revised')  # a stale lock expires
+ def test_this_drafts_own_attempt_says_what_happened(self):
+  self.ready();self.confirm()
+  with self.store.connect() as db:db.execute("UPDATE action_jobs SET status='sending'")
+  with self.assertRaisesRegex(ValueError,'^Sending… '):self.revise('Edit')
+  with self.store.connect() as db:db.execute("UPDATE action_jobs SET status='sent'")
+  with self.assertRaisesRegex(ValueError,r'^Sent at \d\d:\d\d\. '):self.revise('Edit')
+ def test_failed_send_says_so_and_can_be_retried(self):
+  self.ready();self.confirm()
+  self.assertEqual(self.app().action_step(self.transport(send=lambda *_:{'rejected':'refused'})),'failed')
+  self.assertIn('Last attempt failed: WhatsApp refused this WhatsApp message',a.card(self.row()))
+  self.confirm('retry');self.assertEqual(self.job()['status'],'queued')
+  self.assertEqual(self.app().action_step(self.transport()),'sent')
+ def test_unconfirmed_send_is_retried_only_by_the_owner_after_checking(self):
+  self.ready();self.confirm()
+  self.app().action_step(self.transport(send=lambda *_:{}))
+  self.assertEqual(self.job()['status'],'uncertain')
+  self.confirm('impatient');self.assertEqual(self.job()['status'],'uncertain')  # no second send yet
+  with self.assertRaisesRegex(ValueError,'still checking whether the last attempt went out'):self.revise('Edit')
+  self.assertFalse(any(b['label']=='Send reply' for block in a.controls(self.row())['blocks'] for b in block['buttons']))
+  with self.store.connect() as db:db.execute("UPDATE action_jobs SET updated_at=?,retry_at=?",('2000-01-01T00:00:00+00:00','2999-01-01T00:00:00+00:00'))
+  self.assertIn('Last attempt unconfirmed: I found no sign of it going out',a.card(self.row()))
+  self.assertTrue(any(b['label']=='Send reply' for block in a.controls(self.row())['blocks'] for b in block['buttons']))
+  self.assertEqual(self.revise('Edited after checking')['status'],'revised')
+  self.confirm('after-checking');calls=[]
+  self.app().action_step(self.transport(send=lambda action,job:(calls.append(action['body']),{'message_id':'whatsapp:3EB0CC'})[1]))
+  self.assertEqual(calls,['Edited after checking'])
+
 class WhatsAppTransportTest(unittest.TestCase):
  config={'wacli':'/opt/wacli','accounts':[WA]}
  action={'kind':'whatsapp','account_id':WA['id'],'chat_id':CHAT,'to_name':'Sam','body':'Yes, Friday works.'}

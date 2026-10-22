@@ -46,7 +46,7 @@ try{
  // A sent card: one green status, no needs-you line, no draft to approve.
  const done=page.locator(`#task-${sent}`);
  assert.equal(await done.count(),1);assert.equal(await done.locator('.outcome').count(),0);
- assert.ok((await done.textContent()).includes('Email sent.'));assert.ok(!(await done.textContent()).includes('Needs you'));
+ assert.match(await done.textContent(),/Email sent( at \d\d:\d\d)?\./);assert.ok(!(await done.textContent()).includes('Needs you'));
  assert.equal(await done.isVisible(),false,'a sent card leaves Ready for you');
  const widths=[];
  for(const width of [390,1280]){

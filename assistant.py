@@ -417,6 +417,35 @@ UPLOAD_ACTIONS, UPLOAD_REQUEST_BYTES = {'skill_import_upload', 'skill_import_rep
 # its code version records an error within AUTO_UNDO_NEW, or the fault it fixed comes back.
 UNDO_MERGE = dt.timedelta(hours=24)
 AUTO_UNDO_NEW = dt.timedelta(hours=1)
+# A message send whose outcome is unknown keeps its lock while the service checks the conversation
+# (it never resends by itself). After this long with no sign of it, the owner may send it again.
+SEND_RETRY_AFTER = dt.timedelta(minutes=30)
+MESSAGE_KINDS = ('email', 'linkedin', 'slack', 'x', 'whatsapp')
+
+
+def send_retry_ok(job, kind):
+    """An unconfirmed message send the owner may retry: it was checked for SEND_RETRY_AFTER without a trace."""
+    return (job['status'] == 'uncertain' and kind in MESSAGE_KINDS
+            and job['updated_at'] <= (dt.datetime.fromisoformat(now()) - SEND_RETRY_AFTER).isoformat())
+
+
+def send_lock(db, suggestion_id, revision, kind):
+    """Why this draft can't be edited now, in plain words, or None. Only this draft's own attempts
+    count: a reply already sent from the same card before it reopened with a new draft never blocks
+    the new one. Another draft of the card that is going out right now does, for its short lock."""
+    for job in db.execute('SELECT * FROM action_jobs WHERE suggestion_id=? ORDER BY updated_at DESC', (suggestion_id,)).fetchall():
+        if job['revision'] == revision:
+            if job['status'] == 'sent':
+                at = dt.datetime.fromisoformat(job['updated_at']).astimezone(local_tz()).strftime('%H:%M')
+                return f'Sent at {at}. This draft already went out.'
+            if job['status'] == 'sending':
+                return 'Sending… This draft is going out now.'
+            if job['status'] == 'uncertain' and not send_retry_ok(job, kind):
+                at = (dt.datetime.fromisoformat(job['updated_at']) + SEND_RETRY_AFTER).astimezone(local_tz()).strftime('%H:%M')
+                return f'I’m still checking whether the last attempt went out, so I won’t send it twice. If it isn’t there by {at}, you can try again.'
+        elif job['status'] == 'sending' and (job['retry_at'] or '') > now():
+            return 'Another draft on this card is sending right now. Try again in a minute.'
+    return None
 # A signal deferred this many times at the same version is set aside: still pending
 # and searchable, but no longer offered in review batches until new content arrives.
 SET_ASIDE_AFTER = 2
@@ -4216,8 +4245,8 @@ class Store:
             action=next_actions.selected(row['next_action'],revision) if row else None
             if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','whatsapp','finish'):
                 raise ValueError('This draft changed or is no longer ready. Use its current buttons.')
-            if db.execute("SELECT 1 FROM action_jobs WHERE suggestion_id=? AND status IN ('sending','uncertain','sent')",(suggestion_id,)).fetchone():
-                raise ValueError('This draft is already being sent or was sent.')
+            lock=send_lock(db,suggestion_id,revision,action['kind'])
+            if lock:raise ValueError(lock)
             # A final step that ran, or whose outcome is still unknown, may already have gone out:
             # its text stays as confirmed, so a retry checks the source instead of posting other text.
             if action['kind']=='finish' and db.execute("SELECT 1 FROM action_jobs WHERE suggestion_id=? AND revision=? AND status IN ('local_preparation','finish_uncertain','done')",(suggestion_id,revision)).fetchone():
@@ -4274,7 +4303,8 @@ class Store:
             if previous:
                 # Repeated clicks/retries never create a second send, including an
                 # unknown outcome. A blocked pre-send permission check may be retried.
-                if previous['status'] in ('blocked','cancelled','failed') and previous['approval_id']!=approval_id:
+                # So may an unconfirmed message send after SEND_RETRY_AFTER without a trace: only on the owner's new tap.
+                if (previous['status'] in ('blocked','cancelled','failed') or send_retry_ok(previous,action['kind'])) and previous['approval_id']!=approval_id:
                     db.execute("UPDATE action_jobs SET status='queued',retry_at=NULL,error=NULL,updated_at=?,approval_id=?,source=?,payload=? WHERE id=?",(now(),approval_id,source,encoded(action),previous['id']))
                     db.execute('INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)',
                         (approval_id,suggestion_id,'send','',source,now()))
@@ -4424,9 +4454,12 @@ class Store:
             states={r['revision']:{**{k:r[k] for k in ('status','error','message_id','snooze_status','snooze_until','snooze_error') if r[k] is not None or k in ('status','error','message_id')},
                                    **({'auto':True} if r['approval_id'].startswith('auto-merge:') else {}),
                                    **({'sent_at':r['updated_at']} if r['status']=='sent' else {}),
+                                   # Checked long enough without a trace: the owner may try again, and the card says so.
+                                   **({'retry_ok':True,'error':'Last attempt unconfirmed: I found no sign of it going out. Check the conversation; if it isn’t there, try again.'}
+                                      if send_retry_ok(r,json.loads(r['payload']).get('kind')) else {}),
                                    # A merged fix can be undone for a day.
                                    **({'undo_until':(dt.datetime.fromisoformat(r['updated_at'])+UNDO_MERGE).isoformat()} if r['status']=='sent' and str(r['message_id']).startswith('merge:') else {})}
-                    for r in db.execute('SELECT j.revision,j.status,j.error,j.message_id,j.approval_id,j.updated_at,t.status snooze_status,t.until snooze_until,t.error snooze_error FROM action_jobs j LEFT JOIN thread_snoozes t ON t.job_id=j.id WHERE j.suggestion_id=?',(suggestion['id'],))}
+                    for r in db.execute('SELECT j.revision,j.status,j.error,j.message_id,j.approval_id,j.updated_at,j.payload,t.status snooze_status,t.until snooze_until,t.error snooze_error FROM action_jobs j LEFT JOIN thread_snoozes t ON t.job_id=j.id WHERE j.suggestion_id=?',(suggestion['id'],))}
             extra['next_actions']=[{**item,**({'state':states[item['revision']]} if item['revision'] in states else {})} for item in next_actions.visible_actions(action)]
             if action['kind']!='menu' and action['revision'] in states:extra['action_status']=states[action['revision']]
             # The draft Telegram shows in full on the card, so its Send there confirms directly (card_draft).
@@ -6190,6 +6223,12 @@ CARD_DRAFT_KINDS = ('email', 'linkedin', 'slack', 'x', 'whatsapp')
 ACTION_BUSY = ('queued', 'sending', 'sent', 'uncertain', 'local_preparation', 'undoing', 'undone')
 
 
+def action_busy(state):
+    """A draft whose send is under way or done, so it has no Send button. An unconfirmed send the
+    owner may retry (retry_ok) is not."""
+    return state.get('status') in ACTION_BUSY and not state.get('retry_ok')
+
+
 def card_draft(row):
     """The one message draft a ready card shows in Telegram, so the owner reads it there and can
     just press Send (2026-10-20). Returns {'action','text','full'}. full is False when the body
@@ -6200,7 +6239,7 @@ def card_draft(row):
         return None
     actions = next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
     ready = [a for a in actions if a['kind'] in next_actions.APPROVE_KINDS+next_actions.FINISH_KINDS+('email_demo','prepare')
-             and (a.get('state') or row.get('action_status') or {}).get('status') not in ACTION_BUSY]
+             and not action_busy(a.get('state') or row.get('action_status') or {})]
     if len(ready) != 1 or ready[0]['kind'] not in CARD_DRAFT_KINDS or ready[0].get('to_options') or not ready[0].get('body'):
         return None
     a, escape = ready[0], lambda text: re.sub(r'([\\`*_{}\[\]()#+.!>|~-])', r'\\\1', str(text))
@@ -6273,7 +6312,7 @@ def controls(row, root=''):
         for action in actions:
             state=action.get('state') or row.get('action_status',{})
             if action['kind']=='finish' and state.get('status')=='done':continue
-            if action['kind'] in ('email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish') and state.get('status') not in ('queued','sending','sent','uncertain','local_preparation','undoing','undone'):
+            if action['kind'] in ('email','email_demo','linkedin','slack','x','whatsapp','merge','prepare','finish') and not action_busy(state):
                 if shown and shown['full'] and shown['action']['revision']==action['revision']:
                     # The card shows this draft in full: Send confirms it, Edit opens it in the dashboard editor.
                     buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:confirm_{action['revision']}"}})
@@ -8808,7 +8847,7 @@ class App:
         with self.store.connect() as db:
             status='sent' if result.get('message_id') else 'failed' if result.get('rejected') else 'uncertain'
             what,where={'linkedin':('this LinkedIn message','LinkedIn'),'slack':('this Slack message','Slack'),'x':('this X '+('reply' if action.get('reply_to') else 'message'),'X'),'whatsapp':('this WhatsApp message','WhatsApp')}.get(action['kind'],('this email',mailbox_name(self.config,action)))
-            error={'sent':None,'failed':f"{where} refused {what} (error {result.get('rejected')}). Nothing was sent; you can change it or tap Send again.",
+            error={'sent':None,'failed':f"Last attempt failed: {where} refused {what} (error {result.get('rejected')}). Nothing was sent; change it or try again.",
                    'uncertain':f'I couldn’t confirm whether {what} was sent. I won’t resend it.'}[status]
             if action['kind']=='merge':
                 error={'sent':' '.join(note for note in ('Pushing it failed; push it yourself.' if result.get('pushed') is False else
