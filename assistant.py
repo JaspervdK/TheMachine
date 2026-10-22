@@ -5916,14 +5916,24 @@ def card(row):
               'snoozed': 'Snoozed until '+dt.datetime.fromisoformat(row['snoozed_until']).astimezone(local_tz()).strftime('%-d %b · %H:%M')+'.' if row.get('snoozed_until') else 'Snoozed.',
               'instructions': 'Got your feedback. I’ll update this.',
               'prepared': 'Ready for you.', 'completed': 'Done.'}.get(row['status'], '')
+    # One status line: where it stands and what's left for the owner. A later sign that it's
+    # handled replaces the result's own line; a result that found it already done needs no hint.
+    outcome = {}
     if row['status'] == 'prepared' and row.get('outcome'):
         try:
             outcome = json.loads(row['outcome'])
-            status = 'Finished. Mark it done if it looks right.' if outcome['state'] == 'done' else 'Needs you: ' + outcome['needs'].rstrip('.') + '.'
+            status = {'done': 'Finished. Mark it done if it looks right.',
+                      'already_done': 'Looks done already. Mark it done if that’s right.'}.get(outcome['state']) or 'Needs you: ' + outcome['needs'].rstrip('.') + '.'
+        except (ValueError, KeyError, TypeError, AttributeError):
+            outcome = {}
+    if row.get('early') and row['status'] == 'prepared' and not outcome.get('needs') and outcome.get('state') != 'already_done' and any(
+            a.get('kind') != 'open' for a in row.get('next_actions') or []):
+        status = 'Ready to approve. Nothing goes out until you do.'
+    if row.get('handled_hint') and row['status'] not in ('completed','rejected') and outcome.get('state') != 'already_done':
+        try:
+            status = 'Looks handled: ' + json.loads(row['handled_hint'])['reason'].rstrip('.') + '. Mark it done if so.'
         except (ValueError, KeyError, TypeError):
             pass
-    if row.get('early') and row['status'] == 'prepared':
-        status = 'Prepared ahead, so you only need to approve it. Nothing was sent or changed.'
     if row.get('preparation_status') in ('starting','running'):
         status='Preparing… I’ve been in the browser a while; it may need you there (a sign-in or a check).' if row.get('preparation_browser') else 'Preparing…'
     elif row.get('preparation_status') == 'queued': status='Next up. I’ll start shortly.'
@@ -5954,11 +5964,6 @@ def card(row):
             status = f"{handed['name']} replied, so I closed this."
         elif row['status'] == 'prepared':
             status = f"No reply from {handed['name']} yet."
-    if row.get('handled_hint') and row['status'] not in ('completed','rejected'):
-        try:
-            status = ('Looks handled: ' + json.loads(row['handled_hint'])['reason'] + ' Mark it done if so.\n' + status).strip()
-        except (ValueError, KeyError, TypeError):
-            pass
     if row['status'] not in ('completed','rejected','snoozed') and row.get('change_prompt',{}).get('status')=='uncertain':
         status+='\nI couldn’t confirm the Change prompt. If it arrived, reply to it; otherwise use Change on the dashboard.'
     # A hashtag, so tapping it in Telegram lists every #work or #personal card.
@@ -6730,7 +6735,7 @@ For this job:
 - Browser lease owner: assistant-{j[:8]} (python3 {browser_lease_script(config)} claim --owner assistant-{j[:8]} --minutes 30 --wait 10).
 - Attachments folder: {WORKSPACE}/data/assistant-attachments/{j}/
 - Save the result with assistant_signals prepare args suggestion_id={sid}, job_id={j}, body=<short result>, next_actions=[...], outcome and send_now:true only when the owner asked you to send it.
-- outcome:'done' when the job is finished and nothing is left for the owner but to check it; outcome:'needs_you' with needs:<the one thing they have to do> otherwise (approve the send, sign in, choose). Finish what you can first: don't stop to ask about steps the rules already let you do.
+- outcome:'done' when the job is finished and nothing is left for the owner but to check it; outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
 - When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card ("always…", signatures, formatting, tone with this kind of person) also becomes a draft rule: assistant_signals remember_fact args text=<the rule, general>, decision_id=<that note's decision>, kind=draft. A fact note that holds beyond this card goes in remember_fact as a fact.
 - Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>.''' + owner_details(config) + (f'''
 
@@ -7041,7 +7046,7 @@ The assistant instructions (tools/personal-assistant/AGENTS.md) and the owner's 
 With the assistant_signals tool: call status, then ONE begin_analysis with account_ids {json.dumps(accounts)} and limit 120. The reply is paged: read every page with analysis_page before finishing, including next_row_offset continuations on the same page. Where body_clipped matters, read the rest with events (the account, event_ids and body_offset). Events replies contain events and remaining_event_ids; read the remaining IDs with the same accounts. Follow body_next_offset to the end of long bodies.
 Save only genuinely useful, distinct suggestions with suggest; the service delivers them. One card per matter: when a signal is about the same matter as an existing card (open, snoozed, waiting for a reply or done: the same conversation, people and ask, judged by meaning), pass card_id so that card is updated and comes back instead of a new one; reopen:true only when a done card genuinely needs the owner again. Then finish_analysis with reviewed_ids. Defer only what you expect to judge better later.
 Name the ongoing work: finish_analysis projects ({{"Project name": [event_ids from this batch]}}) for signals that clearly belong to a deal, hire, launch, renovation or other piece of work, and project on a suggest that belongs to one. Reuse begin_analysis's projects names when they fit; a signal's probably_project is the graph's guess from meaning and people, so add it to projects when it's right. graph tells who someone is to the owner (role, closeness, rhythm, gone quiet, their projects, what's open between them); when a message shows what someone is to them (their title, "our accountant", an introduction) and graph has no role or a wrong one, set it with graph node_id, role, event_id and quote (a short line copied from that message).
-Before suggesting, check it isn't already handled: search related signals (same thread, sender or chat) for a later reply from the owner or from a colleague (e.g. a teammate on the owner's own email domain answering the thread), or a confirmation (signed, paid, booked, resolved). If so, don't suggest it. When a signal in this batch shows that an OPEN suggestion (pending, prepared, accepted or snoozed in status) is now done, call looks_handled with suggestion_id, a short plain reason and the event_ids that show it; the owner still closes it themselves. For anything tied to a date, check the calendars for that date (days off, travel, existing plans).
+Before suggesting, check it isn't already handled: search related signals (same thread, sender or chat) for a later reply from the owner or from a colleague (e.g. a teammate on the owner's own email domain answering the thread), or a confirmation (signed, paid, booked, resolved). If so, don't suggest it. When a signal in this batch shows that an OPEN suggestion (pending, prepared, accepted or snoozed in status) is now done, call looks_handled with suggestion_id, a reason (one short clause in plain words that reads after "Looks handled:", e.g. "Sam e-signed it on Tuesday") and the event_ids that show it; the owner still closes it themselves. For anything tied to a date, check the calendars for that date (days off, travel, existing plans).
 When a note the owner wrote on a suggestion (decisions with source telegram or dashboard) states something that stays true beyond that card, save it once with remember_fact (text, decision_id); skip one-off wording requests.
 Promises: when a message in this batch commits the owner to doing something for someone, or someone to doing something for the owner, record it with promise (direction, event_id, who, what, due when a date was said). Judge what a message means between these people in its conversation, not its wording: most commitments are never spelled out (agreeing to a request, taking on something the owner asked, accepting a plan), and the same reply can commit one person and be politeness from another, depending on language, habits and the relationship. Read earlier_in_conversation for what was asked. It is not a card; the service checks it when due. When a signal shows an open promise below kept, cancelled or moved, update it with promise and its id.
 Messages are disabled in this turn. Do not work on anything else. End with exactly NO_REPLY.''' + (f'''
@@ -7660,7 +7665,11 @@ class App:
                 needs=' '.join(str(args.get('needs') or '').split())
                 if args.get('outcome')=='done':outcome={'state':'done'}
                 elif args.get('outcome')=='needs_you' and 3<=len(needs)<=200:outcome={'state':'needs_you','needs':needs}
-                else:raise ValueError("Say whether the job is finished: outcome:'done' (nothing left for the owner but to check it), or outcome:'needs_you' with needs:<what they have to do, e.g. approve the send, sign in, pick an option>")
+                elif args.get('outcome')=='already_done':
+                    if any(a['kind']!='open' for a in next_actions.actions(action)):
+                        raise ValueError("outcome:'already_done' means there is nothing left to approve: leave next_actions empty")
+                    outcome={'state':'already_done'}
+                else:raise ValueError("Say whether the job is finished: outcome:'done' (nothing left for the owner but to check it), outcome:'already_done' (it turned out to be done already or no longer needed), or outcome:'needs_you' with needs:<what they have to do, e.g. approve the send, sign in, pick an option>")
             saved=self.store.prepare(args['suggestion_id'], args['body'],args.get('job_id'),action,outcome,args.get('note_kind'),require_note=True,finish_state=args.get('finish_state'))
 
             if args.get('send_now') is True and not saved.get('replayed'):

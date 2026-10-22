@@ -365,6 +365,7 @@ class Invariants(unittest.TestCase):
         row=self.store.snapshot([])['suggestions'][0]
         self.assertEqual(row['status'],'pending')  # never an owner decision
         self.assertIn('Looks handled: Scrive confirmed the e-signature.',assistant.card(row))
+        self.assertEqual(assistant.card(row).count('Looks handled'),1)  # one status line, not stacked on another
         with patch.object(assistant.subprocess,'run') as run:
             assistant.deliver(self.store,{'openclaw':'unused','telegram_owner':'owner'})
         run.assert_not_called()

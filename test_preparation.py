@@ -51,7 +51,7 @@ class Preparation(unittest.TestCase):
         row=self.q('SELECT status,early FROM suggestions WHERE id=?',sid)
         self.assertEqual(row,{'status':'prepared','early':1})
         self.deliver(sent)
-        self.assertEqual((len(sent),sent[0][2]),(1,'send'));self.assertIn('Prepared ahead, so you only need to approve it.',a.card(sent[0][1]))
+        self.assertEqual((len(sent),sent[0][2]),(1,'send'));self.assertIn('Needs you: approve the send.',a.card(sent[0][1]));self.assertNotIn('Nothing was sent',a.card(sent[0][1]))
         self.store.decide(sid,'other','Shorter please','d-change','telegram')  # the owner's own Change runs with full Do it authority
         with self.store.connect() as db:db.execute("UPDATE preparation_runs SET status='ok',finished_at=?",(a.now(),))  # the first run ended
         calls.clear();self.app.preparation_step(lambda r:calls.append(r) or {'status':'admitted'})

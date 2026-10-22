@@ -182,6 +182,19 @@ class NotesRulesAndOutcome(Base):
         row = dict(self.store.snapshot(self.app.config['accounts'])['suggestions'][0])
         self.assertTrue(a.card(row).endswith('Finished. Mark it done if it looks right.'))
 
+    def test_a_task_found_already_done_shows_that_once(self):
+        # Nothing to approve: no buttons allowed, and a later handled hint doesn't add a second line.
+        with self.assertRaisesRegex(ValueError, 'nothing left to approve'):
+            self.save(outcome='already_done', next_actions=[{'kind': 'prepare', 'label': 'Apply the fix', 'instructions': 'Apply the fix to the form'}])
+        self.save(outcome='already_done', note_kind=None)
+        self.store.commit_page('work', {}, [mail('two', a.now())])
+        self.store.looks_handled(self.sid, 'Sam replied to it himself.', [2])
+        row = dict(self.store.snapshot(self.app.config['accounts'])['suggestions'][0])
+        card = a.card(row)
+        self.assertIn('Looks done already. Mark it done if that’s right.', card)
+        self.assertNotIn('Looks handled', card)
+        self.assertNotIn('approve', card)
+
     def test_change_notes_are_sorted_and_count_as_what_they_were(self):
         self.save(outcome='needs_you', needs='approve the send')
         self.store.decide(self.sid, 'other', 'Always put a blank line before my name', 'n1', 'telegram')

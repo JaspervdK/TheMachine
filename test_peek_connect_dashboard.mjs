@@ -63,6 +63,8 @@ try{
   // Off the browser: the picture and its larger view go.
   peek=false;
   await wait(async()=>!(await page.locator('#peek-dialog[open]').count())&&!(await page.locator('#task-prep .peek-thumb').count()),'the look closes');
+  // Let reading ahead settle first (shorter cards put more of them on screen).
+  for(let last='';last!==JSON.stringify(hits);){last=JSON.stringify(hits);await page.waitForTimeout(500)}
   const seen=Object.keys(hits.email)[0];
   const before=JSON.stringify(hits);
   await page.locator(`#task-${seen} .read-original`).click();
