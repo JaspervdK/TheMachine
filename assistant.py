@@ -1994,10 +1994,13 @@ class Store:
             db.execute('CREATE TABLE IF NOT EXISTS rule_changes(id INTEGER PRIMARY KEY,at TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,ref TEXT)')
             # Emails offered to a review as possibly slipped, so each is offered once.
             db.execute('CREATE TABLE IF NOT EXISTS slipped(event_id INTEGER PRIMARY KEY,kind TEXT NOT NULL,run_id TEXT,offered_at TEXT NOT NULL)')
-            # The service's own errors per code location and day: where, never what (no messages or values).
+            # The service's own errors per code location and day: where, and the latest message with anything
+            # private taken out (fault_message), never values or content.
             db.execute('CREATE TABLE IF NOT EXISTS faults(fingerprint TEXT NOT NULL,day TEXT NOT NULL,kind TEXT NOT NULL,frames TEXT NOT NULL,'
                        'location TEXT NOT NULL,version TEXT,first_at TEXT NOT NULL,last_at TEXT NOT NULL,count INTEGER NOT NULL,'
                        'reported INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(fingerprint,day))')
+            if 'message' not in {r['name'] for r in db.execute('PRAGMA table_info(faults)')}:
+                db.execute('ALTER TABLE faults ADD COLUMN message TEXT')
             # Keep version timing independently of daily signal aggregation. Legacy rows only
             # prove their last occurrence belongs to their last recorded version.
             db.execute('CREATE TABLE IF NOT EXISTS fault_versions(fingerprint TEXT NOT NULL,version TEXT NOT NULL,day TEXT NOT NULL,kind TEXT NOT NULL,'
@@ -2484,12 +2487,13 @@ class Store:
         cutoff = (dt.datetime.fromisoformat(stamp) - dt.timedelta(days=30)).isoformat()
         db.execute('DELETE FROM sync_activity WHERE at<?', (cutoff,))
 
-    def record_fault(self, fingerprint, kind, frames, location, version):
+    def record_fault(self, fingerprint, kind, frames, location, version, message=None):
         stamp = now()
         with self.connect() as db:
-            db.execute('INSERT INTO faults(fingerprint,day,kind,frames,location,version,first_at,last_at,count) VALUES(?,?,?,?,?,?,?,?,1) '
-                       'ON CONFLICT(fingerprint,day) DO UPDATE SET count=count+1,last_at=excluded.last_at,frames=excluded.frames,version=excluded.version',
-                       (fingerprint, stamp[:10], kind, json.dumps(frames), location, version, stamp, stamp))
+            db.execute('INSERT INTO faults(fingerprint,day,kind,frames,location,version,first_at,last_at,count,message) VALUES(?,?,?,?,?,?,?,?,1,?) '
+                       'ON CONFLICT(fingerprint,day) DO UPDATE SET count=count+1,last_at=excluded.last_at,frames=excluded.frames,version=excluded.version,'
+                       'message=coalesce(excluded.message,message)',
+                       (fingerprint, stamp[:10], kind, json.dumps(frames), location, version, stamp, stamp, message))
             if version:
                 db.execute('INSERT INTO fault_versions VALUES(?,?,?,?,?,?,1) ON CONFLICT(fingerprint,version,day) '
                            'DO UPDATE SET last_at=excluded.last_at,count=count+1', (fingerprint,version,stamp[:10],kind,stamp,stamp))
@@ -3192,6 +3196,33 @@ class Store:
                 db.execute('UPDATE promises SET due=?,check_at=?,note=?,updated_at=? WHERE id=?', (due, check_at, reason or None, now(), row['id']))
                 return {'id': row['id'], 'status': 'open', 'due': due, 'check_at': check_at}
         raise ValueError("Update a promise with status 'kept' or 'dropped' and a reason, or with a new due date")
+
+    def settle_faults(self, version, quiet=dt.timedelta(days=1)):
+        """A card about The Machine's own error that nobody acted on closes itself once the error stopped: not
+        seen for a day, and the code running now never recorded it (an update fixed it). Returns the closed ids."""
+        if not version:
+            return []
+        stamp = now()
+        cutoff = (dt.datetime.fromisoformat(stamp) - quiet).isoformat()
+        closed = []
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for row in db.execute("SELECT s.id,s.event_ids FROM suggestions s WHERE s.status='pending' AND EXISTS(SELECT 1 FROM json_each(s.event_ids) i "
+                                  "JOIN events e ON e.id=i.value WHERE e.kind='machine.fault')").fetchall():
+                events = db.execute('SELECT e.kind,e.metadata FROM json_each(?) i JOIN events e ON e.id=i.value', (row['event_ids'],)).fetchall()
+                prints = {json.loads(e['metadata']).get('fingerprint') if e['kind'] == 'machine.fault' else None for e in events}
+                if not prints or None in prints:
+                    continue  # it is about more than the error
+                if any(db.execute('SELECT 1 FROM faults WHERE fingerprint=? AND last_at>=?', (fp, cutoff)).fetchone()
+                       or db.execute('SELECT 1 FROM fault_versions WHERE fingerprint=? AND version=?', (fp, version)).fetchone() for fp in prints):
+                    continue
+                db.execute("UPDATE suggestions SET status='completed',completed_from='pending',early=0 WHERE id=?", (row['id'],))
+                db.execute('INSERT OR IGNORE INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,?,?,?)',
+                           ('fault-stopped:' + row['id'], row['id'], 'complete', 'The error stopped after an update: not seen for a day.', 'assistant', stamp))
+                db.execute("UPDATE deliveries SET status='cancelled',reminder=0,updated_at=? WHERE suggestion_id=? AND message_id IS NULL", (stamp, row['id']))
+                db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (row['id'],))
+                closed.append(row['id'])
+        return closed
 
     def settle_promises(self, db):
         """Someone else's email promise closes when that sender replies in the same thread (address only
@@ -4305,9 +4336,16 @@ class Store:
             url = m.get('source_url')
             who = 'You' if m.get('from_me') else (m.get('sender_display') or m.get('from') or m.get('chat_name') or m.get('app_name')
                    or (('#' + m['channel_name']) if m.get('channel_name') else '') or '')
+            body, details = r['body'], None
+            if r['kind'] == 'machine.fault' and '\n' + FAULT_WHERE in body:  # code locations go under Details
+                body, details = body.split('\n' + FAULT_WHERE, 1)
+                body, details = body.strip(), FAULT_WHERE + details.rstrip()
+            if r['kind'] == 'machine.fault':
+                who = 'The Machine'
             result.append({'kind': source_kind(r['kind']), 'from': str(who)[:300], 'to': str(m.get('to') or '')[:500],
                            'cc': str(m.get('cc') or '')[:500], 'title': r['title'][:500], 'occurred_at': r['occurred_at'],
-                           'body': r['body'][:20000], 'clipped': len(r['body']) > 20000 or bool(m.get('truncated')),
+                           'body': body[:20000], 'clipped': len(body) > 20000 or bool(m.get('truncated')),
+                           **({'details': details[:4000]} if details else {}),
                            'url': url if isinstance(url, str) and urllib.parse.urlsplit(url).scheme == 'https' else None,
                            'event_id': r['id'], 'gmail': {'account_id': r['account_id'], 'message_id': r['source_id']} if r['kind'] == 'gmail.message' else None})
         return result
@@ -5108,9 +5146,9 @@ def gateway_event(account, source_id, bucket):
 
 
 # The Machine's own errors. A handler on the service log keeps, for each error raised in this
-# code, its exception type and code location (file, line, function) per day: never the message,
-# arguments or values, which can hold private content. The Gateway source turns them into
-# machine.fault signals, so a review can offer to fix The Machine itself.
+# code, its exception type, code location (file, line, function) and its message with anything
+# private taken out (fault_message) per day: never arguments, values or content. The Gateway
+# source turns them into machine.fault signals, so a review can offer to fix The Machine itself.
 APP_ROOT = Path(__file__).resolve().parent
 FAULT_STEPS = (3, 10, 30, 100, 300, 1000)
 # Trouble outside this code (a source, the network, the disk, a busy database) is not a bug to fix here.
@@ -5124,6 +5162,61 @@ def fault_frames(tb, root=APP_ROOT):
         if path.is_relative_to(root) and 'site-packages' not in path.parts:
             frames.append({'file': str(path.relative_to(root)), 'line': frame.lineno, 'function': frame.name})
     return frames[-8:]
+
+
+FAULT_QUOTED = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+
+
+def fault_message(error, limit=200):
+    """An error's own message, short and safe to keep: quoted text (except a lowercase key such as 'box'),
+    email addresses, links, long numbers, ids and anything token-like are replaced. None when it has none."""
+    text = ' '.join(str(error).split())
+    text = re.sub(r'(?i)\bbearer\s+\S+', 'Bearer <secret>', text)
+    text = re.sub(r'(?i)\b(token|secret|password|passwd|api[_-]?key|authorization|cookie)(["\']?\s*[:=]\s*)\S+', r'\1\2<secret>', text)
+    text = re.sub(r'\b[a-z][a-z0-9+.-]*://\S+', '<link>', text, flags=re.I)
+    text = re.sub(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+', '<email>', text)
+    text = FAULT_QUOTED.sub(lambda m: m.group(0) if re.fullmatch(r'[a-z_][a-z0-9_.-]{0,40}', m.group(1) or m.group(2) or '') else '<text>', text)
+    text = re.sub(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<id>', text, flags=re.I)
+    text = re.sub(r'(?<![\w<])[A-Za-z0-9_\-+/=]{24,}', '<secret>', text)
+    text = re.sub(r'\+?\d[\d .-]{4,}\d', '<number>', text)
+    text = text.strip()
+    return (text[:limit - 1] + '…' if len(text) > limit else text) or None
+
+
+# What a fault means in plain words, by where it was logged (the first word of the log call): what
+# failed and what the owner may notice.
+FAULT_AREAS = {
+    'fleet': ('Talking with your Fleet on The Machine Network', 'Teammates’ questions and answers may come late; your own cards are fine.'),
+    'graph': ('Updating who knows whom', 'Who-knows-whom answers may be out of date.'),
+    'enrichment': ('Looking up contact details', 'Some people may miss details such as their company.'),
+    'embeddings': ('Indexing messages for search', 'Search may miss recent messages.'),
+    'preparation': ('Preparing a card', 'A card may stay unprepared.'),
+    'review': ('Reviewing new messages', 'New cards may come late.'),
+    'sync': ('Reading a source', 'New messages from that source may come late.'),
+    'collector': ('Reading a source', 'New messages from that source may come late.'),
+    'delivery': ('Sending you cards', 'Cards may reach you late.'),
+    'promise': ('Tracking promises', 'Promise reminders may come late.'),
+    'skill': ('Running a skill', 'A skill may not run.'),
+    'skills': ('Running a skill', 'A skill may not run.'),
+    'browser': ('The browser', 'Browser steps such as sign-ins may fail.'),
+    'sign-in': ('Signing in', 'A sign-in may fail.'),
+    'merge': ('Merging a fix', 'A fix may not be applied.'),
+}
+
+
+def fault_plain(location, count, config):
+    """One short paragraph: what failed, what the owner notices, and who acts."""
+    words = str(location or '').lower().split()
+    key = words[1] if words[:1] == ['thread'] and len(words) > 1 else (words[0] if words else '')
+    what, notice = FAULT_AREAS.get(key, (f"Part of The Machine ({location})" if location else 'Part of The Machine',
+                                         'Probably nothing yet: it tries again by itself.'))
+    if count < 3:
+        act = 'Nothing to do yet. If it keeps happening, The Machine offers a fix.'
+    elif config.get('self_fix_auto', True) is False:
+        act = 'The Machine can find the bug and test a fix in a copy; you review it and tap Merge.'
+    else:
+        act = 'The Machine can fix this itself: it tests a fix in a copy, and a small one merges by itself (undo for a day).'
+    return f'{what} failed. {notice} {act}'
 
 
 def code_version(root=APP_ROOT):
@@ -5154,7 +5247,7 @@ class FaultLog(logging.Handler):
                 return
             kind = type(error).__name__
             fingerprint = hashlib.sha256(json.dumps([kind] + [[f['file'], f['function']] for f in frames[-3:]]).encode()).hexdigest()[:16]
-            self.store.record_fault(fingerprint, kind, frames, location[:120], self.version)
+            self.store.record_fault(fingerprint, kind, frames, location[:120], self.version, fault_message(error))
         except Exception:
             pass  # recording an error must never cause one
 
@@ -5172,22 +5265,28 @@ def watch_faults(store, root=APP_ROOT):
     return log
 
 
+FAULT_WHERE = 'Where (innermost last):'  # the technical part of a fault signal starts here; the dashboard shows it under Details
+
+
 def fault_event(account, row, config):
     frames = json.loads(row['frames'])
     top = frames[-1]
     count = row['count']
-    lines = [f"{(row['location'] or 'The service').capitalize()} failed with {row['kind']}, "
-             f"{count} time{'s' if count > 1 else ''} on {row['day']} (last {dt.datetime.fromisoformat(row['last_at']).astimezone(local_tz()).strftime('%H:%M')}).",
-             '', 'Where (innermost last):'] + [f"  {f['file']}:{f['line']} in {f['function']}" for f in frames]
+    message = row.get('message')
+    lines = [fault_plain(row['location'], count, config), '',
+             f"Error: {row['kind']}" + (f': {message}' if message else ''),
+             f"{(row['location'] or 'The service').capitalize()} failed {count} time{'s' if count > 1 else ''} on {row['day']} "
+             f"(last {dt.datetime.fromisoformat(row['last_at']).astimezone(local_tz()).strftime('%H:%M')})."]
+    lines += ['', FAULT_WHERE] + [f"  {f['file']}:{f['line']} in {f['function']}" for f in frames]
     if row.get('version'):
         lines += ['', 'Code version: ' + row['version']]
     return {'account_id': account['id'], 'source_id': f"fault:{row['fingerprint']}:{row['day']}", 'kind': 'machine.fault',
             'occurred_at': row['last_at'], 'title': f"The Machine: {row['kind']} in {top['function']}" + (f' ({count}×)' if count > 1 else ''),
             'body': '\n'.join(lines),
             'metadata': {'fault_kind': row['kind'], 'fingerprint': row['fingerprint'], 'location': row['location'], 'frames': frames,
-                         'count': count, 'day': row['day'], 'version': row.get('version'),
+                         'count': count, 'day': row['day'], 'version': row.get('version'), 'message': message,
                          'app_dir': str(next_actions.app_dir(config)), 'fix_dir': str(next_actions.fix_dir(config)), 'transport': 'internal',
-                         'coverage': 'Errors raised in The Machine’s own code: type and code location only, never messages or values.'},
+                         'coverage': 'Errors raised in The Machine’s own code: type, code location and the message with anything private taken out, never values.'},
             'deleted': False}
 
 
@@ -5236,7 +5335,8 @@ def sync_gateway(store, config, account, source=None):
     events = [gateway_event(account, source_id, buckets[source_id]) for source_id in changed]
     # The Machine's own errors come in through the first Gateway source.
     faults = []
-    if next((a['id'] for a in config.get('accounts', []) if a.get('service') == 'gateway'), None) == account['id']:
+    carries_faults = next((a['id'] for a in config.get('accounts', []) if a.get('service') == 'gateway'), None) == account['id']
+    if carries_faults:
         faults = store.unreported_faults()
         events += [fault_event(account, row, config) for row in faults]
     # Only the last two windows can still grow; older ones are final.
@@ -5247,6 +5347,8 @@ def sync_gateway(store, config, account, source=None):
                  coverage='OpenClaw Gateway journal from the saved cursor; selected failure kinds only.')
     store.commit_page(account['id'], state, events)
     store.faults_reported(faults)
+    if carries_faults:
+        store.settle_faults(code_version(next_actions.app_dir(config)))
     return {'mode': 'incremental', 'events': len(events)}
 
 

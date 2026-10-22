@@ -44,6 +44,23 @@ class Faults(unittest.TestCase):
         self.assertEqual(frames[-1]['function'], 'fail_in_code')
         self.assertEqual(frames[-1]['file'], 'test_self_fix.py')
         self.assertNotIn('alex@example.com', json.dumps(row))
+        self.assertEqual(row['message'], '<text>')  # quoted text is content, never kept
+
+    def test_the_message_is_kept_without_anything_private(self):
+        self.fail_in_code(ValueError('The Network said 500'))
+        self.assertEqual(self.rows()[0]['message'], 'The Network said 500')
+        cases = {
+            "KeyError: 'box'": KeyError('box'),
+            'Expecting value: line 1 column 1 (char 0)': ValueError('Expecting value: line 1 column 1 (char 0)'),
+            'bad token=<secret> for <link> from <email>, call <number>':
+                ValueError('bad token=abc123 for https://example.com/x?key=1 from sam@example.com, call +32 470 12 34 56'),
+            'Bearer <secret> refused for <id>': ValueError('Bearer abcdefghijklmnopqrstuvwxyz012345 refused for 3f2b8c1e-1111-2222-3333-444455556666'),
+            'Unknown person <text>': ValueError('Unknown person "Sam Example"'),
+        }
+        for expected, error in cases.items():
+            self.assertEqual(('KeyError: ' if isinstance(error, KeyError) else '') + a.fault_message(error), expected)
+        self.assertIsNone(a.fault_message(ValueError()))
+        self.assertLessEqual(len(a.fault_message(ValueError('word ' * 200))), 200)
 
     def test_trouble_outside_the_code_is_not_a_bug(self):
         for error in (a.SourceError('gmail'), TimeoutError(), ConnectionResetError(), a.sqlite3.OperationalError('database is locked')):
@@ -70,7 +87,9 @@ class Faults(unittest.TestCase):
         a.sync_gateway(self.store, config, gateway, FakeJournal())
         [event] = self.store.events([gateway['id']])
         self.assertEqual(event['kind'], 'machine.fault')
-        self.assertIn('Graph failed with KeyError, 1 time', event['body'])
+        self.assertIn('Graph failed 1 time', event['body'])
+        self.assertIn("Error: KeyError: 'x'", event['body'])
+        self.assertTrue(event['body'].startswith('Updating who knows whom failed. Who-knows-whom answers may be out of date. Nothing to do yet.'))
         self.assertIn('test_self_fix.py:', event['body'])
         self.assertEqual(json.loads(event['metadata'])['app_dir'] if isinstance(event['metadata'], str) else event['metadata']['app_dir'], '/srv/machine')
         self.fail_in_code(KeyError('x'))
@@ -79,6 +98,64 @@ class Faults(unittest.TestCase):
         self.fail_in_code(KeyError('x'))
         a.sync_gateway(self.store, config, gateway, FakeJournal())
         self.assertEqual(self.store.events([gateway['id']])[0]['title'], 'The Machine: KeyError in fail_in_code (3×)')
+
+
+    def test_the_signal_says_in_plain_words_who_acts_and_keeps_code_locations_under_details(self):
+        gateway = {'id': 'openclaw-gateway', 'service': 'gateway'}
+        config = {'accounts': [gateway]}
+        for _ in range(3):
+            try:
+                raise ValueError('The Network said 500')
+            except ValueError:
+                self.log.emit(logging.LogRecord('personal-assistant', logging.ERROR, __file__, 1, 'fleet error=%s at=%s', ('ValueError', 'x'), None))
+        a.sync_gateway(self.store, config, gateway, FakeJournal())
+        [view] = self.store.event_views([e['id'] for e in self.store.events([gateway['id']])])
+        self.assertEqual(view['from'], 'The Machine')
+        self.assertEqual(view['body'].splitlines()[0], 'Talking with your Fleet on The Machine Network failed. Teammates’ questions and answers may come late; '
+                         'your own cards are fine. The Machine can fix this itself: it tests a fix in a copy, and a small one merges by itself (undo for a day).')
+        self.assertIn('Error: ValueError: The Network said 500', view['body'])
+        self.assertNotIn('test_self_fix.py', view['body'])
+        self.assertTrue(view['details'].startswith('Where (innermost last):\n  test_self_fix.py:'))
+        self.assertIn('Code version: abc123', view['details'])
+        self.assertIn('you review it and tap Merge', a.fault_plain('fleet', 3, {'self_fix_auto': False}))
+        self.assertTrue(a.fault_plain('thread graph', 1, {}).startswith('Updating who knows whom failed.'))
+        self.assertTrue(a.fault_plain('odd place', 1, {}).startswith('Part of The Machine (odd place) failed. Probably nothing yet'))
+
+
+class FaultCardsSettle(unittest.TestCase):
+    """A card about an error that an update fixed closes by itself."""
+    def setUp(self):
+        ux.UX.setUp(self)
+        with self.store.connect() as db:
+            db.execute("UPDATE events SET kind='machine.fault',metadata=? WHERE id=1", (json.dumps({'fingerprint': 'fp-fleet'}),))
+            db.execute("INSERT INTO faults(fingerprint,day,kind,frames,location,version,first_at,last_at,count) VALUES('fp-fleet','2026-10-20','ValueError','[]','fleet','old111',"
+                       "'2026-10-20T20:01:00+00:00','2026-10-20T20:04:00+00:00',5)")
+            db.execute("INSERT INTO fault_versions VALUES('fp-fleet','old111','2026-10-20','ValueError','2026-10-20T20:01:00+00:00','2026-10-20T20:04:00+00:00',5)")
+
+    def status(self):
+        with self.store.connect() as db:
+            return db.execute('SELECT status FROM suggestions WHERE id=?', (self.sid,)).fetchone()[0]
+
+    def test_a_stale_error_card_closes_once_newer_code_stays_quiet(self):
+        self.assertEqual(self.store.settle_faults('old111'), [])  # the version that had it still runs
+        self.assertEqual(self.status(), 'pending')
+        self.assertEqual(self.store.settle_faults('new222'), [self.sid])
+        self.assertEqual(self.status(), 'completed')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT feedback,source FROM decisions WHERE suggestion_id=?', (self.sid,)).fetchone()[:],
+                             ('The error stopped after an update: not seen for a day.', 'assistant'))
+
+    def test_a_recent_error_or_a_card_about_more_stays_open(self):
+        with self.store.connect() as db:
+            db.execute('UPDATE faults SET last_at=?', (a.now(),))
+        self.assertEqual(self.store.settle_faults('new222'), [])
+        with self.store.connect() as db:
+            db.execute("UPDATE faults SET last_at='2026-10-20T20:04:00+00:00'")
+        self.store.commit_page('work', {}, [ux.event(source='other-message')])
+        with self.store.connect() as db:
+            db.execute('UPDATE suggestions SET event_ids=? WHERE id=?', (json.dumps([1, 2]), self.sid))
+        self.assertEqual(self.store.settle_faults('new222'), [])
+        self.assertEqual(self.status(), 'pending')
 
 
 class Merge(unittest.TestCase):
