@@ -665,6 +665,8 @@ EVENT_CHANNELS = {kind: 'Email' if name == 'email' else name for kind, name in O
 ELSEWHERE_DAYS = 3        # the owner's own message in the draft's conversation this soon after it was ready replaced the draft
 FACTS_ALL_UNDER = 1200  # while what was learned is this short, every preparation gets all of it
 FACTS_TOP = 8
+SKILL_NOTES_MIN = 5   # notes about one kind of task before they're offered as a skill
+SKILL_REGROW = 3      # after Not now, offered again only once this many more notes joined them
 FACTS_FLOOR = 0.3          # cosine; facts unrelated to a card mostly score 0.1 to 0.35 against it
 # When an open promise is checked without a date: the owner's own after 3 days, someone else's after a week.
 PROMISE_CHECK_DAYS = {'mine': 3, 'theirs': 7}
@@ -2055,6 +2057,10 @@ class Store:
             # How the owner writes, one short line per channel (and All): learned from their style notes, their edits
             # and their own messages, editable in Settings. Like facts, what was learned, not what messages say.
             db.execute('CREATE TABLE IF NOT EXISTS voices(channel TEXT PRIMARY KEY,text TEXT NOT NULL,source TEXT NOT NULL,ref TEXT,updated_at TEXT NOT NULL)')
+            # Notes about one kind of task, offered as a skill on a card (Create skill / Add to <skill> / Not now).
+            # fact_ids: the notes; target_id: the owner's own skill they'd go into, else a new one with name/description/body.
+            db.execute('CREATE TABLE IF NOT EXISTS skill_clusters(id TEXT PRIMARY KEY,fact_ids TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL,'
+                       'body TEXT NOT NULL,target_id TEXT,target_name TEXT,suggestion_id TEXT,status TEXT NOT NULL,skill_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)')
             # What a fact means, to pick the ones a task needs (when embeddings are on).
             db.execute('CREATE TABLE IF NOT EXISTS fact_vectors(fact_id INTEGER PRIMARY KEY,model TEXT NOT NULL,vector BLOB NOT NULL)')
             # Offered to one review once: an edit (or the owner's own reply instead of the draft) by its id,
@@ -3873,15 +3879,16 @@ class Store:
         db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'condense',?,?)",
                    (now(), f'Condensed {len(originals)} note' + ('' if len(originals) == 1 else 's') + ' into: ' + text[:200], into))
 
-    def unmerge_fact(self, fact_id=None, channel=None):
-        """Undo a condense: the notes behind a merged fact (or a channel's voice) come back as they were; a merged fact goes."""
-        into = 'voice:' + voice_channel(channel) if channel else 'fact:' + str(int(fact_id))
+    def unmerge_fact(self, fact_id=None, channel=None, skill=None):
+        """Undo a condense: the notes behind a merged fact (or a channel's voice, or moved into a skill) come back as they
+        were; a merged fact goes (a skill stays as it is)."""
+        into = 'skill:' + str(skill) if skill else 'voice:' + voice_channel(channel) if channel else 'fact:' + str(int(fact_id))
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             back = db.execute('UPDATE facts SET removed_at=NULL,merged_into=NULL WHERE merged_into=?', (into,)).rowcount
             if not back:
                 raise ValueError('Nothing was merged into that')
-            if not channel:
+            if not channel and not skill:
                 db.execute('UPDATE facts SET removed_at=? WHERE id=? AND removed_at IS NULL', (now(), int(fact_id)))
             db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'condense',?,?)", (now(), f'Undid a condense: {back} note' + ('' if back == 1 else 's') + ' back', into))
         return {'restored': back}
@@ -4411,6 +4418,12 @@ class Store:
         db.execute('UPDATE suggestions SET status=?,snoozed_until=?,resume_status=?,feedback_until=NULL WHERE id=?', (status, until, resume if choice == 'snooze' else None, suggestion_id))
         db.execute("UPDATE action_jobs SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status IN ('queued','blocked')",(now(),suggestion_id))
         db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (suggestion_id,))
+        cluster = db.execute("SELECT id FROM skill_clusters WHERE suggestion_id=? AND status IN ('pending','declined','failed')", (suggestion_id,)).fetchone()
+        if cluster and choice in ('accept', 'reject', 'complete'):  # a skill from notes: done here, no Do it run
+            db.execute('UPDATE skill_clusters SET status=?,updated_at=? WHERE id=?', ('accepting' if choice == 'accept' else 'declined', now(), cluster['id']))
+            if choice == 'accept':
+                db.execute("UPDATE suggestions SET status='completed',completed_from='pending' WHERE id=?", (suggestion_id,))
+                return {'status': 'completed', 'snoozed_until': None, 'note': 'Moving those notes into the skill.'}
         if status in ('accepted','instructions'):
             if choice == 'other':
                 db.execute("UPDATE preparations SET status='cancelled' WHERE suggestion_id=?",(suggestion_id,))
@@ -4902,12 +4915,20 @@ class Store:
             result['facts'] = [{**dict(r), 'merged': merged.get('fact:' + str(r['id']), 0)} for r in
                                db.execute('SELECT id,text,suggestion_id,created_at,kind FROM facts WHERE removed_at IS NULL ORDER BY created_at DESC,id DESC')]
             result['voices'] = [{**v, 'merged': merged.get('voice:' + v['channel'], 0)} for v in self.voices(db)]
+            result['moved'] = [dict(r) for r in db.execute("SELECT substr(f.merged_into,7) skill_id,coalesce(k.name,'a skill') name,count(*) notes FROM facts f "
+                                                           "LEFT JOIN skills k ON k.id=substr(f.merged_into,7) WHERE f.merged_into LIKE 'skill:%' GROUP BY 1,2")] \
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='skills'").fetchone() else []
             last = db.execute("SELECT at FROM rule_changes WHERE kind='condense' AND text LIKE 'Condensed%' ORDER BY at DESC LIMIT 1").fetchone()
             if last:  # the latest pass: every note merged that day
                 day = last['at'][:10]
                 result['condensed'] = {'at': last['at'], 'notes': db.execute("SELECT count(*) FROM facts WHERE merged_into IS NOT NULL AND substr(removed_at,1,10)=?", (day,)).fetchone()[0]}
             # Keep outstanding items visible even after a long completed history.
             result['suggestions'] = [dict(r) for r in db.execute("SELECT * FROM suggestions WHERE status NOT IN ('completed','rejected') OR id IN (SELECT id FROM suggestions WHERE status IN ('completed','rejected') ORDER BY created_at DESC LIMIT 100) ORDER BY created_at DESC")]
+            labels = {r['suggestion_id']: {'accept': 'Add to ' + r['target_name'] if r['target_id'] else 'Create skill', 'reject': 'Not now'}
+                      for r in db.execute("SELECT suggestion_id,target_id,target_name FROM skill_clusters WHERE status IN ('pending','declined')")}
+            for card in result['suggestions']:
+                if card['id'] in labels:
+                    card['labels'] = labels[card['id']]
             # Written requests belong on the card too, even after preparation
             # or a later button click, and beyond the recent-feedback limit.
             for suggestion in result['suggestions']:
@@ -8543,13 +8564,15 @@ class App:
             else:raise ValueError('Undo must come from the owner’s controls')
             return self.store.undo_merge(args['suggestion_id'],args['approval_id'],source)
         if name == 'remember_fact':
+            if args.get('kind') == 'skill':  # notes about one kind of task: offered as a skill on a card, never made by itself
+                return self.propose_skill_from_notes(args.get('name'), args.get('description'), args.get('text'), args.get('replaces'), args.get('skill'))
             if args.get('kind') == 'voice':  # how the owner writes on one channel: the whole line, from their note or edit
                 return self.store.save_voice(args.get('channel'), args.get('text'), 'assistant', args.get('decision_id'), args.get('edit_id'), args.get('replaces'))
             return self.store.remember_fact(args.get('text'), args.get('decision_id'), args.get('kind') or 'fact', args.get('replaces'))
         if name == 'unmerge_fact':
             if not owner_dashboard:
                 raise ValueError('Only the owner undoes a condense, on the dashboard')
-            return self.store.unmerge_fact(args.get('id'), args.get('channel'))
+            return self.store.unmerge_fact(args.get('id'), args.get('channel'), args.get('skill'))
         if name == 'set_voice':
             if not owner_dashboard:
                 raise ValueError('Only the owner edits how they write, in Settings')
@@ -8785,6 +8808,9 @@ class App:
             result=self.store.decide(args['suggestion_id'], args['choice'], args.get('feedback', ''),
                                      args['decision_id'], source, args.get('snooze_hours', 24),
                                      args.get('snoozed_until'), args.get('snooze_option'),terminal_job,self.is_work_suggestion(args['suggestion_id']))
+            if args['choice'] == 'accept':
+                try:self.apply_skill_clusters()
+                except Exception as error:LOG.error('skill from notes error=%s',type(error).__name__)
             if args.get('source')=='telegram':
                 # Compatibility fence: the old handler interprets duplicate
                 # as "skip extra chat acknowledgment", after editing buttons.
@@ -9495,10 +9521,100 @@ class App:
         if row:
             job=dict(row);self.merge_effect(job,json.loads(job['payload']),json.loads(job['receipt']),job['operation'],next_actions.MergeTransport(self.config,restart_self))
 
+    def own_skills(self):
+        """The owner's own skills (made here, approved or imported), which notes may go into; never a teammate's."""
+        with self.store.connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='skills'").fetchone():
+                return []
+            return [dict(r) for r in db.execute("SELECT id,name,slug,description,origin FROM skills WHERE status IN ('on','off') AND origin!='shared' ORDER BY name")]
+
+    def propose_skill_from_notes(self, name, description, body, replaces, into=None):
+        """Notes that are all about one kind of task become a suggestion card: a new skill with them, or added to one of the
+        owner's own skills. Nothing changes until they tap Create skill (or Add to ...); Not now isn't asked again until
+        the same notes have grown by SKILL_REGROW."""
+        if not getattr(self, 'skills', None):
+            raise ValueError('Skills are not set up here')
+        name, description, body = skills.validate(name, description, body)
+        target = None
+        if into:
+            wanted = str(into).strip().casefold()
+            with self.store.connect() as db:
+                found = db.execute("SELECT id,name,origin FROM skills WHERE status IN ('on','off') AND (lower(name)=? OR slug=?)", (wanted, wanted)).fetchone()
+            if found and found['origin'] == 'shared':
+                raise ValueError("That skill is a teammate's: theirs are never changed. Leave skill out to suggest a new one")
+            if not found:
+                raise ValueError('skill is one of the owner\'s own skills: ' + ', '.join(s['name'] for s in self.own_skills()) + ' (or leave it out for a new one)')
+            target = dict(found)
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            notes = self.store.replaced_facts(db, replaces)
+            if not SKILL_NOTES_MIN <= len(notes) <= 20:
+                raise ValueError(f'A skill takes {SKILL_NOTES_MIN} to 20 current notes (replaces=[their ids])')
+            ids = {n['id'] for n in notes}
+            for old in db.execute("SELECT id,fact_ids,status FROM skill_clusters WHERE status IN ('pending','accepting','declined')"):
+                before = set(json.loads(old['fact_ids']))
+                if len(ids & before) * 2 >= len(before):
+                    if old['status'] != 'declined':
+                        return {'id': old['id'], 'duplicate': True}
+                    if len(ids) < len(before) + SKILL_REGROW:
+                        raise ValueError(f'The owner said Not now to these notes; suggest it again once {SKILL_REGROW} more have joined them')
+            cards = [n['suggestion_id'] for n in notes if n['suggestion_id']]
+            events = list(dict.fromkeys(i for r in db.execute('SELECT event_ids FROM suggestions WHERE id IN (' + ','.join('?' for _ in cards) + ')', cards)
+                                        for i in json.loads(r['event_ids'] or '[]')))[:20] if cards else []
+        if not events:
+            raise ValueError('These notes have no cards behind them to show as evidence')
+        cluster = 'sc_' + secrets.token_hex(6)
+        title = f'Add {len(notes)} notes to {target["name"]}' if target else f'Turn {len(notes)} notes into a skill: {name}'
+        lines = '\n'.join('- ' + n['text'] for n in notes)
+        text = (f'{description}\n\nThese notes are all about this, so they could live in one skill instead of every task\'s list:\n{lines}\n\n'
+                + (f'Add to {target["name"]} adds them to that skill. ' if target else 'Create skill makes it, on, under Skills. ')
+                + 'The notes stay visible there. Not now keeps them as they are.')
+        card = self.store.suggest('skill-notes:' + cluster, title, text, events)
+        with self.store.connect() as db:
+            db.execute("INSERT INTO skill_clusters VALUES(?,?,?,?,?,?,?,?,'pending',NULL,?,?)",
+                       (cluster, json.dumps(sorted(ids)), name, description, body, target and target['id'], target and target['name'], card['id'], now(), now()))
+        return {'id': cluster, 'suggestion_id': card['id']}
+
+    def apply_skill_clusters(self):
+        """The owner tapped Create skill (or Add to ...): write the skill with the instructions, and move the notes into it.
+        They stay in the database, shown with the skill, and leave the list every task gets."""
+        if not getattr(self, 'skills', None):
+            return 0
+        with self.store.connect() as db:
+            rows = [dict(r) for r in db.execute("SELECT * FROM skill_clusters WHERE status='accepting'")]
+        for c in rows:
+            try:
+                if c['target_id']:
+                    with self.store.connect() as db:
+                        row = db.execute("SELECT * FROM skills WHERE id=? AND status IN ('on','off') AND origin!='shared'", (c['target_id'],)).fetchone()
+                    if not row:
+                        raise ValueError('That skill is gone')
+                    self.skills.save(row['id'], row['name'], row['description'], row['body'].rstrip() + '\n\n' + c['body'])
+                    skill_id = row['id']
+                else:
+                    self.skills.save(None, c['name'], c['description'], c['body'])
+                    with self.store.connect() as db:
+                        skill_id = db.execute("SELECT id FROM skills WHERE name=? AND origin='mine' ORDER BY created_at DESC LIMIT 1", (c['name'],)).fetchone()['id']
+                with self.store.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    ids = json.loads(c['fact_ids'])
+                    moved = db.execute('UPDATE facts SET removed_at=?,merged_into=? WHERE removed_at IS NULL AND id IN (' + ','.join('?' for _ in ids) + ')',
+                                       (now(), 'skill:' + skill_id, *ids)).rowcount
+                    db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'condense',?,?)",
+                               (now(), f'Moved {moved} notes into the skill {c["target_name"] or c["name"]}', 'skill:' + skill_id))
+                    db.execute("UPDATE skill_clusters SET status='done',skill_id=?,updated_at=? WHERE id=?", (skill_id, now(), c['id']))
+            except (ValueError, OSError) as error:
+                LOG.error('skill from notes error=%s', type(error).__name__)
+                with self.store.connect() as db:
+                    db.execute("UPDATE skill_clusters SET status='failed',updated_at=? WHERE id=?", (now(), c['id']))
+                    db.execute("UPDATE suggestions SET status='pending' WHERE id=?", (c['suggestion_id'],))
+        return len(rows)
+
     def style_step(self):
         """Every ten minutes: a finished profile's channel lines fill voices still empty, and a draft the owner
         answered themselves instead of sending becomes a lesson for the next drafts."""
         seeded, learned = self.store.seed_voices(), self.store.learn_sent_elsewhere()
+        self.apply_skill_clusters()  # a Create skill tapped on Telegram
         if seeded or learned:
             LOG.info('style learned voices=%s replies=%s', seeded, learned)
 
@@ -10270,6 +10386,15 @@ class App:
                              "A note about how the owner writes on one channel goes into that channel's voice: remember_fact kind=voice, channel, "
                              "text=<the whole voice line with it worked in>, replaces=[ids]. A note a newer one made outdated merges into the newer one. "
                              "Never drop something nothing else still says, and leave a note alone when unsure. The originals stay as history and the owner can undo a merge.")
+                    try:
+                        own = ', '.join(s['name'] for s in self.own_skills())
+                    except Exception:
+                        own = ''
+                    block += (f"\nWhen {SKILL_NOTES_MIN} or more notes are all about one specific kind of task or scenario (not how the owner writes in general), "
+                              "suggest moving them into a skill: remember_fact kind=skill, name, description=<when to use it, one sentence>, "
+                              "text=<SKILL.md instructions that keep everything those notes say>, replaces=[their ids], and skill=<the name of one of "
+                              "the owner's own skills it belongs in, when one clearly fits; else leave it out for a new skill>. The owner decides on a card. "
+                              + (f"Their own skills: {own}." if own else "They have no skills of their own yet."))
                     if len(request['message']) + len(block) < 18000:
                         request['message'] += block
                         self.store.condense_text(run_id=run['run_id'])

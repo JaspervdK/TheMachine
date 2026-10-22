@@ -611,6 +611,7 @@ class Skills:
     def view(self):
         with self.connect() as db:
             ensure(db)
+            notes_kept = 'merged_into' in {c[1] for c in db.execute('PRAGMA table_info(facts)')}
             rows = db.execute("SELECT * FROM skills ORDER BY CASE status WHEN 'incoming' THEN 0 WHEN 'proposed' THEN 1 ELSE 2 END, name COLLATE NOCASE").fetchall()
             items = []
             for r in rows:
@@ -620,6 +621,8 @@ class Skills:
                 if r['imported']:
                     item['imported'] = json.loads(r['imported'])
                 if r['status'] in ('on', 'off'):
+                    if notes_kept:  # what the owner taught it, moved here from What I've learned
+                        item['notes'] = [n[0] for n in db.execute("SELECT text FROM facts WHERE merged_into=? ORDER BY id", ('skill:' + r['id'],))]
                     item['shares'] = self.shares_out(db, r['id'])
                     item['changed'] = any(s['version'] < r['version'] for s in item['shares'])
                 items.append(item)

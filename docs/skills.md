@@ -66,6 +66,17 @@ When your agent notices the same kind of work coming back, it can propose a skil
 (`assistant skills-propose --name ... --description ... --file -`). A proposal stays off and waits in Settings > Skills
 with **Approve** and **Dismiss**; at most three wait at a time. Only your tap on the dashboard turns it on.
 
+## From your notes
+
+What you teach on cards (facts and draft rules, under Feedback > What I've learned) can pile up around one kind of task:
+listing exchanges, support handoffs. When a review sees 5 or more notes about one such scenario (judged by meaning, while it
+condenses the list), it suggests a skill on a normal card: the skill's name and when to use it, the notes it would take in,
+and **Create skill**, or **Add to <skill>** when one of your own skills fits (made here, approved or imported; a teammate's
+is never changed), plus **Not now**. Nothing changes before your tap. Not now isn't asked again until 3 more notes joined
+the same ones. On yes the skill is written (instructions only, on, like any of yours) and the notes move into it: kept, listed
+under the skill as "From N of your notes", and no longer in the list every task gets, so a task that needs them gets the
+skill instead. What I've learned shows **Moved into skills** with **Put back**, which returns the notes (the skill stays).
+
 ## Sharing with your Fleet or a friend
 
 Next to each skill, **Share** sends it over The Machine Network:

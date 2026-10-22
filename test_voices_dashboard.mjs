@@ -16,11 +16,13 @@ const posts=[];
 const server=createServer(async(req,res)=>{
  const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
- if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},connectors:[],review_runs:[],voices,facts,
+ if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[{id:'sk1',title:'Turn 6 notes into a skill: Listing exchanges',body:'When a listing exchange is agreed.',status:'pending',
+  created_at:'2026-10-21T09:00:00+00:00',event_ids:'[]',labels:{accept:'Create skill',reject:'Not now'}}],moved:[{skill_id:'sk_9',name:'Partner listings',notes:5}],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},connectors:[],review_runs:[],voices,facts,
   condensed:{at:'2026-10-21T08:00:00+00:00',notes:3}}));return}
  if(url.pathname==='/api/action'){let body='';for await(const c of req)body+=c;const {action,args}=JSON.parse(body);posts.push({action,args});
   if(action==='set_voice'){voices=voices.filter(v=>v.channel!==args.channel);if(args.text)voices.push({channel:args.channel,text:args.text,source:'owner',updated_at:new Date().toISOString()});
    res.end(JSON.stringify({voices}));return}
+  if(action==='decide'){res.end(JSON.stringify({status:'completed'}));return}
   if(action==='unmerge_fact'){res.end(JSON.stringify({restored:2}));return}}
  res.statusCode=404;res.end('{}');
 });
@@ -33,6 +35,10 @@ try{
   const context=await browser.newContext({viewport:{width:390,height:844},colorScheme:scheme}),page=await context.newPage();
   page.on('pageerror',e=>errors.push(e.message));
   await page.goto('http://127.0.0.1:'+server.address().port);
+  // A skill-from-notes card says what its buttons do.
+  const skillCard=page.locator('#task-sk1');await skillCard.waitFor();
+  assert.ok(await skillCard.getByRole('button',{name:'Create skill'}).count());
+  assert.ok(await skillCard.locator('button',{hasText:'Not now'}).count());
   await page.locator('#open-settings').click();await page.locator('#settings-tabs [data-settings-tab="writing"]').click();
   const forms=page.locator('#voices .voice-form:not([data-new])');await forms.first().waitFor();
   assert.equal(await forms.count(),2);
@@ -61,7 +67,10 @@ try{
   await page.goto('http://127.0.0.1:'+server.address().port+'/#feedback');
   await page.locator('[data-tab="feedback"]').click();
   const learned=page.locator('#facts');await learned.locator('.learn-head').first().waitFor();
-  assert.deepEqual(await learned.locator('.learn-head').allTextContents(),['How you write','Facts','How to do things']);
+  assert.deepEqual(await learned.locator('.learn-head').allTextContents(),['How you write','Facts','How to do things','Moved into skills']);
+  await learned.locator('[data-unmerge-skill="sk_9"]').click();
+  await page.locator('#toast',{hasText:'Notes restored.'}).waitFor({state:'attached'});
+  assert.deepEqual(posts.at(-1),{action:'unmerge_fact',args:{skill:'sk_9'}});
   assert.match(await learned.locator('.learn-note').textContent(),/Condensed 3 notes on/);
   const rows=await learned.locator(':scope>div:not(.learn-head):not(.learn-note) .grow').allTextContents();
   assert.match(rows[rows.indexOf(rows.find(r=>r.startsWith('Newest')))],/Merged from 2 notes/);

@@ -519,6 +519,7 @@ class NothingOutsideTheSealedFields(unittest.TestCase):
             'graph_nodes.info': 'people and organisations', 'network_people.reasons': 'why someone is suggested',
             'faults.message': "an error's own message with anything private taken out (assistant.fault_message)",
             'voices.text': 'how the owner writes on a channel, learned like a fact',
+            'skill_clusters.description': 'a skill suggested from learned notes', 'skill_clusters.body': 'a skill suggested from learned notes',
         }
         sealed = {f'{t}.{c}' for t, cs in message_seal.DERIVED.items() for c in cs} | {f'{t}.{c}' for t, c, _ in message_seal.DERIVED_JSON}
         sealed |= {'events.title', 'events.body', 'events.metadata'}
