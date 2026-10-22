@@ -4472,9 +4472,44 @@ class Store:
         if waiting:
             extra['preparation_browser']={**waiting,'link':browser_link(self.config)}
             if waiting.get('sign_in'):extra['preparation_browser']['signin_url']=signin_link(self.config,suggestion['id'])
+        if suggestion.get('status')=='prepared':self.browser_view(db,suggestion,extra)
         if self.accounts and suggestion.get('account_ids') is not None:
             extra['scope']=suggestion_scope(suggestion['account_ids'], self.accounts)
         return extra
+
+    def browser_view(self, db, suggestion, extra):
+        """A ready card whose own run worked in the Machine's browser links to that page there, not in the owner's own
+        browser (where the run's sign-in and filled-in form are missing): its link-out to that site becomes View in
+        browser's (browser:true, the dashboard's #browser-for address), and with none, a run that changed a page there
+        (typed, clicked) gets one. Other links lose token-like query values. Read from the run's own browser steps."""
+        actions=extra.get('next_actions') or []
+        for item in actions:
+            if item.get('kind')=='open':item['url']=safe_link(item.get('url')) or ''
+        page=self.task_pages(db,suggestion['id'])
+        if not page:return
+        link=browser_view_link(self.config,suggestion['id'])
+        site=browser_login.site(urllib.parse.urlsplit(page['url']).hostname)
+        mine=[a for a in actions if a.get('kind')=='open' and same_site(urllib.parse.urlsplit(a.get('url') or '').hostname,page['url'])]
+        for item in mine:
+            item.update(browser=True,site=site)
+            if link:item['url']=link
+        if not mine and page['worked']:
+            extra['browser_view']={'label':'View in browser','site':site}
+            if link:extra['next_actions']=[*actions,{'kind':'open','label':'View in browser','url':link,'browser':True,'site':site,'revision':'browser-view'}]
+
+    def task_pages(self, db, suggestion_id):
+        """task_page, kept per run and number of steps: a finished run's steps don't change, and every card refresh asks."""
+        try:
+            key=db.execute("SELECT p.job_id,(SELECT count(*) FROM preparation_calls c WHERE c.job_id=p.job_id),(SELECT count(*) FROM preparation_runs r WHERE r.suggestion_id=p.suggestion_id) "
+                           "FROM preparations p WHERE p.suggestion_id=?",(suggestion_id,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        key=(suggestion_id,*tuple(key or ()))
+        cache=self.__dict__.setdefault('task_page_cache',{})
+        if key not in cache:
+            if len(cache)>500:cache.clear()
+            cache[key]=task_page(db,suggestion_id)
+        return cache[key]
 
     def result_document(self, suggestion_id, relative):
         with self.connect() as db:
@@ -5775,6 +5810,13 @@ def peek_tab(db, job_id):
         return None
     if not isinstance(last, dict) or last.get('action') == 'close':
         return None
+    return own_tab(db, job_id, calls, last.get('targetId') or last.get('label'))
+
+
+def own_tab(db, job_id, calls, want):
+    """(DevTools target ID, port) of the tab named `want` (a targetId or label a browser step used) that this run
+    opened itself, or that an earlier run of the same task opened (a retry, after a sign-in or a Change), while it was
+    not closed again. `calls` are this run's (tool, params, result), newest first. None otherwise."""
     def opened(calls, want=None):
         """A run's own tabs, newest first: (target ID, port, every name OpenClaw gave it). With `want`, only that tab
         and only while the run had not closed it again."""
@@ -5799,7 +5841,6 @@ def peek_tab(db, job_id):
                 tabs.append((target, ws.port, names))
         return tabs
 
-    want = last.get('targetId') or last.get('label')
     mine = next(iter(opened(calls, want)), None)
     if not mine and want:  # carrying on in a tab an earlier run of this same task opened
         try:
@@ -5828,6 +5869,84 @@ def browser_link(config):
         return 'https://' + str(config['dashboard_host']) + browser_viewer.view_link(config.get('dashboard_path', '/'))
     return None
 
+
+
+FINAL_STEPS = ('submit', 'pay', 'book', 'sign', 'confirm', 'order', 'apply')  # outcome:'your_step': the click left to the owner
+BROWSER_WORK = ('act', 'upload', 'dialog')  # browser steps that change a page (type, click, choose, upload, answer a dialog)
+SECRET_PARAM = re.compile(r'(?i)^(?:.*(?:token|secret|passw(?:or)?d|pwd|session|sess|sid|auth|signature|credential|api_?key|jwt|otp|nonce|ticket|saml).*|key|sig|code|state|hash|x-amz-.*)$')
+
+
+def safe_link(url):
+    """An http(s) address that is fine to show or send: no user name or password, no query value whose name looks
+    like a token, key, signature or session, and no fragment that carries one. None for anything else."""
+    parts = urllib.parse.urlsplit(str(url or '').strip())
+    if parts.scheme not in ('http', 'https') or not parts.hostname:
+        return None
+    query = urllib.parse.urlencode([(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if not SECRET_PARAM.match(k)])
+    fragment = '' if '=' in parts.fragment or re.search(r'(?i)token|secret|session', parts.fragment) else parts.fragment
+    host = parts.hostname if not parts.port else f'{parts.hostname}:{parts.port}'
+    host = f'[{host}]' if ':' in parts.hostname else host
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, query, fragment))
+
+
+def task_page(db, suggestion_id):
+    """The page a task's own browser work ended on, for its card's View in browser: {url, target, port, title, worked}
+    from the newest run of this task that used the browser. `url` is the last address that run recorded for the tab
+    its last browser step used (a step's answer says where the tab is now; else the address it opened), `target` that
+    tab's DevTools ID when this task opened it and did not close it again (own_tab), `worked` whether a step there
+    changed a page (typed, clicked, uploaded), not only read it. None without browser steps. Never another task's tab:
+    only this task's runs and the tabs they named."""
+    try:
+        jobs = [r[0] for r in db.execute('SELECT job_id FROM preparation_runs WHERE suggestion_id=? ORDER BY started_at DESC LIMIT 20', (suggestion_id,))]
+        current = db.execute('SELECT job_id FROM preparations WHERE suggestion_id=?', (suggestion_id,)).fetchone()
+        if current and current[0] not in jobs:
+            jobs.insert(0, current[0])
+        used = {r[0] for r in db.execute("SELECT DISTINCT job_id FROM preparation_calls WHERE tool='browser' AND job_id IN (%s)" % ','.join('?' * len(jobs)), jobs)} if jobs else set()
+        job = next((j for j in jobs if j in used), None)
+        calls = db.execute('SELECT tool,params,result FROM preparation_calls WHERE job_id=? ORDER BY started_at DESC,rowid DESC LIMIT 200',
+                           (job,)).fetchall() if job else []
+    except sqlite3.OperationalError:
+        return None
+    def params(call):
+        try:
+            found = json.loads(call['params'] or '{}')
+        except (ValueError, TypeError):
+            return {}
+        return found if isinstance(found, dict) else {}
+    steps = [(params(c), c) for c in calls if c['tool'] == 'browser']
+    if not steps:
+        return None
+    want = next((p.get('targetId') or p.get('label') for p, _ in steps if p.get('targetId') or p.get('label')), None)
+    want = want if isinstance(want, str) and want else None
+    closed = want and any(p.get('action') == 'close' and want in (str(p.get('targetId')), str(p.get('label'))) for p, _ in steps[:1])
+    tab = None if closed else own_tab(db, job, calls, want)
+    names = {want, tab[0] if tab else None} - {None}  # a step names its tab by label or ID; its answer by ID
+    url = title = None
+    for given, call in steps:
+        if given.get('action') == 'tabs':
+            continue  # a tab list names every tab, never this task's own
+        answer = browser_result(call)
+        found_names = {str(answer.get(k)) for k in ('targetId', 'label', 'tabId', 'suggestedTargetId') if answer.get(k)}
+        for found, named in ((answer.get('url'), found_names), (given.get('url') or given.get('targetUrl'), {str(given.get('targetId')), str(given.get('label'))})):
+            if isinstance(found, str) and urllib.parse.urlsplit(found).scheme in ('http', 'https') and (want is None or names & named):
+                url, title = found, answer.get('title') if found == answer.get('url') else None
+                break
+        if url:
+            break
+    url = url or run_page(db, job, calls)
+    if not url:
+        return None
+    return {'url': url, 'target': tab[0] if tab else None, 'port': tab[1] if tab else None,
+            'title': ' '.join(str(title).split())[:80] if isinstance(title, str) and title.strip() else None,
+            'worked': any(p.get('action') in BROWSER_WORK and (want is None or names & {str(p.get('targetId')), str(p.get('label'))}) for p, _ in steps)}
+
+
+def browser_view_link(config, suggestion_id):
+    """The dashboard address that shows a task's page in the Machine's own browser (View in browser, also from
+    Telegram): it brings that tab to the front, or reopens it there, then opens the browser's viewer. None without a
+    dashboard address. It carries only the task's ID, never the page's address."""
+    host = str(config.get('dashboard_host') or '')
+    return 'https://' + host + config.get('dashboard_path', '/') + '#browser-for=' + suggestion_id if host else None
 
 def transcript_tool_calls(session_key, agent_db=None, limit=4, scan=60):
     """[(at, tool name, arguments)] of the latest tool calls in an agent session, newest first, read from the
@@ -6159,7 +6278,8 @@ def card(row):
     if row['status'] == 'prepared' and row.get('outcome'):
         try:
             outcome = json.loads(row['outcome'])
-            status = {'done': 'Finished. Mark it done if it looks right.',
+            status = {'your_step': 'Ready for you to check and ' + str(outcome.get('step')) + '.',
+                      'done': 'Finished. Mark it done if it looks right.',
                       'answered': 'Answered. Nothing done yet.',
                       'snoozed': 'Back, as you asked.',
                       'already_done': 'Looks done already. Mark it done if that’s right.'}.get(outcome['state']) or 'Needs you: ' + sentence(outcome['needs'])
@@ -6355,7 +6475,7 @@ def controls(row, root=''):
                     continue
                 choice=('next_' if action['kind']=='prepare' else 'send_')+action['revision']
                 buttons.append({'label':next_actions.label(action),'action':{'type':'callback','value':f"assistant:{row['id']}:{choice}"}})
-            elif action['kind']=='open':buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
+            elif action['kind']=='open' and str(action.get('url') or '').startswith(('https://','http://')):buttons.append({'label':action['label'],'action':{'type':'url','url':action['url']}})
             elif action['kind']=='handoff' and root and not row.get('handled_hint'):buttons.append({'label':next_actions.label(action),'action':{'type':'url','url':f"{root}#task-{row['id']}"}})  # the Fleet handoff form is on the dashboard
     if row['status'] in ('prepared','completed') and any(a['kind']=='merge' and (a.get('state') or row.get('action_status') or {}).get('undo_until','')>now() for a in actions):
         buttons.append({'label':'Undo merge','action':{'type':'callback','value':f"assistant:{row['id']}:unmerge"}})  # a merged fix stays reversible for a day
@@ -7025,7 +7145,7 @@ For this job:
 - Browser lease owner: assistant-{j[:8]} (python3 {browser_lease_script(config)} claim --owner assistant-{j[:8]} --minutes 30 --wait 10).
 - Attachments folder: {WORKSPACE}/data/assistant-attachments/{j}/
 - Save the result with assistant_signals prepare args suggestion_id={sid}, job_id={j}, body=<short result>, next_actions=[...], outcome and send_now:true only when the owner asked you to send it.
-- outcome:'done' only when the task itself is complete and nothing is left for the owner but to check it; outcome:'answered' when you only answered their question, explained or planned, and the task itself is still to do (the card then offers Do it again); outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose); when that is a question for them, write needs as the question itself, ending in "?" (the card then leads with Answer). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
+- outcome:'done' only when the task itself is complete and nothing is left for the owner but to check it; outcome:'answered' when you only answered their question, explained or planned, and the task itself is still to do (the card then offers Do it again); outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'your_step' with step:'submit' (or pay, book, sign, confirm, order, apply) when everything is ready but that final click is left for them, e.g. a form you filled in and didn't submit (the card says so and links to the page in this Machine's browser by itself; no link of your own needed); outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose); when that is a question for them, write needs as the question itself, ending in "?" (the card then leads with Answer). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
 - When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card ("always…", signatures, formatting, tone with this kind of person) also becomes a draft rule: assistant_signals remember_fact args text=<the rule, general>, decision_id=<that note's decision>, kind=draft. A fact note that holds beyond this card goes in remember_fact as a fact.
 - When the owner's note means they want this task itself back later (remind me about it next week, later, on Tuesday), that is this card's snooze, not a reminder: save with outcome:'snoozed' and snooze_until:<their local date and time, e.g. 2026-10-27T09:00, or a date alone for their morning>, and a one-line body. The card leaves their list and comes back then. Do not also add an automation, cron job or reminder for it. A separate reminder about something else, or a recurring one, stays an automation. Their time zone is {getattr(local_tz(),'key','UTC')}; it is now {dt.datetime.fromisoformat(now()).astimezone(local_tz()).strftime('%a %Y-%m-%d %H:%M')} there.
 - Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>.''' + owner_details(config) + (f'''
@@ -7964,10 +8084,16 @@ class App:
                         raise ValueError("outcome:'already_done' means there is nothing left to approve: leave next_actions empty")
                     outcome={'state':'already_done'}
                 elif args.get('outcome')=='answered':outcome={'state':'answered'}
+                elif args.get('outcome')=='your_step':
+                    # Everything is ready up to a final click the owner makes themselves (in the Machine's browser):
+                    # the card says what that click is and links to the page (View in browser).
+                    if args.get('step') not in FINAL_STEPS:
+                        raise ValueError("outcome:'your_step' needs step: "+', '.join(FINAL_STEPS)+" (the final click left to the owner)")
+                    outcome={'state':'your_step','step':args['step']}
                 elif args.get('outcome')=='snoozed':
                     # The owner wants this card itself back later: the card's own snooze, not a separate reminder.
                     outcome={'state':'snoozed','until':asked_snooze_time(args.get('snooze_until'))}
-                else:raise ValueError("Say whether the job is finished: outcome:'done' (the task itself is complete; nothing left for the owner but to check it), outcome:'answered' (you only answered a question, explained or planned; the task itself is still to do), outcome:'already_done' (it turned out to be done already or no longer needed), or outcome:'needs_you' with needs:<what they have to do, e.g. approve the send, sign in, pick an option>")
+                else:raise ValueError("Say whether the job is finished: outcome:'done' (the task itself is complete; nothing left for the owner but to check it), outcome:'answered' (you only answered a question, explained or planned; the task itself is still to do), outcome:'already_done' (it turned out to be done already or no longer needed), outcome:'your_step' with step:<submit, pay, book, sign, confirm, order or apply> (all ready, the owner makes that final click), or outcome:'needs_you' with needs:<what they have to do, e.g. approve the send, sign in, pick an option>")
             saved=self.store.prepare(args['suggestion_id'], args['body'],args.get('job_id'),action,outcome,args.get('note_kind'),require_note=True,finish_state=args.get('finish_state'))
 
             if args.get('send_now') is True and not saved.get('replayed'):
@@ -8060,6 +8186,12 @@ class App:
                     return {'shown': False, 'unknown': True}
             shown = browser_viewer.focus(page, self.config.get('browser_cdp_url') or browser_viewer.CDP_URL)
             return {'shown': shown is not None}
+        if name == 'browser_show':
+            if not owner_dashboard:
+                raise ValueError('Only the owner opens a task’s page in the browser, from the dashboard')
+            if not isinstance(args.get('suggestion_id'), str):
+                raise ValueError('Which task?')
+            return self.browser_show(args['suggestion_id'])
         if name in ('browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget'):
             # A separate path: what the owner types goes into the page and, when asked, the encrypted store, never
             # into a log, the model or an error message (see browser_login.py).
@@ -9471,6 +9603,37 @@ class App:
         except (ValueError, OSError):
             pass
         return {'state': state, 'site': signin_name(reason, page), 'kind': signin_kind(reason, [url]), 'view': view}
+
+    def browser_show(self, suggestion_id):
+        """View in browser: the page a task's own run worked on, in front in the Machine's browser (its own tab, still as
+        the run left it), else reopened there from the address the run recorded. Never the owner's own browser and
+        never another task's tab. Returns {shown, opened, site, view}: `view` is the browser's viewer, when there is one."""
+        with self.store.connect() as db:
+            page = task_page(db, suggestion_id)
+        view = browser_link(self.config)
+        if not page:
+            return {'shown': False, 'unknown': True, 'view': view}
+        base = browser_login.endpoints(self.config)[0]
+        site = browser_login.site(urllib.parse.urlsplit(page['url']).hostname)
+        try:
+            tabs = self.signin_tabs()
+        except (browser_login.browser_cdp.CdpError, OSError, TypeError, AttributeError):
+            return {'shown': False, 'site': site, 'view': view, 'error': 'I couldn’t reach the browser on this computer'}
+        same_port = page['target'] and urllib.parse.urlsplit(base).port == page['port']
+        tab = (next((t for t in tabs if same_port and t['id'] == page['target']), None)
+               or next((t for t in tabs if t['url'] == page['url']), None))
+        opened = False
+        if not tab:  # the tab is gone: the same address again, in the Machine's browser
+            try:
+                tab = {'id': browser_login.browser_cdp.open_tab(base, page['url']), 'url': page['url']}
+            except (browser_login.browser_cdp.CdpError, OSError):
+                return {'shown': False, 'site': site, 'view': view, 'error': 'I couldn’t open that page in the browser'}
+            opened = True
+        try:
+            shown = browser_viewer.focus(tab['url'], base, target=tab['id']) is not None
+        except (ValueError, OSError):
+            shown = False
+        return {'shown': shown, 'opened': opened, 'site': site, 'view': view}
 
     def signin_page(self, suggestion_id):
         """The address a task's blocked sign-in waits on, from its own run steps (run_page), or None."""

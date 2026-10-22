@@ -102,9 +102,10 @@ def install(say=print, openclaw='openclaw'):
     return VIEWER_URL
 
 
-def focus(page=None, cdp_url=CDP_URL, timeout=5):
-    """Bring a tab to the front (Target.activateTarget over the DevTools HTTP endpoint): the one showing `page`
-    (same address, else same site), else the first page. Returns the tab's address, or None without a browser."""
+def focus(page=None, cdp_url=CDP_URL, timeout=5, target=None):
+    """Bring a tab to the front (Target.activateTarget over the DevTools HTTP endpoint): the one with DevTools ID
+    `target`, else the one showing `page` (same address, else same site), else the first page. Returns the tab's
+    address, or None without a browser."""
     base = cdp_url.rstrip('/')
     if urllib.parse.urlsplit(base).hostname not in ('127.0.0.1', 'localhost', '::1'):
         raise ValueError('Only a browser on this machine')
@@ -116,7 +117,8 @@ def focus(page=None, cdp_url=CDP_URL, timeout=5):
     if not tabs:
         return None
     site = urllib.parse.urlsplit(page or '').hostname
-    tab = (next((t for t in tabs if page and t.get('url') == page), None)
+    tab = (next((t for t in tabs if target and t.get('id') == target), None)
+           or next((t for t in tabs if page and t.get('url') == page), None)
            or next((t for t in tabs if site and urllib.parse.urlsplit(t.get('url', '')).hostname == site), None) or tabs[0])
     try:
         urllib.request.urlopen(base + '/json/activate/' + urllib.parse.quote(tab['id'], safe=''), timeout=timeout).close()
