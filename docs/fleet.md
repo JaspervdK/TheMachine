@@ -223,6 +223,19 @@ Each person answers with one Machine per Fleet, so teammates never get two answe
 (say a hosted one and one at home), you pick which one answers in your account. Removing someone from a Fleet takes
 effect at once, and how often a Machine can ask is limited.
 
+## In your Graph
+
+Members of your Fleets, your Family and your Friends are marked in the Graph tab ("Has a Machine · Work Fleet"), with
+**See in Fleet** and **Ask your Fleet** on their page; the Fleet tab links each member to them with **In your Graph**.
+When the messages only give part of a name ("kim"), the Graph shows the name they chose to share in the Fleet, and
+**Keep** makes it yours.
+
+It uses only what the directory already shows every member: their name, verified email addresses, and whether they
+have a Machine. It matches on those addresses, and runs on your Machine when you open the Graph. It never asks their
+Machine anything, and nothing new leaves yours. A pending friend request or a blocked person is not marked. When
+someone leaves, or you do, the marker goes and the name falls back to the one in your messages, unless you kept or
+renamed it.
+
 ## Leaving a Work Fleet with your Machine
 
 When you leave a Work Fleet, or its owner or admin removes you, and you keep your Machine, your work data for that

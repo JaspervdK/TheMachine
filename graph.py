@@ -865,15 +865,16 @@ def person_evidence(db, node_id, owner, limit=8):
     return out
 
 
-def find(db, text, limit=10, kinds=('person', 'project', 'org')):
-    """Nodes by name, address or handle; strongest first."""
+def find(db, text, limit=10, kinds=('person', 'project', 'org'), also=None):
+    """Nodes by name, address or handle; strongest first. also: more text to match per node (a Fleet member's name)."""
     words = [w for w in re.findall(r'[\w@.+-]+', str(text or '').casefold()) if len(w) > 1]
     if not words:
         return []
     marks = ','.join('?' for _ in kinds)
     rows = db.execute(f'SELECT * FROM graph_nodes WHERE kind IN ({marks}) ORDER BY strength DESC', tuple(kinds)).fetchall()
     folded = lambda s: unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode().casefold()
-    hits = [r for r in rows if all(w in folded(r['name'] + ' ' + r['id'] + ' ' + r['info']) for w in map(folded, words))]
+    also = also or {}
+    hits = [r for r in rows if all(w in folded(r['name'] + ' ' + r['id'] + ' ' + r['info'] + ' ' + also.get(r['id'], '')) for w in map(folded, words))]
     return hits[:limit]
 
 
@@ -988,6 +989,92 @@ def detail(db, node_id, events=12):
         view['people_roles'] = [{'id': r['id'], 'name': r['name'], 'role': json.loads(r['info']).get('role')} for r in db.execute(
             "SELECT n.id,n.name,n.info FROM graph_links l JOIN graph_nodes n ON n.id=l.a WHERE l.b=? AND l.kind='member' ORDER BY n.strength DESC LIMIT 12", (node_id,))]
     return view
+
+
+# The owner's Fleets, Family and Friends on the graph. Only what the Network's directory already shows every member of
+# that group (the name they chose to share there, their verified addresses, whether they have a Machine), matched on
+# those addresses; nothing is asked of their Machine and nothing leaves this one. Read at view time from the
+# directory kept here, so leaving a Fleet (or a friend removed) takes the marker and the name away with the next
+# directory; a name the owner kept (graph_names) stays.
+FLEET_GROUPS = {'work': 'Work Fleet', 'family': 'Family', 'friends': 'Friend'}
+MEMBER_EMAIL = re.compile(r'[^@\s]+@[^@\s]+\.[^@\s]+')
+
+
+def fleet_marks(db, fleets):
+    """{node_id: {'name', 'machine', 'in': [...]}} for the people in the graph who are members of the owner's Fleets,
+    Family or Friends (fleets: the directory by Fleet id, as fleet.Fleet.fleets() gives it). Members only: a pending
+    friend request or a blocked person is not one."""
+    by_email = collections.defaultdict(list)
+    for ref, found in (fleets or {}).items():
+        kind = (found or {}).get('kind')
+        if kind not in FLEET_GROUPS:
+            continue
+        for m in found.get('members') or ():
+            if not isinstance(m, dict) or m.get('me') or not m.get('member_id'):
+                continue
+            for e in {str(e).strip().lower() for e in m.get('emails') or () if MEMBER_EMAIL.fullmatch(str(e).strip())}:
+                by_email[e].append((ref, kind, found, m))
+    if not by_email:
+        return {}
+    marks = {}
+    ids = ['email:' + e for e in by_email]
+    for start in range(0, len(ids), 400):
+        chunk = ids[start:start + 400]
+        rows = db.execute("SELECT DISTINCT n.id,j.value FROM graph_nodes n, json_each(n.info,'$.identifiers') j WHERE n.kind='person' AND j.value IN ("
+                          + ','.join('?' for _ in chunk) + ')', chunk).fetchall()
+        for node_id, identifier in rows:
+            mark = marks.setdefault(node_id, {'name': '', 'machine': False, 'in': []})
+            for ref, kind, found, m in by_email[identifier.split(':', 1)[1]]:
+                if any(x['fleet'] == ref and x['member_id'] == m['member_id'] for x in mark['in']):
+                    continue
+                mark['in'].append({'kind': kind, 'label': FLEET_GROUPS[kind], 'fleet': ref, 'fleet_name': str(found.get('name') or '')[:80],
+                                   'member_id': str(m['member_id'])})
+                mark['machine'] = mark['machine'] or bool(m.get('machine'))
+                name = ' '.join(str(m.get('name') or '').split())[:100]
+                if not mark['name'] or (kind == 'work' and plain_name(name)):  # the name shared in a Work Fleet first
+                    mark['name'] = name if plain_name(name) else mark['name']
+    order = {'work': 0, 'family': 1, 'friends': 2}
+    for mark in marks.values():
+        mark['in'].sort(key=lambda x: (order[x['kind']], x['fleet_name'].casefold()))
+    return marks
+
+
+def incomplete_name(name):
+    """A name from the messages that is only part of one: a single word ("sam"), all lower case, or an address."""
+    name = str(name or '').strip()
+    return not name or '@' in name or plain_name(name) is None or name == name.lower()
+
+
+def with_fleet(db, result, marks):
+    """Marks the people in a graph view (overview, detail, search) who are in the owner's Fleets, Family or Friends, and
+    gives an incomplete name ("sam") the name they share there. The owner's own name for someone always wins."""
+    if not marks:
+        return result
+    kept = {r[0] for r in db.execute('SELECT node_id FROM graph_names')}
+
+    def mark(item):
+        found = marks.get(item.get('id'))
+        if not found:
+            return
+        item['fleet'] = {'machine': found['machine'], 'in': found['in'], 'name': found['name'] or None}
+        row = db.execute('SELECT info FROM graph_nodes WHERE id=?', (item['id'],)).fetchone()
+        group = set(json.loads(row['info']).get('identifiers') or ()) | {item['id']} if row else {item['id']}
+        if found['name'] and not (group & kept) and incomplete_name(item.get('name')) and found['name'] != item.get('name'):
+            item['name_from_messages'], item['name'] = item.get('name'), found['name']
+            item['fleet']['named'] = True
+
+    def walk(value):
+        if isinstance(value, dict):
+            if value.get('kind') == 'person' and isinstance(value.get('id'), str):
+                mark(value)
+            for v in value.values():
+                if isinstance(v, (dict, list)):
+                    walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+    walk(result)
+    return result
 
 
 def open_between(db, node_id, limit=6, skip_card=None):

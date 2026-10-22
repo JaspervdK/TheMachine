@@ -10067,6 +10067,7 @@ class App:
             self.graph_build()
         limit = min(int(args.get('limit') or 12), 30)
         with self.store.connect() as db:
+            marks = self.graph_fleet_marks(db)
             if args.get('node_id'):
                 found = graph.detail(db, str(args['node_id']), max(1, min(int(args.get('events') or 12), 40)))
                 if not found:
@@ -10075,15 +10076,40 @@ class App:
                 guessed = set(found['probable_ids'])
                 found['recent'] = [line + (' (probably part of it)' if int(line.split(' ', 1)[0]) in guessed else '')
                                    for line in self.graph_event_lines(found.pop('event_ids'))]
-                return found
+                return graph.with_fleet(db, found, marks)
             if args.get('query'):
-                hits = graph.find(db, args['query'], limit)
-                return {'found': [graph.node_view(r, graph.neighbours(db, r['id'], 6)) for r in hits],
-                        'hint': 'Open one with node_id for its links, recent signals and what is alive around it.'}
+                hits = graph.find(db, args['query'], limit, also={k: m['name'] for k, m in marks.items() if m['name']})
+                return graph.with_fleet(db, {'found': [graph.node_view(r, graph.neighbours(db, r['id'], 6)) for r in hits],
+                                             'hint': 'Open one with node_id for its links, recent signals and what is alive around it.'}, marks)
             if args.get('event_ids') and not args.get('project'):
-                return {'on_these_signals': [graph.node_view(r, graph.neighbours(db, r['id'], 6)) for r in graph.for_events(db, args['event_ids'])[:limit]]}
-            result = graph.overview(db, limit)
+                return graph.with_fleet(db, {'on_these_signals': [graph.node_view(r, graph.neighbours(db, r['id'], 6))
+                                                                  for r in graph.for_events(db, args['event_ids'])[:limit]]}, marks)
+            result = graph.with_fleet(db, graph.overview(db, limit), marks)
             return {**result, 'changed': changed} if changed else result
+
+    def fleet_view(self):
+        """The Fleet tab, with each member who is in the graph linked to their person there."""
+        view = self.fleet.view()
+        try:
+            with self.store.connect() as db:
+                found = {(x['fleet'], x['member_id']): node for node, m in self.graph_fleet_marks(db).items() for x in m['in']}
+        except sqlite3.Error:
+            found = {}
+        for f in view.get('fleets') or ():
+            for p in f.get('people') or ():
+                if found.get((f.get('id'), p.get('member_id'))):
+                    p['graph_node'] = found[(f['id'], p['member_id'])]
+        return view
+
+    def graph_fleet_marks(self, db):
+        """Who in the graph is in the owner's Fleets, Family or Friends: from the Network directory this Machine keeps,
+        never by asking their Machine (graph.fleet_marks). Nothing without a Fleet."""
+        if not getattr(self, 'fleet', None):
+            return {}
+        try:
+            return graph.fleet_marks(db, self.fleet.fleets())
+        except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError):
+            return {}
 
     def graph_lines(self, suggestion_id):
         """Who the people on a task are to the owner, and the projects around them, for a preparation."""
@@ -10244,7 +10270,7 @@ class App:
                                 app.fleet.directory(refresh=True)
                         except (fleet.Off, ValueError, OSError):
                             pass
-                        self.output(200, app.fleet.view())
+                        self.output(200, app.fleet_view())
                 elif path.path == '/api/graph':
                     node = urllib.parse.parse_qs(path.query).get('node', [''])[0]
                     query = urllib.parse.parse_qs(path.query).get('q', [''])[0]
