@@ -3728,10 +3728,16 @@ class Store:
         """What the owner did, not only what they wrote: drafts they edited before sending, cards
         they snoozed again and again, and cards they dismissed within minutes without a note."""
         since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+        ids = None if accounts is None else sorted(a for a in accounts if a)
         with self.connect() as db:
             edits = {}
-            scope = ' AND EXISTS(SELECT 1 FROM json_each(s.account_ids) WHERE value IN (' + ','.join('?' for _ in accounts) + '))' if accounts is not None else ''
-            for r in db.execute('SELECT e.*,s.title FROM draft_edits e JOIN suggestions s ON s.id=e.suggestion_id WHERE e.created_at>=?' + scope + ' ORDER BY e.created_at', (since, *(sorted(accounts) if accounts is not None else []))):
+            if ids:
+                scope = ' AND EXISTS(SELECT 1 FROM json_each(s.account_ids) WHERE value IN (' + ','.join('?' for _ in ids) + '))'
+            elif ids is not None:
+                scope = ' AND 0'
+            else:
+                scope = ''
+            for r in db.execute('SELECT e.*,s.title FROM draft_edits e JOIN suggestions s ON s.id=e.suggestion_id WHERE e.created_at>=?' + scope + ' ORDER BY e.created_at', (since, *(ids or []))):
                 first = edits.setdefault(r['suggestion_id'], {'title': r['title'], 'before': r['before_body'], 'before_subject': r['before_subject'], 'at': r['created_at']})
                 first.update(after=r['after_body'], after_subject=r['after_subject'], at=r['created_at'], kind=r['kind'], source=r['source'])
             edited_revisions = {r[0] for r in db.execute('SELECT new_revision FROM draft_edits')}
@@ -4261,7 +4267,7 @@ class Store:
             conversations = {c for c in (conversation_of(kind, meta(e)) for e in mine) if c}
             people = {a.lower() for e in mine for _, a in email.utils.getaddresses([str(meta(e).get(f) or '') for f in ('from', 'to', 'cc')]) if a}
             people -= {str(a.get('email', '')).lower() for a in self.accounts}
-            accounts = {e.get('account_id') for e in mine}
+            accounts = {e.get('account_id') for e in mine if e.get('account_id')}
             if not accounts:
                 return []
             predicate, params = own_predicate(kind, ids)
@@ -4300,7 +4306,7 @@ class Store:
             parts.append(f"The owner's own recent {examples[0]['channel']} messages, newest first. Match how these read (length, greeting, sign-off, "
                          'language, capitals, punctuation, emoji, formality), not what they say:\n' +
                          '\n'.join(f"- ({e['where']}) {e['text']}" if e['where'] else f"- {e['text']}" for e in examples))
-        edits = self.draft_edits_text(kinds=[k for k, v in DRAFT_EVENT_KINDS.items() if v in kinds], accounts={e['account_id'] for e in events})
+        edits = self.draft_edits_text(kinds=[k for k, v in DRAFT_EVENT_KINDS.items() if v in kinds], accounts={e['account_id'] for e in events if e.get('account_id')})
         if edits:
             parts.append(f"Earlier {here[0] + ' ' if here else ''}drafts the owner changed before sending, or answered themselves instead. Write the next drafts "
                          'the way they ended up writing these (length, tone, what they cut or added):\n' + edits)

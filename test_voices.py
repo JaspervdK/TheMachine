@@ -381,6 +381,28 @@ class ReviewRegressions(unittest.TestCase):
         self.store.commit_page('work', {}, [incoming])
         self.assertFalse(any('NOT OWNER' in e['text'] for e in self.store.own_examples(self.sid)))
 
+    def test_style_context_survives_missing_account_ids(self):
+        self.app.action('set_voice', {'channel': 'Email', 'text': 'Hey name, short.'}, owner_dashboard=True)
+        with self.store.connect() as db:
+            db.execute("INSERT INTO draft_edits(id,suggestion_id,old_revision,new_revision,kind,before_body,after_body,source,created_at) "
+                       "VALUES('e-work',?,'a','b','email','Dear Sam','Hey Sam, here it is','dashboard',?)", (self.sid, a.now()))
+        draft = {'kind': 'email', 'label': 'Send', 'to': ['sam@example.com'],
+                 'thread_id': 't1', 'subject': 'Re: Contract', 'body': 'Hey Sam, here it is.', 'revision': 'r1'}
+        with self.store.connect() as db:
+            db.execute("UPDATE suggestions SET next_action=? WHERE id=?", (json.dumps(draft), self.sid))
+        mixed = self.store.style_text(self.sid)
+        self.assertIn('- Email (this card):', mixed)
+        self.assertIn('(this conversation) Hey Sam', mixed)
+        self.assertIn('Hey Sam, here it is', mixed)
+        self.assertEqual(self.store.behaviour(accounts=set())['edits'], [])
+        self.assertTrue(self.store.behaviour(accounts={None, 'work'})['edits'])
+        with self.store.connect() as db:
+            db.execute("UPDATE events SET deleted=1 WHERE id=1")
+            db.execute("UPDATE suggestions SET next_action=NULL WHERE id=?", (self.sid,))
+        empty = self.store.style_text(self.sid)
+        self.assertIn('- Email:', empty)
+        self.assertNotIn('Hey Sam, here it is', empty)
+
     def test_undo_voice_merge_restores_previous_line_but_preserves_new_owner_edit(self):
         decision = self.note_id()
         for preserve in (False, True):
