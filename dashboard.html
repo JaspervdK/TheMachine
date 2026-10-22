@@ -534,6 +534,8 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .card .actions:not(.result-actions)>button.primary{background:var(--mint);color:var(--charcoal);font-weight:650}
 .card .actions:not(.result-actions)>button.primary:hover{background:#cad6b9;color:var(--charcoal)}[data-theme="light"] .card .actions:not(.result-actions)>button.primary:hover{background:#3f582a;color:#fff}
 .card .change-editor{margin:14px 0 0;padding-top:12px;border-top:1px solid var(--border)}
+/* A Change or Answer box opens on purpose: it stays open, so its button doesn't jump away when the box loses focus. */
+.card .change-editor:not(.dismiss-editor) textarea{height:84px}
 /* More: the rarer actions, in a small menu under the last tile. */
 .card .actions>.more-actions{position:relative;display:flex;align-self:stretch;margin:0}.card .more-actions>summary::before{content:none}
 .card .more-actions>summary{list-style:none;flex:1;height:100%;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:8px 16px;border-radius:12px;background:var(--tile);color:var(--muted);font-size:.92rem;font-weight:500;cursor:pointer;user-select:none}
@@ -682,7 +684,7 @@ strong.nb{white-space:nowrap}
 #import-search{width:100%;box-sizing:border-box}.import-own{display:grid;gap:10px}.import-own>summary{cursor:pointer;color:var(--muted);font-size:.88rem}.import-own[open]>summary{margin-bottom:8px}.import-own>*:not(summary){margin-bottom:8px}.import-group>summary{cursor:pointer;margin:14px 0 6px;font-weight:600;font-size:.95rem}.import-group>summary small{color:var(--muted);font-weight:400}
 #import-list .skills-head:first-child{margin-top:4px}.import-more{margin:6px 0 0}
 .import-list>div{align-items:flex-start}.import-list .tick{display:flex;align-items:center;padding-top:2px}.import-list .tick input{width:18px;height:18px;margin:0}
-.import-list .import-why{color:var(--mint)}.import-list .import-no{color:var(--orange,#e8a33d)}.import-list .skill-off .tick{opacity:.5}
+.import-list .import-why{color:var(--mint)}.import-list .import-no{color:var(--orange,#e8a33d)}.import-list .skill-off .tick{opacity:.5}.import-list .import-ok{color:var(--mint)}.import-list .import-here{color:var(--muted)}.skills-list .skill-flash{outline:2px solid var(--mint);outline-offset:2px}
 .import-list .grow strong,.import-list .grow small{white-space:normal;overflow-wrap:anywhere}.import-list label{display:inline;color:inherit;font-size:inherit}
 @media(max-width:560px){.skills-list>div{flex-wrap:wrap}.skills-list .skill-buttons{flex:1 1 100%;justify-content:flex-start;margin-top:6px}}
 /* Design system layer (docs/design.md; the shared tokens at the top). Paper and ink, mint only for the one thing to
@@ -1022,7 +1024,7 @@ const SECONDARY={pending:['snooze','reject','complete','accept','change','handof
 const canHandoff=s=>!closed(s)&&!s.handled_hint&&!!state?.fleet?.on&&s.scope==='work'&&(!s.fleet_handoff||['declined','expired'].includes(s.fleet_handoff.stage))&&!handingOff.has(s.id);
 function cardActions(s,choices,smartButtons,unmerge,hint,smart){
  const answered=s.status==='prepared'&&(()=>{try{return JSON.parse(s.outcome||'{}').state==='answered'}catch{return false}})();
- const isPrimary=c=>c==='send'||c==='retry'||(c==='complete'&&(hint||(s.status==='prepared'&&!answered&&!smart.some(a=>a.kind!=='open'))))||(c==='accept'&&(s.status==='pending'||answered)&&!hint);
+ const isPrimary=c=>c==='send'||c==='retry'||c==='answer'||(c==='complete'&&(hint||(s.status==='prepared'&&!answered&&!askQuestion(s,smart,hint)&&!smart.some(a=>a.kind!=='open'))))||(c==='accept'&&(s.status==='pending'||answered)&&!hint);
  const btn=([c,t])=>c==='handoff'?`<button class="ghost" data-fleet-handoff="${esc(s.id)}">${t}</button>`:`<button class="${isPrimary(c)?'primary':c==='reject'?'quiet':'ghost'}" data-id="${s.id}" data-choice="${c}">${t}</button>`;
  const all=[...choices,...(canHandoff(s)&&s.status!=='snoozed'&&!smart.some(a=>a.kind==='handoff')?[['handoff','Hand off']]:[])];
  const head=all.filter(([c])=>isPrimary(c)),order=(answered?['snooze','change','complete','reject','handoff']:SECONDARY[s.status])||['complete','snooze','change','reject','handoff'];
@@ -1031,15 +1033,23 @@ function cardActions(s,choices,smartButtons,unmerge,hint,smart){
  let shown=rest.slice(0,room),more=rest.slice(room);if(more.length===1&&!unmerge){shown=rest;more=[]}
  const menu=more.length||unmerge?`<details class="more-actions"><summary aria-label="More actions">More</summary><div class="more-menu" role="group" aria-label="More actions">${more.map(btn).join('')}${unmerge}</div></details>`:'';
  return `<div class="actions">${smartButtons}${head.map(btn).join('')}${shown.map(btn).join('')}${menu}</div>`}
+// A Needs you line ends with one mark: a question keeps its "?" instead of getting ".".
+const sentence=t=>{t=String(t).trim();return /[.?!…]$/.test(t)?t:t+'.'};
+// A result waiting on the owner's answer (needs_you, written as a question) with nothing to send:
+// Answer leads and opens the Change editor under the question; Mark done steps back.
+const askQuestion=(s,smart,hint)=>{if(s.status!=='prepared'||hint||s.preparation_status==='blocked'||smart.some(a=>a.kind!=='open'))return '';
+ try{const o=JSON.parse(s.outcome||'{}'),q=String(o.needs||'').trim();return o.state==='needs_you'&&/\?$/.test(q)?q:''}catch{return ''}};
 // A draft's Send opens the preview first: the button says so.
 const sendLabel=a=>['email','email_demo','linkedin','slack','x','whatsapp'].includes(a.kind)&&/^Send\b/.test(a.label||'')?a.label.replace(/^Send\b/,'Review and send'):a.label;
 function suggestionCard(s,section){
 // A result that only answered, explained or planned leaves the task itself to do: Do it leads again.
 const answered=s.status==='prepared'&&(()=>{try{return JSON.parse(s.outcome||'{}').state==='answered'}catch{return false}})();
-const choices=s.status==='pending'?[['accept','Do it'],['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']]:s.status==='snoozed'?[['accept','Bring back'],['snooze','Change time'],['reject','Not needed']]:[...(s.preparation_status==='blocked'?[['retry',retryLabel(s.preparation_reason)]]:answered?[['accept','Do it']]:[]),['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']];
-const smart=taskActions(s);const notes=smart.map(a=>({action:a,state:a.state||s.action_status})).filter(x=>actionNote(x.state,x.action.kind));
-const undo=closed(s)&&s.undo_until&&Date.parse(s.undo_until)>Date.now();
+const smart=taskActions(s);
 const handled=!closed(s)&&s.handled_hint?(()=>{try{return JSON.parse(s.handled_hint)}catch{return {}}})():{},hint=handled.reason||'';
+const ask=askQuestion(s,smart,hint);
+const choices=ask?[['answer','Answer'],['complete','Mark done'],['snooze','Snooze'],['reject','Not needed']]:s.status==='pending'?[['accept','Do it'],['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']]:s.status==='snoozed'?[['accept','Bring back'],['snooze','Change time'],['reject','Not needed']]:[...(s.preparation_status==='blocked'?[['retry',retryLabel(s.preparation_reason)]]:answered?[['accept','Do it']]:[]),['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']];
+const notes=smart.map(a=>({action:a,state:a.state||s.action_status})).filter(x=>actionNote(x.state,x.action.kind));
+const undo=closed(s)&&s.undo_until&&Date.parse(s.undo_until)>Date.now();
 const status=s.preparation_status==='blocked'&&!closed(s)&&s.status!=='snoozed'?'Needs your help':['accepted','instructions'].includes(s.status)?'Preparing':label(s.status);
 // One status line, under the title: where it stands and what's left for you. A later sign that it's
 // handled wins over the result's own line; nothing else repeats it.
@@ -1052,7 +1062,7 @@ const statusLine=(()=>{const line=(text,cls='')=>`<p class="note status-line${cl
  if(s.early&&s.status==='accepted')return line('Preparing this ahead, so it arrives ready.');
  // A send on its way or done has its own line below; the result's needs line no longer holds.
  if(smart.some(a=>sendBusy(a.state||s.action_status)&&!['local_preparation'].includes((a.state||s.action_status)?.status)))return '';
- if(o?.state==='needs_you')return line('Needs you: '+String(o.needs).replace(/\.$/,'')+'.',' outcome');
+ if(o?.state==='needs_you')return line('Needs you: '+sentence(o.needs),' outcome');
  if(s.early&&s.status==='prepared'&&smart.some(a=>a.kind!=='open'))return line('Ready to approve. Nothing goes out until you do.');
  if(o?.state==='answered')return line('Answered. Nothing done yet.');
  if(o?.state==='snoozed')return line('Back, as you asked.');
@@ -1067,7 +1077,7 @@ const drafts=s.status==='prepared'?smart.filter(a=>DRAFT_KINDS.includes(a.kind)&
 const smartButtons=s.status==='prepared'?smart.map(a=>a.kind==='handoff'?(canHandoff(s)?`<button class="primary" data-fleet-handoff="${esc(s.id)}">${esc(a.label||'Hand off')}</button>`:''):a.kind==='open'?`<a class="open" href="${esc(safeURL(a.url))}" target="_blank" rel="noreferrer">${esc(a.label)} ↗</a>`:!(a.kind==='finish'&&(a.state||s.action_status)?.status==='done')&&!sendBusy(a.state||s.action_status)?`<button class="primary" data-id="${s.id}" data-smart="${a.revision}">${esc(sendLabel(a)||(a.kind==='prepare'?'Prepare next step':'Review and send'))}</button>`:'').join(''):'';
 // A merged fix stays reversible for a day.
 const unmerge=['prepared','completed'].includes(s.status)&&smart.some(a=>a.kind==='merge'&&Date.parse((a.state||s.action_status)?.undo_until||'')>Date.now())?`<button data-id="${s.id}" data-unmerge="1">Undo merge</button>`:'';
-return `<article id="task-${s.id}" class="card t-${tone(s.status)}"><div class="meta"><div class="card-badges">${status!==section?chip(status,tone(s.status)):''}${dueChip(s)}${s.scope?`<span class="chip scope">${s.scope==='work'?'Work':'Personal'}</span>`:''}${s.status==='pending'&&s.deliver_after&&new Date(s.deliver_after)>new Date()?chip(deliveryLabel(s.deliver_after),'muted'):''}</div>${time(s.created_at,true)}</div><h3>${esc(s.title)}</h3>${statusLine}${cardBody(s,section)}${handedNote(s)}${skillHintNote(s)}${fleetNote(s)}${s.status==='prepared'?drafts.map(a=>draftBox(s,a,drafts.length>1?a.label:'')).join(''):''}${s.latest_feedback?`<div class="saved-feedback"><div class="row"><strong>${s.latest_feedback.choice==='other'?'You asked':'Your note'}</strong>${time(s.latest_feedback.created_at,true)}</div><blockquote>${esc(s.latest_feedback.feedback)}</blockquote></div>`:''}${['queued','starting','running','blocked'].includes(s.preparation_status)&&!closed(s)&&s.status!=='snoozed'?preparationNote(s):''}${s.change_prompt?.status==='uncertain'&&!closed(s)&&s.status!=='snoozed'?'<p class="note">I couldn’t confirm the Change prompt. If it arrived, reply to it; otherwise use Change here.</p>':''}${s.status==='prepared'||s.status==='completed'?notes.filter(x=>s.status==='prepared'||x.state?.status==='sent').map(x=>{const st=x.state?.status;return `<p class="note${st==='sent'?' sent-ok':''}">${smart.length>1?esc(x.action.label)+': ':''}${esc(actionNote(x.state,x.action.kind))}</p>${['queued','sending'].includes(st)?'<div class="send-progress" aria-hidden="true"><i></i></div>':''}`}).join(''):''}${foot}${closed(s)?`<div class="actions">${undo?`<button class="ghost" data-id="${s.id}" data-choice="undo">Undo</button>`:''}${s.status==='completed'?`<button class="ghost" data-id="${s.id}" data-choice="reopen">Reopen</button>`:''}</div>`:`${changing.has(s.id)?`<div class="change-editor"><label for="feedback-${s.id}">What would you like instead?</label><textarea id="feedback-${s.id}" placeholder="Tell me what to change (Ctrl+Enter saves)"></textarea><div class="actions"><button class="primary" data-id="${s.id}" data-choice="other">Save changes</button><button class="ghost" data-id="${s.id}" data-choice="cancel-change">Cancel</button></div></div>`:''}${handoffEditor(s)}${dismissing.has(s.id)?`<div class="change-editor dismiss-editor"><p class="dismiss-q" id="dismiss-q-${s.id}">Why isn’t this needed? <small>Optional</small></p><div class="reason-chips" role="group" aria-labelledby="dismiss-q-${s.id}">${['Not relevant','Wrong facts','Already handled'].map(r=>`<button type="button" class="reason" aria-pressed="false" data-id="${s.id}" data-choice="dismiss-pick" data-reason="${r}">${r}</button>`).join('')}</div><textarea id="dismiss-${s.id}" rows="1" aria-label="Note (optional)" placeholder="Add a note (optional)"></textarea><div class="actions"><button class="primary" data-id="${s.id}" data-choice="dismiss-typed">Confirm not needed</button><button class="ghost" data-id="${s.id}" data-choice="cancel-dismiss">Cancel</button></div></div>`:''}${changing.has(s.id)||dismissing.has(s.id)||handingOff.has(s.id)?'':s.fleet_handoff?.back&&s.status!=='snoozed'?handoffBackActions(s):cardActions(s,choices,smartButtons,unmerge,hint,smart)}`}</article>`;
+return `<article id="task-${s.id}" class="card t-${tone(s.status)}"><div class="meta"><div class="card-badges">${status!==section?chip(status,tone(s.status)):''}${dueChip(s)}${s.scope?`<span class="chip scope">${s.scope==='work'?'Work':'Personal'}</span>`:''}${s.status==='pending'&&s.deliver_after&&new Date(s.deliver_after)>new Date()?chip(deliveryLabel(s.deliver_after),'muted'):''}</div>${time(s.created_at,true)}</div><h3>${esc(s.title)}</h3>${statusLine}${cardBody(s,section)}${handedNote(s)}${skillHintNote(s)}${fleetNote(s)}${s.status==='prepared'?drafts.map(a=>draftBox(s,a,drafts.length>1?a.label:'')).join(''):''}${s.latest_feedback?`<div class="saved-feedback"><div class="row"><strong>${s.latest_feedback.choice==='other'?'You asked':'Your note'}</strong>${time(s.latest_feedback.created_at,true)}</div><blockquote>${esc(s.latest_feedback.feedback)}</blockquote></div>`:''}${['queued','starting','running','blocked'].includes(s.preparation_status)&&!closed(s)&&s.status!=='snoozed'?preparationNote(s):''}${s.change_prompt?.status==='uncertain'&&!closed(s)&&s.status!=='snoozed'?'<p class="note">I couldn’t confirm the Change prompt. If it arrived, reply to it; otherwise use Change here.</p>':''}${s.status==='prepared'||s.status==='completed'?notes.filter(x=>s.status==='prepared'||x.state?.status==='sent').map(x=>{const st=x.state?.status;return `<p class="note${st==='sent'?' sent-ok':''}">${smart.length>1?esc(x.action.label)+': ':''}${esc(actionNote(x.state,x.action.kind))}</p>${['queued','sending'].includes(st)?'<div class="send-progress" aria-hidden="true"><i></i></div>':''}`}).join(''):''}${foot}${closed(s)?`<div class="actions">${undo?`<button class="ghost" data-id="${s.id}" data-choice="undo">Undo</button>`:''}${s.status==='completed'?`<button class="ghost" data-id="${s.id}" data-choice="reopen">Reopen</button>`:''}</div>`:`${changing.has(s.id)?`<div class="change-editor${ask?' answer-editor':''}"><label for="feedback-${s.id}">${ask?'Your answer':'What would you like instead?'}</label><textarea id="feedback-${s.id}" placeholder="${ask?'Type it here (Ctrl+Enter sends)':'Tell me what to change (Ctrl+Enter saves)'}"></textarea><div class="actions"><button class="primary" data-id="${s.id}" data-choice="other"${ask?' data-answer="1"':''}>${ask?'Send answer':'Save changes'}</button><button class="ghost" data-id="${s.id}" data-choice="cancel-change">Cancel</button></div></div>`:''}${handoffEditor(s)}${dismissing.has(s.id)?`<div class="change-editor dismiss-editor"><p class="dismiss-q" id="dismiss-q-${s.id}">Why isn’t this needed? <small>Optional</small></p><div class="reason-chips" role="group" aria-labelledby="dismiss-q-${s.id}">${['Not relevant','Wrong facts','Already handled'].map(r=>`<button type="button" class="reason" aria-pressed="false" data-id="${s.id}" data-choice="dismiss-pick" data-reason="${r}">${r}</button>`).join('')}</div><textarea id="dismiss-${s.id}" rows="1" aria-label="Note (optional)" placeholder="Add a note (optional)"></textarea><div class="actions"><button class="primary" data-id="${s.id}" data-choice="dismiss-typed">Confirm not needed</button><button class="ghost" data-id="${s.id}" data-choice="cancel-dismiss">Cancel</button></div></div>`:''}${changing.has(s.id)||dismissing.has(s.id)||handingOff.has(s.id)?'':s.fleet_handoff?.back&&s.status!=='snoozed'?handoffBackActions(s):cardActions(s,choices,smartButtons,unmerge,hint,smart)}`}</article>`;
 }
 // Success notices clear themselves after a few seconds; errors stay until the next notice.
 let noticeTimer;const notice=(text,error=false)=>{const n=$('#notice');n.textContent=text;n.className=error?'error':'';clearTimeout(noticeTimer);if(text&&!error)noticeTimer=setTimeout(()=>{if(n.textContent===text)n.textContent=''},4500)};
@@ -1293,11 +1303,24 @@ let importPicked=new Set(),importOpen=new Set(),importAll=false,importPending=ne
 const importCall=(action,args,upload=false)=>request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...(upload?{'X-Upload':'skill-import'}:{})},body:JSON.stringify({action,args})});
 const importFrom=()=>document.querySelector('input[name="import-from"]:checked')?.value||'claude';
 const plural=(n,word)=>`${n} ${word}${n===1?'':'s'}`;
-function importRow(i){const no=i.blocked||i.duplicate,id='imp-'+i.key.replace(/[^a-z0-9]/gi,'_').slice(-60)+i.key.length;
+// After an import the row says so (with a way to see it), never "Can't import". One already here is info, with Replace
+// when it is the owner's own; only a licence or an OpenClaw name clash is a real "can't".
+const importHere=i=>!i.done&&!i.blocked&&i.duplicate==='Already in your skills';
+const importCant=i=>!i.done&&!importHere(i)&&!!(i.blocked||i.duplicate);
+// What else stayed out besides scripts: named when it is one or two files, else counted.
+function importLeftOut(i){const rest=(i.left_out||[]).slice(i.script_count?1:0);if(!rest.length)return '';
+ const more=rest.reduce((n,e)=>{const m=/^and (\d+) more files$/.exec(e);return n+(m?+m[1]:1)},0);
+ return more<=2?'Left out: '+rest.map(e=>e.startsWith('the end of')?'end of SKILL.md':e.replace(/ \(.*$/,'').split('/').pop()).join(', '):plural(more,'other file')+' left out'}
+function importRow(i){const no=importNo(i),here=importHere(i),id='imp-'+i.key.replace(/[^a-z0-9]/gi,'_').slice(-60)+i.key.length;
  const meta=[`From ${esc(i.from_label)}`,esc(i.source)];if(i.script_count)meta.push(i.depends?`Needs its ${plural(i.script_count,'script')}`:plural(i.script_count,'script')+' left out');
- const more=(i.left_out||[]).length-(i.script_count?1:0);if(more>0)meta.push(plural(more,'more file')+' left out');if(i.references?.length)meta.push(plural(i.references.length,'reference')+' included');if(i.licence)meta.push('Licence: '+esc(i.licence));
- return `<div class="${no?'skill-off':''}" data-import="${esc(i.key)}"><span class="tick"><input type="checkbox" id="${esc(id)}" value="${esc(i.key)}"${no?' disabled':''} aria-label="Import ${esc(i.name)}"></span><span class="grow"><strong><label for="${esc(id)}">${esc(i.name)}</label></strong><small>${esc(i.description)}</small>${i.recommended?`<small class="import-why">Recommended${i.why?': '+esc(i.why):''}</small>`:''}<small>${meta.join(' · ')}</small>${no?`<small class="import-no">${esc(i.blocked||i.duplicate)}</small>`:''}</span><span class="skill-buttons"><button type="button" class="ghost" data-import-read="${esc(i.key)}">Read</button></span></div>`}
-const importNo=i=>!!(i.blocked||i.duplicate);
+ const out=importLeftOut(i);if(out)meta.push(esc(out));if(i.references?.length)meta.push(plural(i.references.length,'reference')+' included');if(i.licence)meta.push('Licence: '+esc(i.licence));
+ const note=i.done?`<small class="import-ok">✓ ${esc(i.done)}</small>`:here?`<small class="import-here">Already in your skills${i.existing?.same?', unchanged':''}</small>`:no?`<small class="import-no">${esc(i.blocked||i.duplicate)}</small>`:'';
+ const view=i.done?i.skill_id:here?i.existing?.id:'';
+ const buttons=(i.done?'':`<button type="button" class="ghost" data-import-read="${esc(i.key)}">Read</button>`)+(view?`<button type="button" class="ghost" data-import-view="${esc(view)}">View</button>`:'')
+  +(here&&i.existing?.replaceable&&!i.existing.same?`<button type="button" class="ghost" data-import-replace="${esc(i.key)}">Replace</button>`:'');
+ const tick=i.done?'<span class="tick" aria-hidden="true">✓</span>':`<span class="tick"><input type="checkbox" id="${esc(id)}" value="${esc(i.key)}"${no?' disabled':''} aria-label="Import ${esc(i.name)}"></span>`;
+ return `<div class="${importCant(i)?'skill-off':''}" data-import="${esc(i.key)}">${tick}<span class="grow"><strong><label for="${esc(id)}">${esc(i.name)}</label></strong><small>${esc(i.description)}</small>${i.recommended&&!no?`<small class="import-why">Recommended${i.why?': '+esc(i.why):''}</small>`:''}<small>${meta.join(' · ')}</small>${note}</span><span class="skill-buttons">${buttons}</span></div>`}
+const importNo=i=>!!(i.blocked||i.duplicate||i.done);
 function importSection(key,label,rows,open,count=rows.length){if(!rows.length)return '';const list=`<div class="list settings-list skills-list import-list">${rows.map(importRow).join('')}</div>`;
  return open?`<h4 class="skills-head">${label} <small class="fine">${count}</small></h4>${list}`:`<details class="import-group" data-group="${key}"${importOpen.has(key)?' open':''}><summary>${label} <small>${count}</small></summary>${list}</details>`}
 function renderImport(){const v=importView,list=$('#import-list'),status=$('#import-status'),search=$('#import-search');
@@ -1308,10 +1331,11 @@ function renderImport(){const v=importView,list=$('#import-list'),status=$('#imp
   list.innerHTML=hits.length?importSection('search',plural(hits.length,'match').replace('matchs','matches'),hits,true):'<p class="fine">No skill matches that.</p>'}
  else{const ok=items.filter(i=>!importNo(i)),rec=ok.filter(i=>i.recommended),yours=ok.filter(i=>!i.recommended&&i.group==='yours').sort((a,b)=>b.key.includes(':account:')-a.key.includes(':account:'));
   const shown=importAll?yours:yours.slice(0,IMPORT_YOURS);
-  list.innerHTML=importSection('recommended','Recommended',rec,true)+importSection('yours','Yours',shown,true,yours.length)
+  list.innerHTML=importSection('done','Imported',items.filter(i=>i.done),true)+importSection('recommended','Recommended',rec,true)+importSection('yours','Yours',shown,true,yours.length)
    +(yours.length>shown.length?`<button type="button" class="ghost import-more" id="import-all">Show all ${yours.length}</button>`:'')
    +IMPORT_GROUPS.map(([g,label])=>importSection(g,label,ok.filter(i=>!i.recommended&&i.group===g),false)).join('')
-   +importSection('no','Can’t import',items.filter(importNo),false)}
+   +importSection('here','Already in your skills',items.filter(importHere),items.length<=IMPORT_YOURS)
+   +importSection('no','Can’t import',items.filter(importCant),false)}
  for(const box of list.querySelectorAll('input[type=checkbox]'))box.checked=importPicked.has(box.value)&&!box.disabled;
  const notes=[],b=v.browser||{},running=v.finding?.status==='running';
  // Each place it looks, with its own state; the spinner only while one is still being read.
@@ -1329,7 +1353,7 @@ function renderImport(){const v=importView,list=$('#import-list'),status=$('#imp
  const out=Object.keys(IMPORT_SITES).filter(k=>b[k]==='signed_out'&&!importPending.has(k));
  $('#import-signin').innerHTML=out.map(k=>`<div><span class="grow"><strong>Sign in to ${IMPORT_SITES[k]}</strong><small>Your Machine is signed out of ${IMPORT_SITES[k]}, so your skills there aren’t listed yet.</small></span><button type="button" class="primary" data-import-signin="${k}">Sign in</button></div>`).join('');
  $('#import-signin').hidden=!out.length;
- $('#import-go').hidden=!items.length;importCount();
+ $('#import-go').hidden=!items.some(i=>!importNo(i));importCount();
  clearTimeout(importTimer);if(running)importTimer=setTimeout(async()=>{try{importView=await importCall('skill_import_status',{token:v.token});renderImport()}
   catch(err){$('#import-progress').hidden=true;$('#import-status').textContent=err.message;$('#import-status').className='warn'}},5000);
  else if(importPending.size)importLookAgain()}
@@ -1352,16 +1376,20 @@ $('#import-folder').addEventListener('change',async e=>{const picked=[...e.targe
  const root=(files[0]?.webkitRelativePath||'').split('/')[0]||'Folder';
  await importUpload({name:root,files:await Promise.all(files.slice(0,300).map(async f=>({path:f.webkitRelativePath||f.name,data:toBase64(await f.arrayBuffer())})))})});
 async function importRead(key){const d=await importCall('skill_import_read',{token:importView.token,key});importShown=d;
- const notes=[[`From ${d.from_label}: ${d.source}`],d.blocked&&[d.blocked,true],d.duplicate&&[d.duplicate,true],
+ const notes=[[`From ${d.from_label}: ${d.source}`],d.blocked&&[d.blocked,true],(d.done||d.duplicate)&&[d.done||d.duplicate,!(d.done||d.existing)],
   d.script_count&&[d.depends?`It needs its ${plural(d.script_count,'script')} (${d.scripts.join(', ')}${d.script_count>d.scripts.length?', …':''}). Imported, it is instructions only and says so; installed in OpenClaw, its scripts come with it and your agent could run them.`:`Its ${plural(d.script_count,'script')} stay out; the instructions don’t need them.`,d.depends],
   d.references?.length&&['Included: '+d.references.join(', ')],(d.left_out||[]).length&&['Left out: '+d.left_out.join(', ')],
   ...(d.flags||[]).map(f=>[f,true]),d.licence&&['Licence: '+d.licence]];
  const no=d.blocked||d.duplicate;
  lookOpen(d.name,'What would come in, as your own skill. Read it first: it was written elsewhere.',notes,d.body,
-  (no?'':`<button type="button" class="primary" data-import-one="${esc(d.key)}">Import</button>`)+(d.installable?`<button type="button" class="ghost" data-import-install="${esc(d.key)}">Install in OpenClaw with its scripts</button>`:'')+(d.url?`<a class="btn-link ghost" href="${esc(safeURL(d.url))}" target="_blank" rel="noopener">Source ↗</a>`:'')+'<button type="button" class="ghost" data-look-close>Close</button>')}
-async function importRun(keys){const v=await importCall('skill_import_run',{token:importView.token,keys});for(const k of keys)importPicked.delete(k);importView=v.list;state.skills=v;skillsKey='';renderSkills();renderImport();
- const done=v.results.filter(r=>r.status==='imported'),skipped=v.results.filter(r=>r.status!=='imported'),partial=done.filter(r=>(r.left_out||[]).length);
- notice((done.length?`Imported ${plural(done.length,'skill')}. Your Machine uses ${done.length===1?'it':'them'} from now on.`:'Nothing imported.')+(partial.length?` Some files were left out of ${plural(partial.length,'skill')}: Read shows which.`:'')+(skipped.length?` Skipped: ${skipped.map(r=>`${r.name||r.key} (${r.reason})`).join(', ')}.`:''))}
+  (no?(!d.done&&d.existing?.replaceable&&!d.existing.same?`<button type="button" class="primary" data-import-one="${esc(d.key)}" data-replace="1">Replace yours</button>`:''):`<button type="button" class="primary" data-import-one="${esc(d.key)}">Import</button>`)+(d.installable?`<button type="button" class="ghost" data-import-install="${esc(d.key)}">Install in OpenClaw with its scripts</button>`:'')+(d.url?`<a class="btn-link ghost" href="${esc(safeURL(d.url))}" target="_blank" rel="noopener">Source ↗</a>`:'')+'<button type="button" class="ghost" data-look-close>Close</button>')}
+async function importRun(keys,replace=false){const v=await importCall('skill_import_run',{token:importView.token,keys,...(replace?{replace:true}:{})});for(const k of keys)importPicked.delete(k);importView=v.list;state.skills=v;skillsKey='';renderSkills();renderImport();
+ const done=v.results.filter(r=>r.status==='imported'||r.status==='replaced'),skipped=v.results.filter(r=>!done.includes(r)),swapped=done.filter(r=>r.status==='replaced').length;
+ const text=(done.length?`${swapped===done.length?'Replaced':'Imported'} ${plural(done.length,'skill')}. Your Machine uses ${done.length===1?'it':'them'} from now on.`:'Nothing imported.')+(skipped.length?` Skipped: ${skipped.map(r=>`${r.name||r.key} (${r.reason})`).join(', ')}.`:'');
+ $('#import-status').textContent=text;$('#import-status').className='';notice(text)}
+// View: the skill in your list, scrolled to and marked for a moment.
+function skillShow(id){const f=$('#skills-filter');if(f&&f.value){f.value='';filterSkills()}const row=document.querySelector(`#skills-list [data-skill="${CSS.escape(id)}"]`);if(!row)return;
+ row.scrollIntoView({block:'center',behavior:'smooth'});row.classList.add('skill-flash');setTimeout(()=>row.classList.remove('skill-flash'),2400)}
 $('#skill-import').addEventListener('change',e=>{if(e.target.matches('#import-list input[type=checkbox]')){e.target.checked?importPicked.add(e.target.value):importPicked.delete(e.target.value);importCount()}});
 $('#import-search').addEventListener('input',()=>renderImport());
 $('#skill-import').addEventListener('toggle',e=>{const g=e.target.dataset?.group;if(g)e.target.open?importOpen.add(g):importOpen.delete(g)},true);
@@ -1375,10 +1403,12 @@ $('#skill-import').addEventListener('click',async e=>{const t=e.target.closest('
   if(t.dataset.importRead)return await importRead(t.dataset.importRead);
   if(t.id==='import-go'){t.disabled=true;await importRun([...importPicked]);return}
   if(t.id==='import-all'){importAll=true;renderImport();return}
+  if(t.dataset.importView)return skillShow(t.dataset.importView);
+  if(t.dataset.importReplace){t.disabled=true;await importRun([t.dataset.importReplace],true);return}
   if(t.dataset.importSignin)return await importSignin(t.dataset.importSignin);
  }catch(err){$('#import-status').textContent=err.message;$('#import-status').className='warn'}finally{if(t.id==='import-find')t.disabled=false}});
 document.addEventListener('click',async e=>{const t=e.target.closest('[data-import-one],[data-import-install]');if(!t||!importShown)return;
- try{t.disabled=true;if(t.dataset.importOne){await importRun([t.dataset.importOne]);$('#skill-look').close();return}
+ try{t.disabled=true;if(t.dataset.importOne){await importRun([t.dataset.importOne],t.dataset.replace==='1');$('#skill-look').close();return}
   const v=await importCall('skill_import_install',{token:importView.token,key:importShown.key,sha:importShown.sha});importView=v.list;renderImport();installedView=v;renderInstalled();$('#skill-look').close();
   notice('Installed in OpenClaw with its scripts. It shows under Workspace.');refresh()}
  catch(err){t.disabled=false;$('#skill-look-error').textContent=err.message}});
@@ -1839,10 +1869,10 @@ $('nav').addEventListener('scroll',navFade,{passive:true});addEventListener('res
 const navShow=t=>{const n=$('nav');if(n.scrollWidth>n.clientWidth)n.scrollTo({left:Math.max(0,t.offsetLeft-(n.clientWidth-t.offsetWidth)/2),behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'})};
 $('nav').onclick=e=>{const t=e.target.closest('button');if(!t?.dataset.tab)return;navShow(t);for(const b of document.querySelectorAll('nav button')){b.classList.toggle('active',b===t);b.setAttribute('aria-current',b===t?'page':'false')}for(const s of document.querySelectorAll('main>section'))s.hidden=s.id!==t.dataset.tab;if(t.dataset.tab==='people')people(graphNode,!!$('#people-view').innerHTML);if(t.dataset.tab==='health')savedLogins();if(t.dataset.tab==='fleet')fleetShown=fleetView(true);requestAnimationFrame(()=>document.querySelectorAll('.fleet-tabs,.sub-tabs').forEach(tabsShow))};
 $('#suggestions').oninput=e=>{if(e.target.tagName==='TEXTAREA')e.target.classList.toggle('filled',!!e.target.value)};
-async function saveDecision(id,choice,feedback=''){
+async function saveDecision(id,choice,feedback='',answer=false){
 const saved=await request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'decide',args:{suggestion_id:id,choice,feedback,decision_id:crypto.randomUUID()}})});
 changing.delete(id);await refresh();
-if(['complete','reject'].includes(choice))toast(saved?.status==='completed'?'Marked done':'Marked not needed',false,id);else toast(({accept:'I’ll prepare it.',other:'Changes saved.',retry:'Trying again.',undo:'Undone.',reopen:'Reopened.'})[choice]||'Saved.');
+if(['complete','reject'].includes(choice))toast(saved?.status==='completed'?'Marked done':'Marked not needed',false,id);else toast(answer?'Thanks. I’ll carry on.':({accept:'I’ll prepare it.',other:'Changes saved.',retry:'Trying again.',undo:'Undone.',reopen:'Reopened.'})[choice]||'Saved.');
 }
 document.addEventListener('click',e=>{for(const m of document.querySelectorAll('.more-actions[open]'))if(!m.contains(e.target)||e.target.closest('.more-menu button'))m.open=false});
 $('#suggestions').onclick=async e=>{const b=e.target.closest('button');if(!b||b.dataset.browserFocus)return;const id=b.dataset.id;
@@ -1852,7 +1882,7 @@ if(b.dataset.original){openEmail(id).catch(e=>toast(e.message,true));return}
 if(b.dataset.result){try{if(b.dataset.result==='copy')await copyResult(id);else await openResult(id)}catch(e){toast(e.message,true)}return}
 if(!b.dataset.choice)return;const choice=b.dataset.choice;
 if(choice==='send'){openSend(id);return}
-if(choice==='change'){changing.add(id);dismissing.delete(id);render();$('#feedback-'+id)?.focus();return}
+if(choice==='change'||choice==='answer'){changing.add(id);dismissing.delete(id);render();$('#feedback-'+id)?.focus();return}
 if(choice==='cancel-change'){changing.delete(id);render();return}
 if(choice==='reject'){dismissing.add(id);changing.delete(id);render();return}
 if(choice==='cancel-dismiss'){dismissing.delete(id);render();return}
@@ -1860,8 +1890,8 @@ if(choice==='dismiss-pick'){const on=b.getAttribute('aria-pressed')!=='true';for
 if(choice==='dismiss-typed'){const card=b.closest('.dismiss-editor'),why=[card?.querySelector('.reason[aria-pressed="true"]')?.dataset.reason,($('#dismiss-'+id)?.value||'').trim()].filter(Boolean).join(': ');
  b.disabled=true;b.setAttribute('aria-busy','true');b.textContent='Saving…';try{await saveDecision(id,'reject',why);dismissing.delete(id)}catch(e){toast(e.message,true)}finally{b.disabled=false;b.removeAttribute('aria-busy');b.textContent='Confirm not needed'}return}
 if(choice==='snooze'){openSnooze(id);return}
-const feedback=$('#feedback-'+id)?.value||'';if(choice==='other'&&!feedback.trim()){$('#feedback-'+id)?.focus();toast('Tell me what to change first.',true);return}
-b.disabled=true;try{await saveDecision(id,choice,feedback)}catch(e){toast(e.message,true)}finally{b.disabled=false}};
+const feedback=$('#feedback-'+id)?.value||'';if(choice==='other'&&!feedback.trim()){$('#feedback-'+id)?.focus();toast(b.dataset.answer?'Type your answer first.':'Tell me what to change first.',true);return}
+b.disabled=true;try{await saveDecision(id,choice,feedback,!!b.dataset.answer)}catch(e){toast(e.message,true)}finally{b.disabled=false}};
 // The Fleet: what teammates' Machines said, the questions waiting for you, your rules per teammate, and the log of both directions.
 const fleetPost=(action,args)=>request('api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action,args})});
 const FLEET_RULE={ask:'Ask me first',always:'Always answer',never:'Never'};

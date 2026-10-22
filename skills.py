@@ -379,8 +379,8 @@ class Skills:
     def import_read(self, token, key):
         return self.importer.read(token, key)
 
-    def import_run(self, token, keys):
-        results = self.importer.run(token, keys)
+    def import_run(self, token, keys, replace=False):
+        results = self.importer.run(token, keys, replace)
         return {'results': results, 'list': self.importer.view(token), **self.view()}
 
     def import_install(self, token, key, sha):
@@ -1356,9 +1356,23 @@ class Importer:
                   'scripts': done['scripts'][:5], 'script_count': len(done['scripts']), 'depends': done['depends'],
                   'references': done['references'][:5], 'left_out': done['left_out'], 'flags': done['flags'] + done['notes'],
                   'licence': done['licence'], 'blocked': 'Can\'t import: its licence doesn\'t allow it' if done['closed'] else '',
-                  'duplicate': duplicate, 'recommended': False, 'why': '', **({'link': link} if link else {})}
+                  'duplicate': duplicate, 'existing': self.existing(key, name, description, body) if duplicate == 'Already in your skills' else None,
+                  'done': '', 'skill_id': '', 'recommended': False, 'why': '', **({'link': link} if link else {})}
         return {'public': public, 'files': files, 'converted': (name, description, body), 'original': done['original'],
                 'sha': tree_digest(files)}, ''
+
+    def existing(self, key, name, description, body):
+        """The skill here that an import would duplicate: its id, and whether importing again may replace it (only the
+        owner's own; a teammate's or a proposed one is never overwritten from an upload)."""
+        with self.keeper.connect() as db:
+            rows = db.execute("SELECT id,name,sha,status,origin,imported FROM skills WHERE status IN ('on','off','proposed')").fetchall()
+        sha = digest(name, description, body)
+        for test in (lambda r: r['imported'] and json.loads(r['imported']).get('key') == key, lambda r: r['sha'] == sha,
+                     lambda r: r['name'].lower() == name.lower()):
+            row = next((r for r in rows if test(r)), None)
+            if row:
+                return {'id': row['id'], 'replaceable': row['origin'] == 'mine' and row['status'] in ('on', 'off'), 'same': row['sha'] == sha}
+        return None
 
     def keep(self, items, errors, finding=None):
         token = secrets.token_hex(12)
@@ -1487,9 +1501,10 @@ class Importer:
     def complete(found):
         return all(isinstance(v, bytes) for v in found['files'].values())
 
-    def run(self, token, keys):
+    def run(self, token, keys, replace=False):
         """Imports the ticked skills as the owner's own (origin mine, with where they came from). Skips one that is
-        here already or whose licence doesn't allow it, and says why."""
+        here already or whose licence doesn't allow it, and says why. With replace, one that is here already as the
+        owner's own is updated in place instead (same id, next version)."""
         found = self.scan(token)
         if not isinstance(keys, list) or not keys:
             raise ValueError('Tick the skills to import')
@@ -1503,7 +1518,23 @@ class Importer:
             name, description, body = item['converted']
             keys_here, names, shas, _ = self.taken()
             reason = (public['blocked'] or ('Already in your skills' if key in keys_here or name.lower() in names or digest(name, description, body) in shas else ''))
+            existing = self.existing(key, name, description, body) if reason == 'Already in your skills' else None
+            if replace and existing and existing['replaceable']:
+                imported = {'key': key, 'from': public['from'], 'source': public['source'], **({'url': public['url']} if public['url'] else {}),
+                            'left_out': public['left_out'][:10], 'flags': public['flags'][:8]}
+                sha = digest(name, description, body)
+                with self.keeper.connect() as db:
+                    row = self.keeper.row(db, existing['id'])
+                    slug = row['slug'] if row['name'] == name else self.keeper._slug(db, name, keep_id=row['id'])
+                    db.execute('UPDATE skills SET name=?,slug=?,description=?,body=?,sha=?,imported=?,version=version+?,updated_at=? WHERE id=?',
+                               (name, slug, description, body, sha, json.dumps(imported), 0 if row['sha'] == sha else 1, stamp, row['id']))
+                public.update(done='Replaced', skill_id=row['id'], existing=None)
+                results.append({'key': key, 'name': name, 'status': 'replaced', 'id': row['id'], 'left_out': public['left_out'], 'flags': public['flags']})
+                LOG.info('skill import replaced an existing one from=%s', public['from'])
+                continue
             if reason:
+                if existing:
+                    public.update(duplicate=reason, existing=existing)
                 results.append({'key': key, 'name': name, 'status': 'skipped', 'reason': reason})
                 continue
             imported = {'key': key, 'from': public['from'], 'source': public['source'], **({'url': public['url']} if public['url'] else {}),
@@ -1512,12 +1543,14 @@ class Importer:
                 if db.execute("SELECT COUNT(*) FROM skills WHERE status IN ('on','off')").fetchone()[0] >= MAX_SKILLS:
                     results.append({'key': key, 'name': name, 'status': 'skipped', 'reason': f'At most {MAX_SKILLS} skills'})
                     continue
+                skill_id = 'sk_' + secrets.token_hex(8)
                 db.execute("INSERT INTO skills(id,slug,name,description,body,status,origin,sha,imported,created_at,updated_at) "
                            "VALUES(?,?,?,?,?,'on','mine',?,?,?,?)",
-                           ('sk_' + secrets.token_hex(8), self.keeper._slug(db, name), name, description, body,
+                           (skill_id, self.keeper._slug(db, name), name, description, body,
                             digest(name, description, body), json.dumps(imported), stamp, stamp))
-            public['duplicate'] = 'Already in your skills'
-            results.append({'key': key, 'name': name, 'status': 'imported', 'left_out': public['left_out'], 'flags': public['flags']})
+            # Shown as done from now on, not as a duplicate of itself: the list re-renders right after.
+            public.update(duplicate='Already in your skills', done='Imported', skill_id=skill_id, existing=None)
+            results.append({'key': key, 'name': name, 'status': 'imported', 'id': skill_id, 'left_out': public['left_out'], 'flags': public['flags']})
             LOG.info('skill imported from=%s scripts=%d', public['from'], public['script_count'])
         self.keeper.sync()
         return results
@@ -1560,7 +1593,7 @@ class Importer:
             if temporary:
                 shutil.rmtree(temporary, ignore_errors=True)
         catalog.load()
-        public['duplicate'] = 'Installed in OpenClaw'
+        public.update(duplicate='Installed in OpenClaw', done='Installed in OpenClaw')
         LOG.info('skill installed in openclaw from=%s scripts=%d', public['from'], public['script_count'])
         return {'installed_skill': slug}
 
