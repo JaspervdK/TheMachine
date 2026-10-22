@@ -468,6 +468,18 @@ class Renamed(unittest.TestCase):
         self.assertNotEqual(fleet.node(fleet.NETWORK2 + '/api/fleet'), fleet.node(fleet.NETWORK + '/api/fleet'))
 
 
+class AccountLink(unittest.TestCase):
+    def test_account_url_when_linked_to_a_control_plane(self):
+        # Hosted: its manage_url's Account page
+        self.assertEqual(fleet.account_url({'manage_url': 'https://cp.example.org/setup'}), 'https://cp.example.org/account')
+        # Self-hosted and paired with the Network: the control plane's Account page
+        self.assertEqual(fleet.account_url({'credentials': {'fleet': '/t'}}), 'https://app.themachine.computer/account')
+        self.assertEqual(fleet.account_url({'credentials': {'fleet': '/t'}, 'fleet': {'url': 'https://cp.example.org/api/fleet'}}), 'https://cp.example.org/account')
+        # No link at all, or no pairing token: none
+        for config in ({}, {'credentials': {}}, {'fleet': {'url': 'https://cp.example.org/api/fleet'}}, {'manage_url': 'http://cp.example.org/setup'}):
+            self.assertIsNone(fleet.account_url(config), config)
+
+
 class TwoNodes(unittest.TestCase):
     """The Network on two nodes (docs/network.md, Failover): a question goes to the second node only when the first surely
     didn't take it, an answer goes to the node that has its question, both mailboxes are looked into, acks go to both,

@@ -4,20 +4,21 @@ import {createServer} from 'node:http';
 import {OPENCLAW} from './openclaw-root.mjs';
 const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs');
 
-// Settings in tabs: General, Work hours, Writing, Skills, Model, each part of Settings in one. A hosted Machine gets
-// Account ↗ first, a link out to its account page; on your own computer there is none. A tab with nothing to show is
+// Settings in tabs: General, Work hours, Writing, Skills, Model, each part of Settings in one. A Machine linked to a
+// control plane account (hosted, or self-hosted and paired) gets Account ↗ first, a link out to that account page; one
+// with no link has none. A tab with nothing to show is
 // left out. Links open a tab (#settings/skills, #settings=model), the URL follows the tab, and the last tab is kept.
 // At 390px the row scrolls sideways and the page stays inside the screen.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const hours={days:[0,1,2,3,4],start:'08:00',end:'18:00',morning:'09:00',digest_at:'08:30',timezone:'UTC',saveable:true};
-let hosted=true,model=true;
+let hosted=true,paired=false,model=true;
 const server=createServer(async(req,res)=>{
  const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],connectors:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],hours,
   signatures:[{account_id:'mail',email:'owner@example.org',service:'gmail',html:'<b>Owner</b>',source:'detected',saveable:true}],skills:{skills:[],waiting:0,targets:[],folder:'skills/the-machine'},
   ...(model?{model_usage:[],model_status:{model:'openai/example-model',provider:'openai',windows:[],checked_at:new Date().toISOString()}}:{}),
-  ...(hosted?{manage_url:'https://account.example/setup'}:{})}));return}
+  ...(hosted?{manage_url:'https://account.example/setup',account_url:'https://account.example/account'}:{}),...(paired?{fleet:{on:true,waiting:0},account_url:'https://app.themachine.computer/account'}:{})}));return}
  res.end('{}');
 });
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
@@ -65,6 +66,10 @@ try{
   hosted=false;model=false;await page.goto('about:blank');await page.goto(base+'/#settings/model');await page.locator('#updated',{hasText:/\d/}).waitFor();await page.locator('#settings:not([hidden])').waitFor();
   assert.deepEqual(await tabs(page),['General','Work hours','Writing','Skills']);
   assert.equal(await selected(page),'General');assert.equal(await visible(page,'#settings-cloud'),true);
+  // Self-hosted but paired with the Network: Account ↗ to the control plane's account page.
+  paired=true;await page.goto('about:blank');await page.goto(base+'/#settings');await page.locator('#settings-tab-account:not([hidden])').waitFor();
+  assert.equal(await page.locator('#settings-tab-account').getAttribute('href'),'https://app.themachine.computer/account');
+  paired=false;
   await context.close();
  }
  assert.deepEqual(errors,[]);

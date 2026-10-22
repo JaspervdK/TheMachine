@@ -1142,7 +1142,8 @@ setInterval(async()=>{if(document.hidden)return;for(const [id,p] of peeks){if(!p
 document.addEventListener('click',e=>{const b=e.target.closest('[data-peek-open]');if(!b)return;const id=b.dataset.peekOpen,p=peeks.get(id);if(!p?.image)return;const d=$('#peek-dialog');d.dataset.task=id;$('#peek-image').src=p.image;d.showModal()});
 const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];let hoursDirty=false;
 function zones(){try{return Intl.supportedValuesOf('timeZone')}catch(e){return[]}}
-// Settings in tabs, a pill row like Graph and Connections. A hosted Machine's first pill links out to its account page.
+// Settings in tabs, a pill row like Graph and Connections. A Machine linked to a control plane account (hosted, or
+// paired with the Network) gets a first pill out to that Account page (status account_url).
 // Each part of Settings goes to a tab by its id; a part without one goes with the part before it (a heading with what
 // follows it). A tab with nothing to show is left out. Links: #settings, #settings/skills (or #settings=skills); the last tab is kept.
 const SETTINGS_TABS=[['general','General'],['hours','Work hours'],['writing','Writing'],['skills','Skills'],['model','Model']];
@@ -1156,7 +1157,7 @@ function settingsSync(){const s=$('#settings'),bar=$('#settings-tabs'),shown=new
  settingsNow=shown.has(settingsTab)?settingsTab:SETTINGS_TABS.map(t=>t[0]).find(t=>shown.has(t))||'general';
  for(const el of s.children)if(el!==bar)el.classList.toggle('stab-off',el.dataset.stab!==settingsNow);
  for(const b of bar.querySelectorAll('[data-settings-tab]')){set(b,'hidden',!shown.has(b.dataset.settingsTab));const on=String(b.dataset.settingsTab===settingsNow);if(b.getAttribute('aria-selected')!==on)b.setAttribute('aria-selected',on)}
- const a=$('#settings-tab-account'),url=state?.manage_url?new URL('/account',state.manage_url).href:'';set(a,'hidden',!url);if(url&&a.href!==url)a.href=url}
+ const a=$('#settings-tab-account'),url=state?.account_url||'';set(a,'hidden',!url);if(url&&a.href!==url)a.href=url}
 new MutationObserver(settingsSync).observe($('#settings'),{childList:true,subtree:true,attributes:true,attributeFilter:['hidden']});
 const settingsHash=()=>{if(!$('#settings').hidden)history.replaceState(null,'',location.pathname+location.search+'#settings/'+settingsNow)};
 function showSettings(tab){if(SETTINGS_TABS.some(t=>t[0]===tab)){settingsTab=tab;localStorage.setItem('settings-tab',tab)}const was=!$('#settings').hidden;

@@ -198,6 +198,22 @@ def settings(config):
     return {'url': NETWORK + '/api/fleet'} if (config.get('credentials') or {}).get('fleet') else None
 
 
+CONTROL = 'https://app.themachine.computer'  # the control plane: the Account page, on the same node as NETWORK
+
+
+def account_url(config):
+    """The control plane's Account page when this Machine is linked to one, else None: a hosted Machine (its
+    `manage_url`) or one paired with the Network (hosted or self-hosted). The dashboard's Settings link to it."""
+    manage = str(config.get('manage_url') or '')
+    if manage.startswith('https://'):
+        return urllib.parse.urljoin(manage, '/account')
+    found = settings(config) if (config.get('credentials') or {}).get('fleet') else None
+    url = urllib.parse.urlsplit(str((found or {}).get('url') or ''))
+    if url.scheme != 'https' or not url.hostname:
+        return None
+    return CONTROL + '/account' if url.hostname in MAIN_HOSTS else f'https://{url.netloc}/account'
+
+
 def endpoints(config):
     """More Network endpoints to fail over to: config network_urls, then the old address when the Network's own is used,
     then the Network's second node when the main one is ours (its own names, or the hosted control plane's)."""

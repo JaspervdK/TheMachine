@@ -8306,6 +8306,7 @@ class App:
             # `manage_url`: where this install is set up when that is a web page (a hosted machine); the dashboard links to it.
             manage = str(self.config.get('manage_url') or '')
             result['manage_url'] = manage if manage.startswith('https://') else None
+            result['account_url'] = fleet.account_url(self.config)  # the CP Account page, when linked to one (Settings, Account ↗)
             result['browser_link'] = browser_link(self.config)  # the sign-in dialog's way out to the browser itself
             result['needs_you'] = needs_you(self.config)
             by_id = {a['id']: a for a in self.config['accounts']}
