@@ -19,6 +19,8 @@ const cards=[
   outcome:JSON.stringify({state:'needs_you',needs:'Give another address for Kim.'}),handled_hint:hint('You replied to Kim and closed the conversation')},
  {id:'a1',title:'Reply to Noor about the contract',body:'Drafted a short reply.',status:'prepared',early:1,scope:'work',created_at:now,event_ids:[4],
   next_actions:[{kind:'email',revision:'v1',label:'Send to Noor',to:['noor@example.com'],to_name:'Noor',subject:'Contract',body:'Hi Noor'}]},
+ {id:'q1',title:'Release the mobile apps',body:'I would bump the version, build both apps and submit them for review.',status:'prepared',scope:'work',created_at:now,event_ids:[6],
+  outcome:JSON.stringify({state:'answered'}),latest_feedback:{choice:'other',feedback:'What would you do when I tap Do it?',created_at:now}},
  {id:'b1',title:'Look up the venue hours',body:'Open 9 to 5 on weekdays.',status:'prepared',early:1,scope:'work',created_at:now,event_ids:[5],outcome:JSON.stringify({state:'done'})}];
 const state=()=>({suggestions:cards,promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:false,fleets:[]}});
 const server=createServer(async(req,res)=>{for await(const _ of req);const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
@@ -53,6 +55,18 @@ try{
   assert.deepEqual(await notes('a1'),['Ready to approve. Nothing goes out until you do.']);
   // Prepared ahead, nothing to approve: no approve line, just finished
   assert.deepEqual(await notes('b1'),['Finished. Mark it done if it looks right.']);
+  // Only answered: says nothing is done yet, never Finished, and Do it leads
+  assert.deepEqual(await notes('q1'),['Answered. Nothing done yet.']);
+  assert.ok(!(await text('q1')).includes('Finished'));
+  assert.equal(await page.locator('#task-q1 .actions button.primary').first().textContent(),'Do it');
+  // Not needed: Confirm stays full strength while it saves
+  {await page.locator('#task-q1 .more-actions>summary').click().catch(()=>{});await page.locator('#task-q1 [data-choice="reject"]').click();
+   await page.locator('#dismiss-q1').fill('I release the apps myself.');
+   const confirm=page.locator('#task-q1 [data-choice="dismiss-typed"]');
+   assert.equal(await confirm.evaluate(e=>getComputedStyle(e).opacity),'1');
+   await confirm.evaluate(e=>{e.disabled=true;e.setAttribute('aria-busy','true')});
+   assert.equal(await confirm.evaluate(e=>getComputedStyle(e).opacity),'1');
+   await page.locator('#task-q1 [data-choice="cancel-dismiss"]').click()}
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.locator('#task-d1').screenshot({path:`/tmp/card-status-${width}.png`});
   await context.close();

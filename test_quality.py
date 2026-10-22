@@ -182,6 +182,18 @@ class NotesRulesAndOutcome(Base):
         row = dict(self.store.snapshot(self.app.config['accounts'])['suggestions'][0])
         self.assertTrue(a.card(row).endswith('Finished. Mark it done if it looks right.'))
 
+    def test_an_answer_is_not_a_finished_task(self):
+        # The owner asked what Do it would do: the answer is ready, the task itself isn't, so Do it leads again.
+        self.store.decide(self.sid, 'other', 'What exactly would you do when I tap Do it?', 'q1', 'dashboard')
+        self.save(outcome='answered', note_kind='new_ask')
+        row = dict(self.store.snapshot(self.app.config['accounts'])['suggestions'][0])
+        card = a.card(row)
+        self.assertIn('Answered. Nothing done yet.', card)
+        self.assertNotIn('Finished', card);self.assertNotIn('Mark it done', card)
+        self.assertEqual([b['label'] for b in a.controls(row)['blocks'][0]['buttons']][0], 'Do it')
+        self.store.decide(self.sid, 'accept', '', 'go-now', 'dashboard')
+        self.assertEqual(self.store.snapshot(self.app.config['accounts'])['suggestions'][0]['status'], 'accepted')
+
     def test_a_task_found_already_done_shows_that_once(self):
         # Nothing to approve: no buttons allowed, and a later handled hint doesn't add a second line.
         with self.assertRaisesRegex(ValueError, 'nothing left to approve'):

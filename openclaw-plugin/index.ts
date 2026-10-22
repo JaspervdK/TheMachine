@@ -40,11 +40,15 @@ const retryLabel=(r?:string)=>/\b(?:sign(?:ed)?[ -]?in|log(?:ged)?[ -]?in|signed
 
 // The dashboard root for Edit links on redrawn cards; set from the config on each tap.
 let dashboardRoot='';
+// A result that only answered, explained or planned: the task itself is still to do. Same rule as answered_only() in assistant.py.
+function answeredOnly(item:any){try{return item.status==='prepared'&&JSON.parse(item.outcome||'{}').state==='answered'}catch{return false}}
 function cardButtons(item: any) {
   const choices = ['completed', 'rejected'].includes(item.status) ? (item.undo_until && Date.parse(item.undo_until)>Date.now() ? [['Undo','undo']] : []) : item.status === 'snoozed'
     ? [['Bring back', 'accept'], ['Change time', 'snooze'], ['Not needed', 'reject']]
     : ['accepted', 'prepared', 'instructions'].includes(item.status)
-      ? [...(item.preparation_status==='blocked' ? [[retryLabel(item.preparation_reason),'retry']] : []),['Mark done', 'complete'], ['Snooze', 'snooze'], ['Change', 'other'], ['Not needed', 'reject']]
+      ? item.preparation_status!=='blocked'&&answeredOnly(item)
+        ? [['Do it', 'accept'], ['Snooze', 'snooze'], ['Change', 'other'], ['Mark done', 'complete'], ['Not needed', 'reject']]
+        : [...(item.preparation_status==='blocked' ? [[retryLabel(item.preparation_reason),'retry']] : []),['Mark done', 'complete'], ['Snooze', 'snooze'], ['Change', 'other'], ['Not needed', 'reject']]
       : [['Do it', 'accept'], ['Mark done', 'complete'], ['Snooze', 'snooze'], ['Change', 'other'], ['Not needed', 'reject']];
   const buttons:any[]=[];
   // A run waiting on the browser keeps its Open the browser link on every redraw. Same rule as controls() in assistant.py.

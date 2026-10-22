@@ -3730,6 +3730,18 @@ class Store:
                 db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'draft_rule',?,?)", (now(), 'Draft rule: ' + text, str(cur.lastrowid)))
             return {'id': cur.lastrowid}
 
+    def notes_to_learn(self, days=7, limit=10):
+        """Recent notes the owner wrote on a card without a Change (a Not needed reason, a note on Mark done or Snooze):
+        no preparation reads those, so the next review judges whether each holds beyond its card."""
+        since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+        with self.connect() as db:
+            rows = db.execute("SELECT d.id,d.choice,d.feedback,s.title FROM decisions d JOIN suggestions s ON s.id=d.suggestion_id "
+                              "WHERE d.feedback!='' AND d.source IN ('telegram','dashboard') AND d.choice IN ('reject','complete','snooze') AND d.created_at>=? "
+                              "AND d.id NOT IN (SELECT decision_id FROM decision_annotations) AND d.id NOT IN (SELECT decision_id FROM facts) "
+                              "ORDER BY d.created_at DESC LIMIT ?", (since, limit)).fetchall()
+        verb = {'reject': 'Not needed', 'complete': 'Done', 'snooze': 'Snoozed'}
+        return '\n'.join(f'- {verb[r["choice"]]}: "{r["title"]}". They wrote: "{r["feedback"][:300]}" (decision_id {r["id"]})' for r in rows)
+
     def forget_fact(self, fact_id):
         with self.connect() as db:
             row = db.execute('SELECT kind,text FROM facts WHERE id=? AND removed_at IS NULL', (int(fact_id),)).fetchone()
@@ -5923,6 +5935,7 @@ def card(row):
         try:
             outcome = json.loads(row['outcome'])
             status = {'done': 'Finished. Mark it done if it looks right.',
+                      'answered': 'Answered. Nothing done yet.',
                       'already_done': 'Looks done already. Mark it done if that’s right.'}.get(outcome['state']) or 'Needs you: ' + outcome['needs'].rstrip('.') + '.'
         except (ValueError, KeyError, TypeError, AttributeError):
             outcome = {}
@@ -6035,6 +6048,14 @@ def card_draft(row):
     return {'action': a, 'text': text, 'full': full}
 
 
+def answered_only(row):
+    """A result that only answered, explained or planned: the task itself is still to do."""
+    try:
+        return row['status'] == 'prepared' and json.loads(row.get('outcome') or '{}').get('state') == 'answered'
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def controls(row, root=''):
     if row['status'] in ['completed','rejected']:
         choices = [('Undo','undo')] if row.get('undo_until') and row['undo_until']>now() else []
@@ -6043,6 +6064,7 @@ def controls(row, root=''):
     elif row['status'] in ['accepted','prepared','instructions']:
         choices = [('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
         if row.get('preparation_status')=='blocked':choices.insert(0,(retry_label(row.get('preparation_reason')),'retry'))
+        elif answered_only(row):choices=[('Do it','accept'),('Snooze','snooze'),('Change','other'),('Mark done','complete'),('Not needed','reject')]
     else:
         choices = [('Do it','accept'),('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
@@ -6736,7 +6758,7 @@ For this job:
 - Browser lease owner: assistant-{j[:8]} (python3 {browser_lease_script(config)} claim --owner assistant-{j[:8]} --minutes 30 --wait 10).
 - Attachments folder: {WORKSPACE}/data/assistant-attachments/{j}/
 - Save the result with assistant_signals prepare args suggestion_id={sid}, job_id={j}, body=<short result>, next_actions=[...], outcome and send_now:true only when the owner asked you to send it.
-- outcome:'done' when the job is finished and nothing is left for the owner but to check it; outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
+- outcome:'done' only when the task itself is complete and nothing is left for the owner but to check it; outcome:'answered' when you only answered their question, explained or planned, and the task itself is still to do (the card then offers Do it again); outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
 - When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card ("always…", signatures, formatting, tone with this kind of person) also becomes a draft rule: assistant_signals remember_fact args text=<the rule, general>, decision_id=<that note's decision>, kind=draft. A fact note that holds beyond this card goes in remember_fact as a fact.
 - Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>.''' + owner_details(config) + (f'''
 
@@ -7041,7 +7063,7 @@ Goal: say what each of the owner's closest people is to them, so reviews, drafts
 Do not send messages, change files or do anything else. End with exactly NO_REPLY.'''
 
 
-def review_prompt(run_id, accounts, preferences='', facts='', slipped='', promises='', unnamed='', roles=''):
+def review_prompt(run_id, accounts, preferences='', facts='', slipped='', promises='', unnamed='', roles='', notes=''):
     return f'''This is a signal review started by the personal-assistant service (review run {run_id}). It is not a chat with the owner and not a preparation task.
 The assistant instructions (tools/personal-assistant/AGENTS.md) and the owner's profile (USER.md) are included in this turn's context; follow the "Reviewing signals" section. Don't re-read those files.
 With the assistant_signals tool: call status, then ONE begin_analysis with account_ids {json.dumps(accounts)} and limit 120. The reply is paged: read every page with analysis_page before finishing, including next_row_offset continuations on the same page. Where body_clipped matters, read the rest with events (the account, event_ids and body_offset). Events replies contain events and remaining_event_ids; read the remaining IDs with the same accounts. Follow body_next_offset to the end of long bodies.
@@ -7054,6 +7076,9 @@ Messages are disabled in this turn. Do not work on anything else. End with exact
 
 Facts the owner told you earlier (true unless newer evidence says otherwise):
 {facts}''' if facts else '') + (f'''
+
+Notes the owner wrote when dismissing, closing or snoozing cards, not kept as a fact yet. Judge each by what it means beyond that one card: when it says what they handle themselves, what they don't want from you, or who does what, save it with remember_fact (text: one general sentence, decision_id) so later reviews stop suggesting it; skip a reason that only fits that card.
+{notes}''' if notes else '') + (f'''
 
 Open promises (the owner's and those made to them):
 {promises}''' if promises else '') + (f'''
@@ -7670,7 +7695,8 @@ class App:
                     if any(a['kind']!='open' for a in next_actions.actions(action)):
                         raise ValueError("outcome:'already_done' means there is nothing left to approve: leave next_actions empty")
                     outcome={'state':'already_done'}
-                else:raise ValueError("Say whether the job is finished: outcome:'done' (nothing left for the owner but to check it), outcome:'already_done' (it turned out to be done already or no longer needed), or outcome:'needs_you' with needs:<what they have to do, e.g. approve the send, sign in, pick an option>")
+                elif args.get('outcome')=='answered':outcome={'state':'answered'}
+                else:raise ValueError("Say whether the job is finished: outcome:'done' (the task itself is complete; nothing left for the owner but to check it), outcome:'answered' (you only answered a question, explained or planned; the task itself is still to do), outcome:'already_done' (it turned out to be done already or no longer needed), or outcome:'needs_you' with needs:<what they have to do, e.g. approve the send, sign in, pick an option>")
             saved=self.store.prepare(args['suggestion_id'], args['body'],args.get('job_id'),action,outcome,args.get('note_kind'),require_note=True,finish_state=args.get('finish_state'))
 
             if args.get('send_now') is True and not saved.get('replayed'):
@@ -9302,7 +9328,7 @@ class App:
             self.store.note_rule_files(RULE_FILES)
             request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text(),
                                                self.store.slipped(run['run_id']), self.store.promises_text(),
-                                               self.store.unnamed_text(run['run_id']), self.store.role_text(run['run_id']))
+                                               self.store.unnamed_text(run['run_id']), self.store.role_text(run['run_id']), self.store.notes_to_learn())
             try:  # "There's a skill for this": installed skills that aren't ready here, while there is room this week
                 hint = self.skills.hint_prompt() if getattr(self, 'skills', None) else ''
                 if hint and len(request['message']) + len(hint) < 18500:  # the runner refuses over 20,000

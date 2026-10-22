@@ -48,6 +48,14 @@ class DismissReasons(unittest.TestCase):
         with self.store.connect() as db:
             self.assertEqual(tuple(db.execute("SELECT choice,feedback,source FROM decisions").fetchone()),('reject','We already chose another vendor','telegram'))
         self.assertIn('We already chose another vendor',self.store.preference_summary())
+        # The reason also reaches the next review as a note to learn from, with its decision, until it is kept as a fact.
+        notes=self.store.notes_to_learn()
+        with self.store.connect() as db:decision=db.execute("SELECT id FROM decisions").fetchone()[0]
+        self.assertIn('We already chose another vendor',notes);self.assertIn(decision,notes)
+        self.assertIn('Notes the owner wrote when dismissing',a.review_prompt('r',['work'],notes=notes))
+        self.assertNotIn('Notes the owner wrote when dismissing',a.review_prompt('r',['work']))
+        self.store.remember_fact('The owner already chose another vendor for this.',decision)
+        self.assertEqual(self.store.notes_to_learn(),'')
         self.assertTrue(self.store.feedback_reply('again','42',reply_to_id='41')['duplicate'])
 
     def test_already_handled_reason_is_recorded_as_done_not_as_a_bad_suggestion(self):

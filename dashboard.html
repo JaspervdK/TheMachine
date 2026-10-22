@@ -553,6 +553,7 @@ button.stat[aria-expanded="true"]::after{content:"";position:absolute;left:28%;r
 .card .reason-chips .reason{margin:0;min-height:0;padding:6px 12px;border:1px solid var(--border);border-radius:999px;background:none;color:var(--muted);font-size:.86rem;font-weight:500}
 .card .reason-chips .reason[aria-pressed="true"]{border-color:var(--mint);background:color-mix(in srgb,var(--mint) 18%,transparent);color:var(--text)}
 .card .dismiss-editor textarea{min-height:40px;resize:vertical}
+.card .dismiss-editor button.primary[aria-busy=true]{opacity:1;cursor:progress}
 @media(min-width:561px){
   .card,.card.card{padding:22px 24px 20px}
   .card h3{font-size:1.28rem;margin-bottom:8px}
@@ -1009,10 +1010,11 @@ const SECONDARY={pending:['snooze','reject','complete','accept','change','handof
 // Already handled (a later message, or the teammate's own Machine): nothing to hand on.
 const canHandoff=s=>!closed(s)&&!s.handled_hint&&!!state?.fleet?.on&&s.scope==='work'&&!s.fleet_handoff&&!handingOff.has(s.id);
 function cardActions(s,choices,smartButtons,unmerge,hint,smart){
- const isPrimary=c=>c==='send'||c==='retry'||(c==='complete'&&(hint||(s.status==='prepared'&&!smart.some(a=>a.kind!=='open'))))||(c==='accept'&&s.status==='pending'&&!hint);
+ const answered=s.status==='prepared'&&(()=>{try{return JSON.parse(s.outcome||'{}').state==='answered'}catch{return false}})();
+ const isPrimary=c=>c==='send'||c==='retry'||(c==='complete'&&(hint||(s.status==='prepared'&&!answered&&!smart.some(a=>a.kind!=='open'))))||(c==='accept'&&(s.status==='pending'||answered)&&!hint);
  const btn=([c,t])=>c==='handoff'?`<button class="ghost" data-fleet-handoff="${esc(s.id)}">${t}</button>`:`<button class="${isPrimary(c)?'primary':c==='reject'?'quiet':'ghost'}" data-id="${s.id}" data-choice="${c}">${t}</button>`;
  const all=[...choices,...(canHandoff(s)&&s.status!=='snoozed'&&!smart.some(a=>a.kind==='handoff')?[['handoff','Hand off']]:[])];
- const head=all.filter(([c])=>isPrimary(c)),order=SECONDARY[s.status]||['complete','snooze','change','reject','handoff'];
+ const head=all.filter(([c])=>isPrimary(c)),order=(answered?['snooze','change','complete','reject','handoff']:SECONDARY[s.status])||['complete','snooze','change','reject','handoff'];
  const rest=all.filter(([c])=>!isPrimary(c)).sort((a,b)=>order.indexOf(a[0])-order.indexOf(b[0]));
  const leads=(smartButtons.match(/<(button|a) /g)||[]).length+head.length,room=Math.max(1,3-leads);
  let shown=rest.slice(0,room),more=rest.slice(room);if(more.length===1&&!unmerge){shown=rest;more=[]}
@@ -1021,7 +1023,9 @@ function cardActions(s,choices,smartButtons,unmerge,hint,smart){
 // A draft's Send opens the preview first: the button says so.
 const sendLabel=a=>['email','email_demo','linkedin','slack','x','whatsapp'].includes(a.kind)&&/^Send\b/.test(a.label||'')?a.label.replace(/^Send\b/,'Review and send'):a.label;
 function suggestionCard(s,section){
-const choices=s.status==='pending'?[['accept','Do it'],['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']]:s.status==='snoozed'?[['accept','Bring back'],['snooze','Change time'],['reject','Not needed']]:[...(s.preparation_status==='blocked'?[['retry',retryLabel(s.preparation_reason)]]:[]),['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']];
+// A result that only answered, explained or planned leaves the task itself to do: Do it leads again.
+const answered=s.status==='prepared'&&(()=>{try{return JSON.parse(s.outcome||'{}').state==='answered'}catch{return false}})();
+const choices=s.status==='pending'?[['accept','Do it'],['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']]:s.status==='snoozed'?[['accept','Bring back'],['snooze','Change time'],['reject','Not needed']]:[...(s.preparation_status==='blocked'?[['retry',retryLabel(s.preparation_reason)]]:answered?[['accept','Do it']]:[]),['complete','Mark done'],['snooze','Snooze'],['change','Change'],['reject','Not needed']];
 const smart=taskActions(s);const notes=smart.map(a=>({action:a,state:a.state||s.action_status})).filter(x=>actionNote(x.state,x.action.kind));
 const undo=closed(s)&&s.undo_until&&Date.parse(s.undo_until)>Date.now();
 const handled=!closed(s)&&s.handled_hint?(()=>{try{return JSON.parse(s.handled_hint)}catch{return {}}})():{},hint=handled.reason||'';
@@ -1035,6 +1039,7 @@ const statusLine=(()=>{if(closed(s)||s.status==='snoozed')return '';let o=null;i
  if(s.early&&s.status==='accepted')return line('Preparing this ahead, so it arrives ready.');
  if(o?.state==='needs_you')return line('Needs you: '+String(o.needs).replace(/\.$/,'')+'.',' outcome');
  if(s.early&&s.status==='prepared'&&smart.some(a=>a.kind!=='open'))return line('Ready to approve. Nothing goes out until you do.');
+ if(o?.state==='answered')return line('Answered. Nothing done yet.');
  if(o?.state==='done')return line('Finished. Mark it done if it looks right.',' outcome done');
  return ''})();
 // Like the site's demo card: a ready draft shows in an inset box, the source line sits under the content, and the prepared action leads the button grid.
@@ -1825,7 +1830,7 @@ if(choice==='reject'){dismissing.add(id);changing.delete(id);render();return}
 if(choice==='cancel-dismiss'){dismissing.delete(id);render();return}
 if(choice==='dismiss-pick'){const on=b.getAttribute('aria-pressed')!=='true';for(const r of b.parentElement.children)r.setAttribute('aria-pressed','false');b.setAttribute('aria-pressed',String(on));return}
 if(choice==='dismiss-typed'){const card=b.closest('.dismiss-editor'),why=[card?.querySelector('.reason[aria-pressed="true"]')?.dataset.reason,($('#dismiss-'+id)?.value||'').trim()].filter(Boolean).join(': ');
- b.disabled=true;try{await saveDecision(id,'reject',why);dismissing.delete(id)}catch(e){toast(e.message,true)}finally{b.disabled=false}return}
+ b.disabled=true;b.setAttribute('aria-busy','true');b.textContent='Saving…';try{await saveDecision(id,'reject',why);dismissing.delete(id)}catch(e){toast(e.message,true)}finally{b.disabled=false;b.removeAttribute('aria-busy');b.textContent='Confirm not needed'}return}
 if(choice==='snooze'){openSnooze(id);return}
 const feedback=$('#feedback-'+id)?.value||'';if(choice==='other'&&!feedback.trim()){$('#feedback-'+id)?.focus();toast('Tell me what to change first.',true);return}
 b.disabled=true;try{await saveDecision(id,choice,feedback)}catch(e){toast(e.message,true)}finally{b.disabled=false}};
