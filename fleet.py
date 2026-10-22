@@ -121,6 +121,7 @@ NOTICE_KINDS = ('seat_request', 'joined', 'server_started', 'left', 'seat_confir
 FLEET_ID = re.compile(r'fl_[0-9a-f]{16}')
 NOTICE_DAYS = 30
 DECIDED = {'once': 'Answered once', 'always': 'Answered, and always from now on', 'decline': 'Declined', 'never': 'Declined, and never from now on'}
+BY_RULE = {'answered': 'Shared automatically (your Always rule)', 'declined': 'Declined automatically (your Never rule)'}
 # Warm intros, handoffs and shared follow-ups: requests to do something (fleet_requests.py)
 ASKS['work'] += fleet_requests.KINDS
 RULE_KINDS['work'] += fleet_requests.KINDS
@@ -885,8 +886,10 @@ def fit_brief(facts, limit=None):
 
 def brief_preview(facts):
     """One line for the owner's approval card: how much a brief answer would share, in counts."""
-    return (f"{len(facts['touched'])} companies you were in touch with, {len(facts['quiet'])} that went quiet, "
-            f"{len(facts['unanswered'])} unanswered emails (as hashes), {len(facts['meetings'])} meetings with outside people. "
+    def n(key, one, many):
+        return f"{len(facts[key])} {one if len(facts[key]) == 1 else many}"
+    return (f"{n('touched', 'company', 'companies')} you were in touch with, {len(facts['quiet'])} that went quiet, "
+            f"{n('unanswered', 'unanswered email', 'unanswered emails')} (as hashes), {n('meetings', 'meeting', 'meetings')} with outside people. "
             'Company names, counts and dates only.')
 
 
@@ -1102,7 +1105,7 @@ def telegram_message(rows, root):
     many = len(rows) > 1
     lines, buttons = [], []
     for n, row in enumerate(rows, 1):
-        outcome = ((fleet_requests.ACCEPTED if row['kind'] in fleet_requests.STAGED else DECIDED).get(row['choice']) or ('Answered' if row['status'] == 'answered' else row['status'].capitalize())
+        outcome = ((fleet_requests.ACCEPTED if row['kind'] in fleet_requests.STAGED else DECIDED).get(row['choice']) or (BY_RULE.get(row['status']) if row['choice'] == 'rule' else None) or ('Answered' if row['status'] == 'answered' else row['status'].capitalize())
                    if row['status'] != 'waiting' else '')
         prefix = f'{n}. ' if many else ''
         if row['kind'] == 'anything':
@@ -1826,7 +1829,53 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
                      ('answered: ' + answer_text(row['kind'], answer)) if answer is not None else 'declined')
         if retell and row['telegram_message_id'] and self.retell:
             self.retell(row['telegram_message_id'])
+        if choice in ('always', 'never'):  # the same teammate's other waiting questions of this kind follow the new rule
+            self.settle_waiting(row['fleet'], row['member_id'], row['kind'], retell=retell)
         return {'status': status, 'answer': answer_text(row['kind'], answer) if answer is not None else None}
+
+    def settle_waiting(self, fleet=None, member_id=None, kind=None, retell=True):
+        """Waiting questions the owner's rules now decide: a rule is per teammate and kind of question (never per
+        date or other detail), so when it says Always or Never, the questions still waiting under it are answered or
+        declined as a new one would be, Only about included. Ask me first leaves them waiting. Returns the ids settled."""
+        settled, told = [], set()
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM fleet_in WHERE status='waiting' ORDER BY at,id").fetchall()
+        for row in rows:
+            if (fleet and row['fleet'] != fleet) or (member_id and row['member_id'] != member_id) or (kind and row['kind'] != kind):
+                continue
+            if row['kind'] in ('anything', 'skill') or row['kind'] in fleet_requests.STAGED:  # answered one at a time, or their own path
+                continue
+            with self.connect() as db:
+                if not db.execute("SELECT 1 FROM fleet_in WHERE id=? AND status='waiting'", (row['id'],)).fetchone():
+                    continue
+                try:
+                    question = json.loads(row['question'])
+                except ValueError:
+                    continue
+                rule, details = self.rule(db, row['fleet'], row['member_id'], row['kind'])
+                scope = self.scope(db, row['fleet'], row['member_id'], row['kind']) if row['kind'] in SCOPED else None
+                verdict = question_verdict(row['kind'], question, scope) if scope else 'in'
+                if verdict == 'outside' and rule != 'ask':
+                    rule = 'ask'
+                if rule == 'always' and verdict != 'never':
+                    answer = self.compute(db, row['kind'], question, details, row['fleet'], scope)
+                    status, outcome = 'answered', 'shared automatically (your Always rule): ' + answer_text(row['kind'], answer)
+                elif rule == 'never' or verdict == 'never':
+                    answer, status, outcome = None, 'declined', 'declined automatically (your Never rule)'
+                else:
+                    continue
+            self.relay.call('POST', '/answer', {'id': row['id'], 'status': status, **({'answer': answer} if answer is not None else {})})
+            with self.connect() as db:
+                db.execute("UPDATE fleet_in SET status=?,decided_at=?,choice=? WHERE id=? AND status='waiting'",
+                           (status, now(), 'rule', row['id']))
+                self.log(db, 'in', row['fleet'], row['member_id'], row['name'], row['kind'], question_text(row['kind'], question), outcome)
+            settled.append(row['id'])
+            if row['telegram_message_id']:
+                told.add(row['telegram_message_id'])
+        if retell and self.retell:
+            for message_id in told:
+                self.retell(message_id)
+        return settled
 
     def decide_from_telegram(self, ask_id, choice, message_id):
         """A tap on the Telegram message this Machine sent for that question, and only that message.
@@ -2026,6 +2075,8 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
                 db.execute('DELETE FROM fleet_rules WHERE fleet=? AND kind=? AND member_id!=? AND rule=? AND details=? AND member_id NOT IN '
                            '(SELECT member_id FROM fleet_scopes WHERE fleet=? AND kind=?)', (fleet, kind, ALL, rule, int(details), fleet, kind))
             scope = self.scope(db, fleet, member_id, kind)
+        if rule in ('always', 'never'):
+            self.settle_waiting(fleet, None if member_id == ALL else member_id, kind)
         return {'rule': rule, 'details': details, 'scope': scope}
 
     # -- asking teammates
@@ -2477,6 +2528,10 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         for message_id in {r['telegram_message_id'] for r in expired if r['telegram_message_id']}:
             if self.retell:
                 self.retell(message_id)
+        try:
+            self.settle_waiting()
+        except Exception as error:  # a relay hiccup: the next round tries again
+            LOG.error('fleet settle error=%s', type(error).__name__)
         self.notify_round()
         self.notice_round()
         with self.connect() as db:

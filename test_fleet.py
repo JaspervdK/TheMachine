@@ -624,6 +624,7 @@ class RuleScopes(unittest.TestCase):
         self.assertEqual(self.ask('relationships', {'about': 'client.example'}), 'answered')
         self.assertEqual(self.ask('relationships', {'about': 'other.example'}, 'q2'), 'waiting')
         self.fleet.set_rule('work', 'pat1', 'relationships', 'never')
+        self.assertIn('q2', [w['id'] for w in self.fleet.view()['waiting']])  # outside Only about: a new rule doesn't settle it either
         self.assertEqual(self.ask('relationships', {'about': 'client.example'}, 'q3'), 'declined')
         self.assertEqual(self.ask('relationships', {'about': 'other.example'}, 'q4'), 'waiting')
         self.fleet.decide('q4', 'once')  # the owner said yes: Only about doesn't hide what they chose to share

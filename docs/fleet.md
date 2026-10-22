@@ -147,8 +147,9 @@ itself:
 ## You decide, per Fleet
 
 - **Off by default.** Joining a Fleet only makes your Machine reachable. The first question from a teammate waits for
-  you as a card under Suggestions: **Answer once**, **Always**, **Decline** or **Never**. Always and Never become your exception for
-  that teammate and that kind of question.
+  you as a card under Suggestions: **Share once**, **Always share**, **Decline** or **Never share** (under More). Always and
+  Never become your exception for that teammate and that kind of question, whatever its date or details, and settle
+  their other questions of that kind still waiting (a daily brief leads with Always share).
 - **You hear about it.** A waiting question sends one phone notification (if you turned them on in the dashboard
   app) and, with Telegram connected, one Telegram message with **Answer once**, **Always** and **Decline**. Questions
   that arrive within a minute share one. They say who asks and what, never anything of yours. A tap on the phone

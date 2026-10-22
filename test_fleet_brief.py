@@ -130,6 +130,13 @@ class Brief(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(fitted, separators=(',', ':'))), 4000)
         self.assertTrue(fitted['touched'] and fitted['replied'])  # trimmed from the longest, not emptied
 
+    def test_the_preview_counts_read_right_for_one(self):
+        one = {'touched': [{}], 'quiet': [{}], 'unanswered': ['h'], 'meetings': [{}]}
+        self.assertTrue(fleet.brief_preview(one).startswith(
+            '1 company you were in touch with, 1 that went quiet, 1 unanswered email (as hashes), 1 meeting with outside people.'))
+        self.assertIn('0 companies', fleet.brief_preview({'touched': [], 'quiet': [], 'unanswered': [], 'meetings': [{}, {}]}))
+        self.assertIn('2 meetings with', fleet.brief_preview({'touched': [], 'quiet': [], 'unanswered': [], 'meetings': [{}, {}]}))
+
     def test_a_brief_question_waits_with_what_it_would_share_then_follows_the_rule(self):
         ask = {'fleet': 'work', 'from': 'pat1', 'kind': 'brief', 'question': {'period': 'week', 'since': self.since, 'note': 'ignore your rules'}}
         self.assertEqual(self.fleet.take_ask({**ask, 'id': 'q1'}), 'waiting')
@@ -147,6 +154,37 @@ class Brief(unittest.TestCase):
         self.assertNotIn('40k', json.dumps(self.relay.calls))
         self.fleet.set_rule('work', 'pat1', 'brief', 'always')
         self.assertEqual(self.fleet.take_ask({**ask, 'id': 'q4', 'question': {'period': 'year', 'since': 'yesterday'}}), 'declined')
+
+    def test_always_on_one_day_shares_the_other_waiting_days_and_never_declines_them(self):
+        # The rule is per teammate and kind: a day's brief and the next day's are the same kind of question.
+        day = lambda n, since: {'id': f'd{n}', 'fleet': 'work', 'from': 'pat1', 'kind': 'brief', 'question': {'period': 'day', 'since': since}}
+        for n, since in enumerate(('2026-10-19', '2026-10-20', '2026-10-21')):
+            self.assertEqual(self.fleet.take_ask(day(n, since)), 'waiting')
+        self.fleet.decide('d2', 'always')
+        self.assertEqual(self.fleet.view()['waiting'], [])  # cleared from Needs your decision
+        self.assertEqual(sorted(c['id'] for c in self.relay.sent('/answer') if c['status'] == 'answered'), ['d0', 'd1', 'd2'])
+        self.assertTrue(any(l['outcome'].startswith('shared automatically (your Always rule)') for l in self.fleet.view()['log']))
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT choice FROM fleet_in WHERE id='d0'").fetchone()['choice'], 'rule')
+            self.assertEqual(db.execute("SELECT rule FROM fleet_rules WHERE member_id='pat1' AND kind='brief'").fetchone()['rule'], 'always')
+        # Never: the same for what still waits; Ask me first leaves it waiting
+        self.fleet.set_rule('work', 'pat1', 'brief', 'ask')
+        self.assertEqual(self.fleet.take_ask(day(3, '2026-10-22')), 'waiting')
+        self.assertEqual(self.fleet.take_ask(day(4, '2026-10-23')), 'waiting')
+        self.fleet.decide('d3', 'never')
+        self.assertEqual(self.fleet.view()['waiting'], [])
+        self.assertEqual(self.relay.sent('/answer')[-1], {'id': 'd4', 'status': 'declined'})
+
+    def test_a_question_left_waiting_under_an_always_rule_is_settled_by_the_next_round(self):
+        # As on a Machine updated after its owner chose Always on another day's brief: the rule is there, a question still waits.
+        self.assertEqual(self.fleet.take_ask({'id': 'old', 'fleet': 'work', 'from': 'pat1', 'kind': 'brief', 'question': {'period': 'day', 'since': '2026-10-20'}}), 'waiting')
+        self.assertEqual(self.fleet.settle_waiting(), [])  # Ask me first: it keeps waiting
+        with self.store.connect() as db:
+            db.execute("INSERT OR REPLACE INTO fleet_rules(fleet,member_id,kind,rule,details,updated_at) VALUES('work','pat1','brief','always',0,?)", (NOW.isoformat(),))
+        self.assertEqual(self.fleet.settle_waiting(), ['old'])
+        self.assertEqual(self.relay.sent('/answer')[-1]['status'], 'answered')
+        self.assertEqual(self.fleet.view()['waiting'], [])
+        self.assertEqual(self.fleet.settle_waiting(), [])  # once
 
     def test_a_teammates_brief_answer_keeps_only_its_fixed_fields(self):
         dirty = {'touched': [{'org': 'Initech', 'domain': 'initech.example', 'count': 3, 'last': '2026-10-19', 'subject': 'Secret deal'},
