@@ -405,7 +405,7 @@ button.node:hover{text-decoration:underline;background:none}
 .graph-back{margin:0 0 12px}
 .graph-bar{flex:none;width:52px;height:6px;border-radius:999px;background:var(--sunken);overflow:hidden}
 .graph-bar i{display:block;height:100%;background:var(--mint)}
-.graph-row .fleet-chip{flex:0 100 auto;min-width:34px}.fleet-chip .ct{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.fleet-mark{color:var(--text)}.graph-sub:is(.fleet-mark,.fleet-named){white-space:normal}.fp-graph{font-size:.82rem;margin-left:6px}
+.graph-row .fleet-chip{flex:0 100 auto;min-width:34px}.fleet-chip .ct{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.fleet-mark{color:var(--text)}.graph-sub:is(.fleet-mark,.fleet-named){white-space:normal}.fp-graph{font-size:.8rem;margin-left:6px;color:var(--muted);text-decoration:none;white-space:nowrap}.fp-graph::before{content:"· "}.fp-graph:hover,.fp-graph:focus-visible{color:var(--text);text-decoration:underline}
 /* Calmer layout: compact header, one slim count row, quiet empty state, matching folded rows. */
 header{padding-bottom:18px}.avatar{width:52px;height:52px}h1{font-size:1.4rem}
 .brand p{font-size:.86rem;text-wrap:balance}.brand>div{min-width:0}
@@ -2071,7 +2071,7 @@ function fleetNote(s){if(closed(s))return fleetHandoff(s);const h=s.fleet_holder
  if(s.fleet_context?.length)out+=`<p class="note fleet">From your Fleet: ${s.fleet_context.map(esc).join(' · ')}</p>`;
  if(s.fleet_split)out+=`<p class="note fleet">Follow-ups split in your Fleet: ${esc(s.fleet_split)}</p>`;return out+fleetHandoff(s)}
 // Fleet, Family and Friends members in the Graph, from what the Network directory already shows every member (graph.with_fleet).
-const inGraph=p=>p?.graph_node?` <button type="button" class="link fp-graph" data-graph-open="${esc(p.graph_node)}">In your Graph</button>`:'';
+const inGraph=p=>p?.graph_node?` <a href="#people" class="fp-graph" data-graph-open="${esc(p.graph_node)}" title="Open ${esc(p.label||p.name||'them')} in your Graph" aria-label="Open ${esc(p.label||p.name||'them')} in your Graph">In Graph</a>`:'';
 const fleetGroups=n=>[...new Set((n.fleet?.in||[]).map(x=>({work:'Fleet',family:'Family',friends:'Friend'})[x.kind]||x.label))].join(' · ');
 const fleetLine=n=>[n.fleet?.machine?'Has a Machine':'',...(n.fleet?.in||[]).map(x=>x.kind==='work'&&x.fleet_name?`${x.label} (${x.fleet_name})`:x.label)].filter(Boolean).join(' · ');
 const fleetChip=n=>n.fleet?`<span class="chip fleet-chip" style="--c:var(--mint)" title="${esc(fleetLine(n))}"><span class="ct">${esc(fleetGroups(n))}</span></span>`:'';
@@ -2278,7 +2278,7 @@ $('#people-view').addEventListener('click',async e=>{const keep=e.target.closest
  const b=e.target.closest('[data-fleet-member],[data-fleet-free]');if(!b)return;document.querySelector('nav [data-tab="fleet"]')?.click();await fleetShown;
  const el=b.dataset.fleetMember?document.getElementById('fleet-m-'+b.dataset.fleetMember):document.querySelector(`.fleet-free-form[data-fleet="${CSS.escape(b.dataset.fleetFree)}"]`);if(!el)return;
  fleetReveal(el);el.scrollIntoView({block:'center',behavior:'smooth'});if(b.dataset.fleetFree)el.querySelector('input')?.focus({preventScroll:true});else{el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}});
-$('#fleet-view').addEventListener('click',e=>{const b=e.target.closest('[data-graph-open]');if(!b)return;graphNode=b.dataset.graphOpen;document.querySelector('nav [data-tab="people"]')?.click()});
+$('#fleet-view').addEventListener('click',e=>{const b=e.target.closest('[data-graph-open]');if(!b)return;e.preventDefault();graphNode=b.dataset.graphOpen;document.querySelector('nav [data-tab="people"]')?.click()});
 // A name or address cut off with an ellipsis shows in full on hover or long-press.
 document.addEventListener('pointerover',e=>{const el=e.target.closest?.('.ct,.ell,.fleet-people strong,.fleet-people small');if(el&&!el.title&&el.scrollWidth>el.clientWidth)el.title=el.textContent.trim()});
 // Graph tab: projects heating up or cooling, who's closest, who has gone quiet; tap one for its links and events.

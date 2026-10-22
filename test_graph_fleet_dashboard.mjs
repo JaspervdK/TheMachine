@@ -63,7 +63,11 @@ try{
  await page.locator('#fleet-m-fm_kim.flash').waitFor();
  assert.ok(await page.locator('#fleet-m-fm_kim').isVisible());
  await fits('fleet');
- await page.locator('#fleet-m-fm_kim [data-graph-open]').click();
+ const link=page.locator('#fleet-m-fm_kim [data-graph-open]');  // a quiet muted text link, not a bordered button
+ assert.equal(await link.evaluate(e=>e.tagName),'A');assert.equal(await link.getAttribute('aria-label'),'Open Kim Lee-Park in your Graph');
+ assert.equal(await link.evaluate(e=>getComputedStyle(e).borderStyle),'none');
+ assert.ok(await link.evaluate(e=>e.getBoundingClientRect().height<24),'small');
+ await link.click();
  await page.locator('.fleet-mark').waitFor();
  assert.equal(await page.locator('.graph-detail h3').textContent(),'Kim Lee-Park');
  await page.locator('[data-fleet-free]').click();
