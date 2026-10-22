@@ -51,7 +51,7 @@ try{
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${scheme} ${width}px cards scroll sideways`);
   await page.locator('nav [data-tab="fleet"]').click();await page.locator('[data-fleet-pane="network"]').click();await page.locator('#fleet-network').waitFor();
   const block=page.locator('#fleet-network');
-  assert.match(await block.innerText(),/Find people I know/);assert.match(await block.innerText(),/Zed Zee/);
+  assert.match(await block.innerText(),/Check which of my contacts have a Machine/);assert.match(await block.innerText(),/Zed Zee/);
   assert.ok(await block.locator('[data-net-toggle="find_off"]').isChecked());
   // Which addresses find them: the account one fixed, each connected one can be turned off
   assert.match(await block.locator('.net-addrs').innerText(),/Findable by/);

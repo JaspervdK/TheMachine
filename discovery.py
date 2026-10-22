@@ -1,7 +1,7 @@
 """Finding people you know on the Network, privately, and suggesting a connection only when it would help (docs/network.md).
 
 Two switches, both off until the owner turns them on:
-- Find people I know: daily, and soon after someone new turns up in the graph or becomes findable on the Network, the
+- Check which of my contacts have a Machine: daily, and soon after someone new turns up in the graph or becomes findable on the Network, the
   Machine checks its strongest contacts against the Network without uploading them. Each address is hashed onto a group and blinded with a secret only this Machine knows; the Network raises
   them to its own secret and returns them with its (blinded) list of people who chose to be found; the Machine
   compares. Only the matches are then looked up by address, to learn their username and name.
@@ -230,7 +230,7 @@ class Discovery:
         return pending
 
     def discovery_round(self, force=False):
-        """With "Find people I know" on: look all the contacts up daily (or now, when forced), and every NEW_EVERY the ones
+        """With "Check which of my contacts have a Machine" on: look all the contacts up daily (or now, when forced), and every NEW_EVERY the ones
         not looked up yet or in a bucket where someone became findable; every time, bring the reasons of the people
         found up to date, and mark the ones who became friends."""
         if self._findable_due():
@@ -344,7 +344,7 @@ class Discovery:
             self._set_network(find=do == 'find_on', asked=True)
             with self.connect() as db:
                 self.log(db, 'out', self.friends_ref() or 'friends', None, 'Network', 'discover',
-                         'Find people I know: ' + ('on' if do == 'find_on' else 'off'), 'done')
+                         'Check which of my contacts have a Machine: ' + ('on' if do == 'find_on' else 'off'), 'done')
             if do == 'find_on':
                 try:
                     self.discovery_round(force=True)

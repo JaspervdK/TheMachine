@@ -313,7 +313,7 @@ Friends are free, between hosted and self-hosted Machines alike.
 
 Both switches are off until you turn them on, in the Fleet tab under **Network** (Suggestions asks once).
 
-- **Find people I know** checks daily which of your contacts are on the Network, and soon after you meet someone
+- **Check which of my contacts have a Machine** looks daily for your contacts on the Network, and soon after you meet someone
   new or someone you know becomes findable. Your Machine blinds each
   address with a secret only it holds before anything leaves it (a private set intersection: H(x)^a over a 2048-bit
   group); the Network raises those to its own secret and sends them back with the blinded addresses of people who let
