@@ -21,6 +21,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+try:
+    from scripts.security_gate import require_release_scan
+except ModuleNotFoundError:
+    from security_gate import require_release_scan
+
 ROOT = Path(__file__).resolve().parent.parent
 SIGNERS = ROOT / 'deploy' / 'release-signers'
 TAG = re.compile(r'release-\d{8}-\d{4}')
@@ -90,6 +95,10 @@ def cut(args):
     tag = 'release-' + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M')
     if git('rev-parse', '-q', '--verify', f'refs/tags/{tag}', check=False).returncode == 0:
         raise SystemExit(f'{tag} exists already: wait a minute and try again.')
+    try:
+        require_release_scan('TheMachine', sha, cwd=ROOT)
+    except RuntimeError as error:
+        raise SystemExit(f'Not released: {error}') from error
     subject = git('log', '-1', '--format=%s', sha).stdout.strip()
     git('-c', 'gpg.format=ssh', '-c', f'user.signingkey={key}', '-c', f'user.name=The Machine releases', '-c', f'user.email={PRINCIPAL}',
         'tag', '-s', '-m', f'The Machine {tag}\n\nUp to: {subject}', tag, sha)
