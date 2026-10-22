@@ -36,6 +36,9 @@ class Releases(unittest.TestCase):
         patch = mock.patch.multiple(release, ROOT=self.app, SIGNERS=self.app / 'deploy' / 'release-signers')
         patch.start()
         self.addCleanup(patch.stop)
+        gate = mock.patch.object(release, 'require_release_scan', return_value={'gate_passed': True})
+        self.gate = gate.start()
+        self.addCleanup(gate.stop)
 
     def commit(self, text):
         (self.origin / 'app.py').write_text(text)
@@ -83,11 +86,21 @@ class Releases(unittest.TestCase):
     def test_cut_signs_origin_main_with_the_key_and_verifies_it(self):
         sha = self.commit('two')
         release.main(['cut', '--key', str(self.key), '--no-push'])
+        self.gate.assert_called_once_with('TheMachine', sha, cwd=self.app)
         tags = release.releases()
         self.assertEqual(len(tags), 1)
         self.assertEqual(release.verify(tags[0])[1], sha)
         release.main(['cut', '--key', str(self.key), '--no-push'])  # nothing new on main: no second tag
         self.assertEqual(release.releases(), tags)
+        self.gate.assert_called_once()
+
+    def test_failed_scan_never_creates_or_pushes_a_release(self):
+        self.commit('two')
+        self.gate.side_effect = RuntimeError('scan did not pass')
+        with self.assertRaisesRegex(SystemExit, 'Not released: scan did not pass'):
+            release.main(['cut', '--key', str(self.key)])
+        self.assertEqual(release.releases(), [])
+        self.assertEqual(run('git', 'tag', '--list', cwd=self.origin), '')
 
     def test_cut_with_a_key_that_is_not_pinned_tags_nothing(self):
         self.commit('two')

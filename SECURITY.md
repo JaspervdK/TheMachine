@@ -22,6 +22,11 @@ vulnerable dependencies and leaked secrets. An AI agent goes through the finding
 high issues are fixed the same day, medium ones are fixed or dismissed with a specific reason, and low ones
 are handled in batches. Fixes to this repository arrive as pull requests and are reviewed before they merge.
 
+The release key holder also needs the official `@aikidosec/ci-api-client`, with its Aikido API key in the client's
+protected local configuration. `scripts/release.py cut` requests a scan of the exact `origin/main` commit before
+signing it. High and critical dependency, SAST, IaC and secret findings block release; an unavailable scanner,
+invalid receipt or timeout blocks it as well. The token is never included in release commands or source control.
+
 ## Deployment boundaries
 
 - Keep the service bound to `127.0.0.1`. The dashboard is intended for Tailscale Serve or
