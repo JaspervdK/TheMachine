@@ -372,6 +372,14 @@ class Invariants(unittest.TestCase):
         self.store.decide(sid,'complete','','done-click','dashboard')
         self.assertEqual(self.store.looks_handled(sid,'Signed again later.',[2]),{'skipped':'already closed'})
 
+    def test_telegram_card_keeps_markdown_links_for_telegram_formatting(self):
+        # The Gateway turns Markdown into Telegram's HTML (http(s), mailto, tel only), so links pass through untouched.
+        self.store.commit_page('work', {}, [event(source='ask')])
+        body='Updated your [Google Doc](https://docs.google.com/document/d/abc/edit): removed Sources.'
+        self.store.suggest('doc','Agreed to the listing exchange',body,[1])
+        row=self.store.snapshot([])['suggestions'][0]
+        self.assertIn(body,assistant.card(row))
+
     def test_any_event_opens_on_its_own_without_a_card(self):
         mine={**event(source='wa',body='See you at 8'),'kind':'whatsapp.message','metadata':{'from_me':True,'chat_name':'Anna'}}
         self.store.commit_page('work', {}, [event(), mine])
