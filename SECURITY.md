@@ -18,7 +18,9 @@ Never include actual tokens, messages or a production database.
 ## Code scanning
 
 [Aikido](https://www.aikido.dev) scans this repository and the hosted service's code for security issues,
-vulnerable dependencies and leaked secrets. An AI agent goes through the findings every morning: critical and
+vulnerable dependencies and leaked secrets, on every pull request and every day. It also scans the hosted
+service's Azure setup, through a scoped read-only connection, and its control plane servers.
+An AI agent goes through the findings every morning: critical and
 high issues are fixed the same day, medium ones are fixed or dismissed with a specific reason, and low ones
 are handled in batches. Fixes to this repository arrive as pull requests and are reviewed before they merge.
 
