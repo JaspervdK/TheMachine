@@ -1,7 +1,8 @@
 """How the owner writes, per channel: voices learned from their notes, edits and own messages, and what a draft gets.
 
-Voices are one short line per channel (and All). A style note on a card rewrites that channel's line; the owner edits
-them in Settings; a profile run's channel lines fill empty ones. A preparation gets every voice (its card's channel
+Voices are a short block per channel (and All). A voice study reads the owner's own messages per channel and writes
+each block; a style note on a card rewrites that channel's block; the owner edits them in Settings; a profile run's
+channel lines fill empty ones. A preparation gets every voice (its card's channel
 marked), the owner's own recent messages on that channel (same conversation first) and earlier edits on that channel
 only. A draft the owner answered themselves instead becomes an edit to learn from. All local; nothing is sent."""
 import importlib.util
@@ -70,8 +71,10 @@ class Voices(unittest.TestCase):
                                           'decision_id': self.note_id()})
         self.assertEqual([(v['channel'], v['text'], v['source']) for v in self.store.voices()],
                          [('WhatsApp', 'Short lowercase Flemish, no capitals, no full stop at the end.', 'assistant')])
-        with self.assertRaisesRegex(ValueError, 'one short line'):
-            self.app.action('remember_fact', {'kind': 'voice', 'channel': 'Email', 'text': 'x' * 301, 'decision_id': self.note_id()})
+        with self.assertRaisesRegex(ValueError, 'short block'):
+            self.app.action('remember_fact', {'kind': 'voice', 'channel': 'Email', 'text': 'x' * 451, 'decision_id': self.note_id()})
+        with self.assertRaisesRegex(ValueError, 'short block'):
+            self.app.action('remember_fact', {'kind': 'voice', 'channel': 'Email', 'text': '\n'.join(['Short.'] * 6), 'decision_id': self.note_id()})
         # Each change is marked on the quality chart, like a draft rule.
         self.assertEqual([c['kind'] for c in self.store.rule_changes('2000-01-01')], ['voice', 'voice'])
 
@@ -83,6 +86,71 @@ class Voices(unittest.TestCase):
         self.assertEqual([(v['channel'], v['source']) for v in out['voices']], [('All', 'owner'), ('Email', 'owner')])
         out = self.app.action('set_voice', {'channel': 'Email', 'text': ''}, owner_dashboard=True)
         self.assertEqual([v['channel'] for v in out['voices']], ['All'])
+
+    def test_a_voice_is_a_few_lines_and_a_learned_update_keeps_the_rest_of_it(self):
+        block = '- English: Hi or Hey + first name\n- Regards, a blank line, then the name\n\n• Short paragraphs, no bullets'
+        out = self.app.action('set_voice', {'channel': 'Email', 'text': block}, owner_dashboard=True)
+        self.assertEqual(out['voices'][0]['text'], 'English: Hi or Hey + first name\nRegards, a blank line, then the name\nShort paragraphs, no bullets')
+        # A note works one thing in; it doesn't shrink the block back to that one thing.
+        with self.assertRaisesRegex(ValueError, 'Keep the whole Email block'):
+            self.app.action('remember_fact', {'kind': 'voice', 'channel': 'Email', 'text': 'Less formal.', 'decision_id': self.note_id()})
+        grown = out['voices'][0]['text'] + '\nLess formal with customers than before'
+        self.assertEqual(self.app.action('remember_fact', {'kind': 'voice', 'channel': 'Email', 'text': grown, 'decision_id': self.note_id()})['text'], grown)
+        self.assertIn('- Email:\n  - English: Hi or Hey + first name\n  - Regards', self.store.voices_text())
+
+    def study_messages(self):
+        sent = [mail(f's{i}', f'2026-10-0{i}T10:00:00+00:00', f'Hi {n},\n\nQuick one about item {i}: {w}.\n\nRegards,\n\nOwner', thread=f'ts{i}',
+                     sender='Owner <owner@example.com>', to=f'{n} <{n.lower()}@example.org>', labels=('SENT',))
+                for i, (n, w) in enumerate([('Ann', 'all set'), ('Bo', 'see the doc'), ('Cy', 'call tomorrow?'), ('Di', 'thanks a lot'),
+                                            ('Ed', 'invoice is in'), ('Fay', 'works for me')], 1)]
+        self.store.commit_page('work', {}, sent)
+
+    def test_a_voice_study_reads_own_messages_per_channel_and_keeps_the_owners_own_blocks(self):
+        self.study_messages()
+        with self.store.connect() as db:
+            db.execute("INSERT INTO note_kinds VALUES(?,?,'style','assistant',?)", (self.note_id(), self.chat_sid, a.now()))
+        self.app.action('set_voice', {'channel': 'All', 'text': 'Natural dates.'}, owner_dashboard=True)
+        sample = self.store.voice_sample()
+        self.assertEqual({m['channel'] for m in sample['messages']}, {'Email'})  # one WhatsApp message says too little
+        self.assertTrue(all(m['text'].startswith(('Hi ', 'Hey ')) for m in sample['messages']))
+        self.assertEqual(sample['notes'][0]['note'], 'no capitals on whatsapp please')
+        started = self.store.voice_study_start()
+        session = a.PROFILE_SESSION_PREFIX + started['run_id']
+        page = self.store.profile_evidence(1, session)
+        self.assertEqual((page['counts'], page['current_voices'][0]['written_by_owner']), ({'Email': 8}, True))
+        prompt = a.voices_prompt(started['run_id'], page['counts'], page['pages'])
+        self.assertIn('greeting per language', prompt)
+        with self.assertRaisesRegex(ValueError, 'at most 5 lines'):
+            self.store.save_profile({'voices': {'Email': '\n'.join(['Short line.'] * 6)}}, session)
+        email_block = 'English: Hi + first name, a blank line\nRegards, a blank line, then the name\nShort paragraphs; questions to close'
+        self.store.save_profile({'voices': {'Email': email_block, 'All': 'Overwrites nothing of theirs.'}}, session)
+        with self.store.connect() as db:
+            db.execute("UPDATE profile_runs SET status='ok',finished_at=? WHERE run_id=?", (a.now(), started['run_id']))
+        self.assertEqual(self.store.apply_voice_study(started['run_id']), 1)
+        self.assertEqual(self.store.apply_voice_study(started['run_id']), 0)  # once
+        self.assertEqual({v['channel']: (v['text'], v['source']) for v in self.store.voices()},
+                         {'All': ('Natural dates.', 'owner'), 'Email': (email_block, 'study')})
+        self.assertIsNone(self.store.voice_study_due())  # read again only after a while
+        with patch.object(a, 'now', return_value=(a.dt.datetime.fromisoformat(a.now()) + a.dt.timedelta(days=31)).isoformat()):
+            self.assertIn('run_id', self.store.voice_study_due())
+
+    def test_a_voice_study_runs_as_a_turn_and_applies_when_it_finishes(self):
+        self.study_messages()
+        started = self.store.voice_study_start()
+        self.app.preparation_gateway = None
+        sent = []
+        def runner(request):
+            sent.append(request)
+            if request['action'] == 'start':
+                self.store.save_profile({'voices': {'Email': 'Hi + first name\nRegards, a blank line, then the name'}},
+                                        a.PROFILE_SESSION_PREFIX + started['run_id'])
+                return {'status': 'admitted'}
+            return {'status': 'ok'}
+        self.app.profile_step(runner)
+        self.assertIn('voice study', sent[0]['message'])
+        self.assertEqual(self.store.voices(), [])  # not before the run is done
+        self.app.profile_step(runner)
+        self.assertEqual([(v['channel'], v['source']) for v in self.store.voices()], [('Email', 'study')])
 
     def test_a_profile_fills_empty_channels_once(self):
         draft = {'voices': {'Email': 'Short paragraphs, Regards and name.', 'WhatsApp': 'Tiny lowercase bursts.'}}
@@ -104,15 +172,15 @@ class Voices(unittest.TestCase):
             db.execute("INSERT INTO draft_edits(id,suggestion_id,old_revision,new_revision,kind,before_body,after_body,source,created_at) "
                        "VALUES('e2',?,'a','b','email','Dear Sam, kindly find','Hey Sam, here it is','dashboard',?)", (self.sid, a.now()))
         text = self.store.style_text(self.sid)
-        self.assertIn('- Email (this card): Hey name', text)
-        self.assertIn('- WhatsApp: lowercase', text)  # every voice, so a draft on another channel still has one
+        self.assertIn('- Email (this card):\n  - Hey name', text)
+        self.assertIn('- WhatsApp:\n  - lowercase', text)  # every voice, so a draft on another channel still has one
         examples = text.split("own recent Email messages")[1]
         # Same conversation first, then others; the owner's own words without the quoted history.
         self.assertLess(examples.index('(this conversation) Hey Sam'), examples.index('(to Lee) Hi Lee'))
         self.assertIn('Hey Sam, here it is', text)
         self.assertNotIn('tot straks', text)  # a WhatsApp edit says little about email
         chat_text = self.store.style_text(self.chat_sid)
-        self.assertIn('- WhatsApp (this card): lowercase', chat_text)
+        self.assertIn('- WhatsApp (this card):\n  - lowercase', chat_text)
         self.assertIn('(this conversation) ja tuurlijk, tot straks', chat_text)
         self.assertNotIn('Sent a photo', chat_text)  # media placeholders say nothing about how they write
         self.assertNotIn('Hey Sam', chat_text)

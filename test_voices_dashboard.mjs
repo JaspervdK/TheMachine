@@ -8,7 +8,7 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 // is added with its line. All mocked.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const start=[{channel:'All',text:'Natural dates.',source:'assistant',updated_at:'2026-10-20T10:00:00+00:00'},
- {channel:'Email',text:'Hey name, short, Regards then the name.',source:'profile',updated_at:'2026-10-20T10:00:00+00:00'}];
+ {channel:'Email',text:'English: Hi or Hey + first name\nRegards, a blank line, then the name\nShort paragraphs',source:'study',updated_at:'2026-10-20T10:00:00+00:00'}];
 let voices=start;
 const facts=[{id:9,kind:'fact',text:'Newest fact.',created_at:'2026-10-21T09:00:00+00:00',merged:2},{id:8,kind:'draft',text:'A rule for a kind of task.',created_at:'2026-10-20T09:00:00+00:00',merged:0},
  {id:3,kind:'fact',text:'Older fact.',created_at:'2026-10-10T09:00:00+00:00',merged:0}];
@@ -45,11 +45,14 @@ try{
   assert.match(await forms.nth(0).locator('.sig-head').textContent(),/Everywhere/);
   assert.match(await forms.nth(1).locator('.sig-head').textContent(),/Email.*From your messages/);
   const email=forms.nth(1);
+  assert.equal(await email.locator('textarea').inputValue(),'English: Hi or Hey + first name\nRegards, a blank line, then the name\nShort paragraphs');
+  assert.equal(await email.locator('textarea').getAttribute('maxlength'),'450');
+  assert.match(await page.locator('#settings-voices .section-head p').textContent(),/A few lines per channel/);
   assert.equal(await email.locator('.primary').isHidden(),true);  // no change, no Save
-  await email.locator('textarea').fill('Hey name, short. Regards, a blank line, then my name.');
+  await email.locator('textarea').fill('Hey name, short.\nRegards, a blank line, then my name.');
   await email.locator('.primary').click();
   await page.locator('#notice',{hasText:'Saved.'}).waitFor({state:'attached'});
-  assert.deepEqual(posts.at(-1),{action:'set_voice',args:{channel:'Email',text:'Hey name, short. Regards, a blank line, then my name.'}});
+  assert.deepEqual(posts.at(-1),{action:'set_voice',args:{channel:'Email',text:'Hey name, short.\nRegards, a blank line, then my name.'}});
   await page.locator('#voices .voice-form[data-channel="Email"] .sig-head',{hasText:'Yours'}).waitFor();
   // Add a channel with its line; a missing name is said, not posted.
   const add=page.locator('#voices .voice-form[data-new]');
@@ -72,6 +75,7 @@ try{
   await page.locator('#toast',{hasText:'Notes restored.'}).waitFor({state:'attached'});
   assert.deepEqual(posts.at(-1),{action:'unmerge_fact',args:{skill:'sk_9'}});
   assert.match(await learned.locator('.learn-note').textContent(),/Condensed 3 notes on/);
+  assert.equal(await learned.locator('.voice-text').first().evaluate(e=>getComputedStyle(e).whiteSpace),'pre-line');  // a block keeps its lines
   const rows=await learned.locator(':scope>div:not(.learn-head):not(.learn-note) .grow').allTextContents();
   assert.match(rows[rows.indexOf(rows.find(r=>r.startsWith('Newest')))],/Merged from 2 notes/);
   assert.ok(rows.findIndex(r=>r.startsWith('Newest'))<rows.findIndex(r=>r.startsWith('Older')));
