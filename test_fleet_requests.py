@@ -318,7 +318,7 @@ class Requests(unittest.TestCase):
         self.with_kim()
         self.fleet.close_card = lambda card_id, why, key: self.store.decide_handoff(card_id, 'complete', why, key, key.removeprefix('fleet-handoff-'))
         self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
-        self.fleet.wake_card = lambda card_id, key: self.store.decide_handoff(card_id, 'accept', '', key, key.removeprefix('fleet-handoff-back-'))
+        self.fleet.wake_card = lambda card_id, key, at: self.store.handoff_back(card_id, key, key.removeprefix('fleet-handoff-back-'), at)
         slack = {'kind': 'slack', 'label': 'Send to Kim', 'revision': 'r1', 'to_email': 'kim@acme.example', 'to_name': 'Kim Doe', 'body': self.HANDOFF_TEXT, 'delegate': True}
         link = {'kind': 'open', 'label': 'Open the report', 'revision': 'r2', 'url': 'https://tracker.example/1'}
         view = lambda card: (lambda s: (self.fleet.annotate(db, s), s[0])[1])([{**self.card_row(card), 'next_actions': [slack, link]}])
@@ -346,11 +346,80 @@ class Requests(unittest.TestCase):
                     shown = view(card)
                 self.assertEqual(len(shown['next_actions']), 2 if status == 'prepared' else 1)  # declined: hand it on another way
 
+    def test_a_decline_or_accept_can_carry_a_short_note_back_to_the_sender(self):
+        question = {'title': 'Send Sam the pricing', 'summary': 'Sam wants pricing.', 'contact': 'sam@client.example'}
+        self.assertEqual(self.ask('handoff', question, 'q_' + 'b' * 16), 'waiting')
+        done = self.app.action('fleet_decide', {'id': 'q_' + 'b' * 16, 'choice': 'decline', 'note': '  Not mine: ' + 'x' * 300},
+                               owner_dashboard=True)
+        self.assertEqual(done['status'], 'declined')
+        sent = self.answered()  # a reason travels as a stage, sealed like any answer
+        self.assertEqual((sent['status'], sent['answer']['stage']), ('answered', 'declined'))
+        self.assertTrue(sent['answer']['note'].startswith('Not mine: x'))
+        self.assertLessEqual(len(sent['answer']['note']), fleet_requests.NOTE_CHARS)
+        self.assertEqual(self.ask('handoff', question, 'q_' + 'c' * 16), 'waiting')
+        self.fleet.decide('q_' + 'c' * 16, 'decline')
+        self.assertEqual(self.answered(), {'id': 'q_' + 'c' * 16, 'status': 'declined'})  # no note: a plain decline, as before
+        self.assertEqual(self.ask('handoff', question, 'q_' + 'd' * 16), 'waiting')
+        self.fleet.decide('q_' + 'd' * 16, 'once', note='On it, tomorrow')
+        self.assertEqual(self.answered()['answer'], {'stage': 'accepted', 'note': 'On it, tomorrow'})
+        # The sender's side keeps the note to its fixed form; anything else in the answer is dropped.
+        self.assertEqual(fleet_requests.clean_answer('handoff', {'stage': 'declined', 'note': 'Already done', 'run': 'x'}),
+                         {'stage': 'declined', 'note': 'Already done'})
+        self.assertEqual(fleet_requests.clean_answer('handoff', {'stage': 'done', 'note': 'x'}), {'stage': 'done'})
+        self.assertEqual(fleet_requests.answer_text('handoff', {'stage': 'declined', 'note': 'No time this week'}), 'declined: “No time this week”')
+
+    def test_a_declined_handoff_comes_back_saying_why_with_what_to_do_now(self):
+        self.with_kim()
+        self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
+        self.fleet.wake_card = lambda card_id, key, at: self.store.handoff_back(card_id, key, key.removeprefix('fleet-handoff-back-'), at)
+        card = self.ready_card([], 'k-why')
+        self.fleet.hand_off(card, self.ref, 'kim1', 'Export leaks rows', self.HANDOFF_TEXT)
+        with self.store.connect() as db:
+            ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
+        self.fleet.take_answer({'id': ask_id, 'status': 'answered', 'answer': {'stage': 'declined', 'note': 'Not mine'}})
+        self.assertEqual(self.card_row(card)['status'], 'prepared')  # back in Ready at once
+        self.assertEqual(self.told[-1], 'Kim Doe declined your handoff: Export leaks rows. Their note: “Not mine”')
+        with self.store.connect() as db:
+            shown = [self.card_row(card)]
+            self.fleet.annotate(db, shown)
+        self.assertEqual(shown[0]['fleet_handoff'], {'name': 'Kim Doe', 'stage': 'declined', 'note': 'Not mine', 'back': True})
+        self.app.action('fleet_handoff_mine', {'suggestion_id': card}, owner_dashboard=True)  # Do it myself: the note stays
+        with self.store.connect() as db:
+            self.fleet.annotate(db, shown)
+        self.assertEqual(shown[0]['fleet_handoff'], {'name': 'Kim Doe', 'stage': 'declined', 'note': 'Not mine', 'back': False})
+
+    def test_a_decline_reopens_a_card_the_owner_closed_after_handing_it_off_also_one_that_came_earlier(self):
+        self.with_kim()
+        self.fleet.wake_card = lambda card_id, key, at: self.store.handoff_back(card_id, key, key.removeprefix('fleet-handoff-back-'), at)
+        card = self.ready_card([], 'k-closed')
+        wake, self.fleet.wake_card = self.fleet.wake_card, None  # handed off before this version: nothing woke cards then
+        self.fleet.hand_off(card, self.ref, 'kim1', 'Export leaks rows', self.HANDOFF_TEXT)
+        self.store.decide(card, 'complete', '', 'owner-done', 'dashboard')  # "it's with them"
+        with self.store.connect() as db:
+            ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
+        self.fleet.take_answer({'id': ask_id, 'status': 'declined'})
+        self.assertEqual(self.card_row(card)['status'], 'completed')  # the answer is kept, the card was not woken
+        self.fleet.wake_card = wake
+        for _ in range(2):  # the next round brings it back, once
+            self.fleet.requests_round()
+            self.assertEqual(self.card_row(card)['status'], 'prepared')
+        self.store.decide(card, 'complete', '', 'owner-done-again', 'dashboard')
+        self.fleet.requests_round()
+        self.assertEqual(self.card_row(card)['status'], 'completed')  # the owner's later Done wins
+        # A card the owner closed before the handoff went is never reopened by its answer.
+        other = self.ready_card([], 'k-before')
+        self.store.decide(other, 'complete', '', 'done-before', 'dashboard')
+        with self.store.connect() as db:
+            db.execute("INSERT INTO fleet_out(id,fleet,member_id,name,kind,question,context,status,at,answered_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       ('q_' + 'e' * 16, self.ref, 'kim1', 'Kim Doe', 'handoff', '{}', 'handoff:' + other, 'declined', '2999-01-01T00:00:00+00:00', fleet.now()))
+        self.fleet.requests_round()
+        self.assertEqual(self.card_row(other)['status'], 'completed')
+
     def test_late_handoff_answers_do_not_override_new_owner_instructions(self):
         self.with_kim()
         self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
         self.fleet.close_card = lambda card_id, why, key: self.store.decide_handoff(card_id, 'complete', why, key, key.removeprefix('fleet-handoff-'))
-        self.fleet.wake_card = lambda card_id, key: self.store.decide_handoff(card_id, 'accept', '', key, key.removeprefix('fleet-handoff-back-'))
+        self.fleet.wake_card = lambda card_id, key, at: self.store.handoff_back(card_id, key, key.removeprefix('fleet-handoff-back-'), at)
         for answer in ('accepted', 'declined'):
             card = self.ready_card([], 'late-' + answer)
             self.fleet.hand_off(card, self.ref, 'kim1', 'Export leaks rows', self.HANDOFF_TEXT)

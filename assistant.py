@@ -374,7 +374,7 @@ class SourceError(Exception):
 CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel', 'connect_remove', 'connect_scope')
 OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
-FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_split', 'fleet_split_dismiss',
+FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_handoff_mine', 'fleet_split', 'fleet_split_dismiss',
                          'fleet_split_adjust', 'task_import'}
 OWNER_ACTIONS |= FLEET_REQUEST_ACTIONS
 # Friends (friends.py): adding, accepting, removing and blocking friends, and asking a friend when they are free.
@@ -3889,11 +3889,34 @@ class Store:
                 return {'skipped': True, 'reason': 'newer_card_choice'}
             return self._decide(db, suggestion_id, choice, feedback, decision_id, 'fleet')
 
+    def handoff_back(self, suggestion_id, decision_id, request_id, handed_at):
+        """A teammate declined a handoff: the card comes back to Ready. From Later while this handoff still owns the card,
+        or reopened when the owner's own last choice was to close it after handing it off (it was with them then).
+        Any other later choice of the owner's wins."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM decisions WHERE id=?', (decision_id,)).fetchone():
+                return {'skipped': True, 'reason': 'already_back'}
+            latest = db.execute('SELECT id,source,choice,created_at FROM decisions WHERE suggestion_id=? ORDER BY rowid DESC LIMIT 1',
+                                (suggestion_id,)).fetchone()
+            card = db.execute('SELECT status FROM suggestions WHERE id=?', (suggestion_id,)).fetchone()
+            if not latest or not card:
+                return {'skipped': True, 'reason': 'no_card'}
+            if card['status'] == 'snoozed' and latest['source'] == 'fleet' and latest['id'] == 'fleet-handoff-wait-' + request_id:
+                return self._decide(db, suggestion_id, 'accept', '', decision_id, 'fleet')
+            try:
+                after = dt.datetime.fromisoformat(latest['created_at']) >= dt.datetime.fromisoformat(str(handed_at))
+            except (TypeError, ValueError):
+                after = False
+            if card['status'] == 'completed' and latest['choice'] == 'complete' and latest['source'] in ('dashboard', 'telegram') and after:
+                return self._decide(db, suggestion_id, 'reopen', '', decision_id, 'fleet')
+            return {'skipped': True, 'reason': 'newer_card_choice'}
+
     def _decide(self, db, suggestion_id, choice, feedback, decision_id, source, snooze_hours=24, snoozed_until=None, snooze_option=None, verified_terminal_job=None, work=False):
         # The caller owns one IMMEDIATE transaction, including any prompt validation.
         if choice not in ['accept', 'reject', 'snooze', 'other', 'complete', 'reopen', 'undo', 'retry'] or not decision_id:
             raise ValueError('Invalid decision')
-        if choice == 'reopen' and source != 'dashboard':
+        if choice == 'reopen' and source not in ('dashboard', 'fleet'):  # fleet: a declined handoff (handoff_back), never a request
             raise ValueError('Reopen is available only through the owner dashboard')
         if choice == 'other' and not feedback.strip():
             raise ValueError('Change requires written instructions')
@@ -7306,9 +7329,9 @@ class App:
             # A handoff the teammate accepted is theirs now: the owner's card is done, saying to whom (Undo brings it back).
             self.fleet.close_card = lambda card_id, why, key: self.store.decide_handoff(card_id, 'complete', why, key, key.removeprefix('fleet-handoff-'))
             # Handed off and not answered yet: the card waits under Later (back in 3 work days if their Machine stays quiet);
-            # a decline brings it back to Ready.
+            # a decline brings it back to Ready, also when the owner closed it after handing it off.
             self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
-            self.fleet.wake_card = lambda card_id, key: self.store.decide_handoff(card_id, 'accept', '', key, key.removeprefix('fleet-handoff-back-'))
+            self.fleet.wake_card = lambda card_id, key, handed_at: self.store.handoff_back(card_id, key, key.removeprefix('fleet-handoff-back-'), handed_at)
             self.fleet.retell_notice = lambda message_id, message: threading.Thread(
                 target=self.fleet_retell, args=(message_id, message), daemon=True).start()
             # Briefs and free questions keep to the owner's hours; a free question is searched with the Machine's own search.
@@ -8340,7 +8363,8 @@ class App:
                 raise ValueError('Ask about a company, a domain, an email address or a name')
             return self.fleet.ask(kind, question, fleet=args.get('fleet') or 'work')
         if name == 'fleet_decide':  # text: a free question's answer as the owner edited it
-            return self.fleet.decide(args.get('id'), args.get('choice'), text=args.get('text') if isinstance(args.get('text'), str) else None)
+            return self.fleet.decide(args.get('id'), args.get('choice'), text=args.get('text') if isinstance(args.get('text'), str) else None,
+                                     note=args.get('note') if isinstance(args.get('note'), str) else None)
         if name == 'fleet_free':
             return self.fleet.ask_free(str(args.get('text') or ''), args.get('fleet') or 'work')
         if name == 'fleet_brief':
@@ -8358,6 +8382,8 @@ class App:
         if name == 'fleet_handoff':
             return self.fleet.hand_off(str(args.get('suggestion_id') or ''), str(args.get('fleet') or ''), str(args.get('member_id') or ''),
                                        str(args.get('title') or ''), str(args.get('summary') or ''), str(args.get('contact') or '') or None)
+        if name == 'fleet_handoff_mine':  # Do it myself, on a card a teammate handed back
+            return self.fleet.handoff_mine(str(args.get('suggestion_id') or ''))
         if name == 'fleet_split':  # send a follow-up split as the owner filled it in
             return self.fleet.send_split(str(args.get('id') or ''), args.get('items'))
         if name == 'fleet_split_dismiss':

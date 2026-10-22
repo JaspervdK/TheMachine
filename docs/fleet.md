@@ -61,8 +61,10 @@ default, Always accept, Never), and nothing happens on your side until you accep
    emails travel only as those keys. Your card says "Handed off to <teammate>" and how it went. While it waits for them
    it leaves Ready and sits under Later, with nothing to send again; it comes back by itself after three work days if
    their Machine stays quiet. Once they accept (or mark it done), it is marked done for you, still saying to whom (Undo
-   brings it back); if they decline, it is back in Ready to hand on another way. A card handed to you can't be handed
-   straight back to whoever gave it; to others it can.
+   brings it back); if they decline, it is back in Ready, saying "<teammate> declined: <their reason>", with **Do it
+   myself**, **Hand to someone else** and **Mark done**. Decline asks "Why? (optional)" with quick picks (Not mine,
+   Already done, No time this week); **Accept with a note** (under More) adds a short note too. Only the sender sees it,
+   sealed like the answer. A card handed to you can't be handed straight back to whoever gave it; to others it can.
 
    When a task is a teammate's to do, the review offers to hand it to their Machine, and Do it prepares the handoff
    itself: **Hand off to <teammate>** leads the card and opens this form with that teammate picked and the message
@@ -342,4 +344,4 @@ Current Machines save returned answers locally before acknowledging the exact an
 
 ### A handoff and a newer choice
 
-The card waits for the teammate’s answer only if you have not changed it while the handoff was sending. Their later acceptance or decline updates the card only while that exact handoff still owns it. A newer Change, Snooze, Done, Dismiss or Reopen wins; the reply stays in the Fleet log.
+The card waits for the teammate’s answer only if you have not changed it while the handoff was sending. Their later acceptance or decline updates the card only while that exact handoff still owns it. A newer Change, Snooze, Done, Dismiss or Reopen wins; the reply stays in the Fleet log. One exception: if you marked the card done after handing it off (it was with them), their decline reopens it, once.

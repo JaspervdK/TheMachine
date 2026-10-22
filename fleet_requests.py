@@ -45,6 +45,8 @@ STAGES = {'accepted': 'accepted', 'adjusted': 'accepted with a change', 'sent': 
           'done': 'done'}
 ACCEPTED = {'once': 'Accepted', 'always': 'Accepted, and always from now on', 'decline': 'Declined',
             'never': 'Declined, and never from now on', 'adjust': 'Accepted with your change'}
+NOTE_CHARS = 160  # the optional short note with an answer ("Not mine", "Already done"): sealed for the asker like the stage
+BACK_DAYS = 7  # a handoff declined this recently brings its card back, also when the answer came before this version
 FOLLOWUP_DAYS = 2  # a meeting that ended this long ago still gets a follow-up split proposed
 KEY = re.compile(r'[0-9a-f]{64}')
 DAY = re.compile(r'\d{4}-\d{2}-\d{2}')
@@ -97,7 +99,8 @@ def clean_answer(kind, answer):
     if not isinstance(answer, dict) or answer.get('stage') not in STAGES:
         return None
     what = fleet.clean(answer.get('what'), 200) if kind == 'followup' and answer['stage'] == 'adjusted' and isinstance(answer.get('what'), str) else ''
-    return {'stage': answer['stage'], **({'what': what} if what else {})}
+    note = fleet.clean(answer.get('note'), NOTE_CHARS) if answer['stage'] in ('accepted', 'adjusted', 'declined') and isinstance(answer.get('note'), str) else ''
+    return {'stage': answer['stage'], **({'what': what} if what else {}), **({'note': note} if note else {})}
 
 
 def question_text(kind, question):
@@ -116,7 +119,9 @@ def question_text(kind, question):
 def answer_text(kind, answer):
     if kind in family.REQUESTS:
         return family.answer_text(kind, answer)
-    return STAGES.get((answer or {}).get('stage'), 'no answer') + (f": “{answer['what']}”" if (answer or {}).get('what') else '')
+    answer = answer or {}
+    return (STAGES.get(answer.get('stage'), 'no answer') + (f": “{answer['what']}”" if answer.get('what') else '')
+            + ((' (' if answer.get('what') else ': ') + f"“{answer['note']}”" + (')' if answer.get('what') else '') if answer.get('note') else ''))
 
 
 def meeting_key(secret, source_id, day):
@@ -217,9 +222,10 @@ class Requests:
         self.relay.call('POST', '/answer', {'id': ask['id'], 'status': 'waiting'})
         return 'waiting'
 
-    def decide_request(self, ask_id, choice, text=None, retell=True, by_rule=False):
+    def decide_request(self, ask_id, choice, text=None, retell=True, by_rule=False, note=None):
         """The owner on a waiting request: Accept (once), Always, Decline, Never, or for a follow-up, Accept with their
-        own change (adjust, from the dashboard). Accepting makes a card from this Machine's own data."""
+        own change (adjust, from the dashboard). Accepting makes a card from this Machine's own data. `note`: the owner's
+        optional short reason or remark ("Not mine"), sealed for the asker with the stage; never by a rule."""
         if choice not in ACCEPTED:
             raise ValueError('Choose accept, always, decline or never')
         with self.connect() as db:
@@ -244,16 +250,20 @@ class Requests:
             except ValueError as error:
                 why = fleet.clean(str(error), 200)
         status = 'answered' if stage != 'declined' else 'declined'
+        note = '' if by_rule or row['kind'] not in KINDS else fleet.clean(note, NOTE_CHARS)
         answer = {'stage': stage, **({'what': text} if stage == 'adjusted' else {})} if status == 'answered' else None
-        self.relay.call('POST', '/answer', {'id': row['id'], 'status': status, **({'answer': answer} if answer else {})})
+        if note:  # a decline with a reason travels as a stage (sealed), as only an answer carries words
+            answer = {**(answer or {'stage': 'declined'}), 'note': note}
+        self.relay.call('POST', '/answer', {'id': row['id'], 'status': 'answered' if answer else status, **({'answer': answer} if answer else {})})
         with self.connect() as db:
             db.execute('UPDATE fleet_in SET status=?,decided_at=?,choice=? WHERE id=?', (status, fleet.now(), choice, row['id']))
             db.execute('UPDATE fleet_requests SET stage=?,card_id=?,updated_at=? WHERE id=?', (stage, card_id, fleet.now(), row['id']))
             self.log(db, 'in', row['fleet'], row['member_id'], row['name'], row['kind'], fleet.question_text(row['kind'], question),
-                     (ACCEPTED[choice] + (' by your rule' if by_rule else '') + ': card made') if card_id else ('declined' + (': ' + why if why else '')))
+                     ((ACCEPTED[choice] + (' by your rule' if by_rule else '') + ': card made') if card_id else ('declined' + (': ' + why if why else '')))
+                     + (f' (your note: “{note}”)' if note else ''))
         if retell and row['telegram_message_id'] and self.retell:
             self.retell(row['telegram_message_id'])
-        return {'status': status, 'answer': answer_text(row['kind'], answer) if answer else None, 'card_id': card_id, 'reason': why or None}
+        return {'status': status, 'answer': answer_text(row['kind'], answer) if status == 'answered' else None, 'card_id': card_id, 'reason': why or None}
 
     def request_card(self, row, question, text=None):
         """The card for an accepted request, made from this Machine's own data. The teammate's words are shown quoted."""
@@ -508,27 +518,43 @@ class Requests:
                 self.close_card(row['context'][8:], f"Handed off to {row['name']}", 'fleet-handoff-' + str(row['id']))
             except ValueError as error:
                 LOG.info('fleet handoff close skipped error=%s', error)
-        elif row['kind'] == 'handoff' and stage in ('declined', 'expired') and self.wake_card and str(row['context'] or '').startswith('handoff:'):
-            with self.connect() as db:  # not theirs after all: back to Ready, to hand it on another way
-                waiting = db.execute("SELECT 1 FROM suggestions WHERE id=? AND status='snoozed'", (row['context'][8:],)).fetchone()
-            if waiting:
-                try:
-                    self.wake_card(row['context'][8:], 'fleet-handoff-back-' + str(row['id']))
-                except ValueError as error:
-                    LOG.info('fleet handoff wake skipped error=%s', error)
+        elif row['kind'] == 'handoff' and stage in ('declined', 'expired'):
+            self.handoff_back(row)
         if stage == 'waiting' or not self.tell:
             return
         what = {'intro': f"your intro request ({question.get('about')})", 'handoff': f"your handoff: {question.get('title')}",
                 'followup': 'their part of the follow-ups', 'todo': f"the to-do: {question.get('title')}",
                 'event': f"the plan: {question.get('title')}"}[row['kind']]
-        said = {'accepted': f"{row['name']} {'is in for' if row['kind'] == 'event' else 'accepted'} {what}.", 'adjusted': f"{row['name']} accepted {what}, changed to: “{(answer or {}).get('what', '')}”.",
-                'sent': f"{row['name']} sent the intro email for {what}.", 'declined': f"{row['name']} declined {what}.",
+        note = f" Their note: “{answer['note']}”" if (answer or {}).get('note') else ''
+        said = {'accepted': f"{row['name']} {'is in for' if row['kind'] == 'event' else 'accepted'} {what}.{note}", 'adjusted': f"{row['name']} accepted {what}, changed to: “{(answer or {}).get('what', '')}”.{note}",
+                'sent': f"{row['name']} sent the intro email for {what}.", 'declined': f"{row['name']} declined {what}.{note}",
                 'done': f"{row['name']} marked {what} done.", 'expired': f"{row['name']} didn't get to {what} in time."}.get(stage)
         if said:
             try:
                 self.tell(said, row['id'])
             except Exception as error:
                 LOG.warning('fleet tell error=%s', type(error).__name__)
+
+    def handoff_back(self, row):
+        """Not theirs after all: the handed-off card comes back to Ready, saying who declined and why, to do it yourself,
+        hand it to someone else or mark it done. Also when the owner closed the card after handing it off (it was with
+        them); never over a choice the owner made later than that, and only once per answer."""
+        if not self.wake_card or not str(row['context'] or '').startswith('handoff:'):
+            return None
+        try:
+            return self.wake_card(row['context'][8:], 'fleet-handoff-back-' + str(row['id']), row['at'])
+        except ValueError as error:
+            LOG.info('fleet handoff wake skipped error=%s', error)
+            return None
+
+    def handoff_mine(self, card_id):
+        """Do it myself on a card a teammate handed back: it stays in Ready with its own buttons; the note stays."""
+        with self.connect() as db:
+            row = db.execute("SELECT id FROM fleet_out WHERE context=? ORDER BY at DESC LIMIT 1", ('handoff:' + str(card_id),)).fetchone()
+        if not row:
+            raise ValueError('That card was not handed off')
+        self.set_meta('handoff_mine:' + row['id'], fleet.now())
+        return {'ok': True}
 
     # -- shared follow-ups
     def split_parts(self, fleet_ref, question, teammate):
@@ -671,7 +697,15 @@ class Requests:
     # -- keeping the asker up to date
     def requests_round(self):
         """Stages the owner reached on accepted requests, told to the teammate who asked: an intro email sent (or its
-        card dismissed), a handoff done."""
+        card dismissed), a handoff done. And handoffs declined lately whose card hasn't come back yet (handoff_back)."""
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=BACK_DAYS)).isoformat(timespec='seconds')
+        with self.connect() as db:
+            back = db.execute("SELECT o.* FROM fleet_out o JOIN suggestions s ON s.id=substr(o.context,9) WHERE o.kind='handoff' "
+                              "AND o.context LIKE 'handoff:%' AND o.answered_at>=? AND s.status IN ('snoozed','completed') "
+                              "AND (o.status IN ('declined','expired') OR json_extract(o.answer,'$.stage')='declined') "
+                              "AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.id='fleet-handoff-back-'||o.id)", (since,)).fetchall()
+        for row in back:
+            self.handoff_back(row)
         with self.connect() as db:
             rows = db.execute("SELECT r.*,s.status AS card_status,(SELECT COUNT(*) FROM action_jobs j WHERE j.suggestion_id=r.card_id AND j.status='sent') AS sent "
                               "FROM fleet_requests r JOIN suggestions s ON s.id=r.card_id WHERE r.stage IN ('accepted','adjusted') AND r.kind IN ('intro','handoff','todo')").fetchall()
@@ -713,9 +747,14 @@ class Requests:
     def annotate_requests(self, db, suggestions):
         """A card handed off (to whom, how it went), and who does what after the meeting a card is on."""
         handed = {}
+        mine = {r['key'][13:] for r in db.execute("SELECT key FROM fleet_meta WHERE key LIKE 'handoff_mine:%'")}
         for r in db.execute("SELECT * FROM fleet_out WHERE context LIKE 'handoff:%' ORDER BY at"):
-            stage = (json.loads(r['answer'] or 'null') or {}).get('stage') or r['status']
-            handed[r['context'][8:]] = {'name': r['name'], 'stage': {'asked': 'asked', 'waiting': 'waiting for them'}.get(stage, STAGES.get(stage, stage))}
+            answer = json.loads(r['answer'] or 'null') or {}
+            stage = answer.get('stage') or r['status']
+            handed[r['context'][8:]] = {'name': r['name'], 'stage': {'asked': 'asked', 'waiting': 'waiting for them'}.get(stage, STAGES.get(stage, stage)),
+                                        **({'note': answer['note']} if answer.get('note') else {}),
+                                        # handed back: Do it myself, Hand to someone else or Mark done, until the owner picks
+                                        **({'back': r['id'] not in mine} if stage in ('declined', 'expired') else {})}
         splits = {}
         for r in db.execute("SELECT * FROM fleet_splits WHERE status IN ('sent','accepted') AND event_id IS NOT NULL"):
             splits[r['event_id']] = '; '.join(f"{'you' if p.get('mine') else p['name']}: {p['what']}" for p in json.loads(r['parts']) if p.get('what'))

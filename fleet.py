@@ -1799,11 +1799,12 @@ class Fleet(fleet_requests.Requests, friends.Friends, discovery.Discovery, famil
         self.relay.call('POST', '/answer', {'id': ask['id'], 'status': status, **({'answer': {'stage': 'installed'}} if status == 'answered' else {})})
         return status
 
-    def decide(self, ask_id, choice, retell=True, text=None):
+    def decide(self, ask_id, choice, retell=True, text=None, note=None):
         """The owner on a waiting question: once, always, decline or never. A free question is answered once at a
-        time, with `text` (the draft as the owner edited it) or else its draft as shown."""
+        time, with `text` (the draft as the owner edited it) or else its draft as shown. A request (an intro, handoff or
+        follow-up) can carry the owner's short `note`, a reason with a decline."""
         if self.is_request(ask_id):
-            return self.decide_request(ask_id, choice, retell=retell)
+            return self.decide_request(ask_id, choice, retell=retell, note=note)
         if choice not in ('once', 'always', 'decline', 'never'):
             raise ValueError('Choose once, always, decline or never')
         with self.connect() as db:
