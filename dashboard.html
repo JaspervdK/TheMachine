@@ -1046,6 +1046,8 @@ const statusLine=(()=>{const line=(text,cls='')=>`<p class="note status-line${cl
  if(o?.state==='already_done')return line('Looks done already. Mark it done if that’s right.',' outcome done');
  if(hint)return line((handled.fleet?'Done: ':'Looks handled: ')+hint,' handled');
  if(s.early&&s.status==='accepted')return line('Preparing this ahead, so it arrives ready.');
+ // A send on its way or done has its own line below; the result's needs line no longer holds.
+ if(smart.some(a=>['queued','sending','sent','uncertain','undoing','undone'].includes((a.state||s.action_status)?.status)))return '';
  if(o?.state==='needs_you')return line('Needs you: '+String(o.needs).replace(/\.$/,'')+'.',' outcome');
  if(s.early&&s.status==='prepared'&&smart.some(a=>a.kind!=='open'))return line('Ready to approve. Nothing goes out until you do.');
  if(o?.state==='answered')return line('Answered. Nothing done yet.');

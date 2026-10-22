@@ -21,6 +21,8 @@ const cards=[
   next_actions:[{kind:'email',revision:'v1',label:'Send to Noor',to:['noor@example.com'],to_name:'Noor',subject:'Contract',body:'Hi Noor'}]},
  {id:'q1',title:'Release the mobile apps',body:'I would bump the version, build both apps and submit them for review.',status:'prepared',scope:'work',created_at:now,event_ids:[6],
   outcome:JSON.stringify({state:'answered'}),latest_feedback:{choice:'other',feedback:'What would you do when I tap Do it?',created_at:now}},
+ {id:'s1',title:'Reply to Corey about the listings',body:'Adapted the reply.',status:'prepared',scope:'work',created_at:now,event_ids:[7],outcome:JSON.stringify({state:'needs_you',needs:'Approve sending the reply to Corey.'}),
+  next_actions:[{kind:'email',revision:'v2',label:'Send',to:['corey@example.com'],subject:'Listings',body:'Hi Corey',state:{status:'sent',sent_at:now}}]},
  {id:'b1',title:'Look up the venue hours',body:'Open 9 to 5 on weekdays.',status:'prepared',early:1,scope:'work',created_at:now,event_ids:[5],outcome:JSON.stringify({state:'done'})}];
 const state=()=>({suggestions:cards,promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:false,fleets:[]}});
 const server=createServer(async(req,res)=>{for await(const _ of req);const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
@@ -53,6 +55,8 @@ try{
   assert.equal(await page.locator('#task-n1 button.more').textContent(),'Show more');
   // Prepared ahead with a draft: the one line says nothing goes out until you approve
   assert.deepEqual(await notes('a1'),['Ready to approve. Nothing goes out until you do.']);
+  // Once the reply went out, the old needs line is gone; the sent line says it
+  assert.ok(!(await text('s1')).includes('Needs you'));
   // Prepared ahead, nothing to approve: no approve line, just finished
   assert.deepEqual(await notes('b1'),['Finished. Mark it done if it looks right.']);
   // Only answered: says nothing is done yet, never Finished, and Do it leads
