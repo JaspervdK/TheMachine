@@ -134,6 +134,14 @@ class Voices(unittest.TestCase):
         with patch.object(a, 'now', return_value=(a.dt.datetime.fromisoformat(a.now()) + a.dt.timedelta(days=31)).isoformat()):
             self.assertIn('run_id', self.store.voice_study_due())
 
+    def test_voice_study_excludes_misattributed_style_notes(self):
+        self.study_messages()
+        decision = self.note_id()
+        with self.store.connect() as db:
+            db.execute("INSERT INTO note_kinds VALUES(?,?,'style','assistant',?)", (decision, self.chat_sid, a.now()))
+            db.execute("INSERT INTO decision_annotations(decision_id,status,reason) VALUES(?,'misattributed','wrong card')", (decision,))
+        self.assertNotIn(decision, {n['decision_id'] for n in self.store.voice_sample()['notes']})
+
     def test_a_voice_study_runs_as_a_turn_and_applies_when_it_finishes(self):
         self.study_messages()
         started = self.store.voice_study_start()

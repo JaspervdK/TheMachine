@@ -4167,7 +4167,9 @@ class Store:
                     items += picked
             notes = [{'decision_id': r['id'], 'date': r['created_at'][:10], 'note': clamp(r['feedback'], 300), 'card': clamp(r['title'], 100)}
                      for r in db.execute("SELECT d.id,d.feedback,d.created_at,s.title FROM note_kinds k JOIN decisions d ON d.id=k.decision_id "
-                                         "JOIN suggestions s ON s.id=d.suggestion_id WHERE k.kind='style' AND d.feedback!='' ORDER BY d.created_at DESC LIMIT 40")]
+                                         "JOIN suggestions s ON s.id=d.suggestion_id WHERE k.kind='style' AND d.feedback!='' "
+                                         "AND d.source IN ('telegram','dashboard') AND d.id NOT IN (SELECT decision_id FROM decision_annotations) "
+                                         "ORDER BY d.created_at DESC LIMIT 40")]
             voices = [{'channel': v['channel'], 'text': v['text'], 'written_by_owner': v['source'] == 'owner'} for v in self.voices(db)]
         return {'messages': items, 'notes': notes, 'voices': voices}
 
