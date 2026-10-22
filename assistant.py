@@ -4445,7 +4445,7 @@ class Store:
         db.execute("UPDATE action_jobs SET status='cancelled',updated_at=? WHERE suggestion_id=? AND status IN ('queued','blocked')",(now(),suggestion_id))
         db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (suggestion_id,))
         cluster = db.execute("SELECT id FROM skill_clusters WHERE suggestion_id=? AND status IN ('pending','declined','failed')", (suggestion_id,)).fetchone()
-        if cluster and choice in ('accept', 'reject', 'complete'):  # a skill from notes: done here, no Do it run
+        if cluster and choice in ('accept', 'reject', 'complete') and not (choice == 'accept' and row['status'] == 'snoozed'):  # Bring back isn't Create skill
             db.execute('UPDATE skill_clusters SET status=?,updated_at=? WHERE id=?', ('accepting' if choice == 'accept' else 'declined', now(), cluster['id']))
             if choice == 'accept':
                 db.execute("UPDATE suggestions SET status='completed',completed_from='pending' WHERE id=?", (suggestion_id,))
@@ -6922,7 +6922,7 @@ def controls(row, root=''):
         choices = [('Do it','accept'),('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
     if ask_question(row,actions):choices=[('Answer','other'),*([(retry_label(row.get('preparation_reason')),'retry')] if row.get('preparation_status')=='blocked' and not retry_pointless(row) else []),('Mark done','complete'),('Snooze','snooze'),('Not needed','reject')]
-    if row.get('labels'):
+    if row['status'] == 'pending' and row.get('labels'):
         choices = [(row['labels'].get(choice, label), choice) for label, choice in choices]
     buttons=[]
     link=(row.get('preparation_browser') or {}).get('link') or ''
