@@ -110,14 +110,20 @@ class Voices(unittest.TestCase):
         with self.store.connect() as db:
             db.execute("INSERT INTO note_kinds VALUES(?,?,'style','assistant',?)", (self.note_id(), self.chat_sid, a.now()))
         self.app.action('set_voice', {'channel': 'All', 'text': 'Natural dates.'}, owner_dashboard=True)
+        self.store.commit_page('work', {}, [mail(f'ann{i}', f'2026-10-07T1{i}:00:00+00:00', f'Hi Ann,\n\nPart {i} of a long thread, all fine.\n\nOwner',
+                                                 thread='tann', sender='Owner <owner@example.com>', to='Ann <ann@example.org>', labels=('SENT',)) for i in range(4)])
         sample = self.store.voice_sample()
         self.assertEqual({m['channel'] for m in sample['messages']}, {'Email'})  # one WhatsApp message says too little
+        self.assertEqual(sum(m['to'] == 'Ann' for m in sample['messages']), a.VOICE_STUDY_PER)  # one long thread doesn't decide
+        with patch.dict(a.VOICE_STUDY, {'gmail.message': 5}):  # evenly across what was read, newest first
+            self.assertEqual([m['date'] for m in self.store.voice_sample()['messages']],
+                             ['2026-10-07', '2026-10-07', '2026-10-05', '2026-10-03', '2026-10-02'])
         self.assertTrue(all(m['text'].startswith(('Hi ', 'Hey ')) for m in sample['messages']))
         self.assertEqual(sample['notes'][0]['note'], 'no capitals on whatsapp please')
         started = self.store.voice_study_start()
         session = a.PROFILE_SESSION_PREFIX + started['run_id']
         page = self.store.profile_evidence(1, session)
-        self.assertEqual((page['counts'], page['current_voices'][0]['written_by_owner']), ({'Email': 8}, True))
+        self.assertEqual((page['counts'], page['current_voices'][0]['written_by_owner']), ({'Email': 10}, True))
         prompt = a.voices_prompt(started['run_id'], page['counts'], page['pages'])
         self.assertIn('greeting per language', prompt)
         with self.assertRaisesRegex(ValueError, 'at most 5 lines'):
