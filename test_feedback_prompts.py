@@ -65,8 +65,11 @@ class FeedbackPrompts(unittest.TestCase):
             send.assert_not_called()
         self.assertEqual(self.prompt()['status'],'uncertain')
     def test_exact_cached_prompt_recovers_but_wrong_chat_does_not(self):
-        app=self.app();self.request(app);app.feedback_prompt_step(sender=lambda row:{})
-        base={'message_id':41,'date':int(a.dt.datetime.fromisoformat(self.prompt()['created_at']).timestamp()),'from':{'is_bot':True},'chat':{'id':1000001},'reply_to_message':{'message_id':40},'text':a.prompt_text('Prepare a draft')}
+        app=self.app();self.request(app)
+        # Telegram cannot deliver before send admission; cross a second deterministically.
+        attempted=(a.dt.datetime.fromisoformat(self.prompt()['created_at'])+a.dt.timedelta(seconds=2)).isoformat()
+        with patch.object(a,'now',return_value=attempted):app.feedback_prompt_step(sender=lambda row:{})
+        base={'message_id':41,'date':int(a.dt.datetime.fromisoformat(self.prompt()['attempted_at']).timestamp()),'from':{'is_bot':True},'chat':{'id':1000001},'reply_to_message':{'message_id':40},'text':a.prompt_text('Prepare a draft')}
         with sqlite3.connect(app.config['openclaw_state']) as db:
             db.execute('CREATE TABLE plugin_state_entries(plugin_id,namespace,value_json)')
             db.execute('INSERT INTO plugin_state_entries VALUES(?,?,?)',('telegram','telegram.message-cache',json.dumps({"sourceMessage":{**base,'chat':{'id':123}}})))
@@ -77,7 +80,7 @@ class FeedbackPrompts(unittest.TestCase):
         self.assertEqual(self.row()['feedback_prompt_message_id'],'41')
     def test_multiple_cached_candidates_and_wrong_card_are_held(self):
         app=self.app();self.request(app);app.feedback_prompt_step(sender=lambda row:{})
-        base={'date':int(a.dt.datetime.fromisoformat(self.prompt()['created_at']).timestamp()),'from':{'is_bot':True},'chat':{'id':1000001},'reply_to_message':{'message_id':40},'text':a.prompt_text('Prepare a draft')}
+        base={'date':int(a.dt.datetime.fromisoformat(self.prompt()['attempted_at']).timestamp()),'from':{'is_bot':True},'chat':{'id':1000001},'reply_to_message':{'message_id':40},'text':a.prompt_text('Prepare a draft')}
         with sqlite3.connect(app.config['openclaw_state']) as db:
             db.execute('CREATE TABLE plugin_state_entries(plugin_id,namespace,value_json)')
             for mid in (41,42):db.execute('INSERT INTO plugin_state_entries VALUES(?,?,?)',('telegram','telegram.message-cache',json.dumps({'sourceMessage':{**base,'message_id':mid}})))
