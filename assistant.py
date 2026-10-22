@@ -239,6 +239,24 @@ def snooze_time(option=None, explicit=None, hours=24, work=False):
     return due.isoformat()
 
 
+def asked_snooze_time(value):
+    """When the owner asked, in a Change note, for this card back later: snooze_until as the run read it.
+    A date alone means that day in their morning (work_hours.morning); a time without an offset is the
+    owner's own time zone, so the clock change in between is handled here, not by the model."""
+    text = str(value or '').strip()
+    try:
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', text):
+            hour, minute = clock(WORK_HOURS['morning'])
+            due = dt.datetime.combine(dt.date.fromisoformat(text), dt.time(hour, minute))
+        else:
+            due = dt.datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        raise ValueError("snooze_until is the owner's local date and time, like 2026-10-27T09:00") from None
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=local_tz())
+    return snooze_time(explicit=due.isoformat())
+
+
 def hours_settings(config, changes):
     """`timezone`, `digest_at` and `work_hours` after `changes` (any of those, or the work_hours keys
     days/start/end/morning at the top level), checked; a ValueError says what is wrong."""
@@ -4146,6 +4164,8 @@ class Store:
             action_json=encoded(next_action) if next_action else None
             if job_id and job and job['job_id']==job_id and job['status']=='done' and row and row['status']=='prepared' and row['body']==body and row['next_action']==action_json:
                 return {'status':'prepared','replayed':True}
+            if job_id and job and job['job_id']==job_id and job['status']=='done' and row and row['status']=='snoozed' and row['body']==body and (outcome or {}).get('state')=='snoozed':
+                return {'status':'snoozed','replayed':True}
             if job and job['status'] in ('starting','running') and job_id != job['job_id']:
                 raise ValueError('This preparation is owned by its already-running turn')
             if job_id and (not job or job['job_id'] != job_id or job['status'] not in ('starting','running')):
@@ -4170,6 +4190,12 @@ class Store:
             db.execute("UPDATE suggestions SET body=?,status='prepared',next_action=?,outcome=? WHERE id=?", (body[:5000],action_json,encoded(outcome) if outcome else None,suggestion_id))
             db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL', (suggestion_id,))
             db.execute("UPDATE preparations SET status='done',updated_at=?,error=NULL,reason=NULL WHERE suggestion_id=?",(now(),suggestion_id))
+            if (outcome or {}).get('state')=='snoozed':
+                # "Remind me about this on Tuesday": the same snooze as the Snooze button. The card leaves
+                # Ready for you and comes back (with its notification) then; nothing is notified now.
+                done=self._decide(db,suggestion_id,'snooze','','snooze-ask:'+(job_id or uuid.uuid4().hex),'assistant',snoozed_until=outcome['until'])
+                return {'status':'snoozed','snoozed_until':done['snoozed_until'],
+                        'note':'Result saved and the card is snoozed until then. Do not also add an automation or reminder for it.'}
             # A new result is worth a notification, not only an invisible edit.
             db.execute("UPDATE deliveries SET status='queued',reminder=1,error=NULL WHERE suggestion_id=? AND status IN ('queued','sent','uncertain')",(suggestion_id,))
             # The confirmed final step went through (a verified receipt): like a sent message, the card is done.
@@ -6050,7 +6076,7 @@ def merge_state(row, state):
 def card(row):
     title = row['title'].replace('*', '').replace('_', '')
     status = {'accepted': 'On it.', 'rejected': 'Not needed.',
-              'snoozed': 'Snoozed until '+dt.datetime.fromisoformat(row['snoozed_until']).astimezone(local_tz()).strftime('%-d %b · %H:%M')+'.' if row.get('snoozed_until') else 'Snoozed.',
+              'snoozed': 'Snoozed until '+dt.datetime.fromisoformat(row['snoozed_until']).astimezone(local_tz()).strftime('%a %-d %b, %H:%M')+'.' if row.get('snoozed_until') else 'Snoozed.',
               'instructions': 'Got your feedback. I’ll update this.',
               'prepared': 'Ready for you.', 'completed': 'Done.'}.get(row['status'], '')
     # One status line: where it stands and what's left for the owner. A later sign that it's
@@ -6061,6 +6087,7 @@ def card(row):
             outcome = json.loads(row['outcome'])
             status = {'done': 'Finished. Mark it done if it looks right.',
                       'answered': 'Answered. Nothing done yet.',
+                      'snoozed': 'Back, as you asked.',
                       'already_done': 'Looks done already. Mark it done if that’s right.'}.get(outcome['state']) or 'Needs you: ' + outcome['needs'].rstrip('.') + '.'
         except (ValueError, KeyError, TypeError, AttributeError):
             outcome = {}
@@ -6885,6 +6912,7 @@ For this job:
 - Save the result with assistant_signals prepare args suggestion_id={sid}, job_id={j}, body=<short result>, next_actions=[...], outcome and send_now:true only when the owner asked you to send it.
 - outcome:'done' only when the task itself is complete and nothing is left for the owner but to check it; outcome:'answered' when you only answered their question, explained or planned, and the task itself is still to do (the card then offers Do it again); outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
 - When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card ("always…", signatures, formatting, tone with this kind of person) also becomes a draft rule: assistant_signals remember_fact args text=<the rule, general>, decision_id=<that note's decision>, kind=draft. A fact note that holds beyond this card goes in remember_fact as a fact.
+- When the owner's note means they want this task itself back later (remind me about it next week, later, on Tuesday), that is this card's snooze, not a reminder: save with outcome:'snoozed' and snooze_until:<their local date and time, e.g. 2026-10-27T09:00, or a date alone for their morning>, and a one-line body. The card leaves their list and comes back then. Do not also add an automation, cron job or reminder for it. A separate reminder about something else, or a recurring one, stays an automation. Their time zone is {getattr(local_tz(),'key','UTC')}; it is now {dt.datetime.fromisoformat(now()).astimezone(local_tz()).strftime('%a %Y-%m-%d %H:%M')} there.
 - Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>.''' + owner_details(config) + (f'''
 
 Facts the owner told you earlier (true unless they say otherwise now):
@@ -7821,6 +7849,9 @@ class App:
                         raise ValueError("outcome:'already_done' means there is nothing left to approve: leave next_actions empty")
                     outcome={'state':'already_done'}
                 elif args.get('outcome')=='answered':outcome={'state':'answered'}
+                elif args.get('outcome')=='snoozed':
+                    # The owner wants this card itself back later: the card's own snooze, not a separate reminder.
+                    outcome={'state':'snoozed','until':asked_snooze_time(args.get('snooze_until'))}
                 else:raise ValueError("Say whether the job is finished: outcome:'done' (the task itself is complete; nothing left for the owner but to check it), outcome:'answered' (you only answered a question, explained or planned; the task itself is still to do), outcome:'already_done' (it turned out to be done already or no longer needed), or outcome:'needs_you' with needs:<what they have to do, e.g. approve the send, sign in, pick an option>")
             saved=self.store.prepare(args['suggestion_id'], args['body'],args.get('job_id'),action,outcome,args.get('note_kind'),require_note=True,finish_state=args.get('finish_state'))
 
