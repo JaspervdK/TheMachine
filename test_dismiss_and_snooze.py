@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import unittest
 import threading
 from unittest.mock import patch
@@ -183,5 +184,25 @@ class SilentBatch(unittest.TestCase):
              patch.object(a,'telegram_request',side_effect=lambda c,args:(sent.append(args),{'messageId':str(40+len(sent))})[1]):
             a.deliver(self.store,{'telegram_owner':'1000001'})
         self.assertEqual([args.get('silent') for args in sent],[None,True])
+
+class AnswerQuestion(unittest.TestCase):
+    """A result waiting on the owner's answer (needs_you, written as a question) leads with Answer on Telegram too; the
+    question keeps its own "?" in the status line."""
+    setUp=ux.UX.setUp
+    def labels(self,row):return [b['label'] for block in a.controls(row)['blocks'] for b in block['buttons']]
+    def test_a_question_leads_with_answer_and_keeps_its_mark(self):
+        row={**ux.UX.row(self),'status':'prepared','outcome':json.dumps({'state':'needs_you','needs':'Which date goes in the cash-out field?'})}
+        self.assertEqual(self.labels(row)[:2],['Answer','Mark done'])
+        self.assertNotIn('Change',self.labels(row))
+        answer=next(b for block in a.controls(row)['blocks'] for b in block['buttons'] if b['label']=='Answer')
+        self.assertTrue(answer['action']['value'].endswith(':other'))  # the Change path
+        self.assertTrue(a.card(row).endswith('Needs you: Which date goes in the cash-out field?'))
+        # Not a question, a draft to send, or a sign it's handled: the usual buttons
+        plain={**row,'outcome':json.dumps({'state':'needs_you','needs':'Pay in the bank app'})}
+        self.assertEqual(self.labels(plain)[0],'Mark done');self.assertTrue(a.card(plain).endswith('Needs you: Pay in the bank app.'))
+        self.assertNotIn('Answer',self.labels({**row,'next_actions':[{'kind':'email','revision':'v1','label':'Send','to':['x@example.com'],'subject':'s','body':'b'}]}))
+        self.assertNotIn('Answer',self.labels({**row,'handled_hint':json.dumps({'reason':'You replied'})}))
+        self.assertNotIn('Answer',self.labels({**row,'preparation_status':'blocked'}))
+
 
 if __name__=='__main__':unittest.main()

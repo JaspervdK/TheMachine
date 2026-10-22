@@ -43,8 +43,12 @@ const retryLabel=(r?:string)=>/\b(?:sign(?:ed)?[ -]?in|log(?:ged)?[ -]?in|signed
 let dashboardRoot='';
 // A result that only answered, explained or planned: the task itself is still to do. Same rule as answered_only() in assistant.py.
 function answeredOnly(item:any){try{return item.status==='prepared'&&JSON.parse(item.outcome||'{}').state==='answered'}catch{return false}}
+// A result waiting on the owner's answer (needs_you, written as a question) with nothing to send: Answer leads (the Change
+// path) and Mark done steps back. Same rule as ask_question() in assistant.py.
+function askQuestion(item:any){if(item.status!=='prepared'||item.handled_hint||item.preparation_status==='blocked'||taskActions(item).some((a:any)=>a.kind!=='open'))return '';
+  try{const o=JSON.parse(item.outcome||'{}'),q=String(o.needs||'').trim();return o.state==='needs_you'&&q.endsWith('?')?q:''}catch{return ''}}
 function cardButtons(item: any) {
-  const choices = ['completed', 'rejected'].includes(item.status) ? (item.undo_until && Date.parse(item.undo_until)>Date.now() ? [['Undo','undo']] : []) : item.status === 'snoozed'
+  const choices = askQuestion(item) ? [['Answer', 'other'], ['Mark done', 'complete'], ['Snooze', 'snooze'], ['Not needed', 'reject']] : ['completed', 'rejected'].includes(item.status) ? (item.undo_until && Date.parse(item.undo_until)>Date.now() ? [['Undo','undo']] : []) : item.status === 'snoozed'
     ? [['Bring back', 'accept'], ['Change time', 'snooze'], ['Not needed', 'reject']]
     : ['accepted', 'prepared', 'instructions'].includes(item.status)
       ? item.preparation_status!=='blocked'&&answeredOnly(item)

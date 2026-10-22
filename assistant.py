@@ -6162,7 +6162,7 @@ def card(row):
             status = {'done': 'Finished. Mark it done if it looks right.',
                       'answered': 'Answered. Nothing done yet.',
                       'snoozed': 'Back, as you asked.',
-                      'already_done': 'Looks done already. Mark it done if that’s right.'}.get(outcome['state']) or 'Needs you: ' + outcome['needs'].rstrip('.') + '.'
+                      'already_done': 'Looks done already. Mark it done if that’s right.'}.get(outcome['state']) or 'Needs you: ' + sentence(outcome['needs'])
         except (ValueError, KeyError, TypeError, AttributeError):
             outcome = {}
     if row.get('early') and row['status'] == 'prepared' and not outcome.get('needs') and outcome.get('state') != 'already_done' and any(
@@ -6280,6 +6280,25 @@ def card_draft(row):
     return {'action': a, 'text': text, 'full': full}
 
 
+def sentence(text):
+    """One closing mark: a question keeps its "?" instead of getting "."."""
+    text = str(text).strip()
+    return text if text.endswith(('.', '?', '!', '…')) else text + '.'
+
+
+def ask_question(row, actions):
+    """A result waiting on the owner's answer (needs_you, written as a question) with nothing to send: Answer leads
+    (the Change path) and Mark done steps back. Same rule as askQuestion() in dashboard.html."""
+    if row['status'] != 'prepared' or row.get('handled_hint') or row.get('preparation_status') == 'blocked' or any(a.get('kind') != 'open' for a in actions):
+        return ''
+    try:
+        outcome = json.loads(row.get('outcome') or '{}')
+        question = str(outcome.get('needs') or '').strip()
+        return question if outcome.get('state') == 'needs_you' and question.endswith('?') else ''
+    except (ValueError, TypeError, AttributeError):
+        return ''
+
+
 def answered_only(row):
     """A result that only answered, explained or planned: the task itself is still to do."""
     try:
@@ -6300,6 +6319,7 @@ def controls(row, root=''):
     else:
         choices = [('Do it','accept'),('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
+    if ask_question(row,actions):choices=[('Answer','other'),('Mark done','complete'),('Snooze','snooze'),('Not needed','reject')]
     buttons=[]
     link=(row.get('preparation_browser') or {}).get('link') or ''
     signin=(row.get('preparation_browser') or {}).get('signin_url') or ''
@@ -6990,7 +7010,7 @@ For this job:
 - Browser lease owner: assistant-{j[:8]} (python3 {browser_lease_script(config)} claim --owner assistant-{j[:8]} --minutes 30 --wait 10).
 - Attachments folder: {WORKSPACE}/data/assistant-attachments/{j}/
 - Save the result with assistant_signals prepare args suggestion_id={sid}, job_id={j}, body=<short result>, next_actions=[...], outcome and send_now:true only when the owner asked you to send it.
-- outcome:'done' only when the task itself is complete and nothing is left for the owner but to check it; outcome:'answered' when you only answered their question, explained or planned, and the task itself is still to do (the card then offers Do it again); outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
+- outcome:'done' only when the task itself is complete and nothing is left for the owner but to check it; outcome:'answered' when you only answered their question, explained or planned, and the task itself is still to do (the card then offers Do it again); outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose); when that is a question for them, write needs as the question itself, ending in "?" (the card then leads with Answer). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
 - When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card ("always…", signatures, formatting, tone with this kind of person) also becomes a draft rule: assistant_signals remember_fact args text=<the rule, general>, decision_id=<that note's decision>, kind=draft. A fact note that holds beyond this card goes in remember_fact as a fact.
 - When the owner's note means they want this task itself back later (remind me about it next week, later, on Tuesday), that is this card's snooze, not a reminder: save with outcome:'snoozed' and snooze_until:<their local date and time, e.g. 2026-10-27T09:00, or a date alone for their morning>, and a one-line body. The card leaves their list and comes back then. Do not also add an automation, cron job or reminder for it. A separate reminder about something else, or a recurring one, stays an automation. Their time zone is {getattr(local_tz(),'key','UTC')}; it is now {dt.datetime.fromisoformat(now()).astimezone(local_tz()).strftime('%a %Y-%m-%d %H:%M')} there.
 - Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>.''' + owner_details(config) + (f'''
