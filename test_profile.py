@@ -211,6 +211,72 @@ class Profile(unittest.TestCase):
         self.assertEqual((run['status'], run['error']), ('error', 'no_draft'))
 
 
+    def first_profile_app(self, user_md=None):
+        workspace = Path(self.temp.name) / 'workspace'; workspace.mkdir(exist_ok=True)
+        if user_md is not None:
+            (workspace / 'USER.md').write_text(user_md)
+        self.app.config = {**self.app.config, 'review_worker': {'enabled': True}, 'openclaw_workspace': str(workspace), 'owner_name': 'Alex Example'}
+        return workspace / 'USER.md'
+
+    def finish_first_profile(self, run_id, profile):
+        self.app.profile_step(Runner('admitted'))
+        self.app.action('save_profile', {'_profile_session': a.PROFILE_SESSION_PREFIX + run_id, 'profile': profile})
+        self.app.profile_step(Runner('ok'))
+
+    def test_hosted_install_drafts_its_first_profile_by_itself(self):
+        template = '# USER.md - User Model\n\n## Directives\n\n- Prefer ...\n'
+        path = self.first_profile_app(template)
+        self.app.config['review_worker'] = {'enabled': False}
+        self.assertIsNone(self.app.first_profile_step())  # reviews off: the owner hasn't started yet
+        self.app.config['review_worker'] = {'enabled': True}
+        started = self.app.first_profile_step()
+        self.assertTrue(started['run_id'])
+        self.assertIsNone(self.app.first_profile_step())  # one at a time
+        self.finish_first_profile(started['run_id'], {'role': 'Developer working on integrations', 'tone': 'Short and direct',
+                                                      'leave_alone': ['payment alerts: a colleague handles them']})
+        text = path.read_text()
+        self.assertIn('## Observed from my messages', text)
+        self.assertIn('- Role: Developer working on integrations', text)
+        self.assertIn('# About me', text)  # the starter for the template, its covered blanks gone
+        self.assertNotIn('- Tone: (for example', text)
+        self.assertIsNone(self.app.first_profile_step())  # says how they write now: never again by itself
+
+    def test_first_profile_leaves_a_written_user_md_and_the_owners_own_run_alone(self):
+        self.first_profile_app('# About me\n\n- Tone: warm, first names\n')
+        self.assertIsNone(self.app.first_profile_step())
+        path = self.first_profile_app('# About me\n\n- Role: \n- Tone: \n')
+        own = self.app.action('profile_start', {})['run_id']  # the owner ran assistant profile themselves
+        self.assertIsNone(self.app.first_profile_step())
+        self.finish_first_profile(own, {'tone': 'Warm'})
+        self.assertNotIn('Observed from my messages', path.read_text())  # their own run waits for their yes
+
+    def test_first_profile_never_overwrites_edits_made_while_it_ran(self):
+        path = self.first_profile_app('# About me\n\n- Tone: \n')
+        run_id = self.app.first_profile_step()['run_id']
+        path.write_text('# About me\n\n- Tone: terse, no greeting\n')
+        self.finish_first_profile(run_id, {'tone': 'Warm'})
+        self.assertEqual(path.read_text(), '# About me\n\n- Tone: terse, no greeting\n')
+
+    def test_first_profile_waits_for_enough_own_messages_and_gives_up_after_a_few_tries(self):
+        self.first_profile_app('# About me\n\n- Tone: \n')
+        with self.store.connect() as db: db.execute('UPDATE events SET deleted=1')
+        self.assertIsNone(self.app.first_profile_step())
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM profile_runs').fetchone()[0], 0)
+            db.execute('UPDATE events SET deleted=0')
+        self.assertIsNone(self.app.first_profile_step())  # waits before looking again
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=a.FIRST_PROFILE_RETRY_SECONDS + 60)
+        self.assertTrue(self.app.first_profile_step(later)['run_id'])
+        with self.store.connect() as db:
+            db.execute("UPDATE profile_runs SET status='error',finished_at='2000-01-01'")
+            for n in range(a.FIRST_PROFILE_TRIES - 1):
+                db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,finished_at,auto) VALUES(?,'error','2000','2000','2000',1)", (f'x{n}',))
+        self.assertIsNone(self.app.first_profile_step(later))  # tried enough
+        self.app.config['first_profile'] = False
+        with self.store.connect() as db: db.execute("DELETE FROM profile_runs WHERE run_id LIKE 'x%'")
+        self.assertIsNone(self.app.first_profile_step(later))
+
+
 class ProfileCommand(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)

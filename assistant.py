@@ -556,6 +556,8 @@ PREVIEW_DAYS = 7  # what `assistant preview` reviews on a new install
 GRAPH_CHECK_SECONDS = 60  # how often the graph worker looks for new organisation profiles
 # The first look (App.first_look): starts once no new signal came in for this long, tried at most this often, this far apart
 FIRST_LOOK_SETTLE_SECONDS, FIRST_LOOK_TRIES, FIRST_LOOK_RETRY_SECONDS = 180, 3, 1800
+# The first profile on an install without the interactive installer (hosted): tries, and the wait between them.
+FIRST_PROFILE_TRIES, FIRST_PROFILE_RETRY_SECONDS = 3, 6 * 3600
 PREPARATION_INTERRUPTED_TRIES = 4  # starts of one card's preparation that a Gateway restart may cut off before it counts
 SYSTEM_SERVICES = {'gateway'}  # The Machine's own logs: not a source of the owner's
 
@@ -1962,6 +1964,8 @@ class Store:
                 db.execute('ALTER TABLE profile_runs ADD COLUMN evidence TEXT')
             if 'kind' not in {r['name'] for r in db.execute('PRAGMA table_info(profile_runs)')}:
                 db.execute("ALTER TABLE profile_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'profile'")
+            if 'auto' not in {r['name'] for r in db.execute('PRAGMA table_info(profile_runs)')}:
+                db.execute('ALTER TABLE profile_runs ADD COLUMN auto INTEGER NOT NULL DEFAULT 0')
             worker_columns = {r['name'] for r in db.execute('PRAGMA table_info(review_runs)')}
             for column in ['retry_at', 'unavailable_since', 'error_phase', 'last_error', 'last_error_phase', 'error_at']:
                 if column not in worker_columns:
@@ -3393,7 +3397,7 @@ class Store:
             result['frequent_unanswered_senders'] = evidence['frequent_unanswered_senders']
         return result
 
-    def profile_start(self, again=False, room=None):
+    def profile_start(self, again=False, room=None, auto=False):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             run = db.execute("SELECT run_id,started_at FROM profile_runs WHERE kind='profile' AND (status IN ('starting','running') OR "
@@ -3414,8 +3418,8 @@ class Store:
                              ((dt.datetime.fromisoformat(now()) - dt.timedelta(minutes=30)).isoformat(), int(bool(again)))).fetchone()
             if run:
                 return {'run_id': run['run_id'], 'started_at': run['started_at'], 'attached': True}
-            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,room,evidence) VALUES(?,'starting',?,?,?,?)",
-                       (run_id, started, started, None if room is None else min(max(int(room), 400), 4000), json.dumps(evidence)))
+            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,room,evidence,auto) VALUES(?,'starting',?,?,?,?,?)",
+                       (run_id, started, started, None if room is None else min(max(int(room), 400), 4000), json.dumps(evidence), int(bool(auto))))
         roles = self.roles_start(again=again)  # onboarding names the closest people too, right after the draft
         return {'run_id': run_id, 'started_at': started, 'counts': dict(counts), 'roles_run_id': roles.get('run_id')}
 
@@ -9549,7 +9553,70 @@ class App:
                 db.execute('UPDATE profile_runs SET status=?,error=?,finished_at=?,updated_at=? WHERE run_id=?', (status, error, now(), now(), run['run_id']))
                 if run.get('kind') == 'skills':
                     self.skills_find_done(run, status)
+        if run.get('auto') and run.get('kind') == 'profile':  # saves only once the run is ok
+            self.first_profile_save(run['run_id'])
         return result
+
+    def user_md(self):
+        import onboarding
+        return onboarding.user_md_path(self.config.get('openclaw_workspace') or WORKSPACE)
+
+    @staticmethod
+    def user_md_says_how(path):
+        """OpenClaw's own USER.md template has no Tone line either, yet says nothing about the owner."""
+        import onboarding
+        return not onboarding.user_md_is_template(path) and onboarding.says_how_you_write(path)
+
+    def first_profile_step(self, current=None):
+        """Installs set up without the interactive installer (hosted Machines) never ran `assistant profile`, so reviews
+        and drafts knew neither who the owner is nor how they write. Once reviews are on and USER.md still says nothing
+        about how they write, one profile turn starts by itself (and names the closest people after it). Tried a few
+        times at most; `first_profile: false` in the config turns it off."""
+        import onboarding
+        if not (self.config.get('review_worker') or {}).get('enabled') or self.config.get('first_profile') is False:
+            return None
+        current = current or dt.datetime.fromisoformat(now())
+        if getattr(self, '_first_profile_wait', None) and self._first_profile_wait > current:
+            return None
+        path = self.user_md()
+        if self.user_md_says_how(path):
+            return None
+        with self.store.connect() as db:
+            runs = db.execute("SELECT status,auto,finished_at FROM profile_runs WHERE kind='profile' ORDER BY started_at").fetchall()
+        if (any(not r['auto'] or r['status'] in ('starting', 'running', 'ok') for r in runs) or len(runs) >= FIRST_PROFILE_TRIES
+                or (runs and (runs[-1]['finished_at'] or '') > (current - dt.timedelta(seconds=FIRST_PROFILE_RETRY_SECONDS)).isoformat())):
+            return None  # the owner ran their own, one is running or done, or tried enough
+        try:
+            text = path.read_text() if path.exists() else onboarding.starter_user_md(self.config)
+        except OSError:
+            return None
+        if onboarding.user_md_is_template(path):
+            text = text.rstrip() + '\n\n' + onboarding.starter_user_md(self.config)
+        try:
+            return self.store.profile_start(room=max(onboarding.profile_room(text), 0), auto=True)
+        except ValueError:  # too few of the owner's own messages yet: look again later
+            self._first_profile_wait = current + dt.timedelta(seconds=FIRST_PROFILE_RETRY_SECONDS)
+            return None
+
+    def first_profile_save(self, run_id):
+        """The first profile's draft goes into USER.md as its own section (marked, so the owner can edit or delete
+        it), never over anything that already says how the owner writes."""
+        import onboarding
+        with self.store.connect() as db:
+            row = db.execute("SELECT draft FROM profile_runs WHERE run_id=? AND status='ok'", (run_id,)).fetchone()
+        path = self.user_md()
+        if not row or not row['draft'] or self.user_md_says_how(path):
+            return False
+        text = path.read_text() if path.exists() else onboarding.starter_user_md(self.config)
+        if onboarding.user_md_is_template(path):
+            text = text.rstrip() + '\n\n' + onboarding.starter_user_md(self.config)
+        merged, _ = onboarding.fit_profile(text, json.loads(row['draft']), dt.datetime.now(local_tz()).date().isoformat())
+        if not merged:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        onboarding.write_private(path, merged)
+        LOG.info('first profile saved to USER.md chars=%s', len(merged))
+        return True
 
     def skills_find_begin(self, run):
         """Before the Find my skills turn: the service takes the browser lease for it and checks which accounts are
@@ -9601,6 +9668,8 @@ class App:
             except Exception as error:LOG.error('review worker error=%s',type(error).__name__)
             try:self.profile_step()
             except Exception as error:LOG.error('profile worker error=%s',type(error).__name__)
+            try:self.first_profile_step()
+            except Exception as error:LOG.error('first profile error=%s',type(error).__name__)
             try:self.recap_step()
             except Exception as error:LOG.error('recap error=%s',type(error).__name__)
 
