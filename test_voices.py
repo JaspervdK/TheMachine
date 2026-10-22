@@ -140,6 +140,11 @@ class Voices(unittest.TestCase):
         with patch.object(a, 'now', return_value=(a.dt.datetime.fromisoformat(a.now()) + a.dt.timedelta(days=31)).isoformat()):
             self.assertIn('run_id', self.store.voice_study_due())
 
+    def test_one_regular_correspondent_still_qualifies_a_channel(self):
+        self.store.commit_page('phone', {}, [chat(f'kim{i}', f'2026-10-03T08:0{i}:00+00:00', f'ja tot straks, zie je dan om {i}', mine=True)
+                                             for i in range(4)])
+        self.assertGreaterEqual(sum(m['channel'] == 'WhatsApp' for m in self.store.voice_sample()['messages']), a.VOICE_STUDY_MIN)
+
     def test_a_voice_study_runs_as_a_turn_and_applies_when_it_finishes(self):
         self.study_messages()
         started = self.store.voice_study_start()

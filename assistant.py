@@ -4116,7 +4116,7 @@ class Store:
         with self.connect() as db:
             db.execute('BEGIN')
             for kind, channel in EVENT_CHANNELS.items():
-                limit, picked, copies, per = VOICE_STUDY.get(kind, VOICE_STUDY_EACH), [], [], collections.Counter()
+                limit, picked, copies, per, extra = VOICE_STUDY.get(kind, VOICE_STUDY_EACH), [], [], collections.Counter(), []
                 predicate, params = own_predicate(kind, ids)
                 for row in db.execute(f'SELECT id,occurred_at,title,body,metadata FROM events WHERE deleted=0 AND kind=? AND ({predicate}) '
                                       'ORDER BY occurred_at DESC,id DESC LIMIT ?', (kind, *params, limit * VOICE_STUDY_SCAN)):
@@ -4129,9 +4129,6 @@ class Store:
                     m = json.loads(row['metadata'] or '{}')
                     partner = (','.join(sorted(a.lower() for _, a in email.utils.getaddresses([str(m.get('to') or '')]) if a)) if kind == 'gmail.message'
                                else conversation_of(kind, m)) or ''
-                    if per[partner] >= VOICE_STUDY_PER:
-                        continue
-                    per[partner] += 1
                     copies.append(gist)
                     roles = [r[0] for r in db.execute("SELECT DISTINCT json_extract(n.info,'$.role') FROM graph_events g JOIN graph_nodes n ON n.id=g.node_id "
                                                       "WHERE g.event_id=? AND g.direct=1 AND n.kind='person' AND json_extract(n.info,'$.role') IS NOT NULL LIMIT 3",
@@ -4145,7 +4142,13 @@ class Store:
                         item['chat'] = clamp(str(m.get('chat_name') or m.get('channel_name')), 60)
                     if roles:
                         item['they_are'] = ', '.join(clamp(str(r), 60) for r in roles)
+                    if per[partner] >= VOICE_STUDY_PER:
+                        extra.append(item)
+                        continue
+                    per[partner] += 1
                     picked.append(item)
+                if len(picked) < VOICE_STUDY_MIN:  # one regular correspondent still has enough to learn from
+                    picked += extra[:VOICE_STUDY_MIN - len(picked)]
                 if len(picked) > limit:  # evenly across the period read, newest first
                     picked = [picked[i * len(picked) // limit] for i in range(limit)]
                 if len(picked) >= VOICE_STUDY_MIN:
