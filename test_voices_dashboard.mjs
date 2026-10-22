@@ -46,11 +46,14 @@ try{
   assert.match(await forms.nth(1).locator('.sig-head').textContent(),/Email.*From your messages/);
   const email=forms.nth(1);
   assert.equal(await email.locator('.primary').isHidden(),true);  // no change, no Save
+  await forms.first().locator('textarea').fill('Unsaved everywhere preference.');
   await email.locator('textarea').fill('Hey name, short. Regards, a blank line, then my name.');
   await email.locator('.primary').click();
   await page.locator('#notice',{hasText:'Saved.'}).waitFor({state:'attached'});
   assert.deepEqual(posts.at(-1),{action:'set_voice',args:{channel:'Email',text:'Hey name, short. Regards, a blank line, then my name.'}});
   await page.locator('#voices .voice-form[data-channel="Email"] .sig-head',{hasText:'Yours'}).waitFor();
+  assert.equal(await page.locator('#voices .voice-form[data-channel="All"] textarea').inputValue(),'Unsaved everywhere preference.');
+  assert.equal(await page.locator('#voices .voice-form[data-channel="All"] .primary').isVisible(),true);
   // Add a channel with its line; a missing name is said, not posted.
   const add=page.locator('#voices .voice-form[data-new]');
   await add.locator('textarea').fill('lowercase, no full stop');
@@ -62,6 +65,7 @@ try{
   await page.locator('#voices .voice-form[data-channel="All"] [data-voice-remove]').click();
   await page.locator('#voices .voice-form[data-channel="All"]').waitFor({state:'detached'});
   assert.deepEqual(posts.at(-1),{action:'set_voice',args:{channel:'All',text:''}});
+  if(process.env.REVIEW_SHOTS)await page.screenshot({path:process.env.REVIEW_SHOTS+'/'+scheme+'-writing.png',fullPage:true});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   // What I've learned: grouped (how you write, facts, how to do things), newest first, merges shown with Undo.
   await page.goto('http://127.0.0.1:'+server.address().port+'/#feedback');
