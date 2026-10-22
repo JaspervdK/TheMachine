@@ -122,6 +122,61 @@ class Faults(unittest.TestCase):
         self.assertTrue(a.fault_plain('odd place', 1, {}).startswith('Part of The Machine (odd place) failed. Probably nothing yet'))
 
 
+    def test_an_outside_service_failing_is_named_retried_and_needs_nothing(self):
+        import io, urllib.error
+        import fleet
+        gateway = {'id': 'openclaw-gateway', 'service': 'gateway'}
+
+        def translated(code, url):  # a client turning an HTTP error into a bare ValueError, as clients do
+            try:
+                raise urllib.error.HTTPError(url, code, 'error', {}, io.BytesIO(b''))
+            except urllib.error.HTTPError:
+                raise ValueError(f'The service said {code}') from None
+
+        for error_at in (lambda: translated(500, 'https://www.googleapis.com/x'),):
+            try:
+                error_at()
+            except ValueError as error:
+                self.assertEqual(a.fault_origin(error), {'service': 'Google', 'status': 500})
+        try:
+            raise fleet.NetworkUnavailable('The Network had a problem')
+        except ValueError as error:
+            self.assertEqual(a.fault_origin(error), {'service': 'The Machine Network', 'status': None})
+        self.assertIs(fleet.Unavailable, fleet.NetworkUnavailable)
+        try:
+            translated(400, 'https://slack.com/api/x')  # a refusal may be The Machine's own mistake
+        except ValueError as error:
+            self.assertIsNone(a.fault_origin(error))
+        try:
+            try:
+                raise TimeoutError()
+            except TimeoutError:
+                {}['missing']  # a bug while handling a timeout is still a bug
+        except KeyError as error:
+            self.assertIsNone(a.fault_origin(error))
+        try:
+            try:
+                raise urllib.error.URLError('down')
+            except urllib.error.URLError as cause:
+                raise ValueError('Slack did not answer') from cause
+        except ValueError as error:
+            self.assertEqual(a.fault_origin(error), {'service': 'An outside service', 'status': None})
+
+        for _ in range(3):
+            try:
+                translated(503, 'https://app.themachine.computer/api/fleet/directory')
+            except ValueError:
+                self.log.emit(logging.LogRecord('personal-assistant', logging.ERROR, __file__, 1, 'fleet error=%s', ('ValueError',), None))
+        a.sync_gateway(self.store, {'accounts': [gateway]}, gateway, FakeJournal())
+        [event] = self.store.events([gateway['id']])
+        self.assertTrue(event['body'].startswith('Talking with your Fleet on The Machine Network failed because The Machine Network had a problem '
+                                                 '(it answered 503), not The Machine. Teammates’ questions and answers may come late; your own cards '
+                                                 'are fine. The Machine tries again by itself; nothing is needed from you.'), event['body'])
+        self.assertNotIn('fix this itself', event['body'])
+        metadata = event['metadata'] if isinstance(event['metadata'], dict) else json.loads(event['metadata'])
+        self.assertEqual(metadata['outside'], {'service': 'The Machine Network', 'status': 503})
+
+
 class FaultCardsSettle(unittest.TestCase):
     """A card about an error that an update fixed closes by itself."""
     def setUp(self):
@@ -313,6 +368,12 @@ class AutoMerge(unittest.TestCase):
         self.assertEqual(self.app.action_step(next_actions_transport(self)), 'sent')
         self.assertEqual(git(self.app_dir, 'log', '--format=%s', '-1'), 'Test the missing key')
         return git(self.app_dir, 'rev-parse', 'HEAD')
+
+    def test_a_fix_for_an_outside_service_failing_never_merges_by_itself(self):
+        with self.store.connect() as db:
+            db.execute('UPDATE events SET metadata=? WHERE id=1', (json.dumps({'fingerprint': 'fp-graph', 'outside': {'service': 'Google', 'status': 502}}),))
+        saved = self.save(self.fix())
+        self.assertIn('outside service', saved['auto_merge'])
 
     def test_a_small_tested_fix_merges_by_itself_and_the_owner_can_undo_it(self):
         start = git(self.upstream, 'rev-parse', 'main')

@@ -153,9 +153,16 @@ class Off(Exception):
     """Not in a Fleet (any more), or the Fleet is switched off: the relay said 404."""
 
 
-class Unavailable(ValueError):
-    """The relay is away for a moment: it said 502, 503 or 504 (a restart cuts every long poll at once). A ValueError like any refusal, so a caller that shows the reason still does; the loop
-    just asks again in a few seconds instead of backing off and logging an error."""
+class NetworkUnavailable(ValueError):
+    """The Network is away for a moment or had its own problem: it said 5xx (a restart cuts every long poll at once) or
+    did not answer. A ValueError like any refusal, so a caller that shows the reason still does; the loop just asks
+    again in a few seconds instead of backing off and logging an error. Typed as outside trouble, so an error report
+    (assistant.fault_origin) blames the Network, not The Machine's own code."""
+    outside_service = 'The Machine Network'
+    code = None
+
+
+Unavailable = NetworkUnavailable  # its name before, for code that still says Unavailable
 
 
 def where(error):

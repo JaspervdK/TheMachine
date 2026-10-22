@@ -2017,8 +2017,11 @@ class Store:
             db.execute('CREATE TABLE IF NOT EXISTS faults(fingerprint TEXT NOT NULL,day TEXT NOT NULL,kind TEXT NOT NULL,frames TEXT NOT NULL,'
                        'location TEXT NOT NULL,version TEXT,first_at TEXT NOT NULL,last_at TEXT NOT NULL,count INTEGER NOT NULL,'
                        'reported INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(fingerprint,day))')
-            if 'message' not in {r['name'] for r in db.execute('PRAGMA table_info(faults)')}:
+            fault_columns = {r['name'] for r in db.execute('PRAGMA table_info(faults)')}
+            if 'message' not in fault_columns:
                 db.execute('ALTER TABLE faults ADD COLUMN message TEXT')
+            if 'origin' not in fault_columns:  # an outside service that failed (fault_origin), as JSON
+                db.execute('ALTER TABLE faults ADD COLUMN origin TEXT')
             # Keep version timing independently of daily signal aggregation. Legacy rows only
             # prove their last occurrence belongs to their last recorded version.
             db.execute('CREATE TABLE IF NOT EXISTS fault_versions(fingerprint TEXT NOT NULL,version TEXT NOT NULL,day TEXT NOT NULL,kind TEXT NOT NULL,'
@@ -2505,13 +2508,14 @@ class Store:
         cutoff = (dt.datetime.fromisoformat(stamp) - dt.timedelta(days=30)).isoformat()
         db.execute('DELETE FROM sync_activity WHERE at<?', (cutoff,))
 
-    def record_fault(self, fingerprint, kind, frames, location, version, message=None):
+    def record_fault(self, fingerprint, kind, frames, location, version, message=None, origin=None):
         stamp = now()
         with self.connect() as db:
-            db.execute('INSERT INTO faults(fingerprint,day,kind,frames,location,version,first_at,last_at,count,message) VALUES(?,?,?,?,?,?,?,?,1,?) '
+            db.execute('INSERT INTO faults(fingerprint,day,kind,frames,location,version,first_at,last_at,count,message,origin) VALUES(?,?,?,?,?,?,?,?,1,?,?) '
                        'ON CONFLICT(fingerprint,day) DO UPDATE SET count=count+1,last_at=excluded.last_at,frames=excluded.frames,version=excluded.version,'
-                       'message=coalesce(excluded.message,message)',
-                       (fingerprint, stamp[:10], kind, json.dumps(frames), location, version, stamp, stamp, message))
+                       'message=coalesce(excluded.message,message),origin=excluded.origin',
+                       (fingerprint, stamp[:10], kind, json.dumps(frames), location, version, stamp, stamp, message,
+                        json.dumps(origin) if origin else None))
             if version:
                 db.execute('INSERT INTO fault_versions VALUES(?,?,?,?,?,?,1) ON CONFLICT(fingerprint,version,day) '
                            'DO UPDATE SET last_at=excluded.last_at,count=count+1', (fingerprint,version,stamp[:10],kind,stamp,stamp))
@@ -4306,6 +4310,7 @@ class Store:
                 "SELECT e.metadata FROM events e JOIN json_each(?) ids ON ids.value=e.id WHERE e.kind='machine.fault'",(row['event_ids'],))),None)
             fault=fault_info.get('fingerprint') if fault_info else None
             if not fault:return 'it does not fix one of The Machine’s recorded errors'
+            if fault_info.get('outside'):return 'the error came from an outside service, not The Machine’s code'
             reason=next_actions.unsafe_merge(action,config)
             if reason:return reason
             since=(dt.datetime.fromisoformat(now())-UNDO_MERGE).isoformat()
@@ -5253,12 +5258,46 @@ FAULT_AREAS = {
 }
 
 
-def fault_plain(location, count, config):
+# Outside services by host, for naming the one that failed (the host itself is never kept).
+OUTSIDE_SERVICES = (('themachine.computer', 'The Machine Network'), ('googleapis.com', 'Google'), ('google.com', 'Google'),
+                    ('slack.com', 'Slack'), ('microsoft.com', 'Microsoft'), ('office.com', 'Microsoft'), ('salesflare.com', 'Salesflare'),
+                    ('stripe.com', 'Stripe'), ('github.com', 'GitHub'), ('telegram.org', 'Telegram'), ('trello.com', 'Trello'),
+                    ('shortcut.com', 'Shortcut'), ('x.com', 'X'), ('linkedin.com', 'LinkedIn'))
+
+
+def outside_service(url):
+    host = (urllib.parse.urlsplit(str(url or '')).hostname or '').lower()
+    return next((name for suffix, name in OUTSIDE_SERVICES if host == suffix or host.endswith('.' + suffix)), 'An outside service')
+
+
+def fault_origin(error):
+    """The outside service an error came from, as {service, status}, or None when it is The Machine's own. Read from
+    where it was raised, never its words: a typed error that says so (outside_service, like fleet.NetworkUnavailable),
+    or an HTTP 5xx, timeout or dropped connection it was translated from (raise ... from it, or from None)."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if getattr(type(error), 'outside_service', None):
+            return {'service': type(error).outside_service, 'status': getattr(error, 'code', None)}
+        if isinstance(error, urllib.error.HTTPError):
+            return {'service': outside_service(error.url), 'status': error.code} if error.code >= 500 else None
+        if isinstance(error, (TimeoutError, ConnectionError, urllib.error.URLError)):
+            return {'service': outside_service(getattr(error, 'url', None)), 'status': None}
+        # Follow only a deliberate translation: an error raised while handling another one is not caused by it.
+        error = error.__cause__ or (error.__context__ if error.__suppress_context__ else None)
+    return None
+
+
+def fault_plain(location, count, config, origin=None):
     """One short paragraph: what failed, what the owner notices, and who acts."""
     words = str(location or '').lower().split()
     key = words[1] if words[:1] == ['thread'] and len(words) > 1 else (words[0] if words else '')
     what, notice = FAULT_AREAS.get(key, (f"Part of The Machine ({location})" if location else 'Part of The Machine',
                                          'Probably nothing yet: it tries again by itself.'))
+    if origin:
+        status = f" (it answered {origin['status']})" if origin.get('status') else ''
+        return (f"{what} failed because {origin.get('service') or 'An outside service'} had a problem{status}, not The Machine. "
+                f"{notice} The Machine tries again by itself; nothing is needed from you.")
     if count < 3:
         act = 'Nothing to do yet. If it keeps happening, The Machine offers a fix.'
     elif config.get('self_fix_auto', True) is False:
@@ -5296,7 +5335,7 @@ class FaultLog(logging.Handler):
                 return
             kind = type(error).__name__
             fingerprint = hashlib.sha256(json.dumps([kind] + [[f['file'], f['function']] for f in frames[-3:]]).encode()).hexdigest()[:16]
-            self.store.record_fault(fingerprint, kind, frames, location[:120], self.version, fault_message(error))
+            self.store.record_fault(fingerprint, kind, frames, location[:120], self.version, fault_message(error), fault_origin(error))
         except Exception:
             pass  # recording an error must never cause one
 
@@ -5322,7 +5361,8 @@ def fault_event(account, row, config):
     top = frames[-1]
     count = row['count']
     message = row.get('message')
-    lines = [fault_plain(row['location'], count, config), '',
+    origin = json.loads(row['origin']) if row.get('origin') else None
+    lines = [fault_plain(row['location'], count, config, origin), '',
              f"Error: {row['kind']}" + (f': {message}' if message else ''),
              f"{(row['location'] or 'The service').capitalize()} failed {count} time{'s' if count > 1 else ''} on {row['day']} "
              f"(last {dt.datetime.fromisoformat(row['last_at']).astimezone(local_tz()).strftime('%H:%M')})."]
@@ -5334,6 +5374,7 @@ def fault_event(account, row, config):
             'body': '\n'.join(lines),
             'metadata': {'fault_kind': row['kind'], 'fingerprint': row['fingerprint'], 'location': row['location'], 'frames': frames,
                          'count': count, 'day': row['day'], 'version': row.get('version'), 'message': message,
+                         'outside': origin,  # an outside service failed: nothing to fix in The Machine's code
                          'app_dir': str(next_actions.app_dir(config)), 'fix_dir': str(next_actions.fix_dir(config)), 'transport': 'internal',
                          'coverage': 'Errors raised in The Machine’s own code: type, code location and the message with anything private taken out, never values.'},
             'deleted': False}
