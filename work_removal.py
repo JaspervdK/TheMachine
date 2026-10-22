@@ -308,6 +308,15 @@ def remove(config_path, domains=(), companies=(), restart=None, store=None, run=
                'removed': [*previous.get('removed', []), *found],
                'credentials': {**previous.get('credentials', {}), **credentials}}
     onboarding.write_private(note, json.dumps(pending))
+    # The recovery note must survive a power loss before configuration changes or secret removal.
+    with note.open('rb') as handle:
+        os.fsync(handle.fileno())
+    if os.name != 'nt':
+        fd = os.open(note.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     out['secrets'] = len(_drop_secrets(config, found, unlink=False))
     onboarding.save(config_path, config)
     # Never remove a credential file before the configuration that stops using it was saved.

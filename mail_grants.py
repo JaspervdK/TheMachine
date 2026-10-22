@@ -77,6 +77,12 @@ def _write(config, data):
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(fresh, target)
+    if os.name != 'nt':
+        fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)  # the handoff may only be acknowledged after its renamed file is durable
+        finally:
+            os.close(fd)
 
 
 class _Locked:

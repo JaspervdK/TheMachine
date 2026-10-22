@@ -131,6 +131,13 @@ class Removal(unittest.TestCase):
         self.assertEqual(result['events'], 4)
         self.assertEqual(self.rows('SELECT DISTINCT account_id FROM events'), [('personal-gmail',)])
 
+    def test_failed_recovery_note_flush_does_not_change_accounts_or_credentials(self):
+        with mock.patch.object(work_removal.os, 'fsync', side_effect=OSError('flush failed')):
+            with self.assertRaises(OSError):
+                work_removal.remove(self.path, ['acme.com'], ['Acme'], store=self.store)
+        self.assertTrue((self.dir / 'intercom.env').is_file())
+        self.assertIn('acme-gmail', [a['id'] for a in json.loads(self.path.read_text())['accounts']])
+
     def test_failed_config_save_does_not_delete_credentials(self):
         import onboarding
         with mock.patch.object(onboarding, 'save', side_effect=OSError('disk full')):

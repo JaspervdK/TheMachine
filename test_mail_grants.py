@@ -86,6 +86,19 @@ class Grants(unittest.TestCase):
                         ms_graph._from_broker(self.config, self.credential, account, 'Mail.Read')
                 self.assertEqual(mail_grants.get(self.config, provider, account['email']), None if remove else 'new-login')
 
+    @unittest.skipIf(os.name == 'nt', 'directory fsync is a POSIX durability step; Windows service runs in WSL2')
+    def test_failed_directory_flush_is_not_acknowledged_and_saved_receipt_is_recoverable(self):
+        real = os.fsync
+        import stat
+        def flush(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError('directory flush failed')
+            return real(fd)
+        with mock.patch.object(mail_grants.os, 'fsync', side_effect=flush):
+            with self.assertRaises(OSError):
+                mail_grants.put(self.config, 'google', 'alex@acme.test', 'token', handoff='ho_flush')
+        self.assertTrue(mail_grants.handed(self.config, 'google', 'alex@acme.test', 'ho_flush'))
+
     def test_exact_handoff_receipt_survives_rotation_and_changes_on_reconnect(self):
         mail_grants.put(self.config, 'google', 'alex@acme.test', 'old', handoff='ho_1')
         self.assertTrue(mail_grants.handed(self.config, 'google', 'alex@acme.test', 'ho_1'))
