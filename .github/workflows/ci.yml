@@ -20,7 +20,7 @@ jobs:
             node: '24.16.0'
             openclaw: '2026.10.5'
           - python: '3.14'
-            node: '26.1.0'
+            node: '26'  # current Node 26: latest OpenClaw can raise its patch-level minimum
             openclaw: 'latest'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
