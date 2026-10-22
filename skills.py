@@ -362,8 +362,9 @@ class Skills:
                 with self.importer.lock:
                     found = self.importer.scans[token]
                     found['finding'] = {'run_id': run, 'status': 'running'}
-                    for site in sites or ():
+                    for site in sites or IMPORT_FROM:
                         found['browser'].pop(site, None)  # checked again by this turn
+                        found['looked'][site] = 'starting'
         return self.importer.view(token)
 
     def import_upload(self, frm, data):
@@ -1365,7 +1366,7 @@ class Importer:
             stamp = time.time()
             self.scans = {k: v for k, v in sorted(self.scans.items(), key=lambda kv: kv[1]['at'])[-(SCANS - 1):] if stamp - v['at'] < SCAN_SECONDS}
             self.scans[token] = {'at': stamp, 'items': {i['public']['key']: i for i in items}, 'errors': errors[:10], 'finding': finding,
-                                 'browser': {}}
+                                 'browser': {}, 'looked': {}}
         return token
 
     def scan(self, token):
@@ -1380,7 +1381,21 @@ class Importer:
         order = {'yours': 0, 'project': 1, 'vendor': 2, 'builtin': 3}
         items = sorted((i['public'] for i in found['items'].values()), key=lambda p: (order.get(p['group'], 3), not p['recommended'], p['name'].lower()))
         return {'token': token, 'items': items, 'errors': found['errors'], 'finding': found['finding'], 'browser': found['browser'],
-                'local': self.local}
+                'local': self.local, 'sources': self.sources(found, items)}
+
+    def sources(self, found, items):
+        """Where Find my skills looks, each with its own state: 'starting' (the turn hasn't opened the browser yet),
+        'looking', 'done', 'error', 'signed_out' or 'unavailable', and how many skills came from there. [] for an upload."""
+        looked = found.get('looked') or {}
+        if not found['finding'] and not looked:
+            return []
+        out = [{'key': 'local', 'state': 'done', 'found': sum(1 for p in items if ':account:' not in p['key'])}] if self.local else []
+        for site in IMPORT_FROM:
+            if site in looked:
+                browser = found['browser'].get(site)
+                out.append({'key': site, 'state': browser if browser in ('signed_out', 'unavailable') else looked[site],
+                            'found': sum(1 for p in items if p['from'] == site and ':account:' in p['key'])})
+        return out
 
     # -- listing
     def find(self):
@@ -1593,6 +1608,8 @@ class Importer:
                 item['public']['recommended'], item['public']['why'] = True, one_line(r.get('why'), 160)
         if isinstance(browser, dict):
             scan['browser'].update({k: v for k, v in browser.items() if k in IMPORT_FROM and v in ('ok', 'signed_out', 'unavailable')})
+        with self.lock:  # one report covers every account the turn read: those are done now, before the turn itself ends
+            scan['looked'] = {k: 'done' if v in ('starting', 'looking') else v for k, v in scan.get('looked', {}).items()}
         return {'added': added}
 
     def accounts(self, token, states):
@@ -1602,12 +1619,20 @@ class Importer:
             scan = self.scans.get(token)
             if scan:
                 scan['browser'].update({k: v for k, v in (states or {}).items() if k in IMPORT_FROM and v in ('ok', 'signed_out', 'unavailable')})
+                looked = scan.setdefault('looked', {})
+                for site in looked:  # the turn has the browser now
+                    if looked[site] == 'starting':
+                        looked[site] = 'looking'
 
     def finished(self, token, status):
         with self.lock:
             scan = self.scans.get(token)
             if scan and scan['finding']:
                 scan['finding'] = {**scan['finding'], 'status': status}
+                looked = scan.setdefault('looked', {})  # a turn that ended without reporting a site: done, or couldn't check
+                for site in looked:
+                    if looked[site] in ('starting', 'looking'):
+                        looked[site] = 'done' if status == 'ok' else 'error'
 
 
 def fleet_module():

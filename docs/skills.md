@@ -35,7 +35,9 @@ Both use the same `SKILL.md` form. **Import** under Settings > Skills lists skil
   skills in your claude.ai and ChatGPT accounts, read-only, in your Machine's own browser: on claude.ai under Customize >
   Skills, on ChatGPT the Skills library (chatgpt.com/skills). Custom GPTs, projects and custom instructions aren't
   skills and aren't imported. It also marks a few as **Recommended**, judged against the work your Machine actually
-  does. A hosted Machine has no such folders; there it only checks your accounts.
+  does. A hosted Machine has no such folders; there it only checks your accounts. While it looks, each place shows
+  its own state (found, looking, not signed in, couldn't check), and skills already found are listed right away. When
+  it's done, one line sums up how many it found and how many it picked.
 - **Signed out?** If your Machine's browser is signed out of ChatGPT or claude.ai, the list shows **Sign in to ChatGPT**
   (or Claude). It opens the same sign-in dialog as for LinkedIn and X, including the one-time code the site sends; once
   you're in, it looks in that account by itself. Your agent never signs in or types a password.

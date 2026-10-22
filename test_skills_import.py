@@ -184,6 +184,34 @@ class Import(unittest.TestCase):
         self.assertEqual((view['items'], view['local']), ([], False))
         self.assertFalse(keeper.view()['import_local'])
 
+    def test_progress_per_source_and_never_stale(self):
+        """Each place it looks has its own state; one report finishes every account it read, before the turn ends."""
+        self.keeper.finder = lambda token, items, sites=None: 'run1'
+        view, _ = self.found()
+        token, local = view['token'], len(view['items'])
+        state = lambda: {s['key']: (s['state'], s['found']) for s in self.keeper.import_status(token)['sources']}
+        self.assertEqual(state(), {'local': ('done', local), 'claude': ('starting', 0), 'chatgpt': ('starting', 0)})
+        self.keeper.importer.accounts(token, {'claude': 'ok', 'chatgpt': 'signed_out'})  # the turn has the browser
+        self.assertEqual(state(), {'local': ('done', local), 'claude': ('looking', 0), 'chatgpt': ('signed_out', 0)})
+        self.keeper.importer.report(token, [{'from': 'claude', 'name': 'late-replies', 'description': 'Chase replies that are late.',
+                                      'body': 'Check sent mail.\n\n1. Find unanswered.'}],
+                                    [], {'claude': 'ok'})
+        self.assertEqual(self.keeper.import_status(token)['finding']['status'], 'running')  # the turn is still ending
+        self.assertEqual(state(), {'local': ('done', local), 'claude': ('done', 1), 'chatgpt': ('signed_out', 0)})
+        self.keeper.importer.finished(token, 'ok')
+        self.assertEqual(state()['claude'], ('done', 1))
+        # Signed in to ChatGPT, and that turn fails: claude.ai keeps its result, ChatGPT says it couldn't check.
+        self.keeper.import_find(token, ['chatgpt'])
+        self.assertEqual(state()['chatgpt'], ('starting', 0))
+        self.keeper.importer.finished(token, 'error')
+        self.assertEqual(state(), {'local': ('done', local), 'claude': ('done', 1), 'chatgpt': ('error', 0)})
+        # A turn that ends well without a report: done, never left looking.
+        self.keeper.import_find(token, ['chatgpt'])
+        self.keeper.importer.finished(token, 'ok')
+        self.assertEqual(state()['chatgpt'], ('done', 0))
+        # An upload has no sources to show.
+        self.assertEqual(self.keeper.import_paste('claude', '---\nname: x\ndescription: y\n---\nCheck sent mail for unanswered threads.')['sources'], [])
+
     def test_find_turn_reports_account_skills_and_recommendations(self):
         started = []
         self.keeper.finder = lambda token, items, sites=None: started.append((token, items, sites)) or 'run1'
@@ -252,6 +280,9 @@ class FindTurn(unittest.TestCase):
         out = app.action('skills_found', {'_skills_session': a.SKILLS_SESSION_PREFIX + run, 'browser': {'claude': 'signed_out'}, 'found': [
             {'from': 'claude', 'name': 'follow-ups', 'description': 'Chase replies that are late.', 'body': 'Check sent mail for unanswered threads.'}]})
         self.assertEqual(out, {'added': 1})
+        # Reported: no account shows as still looking, though the turn itself hasn't ended yet.
+        shown = {x['key']: x['state'] for x in app.action('skill_import_status', {'token': view['token']})['sources']}
+        self.assertEqual((shown['claude'], shown['chatgpt']), ('signed_out', 'signed_out'))
         app.profile_step(runner)
         status = app.action('skill_import_status', {'token': view['token']})
         self.assertEqual((status['finding']['status'], status['browser'], [i['name'] for i in status['items']]),

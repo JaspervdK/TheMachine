@@ -26,7 +26,8 @@ for(let n=0;n<51;n++)items.push(item({key:'claude:proj'+n,name:'project-skill-'+
 for(let n=0;n<49;n++)items.push(item({key:'claude:vendor'+n,name:'vendor-skill-'+n,description:'A vendor skill.',group:'vendor',source:'claude.ai plugin v'+n}));
 for(let n=0;n<13;n++)items.push(item({key:'claude:builtin'+n,name:'builtin-skill-'+n,description:'Built in.',group:'builtin'}));
 for(let n=0;n<11;n++)items.push(item({key:'claude:mine'+n,name:'my-skill-'+n,description:'Mine.',source:'~/.claude/skills/m'+n}));
-let list={token:'tok1',items,errors:[],finding:{run_id:'r1',status:'running'},browser:{},local:true};
+const src=(claude,chatgpt,c=0,g=0)=>[{key:'local',state:'done',found:items.length},{key:'claude',state:claude,found:c},{key:'chatgpt',state:chatgpt,found:g}];
+let list={token:'tok1',items,errors:[],finding:{run_id:'r1',status:'running'},browser:{},local:true,sources:src('looking','looking')};
 let skills={skills:[],waiting:0,targets:[],folder:'skills/the-machine',openclaw:true,import_local:true,hints:[]};
 const calls=[];
 const server=createServer((req,res)=>{
@@ -35,13 +36,13 @@ const server=createServer((req,res)=>{
  if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],connectors:[],skills}));return}
  if(url.pathname==='/api/action'){let body='';req.on('data',c=>body+=c);req.on('end',()=>{const {action,args}=JSON.parse(body);calls.push({action,args,upload:req.headers['x-upload']||''});
    if(action==='skill_installed'){res.end(JSON.stringify({installed:[],checked_at:null,error:''}));return}
-   if(action==='skill_import_find'){if(args.token){list={...list,finding:{run_id:'r2',status:'running'},browser:{claude:'ok'}}}res.end(JSON.stringify(list));return}
+   if(action==='skill_import_find'){if(args.token){list={...list,finding:{run_id:'r2',status:'running'},browser:{claude:'ok'},sources:src('done','starting',1)}}res.end(JSON.stringify(list));return}
    if(action==='skill_import_signin'){res.end(JSON.stringify({opened:true,site:'chatgpt.com',view:''}));return}
    if(action==='browser_login_pages'){res.end(JSON.stringify({pages:[{id:'0:t1',host:'auth.openai.com',site:'auth.openai.com',brand:'OpenAI',title:'Log in',username:false,password:false,code:true,code_kind:'email',sent_to:'j•••@example.com',saved:null}]}));return}
    if(action==='browser_login_fill'){res.end(JSON.stringify({result:'done'}));return}
-   if(action==='skill_import_status'&&list.finding?.run_id==='r2'){list={...list,finding:{run_id:'r2',status:'ok'},browser:{claude:'ok',chatgpt:'ok'},
+   if(action==='skill_import_status'&&list.finding?.run_id==='r2'){list={...list,finding:{run_id:'r2',status:'ok'},browser:{claude:'ok',chatgpt:'ok'},sources:src('done','done',1,1),
      items:[...list.items,item({key:'chatgpt:account:pricing',name:'pricing-answers',description:'Answer pricing questions.',from:'chatgpt',from_label:'ChatGPT',source:'chatgpt.com, your account'})]};res.end(JSON.stringify(list));return}
-   if(action==='skill_import_status'){list={...list,finding:{run_id:'r1',status:'ok'},browser:{claude:'ok',chatgpt:'signed_out'},
+   if(action==='skill_import_status'){list={...list,finding:{run_id:'r1',status:'ok'},browser:{claude:'ok',chatgpt:'signed_out'},sources:src('done','signed_out',1),
      items:[...list.items,item({key:'claude:account:follow-ups',name:'follow-ups',description:'Chase replies that are late.',source:'claude.ai, your account',url:'https://claude.ai/customize/skills',recommended:true,why:'You get many follow-up cards'})]};
      res.end(JSON.stringify(list));return}
    if(action==='skill_import_read'){const found=list.items.find(i=>i.key===args.key);res.end(JSON.stringify({...found,body:'# Steps\n<b>not bold</b>\n1. Run scripts/build.py',original:'',sha:'abc',installable:found.script_count>0&&!found.blocked}));return}
@@ -60,9 +61,9 @@ const fits=page=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWi
 const shots=process.env.SCREENSHOTS_DIR;if(shots)await mkdir(shots,{recursive:true});
 try{
  browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
- for(const width of [390,1280]){
-  list={...list,token:'tok1',items,finding:{run_id:'r1',status:'running'},browser:{}};calls.length=0;skills={...skills,skills:[]};
-  const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage();
+ for(const [width,theme] of [[390,'dark'],[1280,'light'],[390,'light'],[1280,'dark']]){
+  list={...list,token:'tok1',items,finding:{run_id:'r1',status:'running'},browser:{},sources:src('looking','looking')};calls.length=0;skills={...skills,skills:[]};
+  const context=await browser.newContext({viewport:{width,height:900},colorScheme:theme}),page=await context.newPage();
   await context.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
   page.on('pageerror',e=>errors.push(e.message));
   await page.goto('http://127.0.0.1:'+server.address().port);
@@ -88,24 +89,34 @@ try{
   assert.equal(await pdf.locator('input').isDisabled(),true);
   assert.match(await pdf.textContent(),/Can't import: its licence doesn't allow it/);
   assert.match(await page.locator('[data-import="chatgpt:~/.codex/skills/report"]').textContent(),/Needs its 1 script/);
-  assert.match(await page.locator('#import-status').textContent(),/Looking in your claude\.ai and ChatGPT accounts/);
+  // Each place it looks has its own state, a spinner only on the ones still being read, and the list says it is
+  // what has come in so far.
+  assert.deepEqual(await page.locator('#import-progress .import-src').allTextContents(),['✓This computer 129 found','claude.ai looking…','ChatGPT looking…']);
+  assert.equal(await page.locator('#import-progress .spin').count(),2);
+  assert.match(await page.locator('#import-status').textContent(),/^Showing what’s in so far\. More can still come in\.$/);
+  if(shots){await page.locator('#import-body').evaluate(b=>b.scrollTop=0);await page.locator('#skill-import').screenshot({path:`${shots}/skills-import-looking-${width}-${theme}.png`});}
   assert.ok(await fits(page),'import list fits at '+width);
   // The accounts turn ends: its skill joins the list, and a signed-out site says what to do.
   await page.locator('[data-import="claude:account:follow-ups"]').waitFor({timeout:9000});
   assert.match(await page.locator('#import-signin').textContent(),/Sign in to ChatGPT.*signed out of ChatGPT/);
+  // Done: no spinner and no "looking" left; each place says what it found, or plainly why it couldn't.
+  assert.deepEqual(await page.locator('#import-progress .import-src').allTextContents(),['✓This computer 129 found','✓claude.ai 1 found','ChatGPT not signed in']);
+  assert.equal(await page.locator('#import-progress .spin').count(),0);
+  assert.equal(await page.locator('#import-status').textContent(),'Found 130 skills, 2 picked for your work.');
+  if(shots){await page.locator('#import-body').evaluate(b=>b.scrollTop=0);await page.locator('#skill-import').screenshot({path:`${shots}/skills-import-done-${width}-${theme}.png`});}
   assert.ok(calls.some(c=>c.action==='skill_import_status'&&c.args.token==='tok1'));
   // Search finds one in a closed group.
   await page.locator('#import-search').fill('vendor-skill-42');
   assert.deepEqual(await page.locator('#import-list [data-import] strong').allTextContents(),['vendor-skill-42']);
   await page.locator('#import-search').fill('');
-  if(shots)await page.locator('#skill-import').screenshot({path:`${shots}/skills-import-${width}.png`});
+  if(shots)await page.locator('#skill-import').screenshot({path:`${shots}/skills-import-${width}-${theme}.png`});
   // Read: what would come in, shown as text; a skill that needs its scripts offers OpenClaw's install instead.
   await page.locator('[data-import-read="chatgpt:~/.codex/skills/report"]').click();
   await page.locator('#skill-look[open]').waitFor();
   assert.equal(await page.locator('#skill-look-body b').count(),0);
   assert.match(await page.locator('#skill-look-notes').textContent(),/It needs its 1 script \(scripts\/build\.py\)/);
   assert.ok(await page.locator('#skill-look').evaluate(d=>d.getBoundingClientRect().right<=innerWidth));
-  if(shots)await page.locator('#skill-look').screenshot({path:`${shots}/skills-import-read-${width}.png`});
+  if(shots)await page.locator('#skill-look').screenshot({path:`${shots}/skills-import-read-${width}-${theme}.png`});
   await page.locator('[data-import-install]').click();
   await page.locator('#notice',{hasText:'Installed in OpenClaw with its scripts'}).waitFor();
   assert.deepEqual(calls.find(c=>c.action==='skill_import_install').args,{token:'tok1',key:'chatgpt:~/.codex/skills/report',sha:'abc'});
@@ -114,10 +125,11 @@ try{
   await page.locator('[data-import-signin="chatgpt"]').click();
   await page.locator('#signin-dialog[open] #signin-code-row:not([hidden])').waitFor();
   assert.match(await page.locator('#signin-title').textContent(),/Sign in to ChatGPT/);assert.match(await page.locator('#signin-code-help').textContent(),/Sent to j•••@example\.com/);
-  if(shots)await page.locator('#signin-dialog').screenshot({path:`${shots}/skills-import-signin-${width}.png`});
+  if(shots)await page.locator('#signin-dialog').screenshot({path:`${shots}/skills-import-signin-${width}-${theme}.png`});
   await page.locator('#signin-code').fill('123456');
   await page.locator('#signin-go').click();
   await page.locator('[data-import="chatgpt:account:pricing"]').waitFor({timeout:9000});
+  assert.deepEqual(await page.locator('#import-progress .import-src').allTextContents(),['✓This computer 129 found','✓claude.ai 1 found','✓ChatGPT 1 found']);
   assert.equal(await page.locator('#signin-dialog[open]').count(),0);
   assert.deepEqual(calls.find(c=>c.action==='skill_import_signin').args,{site:'chatgpt'});
   assert.deepEqual(calls.find(c=>c.action==='skill_import_find'&&c.args.token).args,{token:'tok1',sites:['chatgpt']});
