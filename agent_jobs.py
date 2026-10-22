@@ -54,7 +54,7 @@ URL = re.compile(r'https?://[^\s<>()"\'`\]]+')
 SCHEMA = '''CREATE TABLE IF NOT EXISTS agent_jobs(id TEXT PRIMARY KEY,suggestion_id TEXT NOT NULL,tool TEXT NOT NULL,place TEXT NOT NULL,
   status TEXT NOT NULL,brief TEXT NOT NULL,asks TEXT,session_id TEXT,url TEXT,progress TEXT,summary TEXT,diff TEXT,files TEXT,
   error TEXT,error_kind TEXT,turns INTEGER NOT NULL DEFAULT 1,outcome TEXT,token_hash TEXT,created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,draft_updated INTEGER);
+  updated_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,draft_updated INTEGER,answers TEXT);
 CREATE INDEX IF NOT EXISTS agent_jobs_card ON agent_jobs(suggestion_id,created_at);'''
 
 
@@ -127,7 +127,8 @@ def brief_for(card, drafts=(), links=(), files=(), messages=()):
     if drafts:
         lines += [f'If you rewrite the message prepared above, save only its new text (no To or Subject lines) in {DRAFT_FILE}: '
                   'it replaces the draft on the card, which I check and send myself.', '']
-    lines += ['Done looks like: a short summary of what you did and found, with any files you made in this folder.', '',
+    lines += ['Done looks like: a short summary of what you did and found, with any files you made in this folder. Start with the answer '
+              'or the finding itself; don\'t list the files you saved or say what you didn\'t send, as I see your files myself.', '',
               'Leave anything that sends, publishes, pays or submits for me: prepare it and say what is left.']
     return '\n'.join(lines).strip()[:BRIEF_MAX]
 
@@ -675,8 +676,11 @@ class AgentJobs:
         self.procs, self.lock = {}, threading.Lock()
         with self.connect() as db:
             db.executescript(SCHEMA)
-            if 'draft_updated' not in {r[1] for r in db.execute('PRAGMA table_info(agent_jobs)')}:
+            have = {r[1] for r in db.execute('PRAGMA table_info(agent_jobs)')}
+            if 'draft_updated' not in have:
                 db.execute('ALTER TABLE agent_jobs ADD COLUMN draft_updated INTEGER')
+            if 'answers' not in have:  # each turn's answer, so the card's chat shows every reply (older jobs only kept the latest)
+                db.execute('ALTER TABLE agent_jobs ADD COLUMN answers TEXT')
 
     # -- what the dashboard shows
     def tools(self):
@@ -1009,11 +1013,21 @@ class AgentJobs:
         if files is None:
             files, diff = self.changes(job_id)
         updated = self.take_draft(job_id, files)
+        summary, at = str(summary or 'Done, without a summary.')[:SUMMARY_MAX], now()
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT answers FROM agent_jobs WHERE id=? AND status IN ('running','waiting','sent')", (job_id,)).fetchone()
+            if not row:
+                return
+            try:
+                answers = json.loads(row['answers'] or '[]')
+            except ValueError:
+                answers = []
+            answers = (answers if isinstance(answers, list) else []) + [{'at': at, 'summary': summary, 'files': [f['path'] for f in files]}]
             db.execute("UPDATE agent_jobs SET status='result',session_id=COALESCE(?,session_id),summary=?,files=?,diff=?,progress=NULL,"
-                       "error=NULL,error_kind=NULL,draft_updated=?,updated_at=?,finished_at=? WHERE id=? AND status IN ('running','waiting','sent')",
-                       (session, str(summary or 'Done, without a summary.')[:SUMMARY_MAX], json.dumps(files), diff or None,
-                        1 if updated else None, now(), now(), job_id))
+                       "error=NULL,error_kind=NULL,draft_updated=?,updated_at=?,finished_at=?,answers=? WHERE id=? AND status IN ('running','waiting','sent')",
+                       (session, summary, json.dumps(files), diff or None, 1 if updated else None, at, at,
+                        json.dumps(answers[-20:], ensure_ascii=False), job_id))
 
     def take_draft(self, job_id, files):
         """A message the job rewrote (draft.md, made or changed this turn) becomes the card's draft. The owner still
