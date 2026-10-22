@@ -390,7 +390,7 @@ class SourceError(Exception):
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
 CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel', 'connect_remove', 'connect_scope')
-OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature'}
+OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'graph_role', 'graph_rename', 'graph_relation', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature', 'set_voice', 'unmerge_fact'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_handoff_mine', 'fleet_split', 'fleet_split_dismiss',
                          'fleet_split_adjust', 'task_import'}
@@ -655,6 +655,17 @@ ROLES_PEOPLE = 15       # closest people without a role one roles turn names
 ROLES_PAGE = 3
 PROFILE_WEIGHTS = {'gmail.message': 2}  # drafts are mostly email, so email gets two turns per round
 OWN_KINDS = {'gmail.message': 'email', 'slack.message': 'Slack', 'whatsapp.message': 'WhatsApp', 'linkedin.message': 'LinkedIn', 'x.dm': 'X DM'}
+# How the owner writes, per channel. A voice is one short line; All holds what goes for every channel.
+VOICE_CHANNELS = ('All', 'Email', 'Slack', 'WhatsApp', 'LinkedIn', 'X DM')
+VOICE_CHARS = 300
+VOICE_MAX = 10
+VOICE_EXAMPLES = 6        # the owner's own recent messages a draft gets to match, same conversation first
+DRAFT_EVENT_KINDS = {'email': 'gmail.message', 'slack': 'slack.message', 'whatsapp': 'whatsapp.message', 'linkedin': 'linkedin.message', 'x': 'x.dm'}
+EVENT_CHANNELS = {kind: 'Email' if name == 'email' else name for kind, name in OWN_KINDS.items()}
+ELSEWHERE_DAYS = 3        # the owner's own message in the draft's conversation this soon after it was ready replaced the draft
+FACTS_ALL_UNDER = 1200  # while what was learned is this short, every preparation gets all of it
+FACTS_TOP = 8
+FACTS_FLOOR = 0.3          # cosine; facts unrelated to a card mostly score 0.1 to 0.35 against it
 # When an open promise is checked without a date: the owner's own after 3 days, someone else's after a week.
 PROMISE_CHECK_DAYS = {'mine': 3, 'theirs': 7}
 PROMISE_CARDS_PER_DAY = 5
@@ -2035,10 +2046,20 @@ class Store:
                 db.execute('ALTER TABLE suggestions ADD COLUMN outcome TEXT')
             if 'kind' not in {r['name'] for r in db.execute('PRAGMA table_info(facts)')}:
                 db.execute("ALTER TABLE facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact'")
+            if 'merged_into' not in {r[1] for r in db.execute('PRAGMA table_info(facts)')}:  # condensed: 'fact:<id>' or 'voice:<channel>'
+                db.execute('ALTER TABLE facts ADD COLUMN merged_into TEXT')
             # What each Change note was: a style fix, a missing fact, keep going, or a new ask.
             db.execute('CREATE TABLE IF NOT EXISTS note_kinds(decision_id TEXT PRIMARY KEY,suggestion_id TEXT NOT NULL,kind TEXT NOT NULL,source TEXT NOT NULL,created_at TEXT NOT NULL)')
             # Changes to how cards and drafts are made, shown on the hit-rate chart.
             db.execute('CREATE TABLE IF NOT EXISTS rule_changes(id INTEGER PRIMARY KEY,at TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,ref TEXT)')
+            # How the owner writes, one short line per channel (and All): learned from their style notes, their edits
+            # and their own messages, editable in Settings. Like facts, what was learned, not what messages say.
+            db.execute('CREATE TABLE IF NOT EXISTS voices(channel TEXT PRIMARY KEY,text TEXT NOT NULL,source TEXT NOT NULL,ref TEXT,updated_at TEXT NOT NULL)')
+            # What a fact means, to pick the ones a task needs (when embeddings are on).
+            db.execute('CREATE TABLE IF NOT EXISTS fact_vectors(fact_id INTEGER PRIMARY KEY,model TEXT NOT NULL,vector BLOB NOT NULL)')
+            # Offered to one review once: an edit (or the owner's own reply instead of the draft) by its id,
+            # an unlearned style note as 'note:<decision id>', and the condense pass as 'condense:<date>'.
+            db.execute('CREATE TABLE IF NOT EXISTS edits_offered(edit_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,offered_at TEXT NOT NULL)')
             # Emails offered to a review as possibly slipped, so each is offered once.
             db.execute('CREATE TABLE IF NOT EXISTS slipped(event_id INTEGER PRIMARY KEY,kind TEXT NOT NULL,run_id TEXT,offered_at TEXT NOT NULL)')
             # The service's own errors per code location and day: where, and the latest message with anything
@@ -3665,12 +3686,12 @@ class Store:
             edits = {}
             for r in db.execute('SELECT e.*,s.title FROM draft_edits e JOIN suggestions s ON s.id=e.suggestion_id WHERE e.created_at>=? ORDER BY e.created_at', (since,)):
                 first = edits.setdefault(r['suggestion_id'], {'title': r['title'], 'before': r['before_body'], 'before_subject': r['before_subject'], 'at': r['created_at']})
-                first.update(after=r['after_body'], after_subject=r['after_subject'], at=r['created_at'])
+                first.update(after=r['after_body'], after_subject=r['after_subject'], at=r['created_at'], kind=r['kind'], source=r['source'])
             edited_revisions = {r[0] for r in db.execute('SELECT new_revision FROM draft_edits')}
             # As is: no edit in the dashboard and no Change or Try again before the send.
             # A note that only said keep going or asked for something else didn't change the draft.
             # The drafting rules last changed: a saved draft rule, or an edit to PREPARATION.md.
-            rules_at = db.execute("SELECT max(at) FROM rule_changes WHERE kind='draft_rule' OR (kind='file' AND text='PREPARATION.md edited')").fetchone()[0]
+            rules_at = db.execute("SELECT max(at) FROM rule_changes WHERE kind IN ('draft_rule','voice') OR (kind='file' AND text='PREPARATION.md edited')").fetchone()[0]
             sends = [(r['updated_at'], bool(r['revision'] in edited_revisions or r['changed'])) for r in db.execute(
                 "SELECT j.revision,j.updated_at,EXISTS(SELECT 1 FROM decisions d LEFT JOIN note_kinds k ON k.decision_id=d.id WHERE d.suggestion_id=j.suggestion_id AND d.choice='other' "
                 "AND coalesce(k.kind,'') NOT IN ('continue','new_ask') AND d.source IN ('telegram','dashboard') AND d.created_at<j.created_at) changed "
@@ -3777,40 +3798,93 @@ class Store:
             lines += ['Dismissed within minutes, without a note (not worth their time):'] + [f'- {t}' for t in b['quick_dismissed'][:10]]
         return '\n'.join(lines)
 
-    def draft_edits_text(self, limit=4, chars=500):
-        """Recent drafts the owner rewrote before sending, for the next drafts."""
+    def draft_edits_text(self, limit=4, chars=500, kinds=None):
+        """Recent drafts the owner rewrote before sending (or answered themselves instead), for the next drafts:
+        only those on the given channels (draft kinds) when given, since email edits say little about a chat."""
         clip = lambda v: v if len(v) <= chars else v[:chars] + '…'
         out = []
-        for e in self.behaviour()['edits'][:limit]:
-            subject = f"\n  Subject: {e['before_subject']} → {e['after_subject']}" if e['before_subject'] != e['after_subject'] else ''
-            out.append(f"- {e['title']}{subject}\n  Your draft: {clip(e['before'])}\n  The owner changed it to: {clip(e['after'])}")
+        for e in [e for e in self.behaviour()['edits'] if kinds is None or e['kind'] in kinds][:limit]:
+            subject = f"\n  Subject: {e['before_subject']} → {e['after_subject']}" if e['before_subject'] != e['after_subject'] and e['after_subject'] else ''
+            changed = 'They wrote this themselves instead' if e['source'] == 'elsewhere' else 'The owner changed it to'
+            out.append(f"- {e['title']}{subject}\n  Your draft: {clip(e['before'])}\n  {changed}: {clip(e['after'])}")
         return '\n'.join(out)
 
-    def remember_fact(self, text, decision_id, kind='fact'):
-        """Keep a lasting fact from one of the owner's own written notes, so later reviews and preparations use it."""
+    def remember_fact(self, text, decision_id, kind='fact', replaces=None):
+        """Keep a lasting fact from one of the owner's own written notes, so later reviews and preparations use it.
+        With replaces (ids of facts and rules) it condenses: the new one says what those said, the newer winning where
+        they disagree, and they stay behind it as history the owner can restore (unmerge_fact)."""
         text = ' '.join(str(text or '').split())
         if not 5 <= len(text) <= 240:
             raise ValueError('A fact is one short sentence (5-240 characters)')
         if kind not in FACT_KINDS:
-            raise ValueError('kind is fact (true about the world) or draft (how the owner wants drafts written)')
+            raise ValueError('kind is fact (true about the world), draft (how a kind of task is done) or voice (how the owner writes on one channel, with channel)')
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            note = db.execute("SELECT suggestion_id,feedback FROM decisions WHERE id=? AND source IN ('telegram','dashboard') AND feedback!='' AND id NOT IN (SELECT decision_id FROM decision_annotations)", (decision_id,)).fetchone()
+            originals = self.replaced_facts(db, replaces)
+            if originals:  # condensing: the merged fact comes from the newest note behind them
+                decision_id = originals[-1]['decision_id']
+                note = {'suggestion_id': originals[-1]['suggestion_id']}
+            else:
+                note = db.execute("SELECT suggestion_id,feedback FROM decisions WHERE id=? AND source IN ('telegram','dashboard') AND feedback!='' AND id NOT IN (SELECT decision_id FROM decision_annotations)", (decision_id,)).fetchone()
             if not note:
                 raise ValueError('Facts must come from one of the owner’s own written notes: give that decision_id')
-            removed = db.execute('SELECT id,text FROM facts WHERE decision_id=? AND removed_at IS NOT NULL',(decision_id,)).fetchall()
-            tombstone = next((r for r in removed if ' '.join(r['text'].casefold().split()) == text.casefold()),None)
-            if tombstone:
-                return {'id':tombstone['id'],'suppressed':True}
-            existing = db.execute('SELECT id FROM facts WHERE removed_at IS NULL AND kind=? AND lower(text)=lower(?)', (kind, text)).fetchone()
-            if existing:
+            if not originals:
+                removed = db.execute('SELECT id,text FROM facts WHERE decision_id=? AND removed_at IS NOT NULL AND merged_into IS NULL',(decision_id,)).fetchall()
+                tombstone = next((r for r in removed if ' '.join(r['text'].casefold().split()) == text.casefold()),None)
+                if tombstone:
+                    return {'id':tombstone['id'],'suppressed':True}
+            merging = {o['id'] for o in originals}
+            existing = next((r for r in db.execute('SELECT id FROM facts WHERE removed_at IS NULL AND kind=? AND lower(text)=lower(?)', (kind, text)) if r['id'] not in merging), None)
+            if existing and not originals:
                 return {'id': existing['id'], 'duplicate': True}
-            if db.execute('SELECT count(*) FROM facts WHERE removed_at IS NULL').fetchone()[0] >= 80:
+            if not existing and db.execute('SELECT count(*) FROM facts WHERE removed_at IS NULL').fetchone()[0] - len(originals) >= 80:
                 raise ValueError('Too many facts; the owner can remove old ones on the dashboard')
-            cur = db.execute('INSERT INTO facts(text,decision_id,suggestion_id,created_at,kind) VALUES(?,?,?,?,?)', (text, decision_id, note['suggestion_id'], now(), kind))
-            if kind == 'draft':
-                db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'draft_rule',?,?)", (now(), 'Draft rule: ' + text, str(cur.lastrowid)))
-            return {'id': cur.lastrowid}
+            if existing:  # condensed into one that already says it
+                fact_id = existing['id']
+            else:
+                fact_id = db.execute('INSERT INTO facts(text,decision_id,suggestion_id,created_at,kind) VALUES(?,?,?,?,?)', (text, decision_id, note['suggestion_id'], now(), kind)).lastrowid
+                if kind == 'draft':
+                    db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'draft_rule',?,?)", (now(), 'Draft rule: ' + text, str(fact_id)))
+            if originals:
+                self.merge_originals(db, originals, 'fact:' + str(fact_id), text)
+                return {'id': fact_id, 'merged': len(originals)}
+            return {'id': fact_id}
+
+    @staticmethod
+    def replaced_facts(db, replaces):
+        """The current facts and rules a condensed one replaces, oldest first."""
+        if replaces in (None, '', []):
+            return []
+        if not isinstance(replaces, (list, tuple)) or not 1 <= len(replaces) <= 20:
+            raise ValueError('replaces is a list of the ids of the facts or rules this one replaces')
+        try:
+            ids = sorted({int(i) for i in replaces})
+        except (TypeError, ValueError):
+            raise ValueError('replaces is a list of fact ids') from None
+        rows = [dict(r) for r in db.execute('SELECT id,text,kind,decision_id,suggestion_id,created_at FROM facts WHERE removed_at IS NULL AND id IN (' +
+                                             ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)]
+        if len(rows) != len(ids):
+            raise ValueError('replaces names a fact that is not current (removed or merged already)')
+        return rows
+
+    @staticmethod
+    def merge_originals(db, originals, into, text):
+        db.executemany('UPDATE facts SET removed_at=?,merged_into=? WHERE id=?', [(now(), into, o['id']) for o in originals])
+        db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'condense',?,?)",
+                   (now(), f'Condensed {len(originals)} note' + ('' if len(originals) == 1 else 's') + ' into: ' + text[:200], into))
+
+    def unmerge_fact(self, fact_id=None, channel=None):
+        """Undo a condense: the notes behind a merged fact (or a channel's voice) come back as they were; a merged fact goes."""
+        into = 'voice:' + voice_channel(channel) if channel else 'fact:' + str(int(fact_id))
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            back = db.execute('UPDATE facts SET removed_at=NULL,merged_into=NULL WHERE merged_into=?', (into,)).rowcount
+            if not back:
+                raise ValueError('Nothing was merged into that')
+            if not channel:
+                db.execute('UPDATE facts SET removed_at=? WHERE id=? AND removed_at IS NULL', (now(), int(fact_id)))
+            db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'condense',?,?)", (now(), f'Undid a condense: {back} note' + ('' if back == 1 else 's') + ' back', into))
+        return {'restored': back}
 
     def notes_to_learn(self, days=7, limit=10):
         """Recent notes the owner wrote on a card without a Change (a Not needed reason, a note on Mark done or Snooze):
@@ -3841,6 +3915,271 @@ class Store:
     def facts_text(self, limit=3000, kind='fact'):
         text = '\n'.join('- ' + f['text'] for f in self.facts() if f['kind'] == kind)
         return text if len(text) <= limit else text[:limit] + '\n…'
+
+    def facts_for(self, suggestion_id, kind='fact', settings=None, limit=3000, all_under=FACTS_ALL_UNDER, top=FACTS_TOP, floor=FACTS_FLOOR):
+        """The facts (or draft rules) a preparation needs, not everything learned: all of them while they are few;
+        else the ones learned on this card plus those closest in meaning to it (embeddings), else the newest."""
+        facts = [f for f in self.facts() if f['kind'] == kind]
+        if sum(len(f['text']) + 3 for f in facts) <= all_under:
+            return self.facts_text(limit, kind)
+        own = [f for f in facts if f['suggestion_id'] == suggestion_id]
+        ranked = None
+        if settings:
+            try:
+                ranked = self.rank_facts(suggestion_id, facts, settings)
+            except Exception as error:  # the embedding server is down: the newest instead
+                LOG.error('fact ranking error=%s', type(error).__name__)
+        if ranked is None:
+            picked = own + [f for f in reversed(facts) if f not in own]
+        else:
+            picked = own + [f for score, f in ranked if score >= floor and f not in own][:top]
+        out, size = [], 0
+        for f in picked:
+            if size + len(f['text']) + 3 > limit:
+                break
+            out.append('- ' + f['text']); size += len(f['text']) + 3
+        return '\n'.join(out)
+
+    def rank_facts(self, suggestion_id, facts, settings, timeout=15):
+        """[(similarity, fact)] best first, between each fact and what this card is about (its title, text and latest note)."""
+        key = f"{settings.get('model', '')}:{int(settings.get('dims', 256))}"
+        with self.connect() as db:
+            card = db.execute('SELECT title,body FROM suggestions WHERE id=?', (suggestion_id,)).fetchone()
+            note = db.execute("SELECT feedback FROM decisions WHERE suggestion_id=? AND feedback!='' ORDER BY created_at DESC LIMIT 1", (suggestion_id,)).fetchone()
+            stored = {r['fact_id']: embeddings.unpack(r['vector']) for r in db.execute('SELECT fact_id,vector FROM fact_vectors WHERE model=?', (key,))}
+        if not card:
+            return None
+        missing = [f for f in facts if f['id'] not in stored]
+        texts = [embeddings.document('none', f['text']) for f in missing]
+        texts.append(embeddings.document(card['title'], (card['body'] or '') + (' ' + note['feedback'] if note else '')))
+        vectors = embeddings.embed(settings, texts, timeout)
+        if missing:
+            with self.connect() as db:
+                db.executemany('INSERT OR REPLACE INTO fact_vectors(fact_id,model,vector) VALUES(?,?,?)',
+                               [(f['id'], key, embeddings.pack(v)) for f, v in zip(missing, vectors)])
+            stored.update({f['id']: v for f, v in zip(missing, vectors)})
+        asked = vectors[-1]
+        return sorted(((embeddings.cosine(asked, stored[f['id']]), f) for f in facts), key=lambda x: -x[0])
+
+    def condense_text(self, run_id=None, every_hours=20, least=6):
+        """Everything learned, with ids, for a review to condense once in a while: when the list changed since the last pass."""
+        with self.connect() as db:
+            last = db.execute("SELECT max(offered_at) FROM edits_offered WHERE edit_id LIKE 'condense:%'").fetchone()[0]
+            facts = [dict(r) for r in db.execute('SELECT id,kind,text,created_at FROM facts WHERE removed_at IS NULL ORDER BY kind,id')]
+            if len(facts) < least or (last and (max(f['created_at'] for f in facts) <= last or
+                                                dt.datetime.fromisoformat(now()) - dt.datetime.fromisoformat(last) < dt.timedelta(hours=every_hours))):
+                return ''
+            if run_id:
+                db.execute('INSERT OR REPLACE INTO edits_offered(edit_id,run_id,offered_at) VALUES(?,?,?)', ('condense:' + now()[:10], run_id, now()))
+        label = {'fact': 'fact', 'draft': 'draft rule'}
+        return '\n'.join(f"- id {f['id']} ({label.get(f['kind'], f['kind'])}): {f['text']}" for f in facts)
+
+    def style_notes_to_learn(self, run_id=None, days=30, limit=6, chars=300):
+        """The owner's style notes (how a draft should have been written) that no fact, rule or voice came from yet, each offered once."""
+        since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+        with self.connect() as db:
+            rows = db.execute("SELECT d.id,d.feedback,s.title FROM note_kinds k JOIN decisions d ON d.id=k.decision_id JOIN suggestions s ON s.id=d.suggestion_id "
+                              "WHERE k.kind='style' AND d.feedback!='' AND d.created_at>=? AND d.id NOT IN (SELECT decision_id FROM facts) "
+                              "AND d.id NOT IN (SELECT decision_id FROM decision_annotations) "
+                              "AND 'decision:'||d.id NOT IN (SELECT ref FROM rule_changes WHERE kind='voice' AND ref IS NOT NULL) "
+                              "AND 'note:'||d.id NOT IN (SELECT edit_id FROM edits_offered) ORDER BY d.created_at DESC LIMIT ?", (since, limit)).fetchall()
+            if run_id:
+                db.executemany('INSERT OR IGNORE INTO edits_offered(edit_id,run_id,offered_at) VALUES(?,?,?)', [('note:' + str(r['id']), run_id, now()) for r in rows])
+        return '\n'.join(f"- \"{r['title']}\". They wrote: \"{r['feedback'][:chars]}\" (decision_id {r['id']})" for r in rows)
+
+    # How the owner writes, per channel: one short line each, learned from their style notes, edits and own messages.
+    def voices(self, db=None):
+        with contextlib.nullcontext(db) if db else self.connect() as db:
+            rows = [dict(r) for r in db.execute('SELECT channel,text,source,updated_at FROM voices')]
+        order = {c: i for i, c in enumerate(VOICE_CHANNELS)}
+        return sorted(rows, key=lambda v: (order.get(v['channel'], len(order)), v['channel'].lower()))
+
+    def save_voice(self, channel, text, source, decision_id=None, edit_id=None, replaces=None):
+        """Set one channel's voice line. The assistant rewrites the whole line from one of the owner's own notes or
+        edits (never from a message someone else wrote); the owner edits it in Settings, and an empty line removes it."""
+        channel = voice_channel(channel)
+        text = ' '.join(str(text or '').split())
+        if not 2 <= len(channel) <= 30:
+            raise ValueError('channel is where the owner writes this way: ' + ', '.join(VOICE_CHANNELS) + ', or another channel\'s name')
+        if len(text) > VOICE_CHARS or (text and len(text) < 5) or (not text and source != 'owner'):
+            raise ValueError(f'A voice is one short line (5-{VOICE_CHARS} characters): the whole line for that channel')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            ref = None
+            originals = self.replaced_facts(db, replaces) if source != 'owner' else []
+            if originals and not (decision_id or edit_id):  # condensing style facts into this voice
+                decision_id = originals[-1]['decision_id']
+            if source != 'owner':
+                if decision_id:
+                    if not db.execute("SELECT 1 FROM decisions WHERE id=? AND source IN ('telegram','dashboard') AND feedback!=''", (decision_id,)).fetchone():
+                        raise ValueError('A voice is learned from one of the owner’s own written notes (decision_id) or their edit of a draft (edit_id)')
+                    ref = 'decision:' + str(decision_id)
+                elif edit_id and db.execute('SELECT 1 FROM draft_edits WHERE id=?', (edit_id,)).fetchone():
+                    ref = 'edit:' + str(edit_id)
+                else:
+                    raise ValueError('A voice is learned from one of the owner’s own written notes (decision_id) or their edit of a draft (edit_id)')
+            current = db.execute('SELECT text FROM voices WHERE channel=?', (channel,)).fetchone()
+            if not text:
+                if current:
+                    db.execute('DELETE FROM voices WHERE channel=?', (channel,))
+                    db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'voice',?,?)", (now(), f'Removed {channel} voice', None))
+                return {'channel': channel, 'removed': bool(current)}
+            if originals:
+                self.merge_originals(db, originals, 'voice:' + channel, f'{channel} voice')
+            if current and current['text'] == text:
+                return {'channel': channel, 'text': text, 'unchanged': True, **({'merged': len(originals)} if originals else {})}
+            if not current and db.execute('SELECT count(*) FROM voices').fetchone()[0] >= VOICE_MAX:
+                raise ValueError(f'At most {VOICE_MAX} voices: work this into an existing channel or All')
+            db.execute('INSERT INTO voices(channel,text,source,ref,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(channel) DO UPDATE SET '
+                       'text=excluded.text,source=excluded.source,ref=excluded.ref,updated_at=excluded.updated_at', (channel, text, source, ref, now()))
+            db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'voice',?,?)", (now(), f'{channel} voice: {text}', ref))
+        return {'channel': channel, 'text': text, **({'merged': len(originals)} if originals else {})}
+
+    def seed_voices(self):
+        """A profile run read the owner's own messages and described each channel: those lines become the voices of
+        channels that have none yet, once per run (a voice the owner removed stays removed until a new profile)."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            run = db.execute("SELECT run_id,draft FROM profile_runs WHERE kind='profile' AND status='ok' AND draft LIKE '%\"voices\"%' "
+                             'ORDER BY started_at DESC LIMIT 1').fetchone()
+            if not run or db.execute("SELECT 1 FROM rule_changes WHERE kind='voice' AND ref=?", ('profile:' + run['run_id'],)).fetchone():
+                return 0
+            try:
+                voices = json.loads(run['draft']).get('voices') or {}
+            except (ValueError, AttributeError):
+                voices = {}
+            added = 0
+            for channel, text in list(voices.items())[:VOICE_MAX] if isinstance(voices, dict) else ():
+                channel, text = voice_channel(channel), sentences(text, VOICE_CHARS)
+                if 2 <= len(channel) <= 30 and len(text) >= 5 and db.execute('SELECT count(*) FROM voices').fetchone()[0] < VOICE_MAX:
+                    added += db.execute("INSERT OR IGNORE INTO voices(channel,text,source,ref,updated_at) VALUES(?,?,'profile',?,?)",
+                                        (channel, text, 'profile:' + run['run_id'], now())).rowcount
+            db.execute("INSERT INTO rule_changes(at,kind,text,ref) VALUES(?,'voice',?,?)",
+                       (now(), f'Voices from your own messages: {added} channel' + ('' if added == 1 else 's'), 'profile:' + run['run_id']))
+        return added
+
+    def card_channels(self, suggestion_id, db):
+        """The channels a card's draft goes out on: its ready drafts first, then the messages it is about."""
+        row = db.execute('SELECT event_ids,next_action FROM suggestions WHERE id=?', (suggestion_id,)).fetchone()
+        if not row:
+            return [], []
+        drafts = [a for a in next_actions.actions(row['next_action']) if a.get('kind') in DRAFT_EVENT_KINDS] if row['next_action'] else []
+        events = [dict(e) for e in db.execute('SELECT e.id,e.account_id,e.kind,e.metadata FROM json_each(?) i JOIN events e ON e.id=i.value '
+                                              'WHERE e.deleted=0', (row['event_ids'],))]
+        kinds = [DRAFT_EVENT_KINDS[a['kind']] for a in drafts] + [e['kind'] for e in events if e['kind'] in EVENT_CHANNELS]
+        return list(dict.fromkeys(kinds)), events + [{'kind': DRAFT_EVENT_KINDS[a['kind']], 'account_id': a.get('account_id'),
+                                                     'metadata': {k: a[k] for k in ('thread_id', 'chat_id', 'conversation_id', 'channel_id') if a.get(k)}}
+                                                    for a in drafts]
+
+    def own_examples(self, suggestion_id, limit=VOICE_EXAMPLES, scan=200):
+        """The owner's own recent messages on the card's channel: in the same conversation first, then to the same
+        people, then on the same account. Real examples of how they write there, for the draft to match."""
+        ids = sorted(self.owner_user_ids)
+        with self.connect() as db:
+            db.execute('BEGIN')
+            kinds, events = self.card_channels(suggestion_id, db)
+            if not kinds:
+                return []
+            kind = kinds[0]
+            mine = [e for e in events if e['kind'] == kind]
+            meta = lambda e: e['metadata'] if isinstance(e['metadata'], dict) else json.loads(e['metadata'] or '{}')
+            conversations = {c for c in (conversation_of(kind, meta(e)) for e in mine) if c}
+            people = {a.lower() for e in mine for _, a in email.utils.getaddresses([str(meta(e).get(f) or '') for f in ('from', 'to', 'cc')]) if a}
+            people -= {str(a.get('email', '')).lower() for a in self.accounts}
+            accounts = {e.get('account_id') for e in mine}
+            predicate, params = own_predicate(kind, ids)
+            rows = db.execute(f'SELECT id,account_id,occurred_at,title,body,metadata FROM events WHERE deleted=0 AND kind=? AND ({predicate}) '
+                              'ORDER BY occurred_at DESC,id DESC LIMIT ?', (kind, *params, scan)).fetchall()
+        picked = []
+        for row in rows:
+            text = own_text(row['body'])
+            if len(text.split()) < 2 or PROFILE_SKIP.match(text):
+                continue
+            m = json.loads(row['metadata'] or '{}')
+            to = {a.lower() for _, a in email.utils.getaddresses([str(m.get(f) or '') for f in ('to', 'cc')]) if a}
+            rank = 0 if conversation_of(kind, m) in conversations else 1 if to & people else 2 if row['account_id'] in accounts else 3
+            names = [n or a.split('@')[0] for n, a in email.utils.getaddresses([str(m.get('to') or '')]) if a][:2]
+            picked.append((rank, len(picked), {'channel': EVENT_CHANNELS[kind], 'where': ('this conversation' if rank == 0 else
+                           'to ' + ', '.join(names) if names else str(m.get('chat_name') or m.get('channel_name') or '')[:60]),
+                           'text': clamp(text, 500 if kind == 'gmail.message' else 300)}))
+        picked.sort(key=lambda p: (p[0], p[1]))
+        return [p[2] for p in picked[:limit]]
+
+    def style_text(self, suggestion_id, chars=4000):
+        """What a draft for this card gets about how the owner writes: every channel's voice (this card's marked),
+        the owner's own recent messages there, and how they changed earlier drafts on that channel."""
+        with self.connect() as db:
+            kinds, _ = self.card_channels(suggestion_id, db)
+            voices = self.voices(db)
+        here = [EVENT_CHANNELS[k] for k in kinds]
+        parts = []
+        if voices:
+            parts.append('How the owner writes, per channel. A draft follows the line for the channel it goes out on, plus All; these lines '
+                         'come from the owner\'s own notes and messages and win over general tone notes elsewhere:\n' +
+                         '\n'.join(f"- {v['channel']}{' (this card)' if v['channel'] in here else ''}: {v['text']}" for v in voices))
+        examples = self.own_examples(suggestion_id)
+        if examples:
+            parts.append(f"The owner's own recent {examples[0]['channel']} messages, newest first. Match how these read (length, greeting, sign-off, "
+                         'language, capitals, punctuation, emoji, formality), not what they say:\n' +
+                         '\n'.join(f"- ({e['where']}) {e['text']}" if e['where'] else f"- {e['text']}" for e in examples))
+        edits = self.draft_edits_text(kinds=[k for k, v in DRAFT_EVENT_KINDS.items() if v in kinds] or None)
+        if edits:
+            parts.append(f"Earlier {here[0] + ' ' if here else ''}drafts the owner changed before sending, or answered themselves instead. Write the next drafts "
+                         'the way they ended up writing these (length, tone, what they cut or added):\n' + edits)
+        text = '\n\n'.join(parts)
+        return text if len(text) <= chars else text[:chars] + '\n…'
+
+    def learn_sent_elsewhere(self, days=ELSEWHERE_DAYS):
+        """A ready draft the owner didn't send from the card, because they wrote their own reply in that conversation
+        (in Gmail, WhatsApp, Slack…): what they wrote instead teaches the next drafts like an edit does."""
+        since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+        ids, learned = sorted(self.owner_user_ids), 0
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute("SELECT s.id,s.next_action,p.updated_at ready FROM suggestions s JOIN preparations p ON p.suggestion_id=s.id "
+                              "WHERE p.updated_at>=? AND s.next_action IS NOT NULL AND s.status IN ('prepared','completed') "
+                              "AND NOT EXISTS(SELECT 1 FROM action_jobs j WHERE j.suggestion_id=s.id AND j.status NOT IN ('cancelled','blocked')) "
+                              "AND NOT EXISTS(SELECT 1 FROM draft_edits d WHERE d.suggestion_id=s.id AND d.source='elsewhere')", (since,)).fetchall()
+            for row in rows:
+                draft = next((a for a in next_actions.actions(row['next_action']) if a.get('kind') in DRAFT_EVENT_KINDS), None)
+                if not draft or not (next_actions.draft_text(draft) or '').strip():
+                    continue
+                kind = DRAFT_EVENT_KINDS[draft['kind']]
+                _, events = self.card_channels(row['id'], db)
+                conversations = {c for c in (conversation_of(kind, e['metadata'] if isinstance(e['metadata'], dict) else json.loads(e['metadata'] or '{}'))
+                                             for e in events if e['kind'] == kind) if c}
+                if not conversations:
+                    continue
+                until = (dt.datetime.fromisoformat(row['ready']) + dt.timedelta(days=days)).isoformat()
+                predicate, params = own_predicate(kind, ids)
+                found = next((e for e in db.execute(f'SELECT id,title,body,metadata FROM events WHERE deleted=0 AND kind=? AND ({predicate}) '
+                                                    'AND occurred_at>? AND occurred_at<=? ORDER BY occurred_at,id LIMIT 50', (kind, *params, row['ready'], until))
+                              if conversation_of(kind, json.loads(e['metadata'] or '{}')) in conversations), None)
+                if not found:
+                    continue
+                text, before = own_text(found['body']), next_actions.draft_text(draft).strip()
+                if len(text.split()) < 2 or PROFILE_SKIP.match(text) or ' '.join(text.split()) == ' '.join(before.split()):
+                    continue
+                db.execute('INSERT INTO draft_edits(id,suggestion_id,old_revision,new_revision,kind,before_subject,before_body,after_subject,after_body,source,created_at) '
+                           "VALUES(?,?,?,?,?,?,?,?,?,'elsewhere',?)", (uuid.uuid4().hex, row['id'], draft.get('revision') or '', f"elsewhere:{found['id']}", draft['kind'],
+                                                                       draft.get('subject'), before, found['title'] if kind == 'gmail.message' else None, text, now()))
+                learned += 1
+        return learned
+
+    def edits_to_learn(self, run_id=None, limit=3, days=14, chars=350):
+        """Edits not offered to a review yet, each offered once, for it to fold lasting habits into that channel's voice."""
+        since = (dt.datetime.fromisoformat(now()) - dt.timedelta(days=days)).isoformat()
+        clip = lambda v: (v or '') if len(v or '') <= chars else v[:chars] + '…'
+        with self.connect() as db:
+            rows = db.execute('SELECT e.id,e.kind,e.source,e.before_body,e.after_body,s.title FROM draft_edits e JOIN suggestions s ON s.id=e.suggestion_id '
+                              'WHERE e.id NOT IN (SELECT edit_id FROM edits_offered) AND e.created_at>=? ORDER BY e.created_at DESC LIMIT ?', (since, limit)).fetchall()
+            if run_id:  # offered to this review: it's in the prompt
+                db.executemany('INSERT OR IGNORE INTO edits_offered(edit_id,run_id,offered_at) VALUES(?,?,?)', [(r['id'], run_id, now()) for r in rows])
+        return '\n'.join(f"- {EVENT_CHANNELS.get(DRAFT_EVENT_KINDS.get(r['kind']), r['kind'])}, \"{r['title']}\" (edit_id {r['id']})\n  Draft: {clip(r['before_body'])}\n  "
+                         + ('They wrote themselves instead: ' if r['source'] == 'elsewhere' else 'They changed it to: ') + clip(r['after_body']) for r in rows)
+
+    def voices_text(self):
+        return '\n'.join(f"- {v['channel']}: {v['text']}" for v in self.voices())
 
     def tag_note(self, suggestion_id, kind, db, source='assistant'):
         """Record what the Change note behind this preparation was. Returns False when there's no untagged note."""
@@ -4558,7 +4897,15 @@ class Store:
                 annotation=db.execute('SELECT status,reason,superseded_by FROM decision_annotations WHERE decision_id=?',(decision['id'],)).fetchone()
                 if annotation:
                     decision.update(annotation=dict(annotation),feedback='')
-            result['facts'] = [dict(r) for r in db.execute('SELECT id,text,suggestion_id,created_at FROM facts WHERE removed_at IS NULL ORDER BY created_at')]
+            # What was learned, newest first; a condensed one says how many notes it stands for (the owner can undo that).
+            merged = {r['merged_into']: r['n'] for r in db.execute('SELECT merged_into,count(*) n FROM facts WHERE merged_into IS NOT NULL GROUP BY 1')}
+            result['facts'] = [{**dict(r), 'merged': merged.get('fact:' + str(r['id']), 0)} for r in
+                               db.execute('SELECT id,text,suggestion_id,created_at,kind FROM facts WHERE removed_at IS NULL ORDER BY created_at DESC,id DESC')]
+            result['voices'] = [{**v, 'merged': merged.get('voice:' + v['channel'], 0)} for v in self.voices(db)]
+            last = db.execute("SELECT at FROM rule_changes WHERE kind='condense' AND text LIKE 'Condensed%' ORDER BY at DESC LIMIT 1").fetchone()
+            if last:  # the latest pass: every note merged that day
+                day = last['at'][:10]
+                result['condensed'] = {'at': last['at'], 'notes': db.execute("SELECT count(*) FROM facts WHERE merged_into IS NOT NULL AND substr(removed_at,1,10)=?", (day,)).fetchone()[0]}
             # Keep outstanding items visible even after a long completed history.
             result['suggestions'] = [dict(r) for r in db.execute("SELECT * FROM suggestions WHERE status NOT IN ('completed','rejected') OR id IN (SELECT id FROM suggestions WHERE status IN ('completed','rejected') ORDER BY created_at DESC LIMIT 100) ORDER BY created_at DESC")]
             # Written requests belong on the card too, even after preparation
@@ -5583,6 +5930,33 @@ def awaiting_key(event, owner_slack_ids=()):
     if event['kind'] in ('whatsapp.message', 'linkedin.message', 'x.dm') and not m.get('from_me') and (m.get('chat_id') or m.get('conversation_id')):
         return {**key, 'conversation': m.get('chat_id') or m['conversation_id'], 'sender': m.get('sender_id') or m.get('from') or ''}
     return None
+
+
+def voice_channel(name):
+    """A channel's name as voices keep it: the known ones in their usual spelling, any other as written."""
+    name = ' '.join(str(name or '').split())
+    known = {c.lower(): c for c in VOICE_CHANNELS} | {'x': 'X DM', 'mail': 'Email', 'e-mail': 'Email'}
+    return known.get(name.lower(), name[:30])
+
+
+def conversation_of(kind, m):
+    """The conversation a message belongs to: an email thread, a Slack channel or DM, a chat."""
+    key = m.get('thread_id') if kind == 'gmail.message' else m.get('channel_id') if kind == 'slack.message' else m.get('chat_id') or m.get('conversation_id')
+    return str(key) if key else None
+
+
+def own_predicate(kind, owner_slack_ids=()):
+    """SQL for "the owner wrote this" on one kind of message, with its parameters (same rule as own_message)."""
+    if kind == 'gmail.message':
+        return "instr(metadata,'\"SENT\"')>0", []
+    if kind == 'slack.message':
+        return f"json_extract(metadata,'$.user_id') IN ({','.join('?' for _ in owner_slack_ids)})", list(owner_slack_ids)
+    return "json_extract(metadata,'$.from_me')=1", []
+
+
+def own_text(body):
+    """What the owner wrote in a message, without the quoted history below it."""
+    return (body or '').split('[Quoted earlier messages', 1)[0].strip()
 
 
 def own_message(event, owner_slack_ids=()):
@@ -7164,7 +7538,7 @@ def finish_text(step):
     return ''
 
 
-def preparation_prompt(job, facts='', config=None, edits='', rules=''):
+def preparation_prompt(job, facts='', config=None, edits='', rules='', style=''):
     # The standing rules live in PREPARATION.md, which the plugin prepends to every preparation
     # session (outside the runner's message limit); this message carries only the job itself.
     j,sid=job['job_id'],job['suggestion_id']
@@ -7186,15 +7560,17 @@ For this job:
 - Attachments folder: {WORKSPACE}/data/assistant-attachments/{j}/
 - Save the result with assistant_signals prepare args suggestion_id={sid}, job_id={j}, body=<short result>, next_actions=[...], outcome and send_now:true only when the owner asked you to send it.
 - outcome:'done' only when the task itself is complete and nothing is left for the owner but to check it; outcome:'answered' when you only answered their question, explained or planned, and the task itself is still to do (the card then offers Do it again); outcome:'already_done' with no next_actions when it turns out to be done already or no longer needed; outcome:'your_step' with step:'submit' (or pay, book, sign, confirm, order, apply) when everything is ready but that final click is left for them, e.g. a form you filled in and didn't submit (the card says so and links to the page in this Machine's browser by itself; no link of your own needed); outcome:'needs_you' with needs:<the one thing they have to do, in a few words> otherwise (approve the send, sign in, choose); when that is a question for them, write needs as the question itself, ending in "?" (the card then leads with Answer). The card shows that status line itself, so the body doesn't repeat it. Finish what you can first: don't stop to ask about steps the rules already let you do.
-- When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card ("always…", signatures, formatting, tone with this kind of person) also becomes a draft rule: assistant_signals remember_fact args text=<the rule, general>, decision_id=<that note's decision>, kind=draft. A fact note that holds beyond this card goes in remember_fact as a fact.
+- When latest_feedback is a Change note, also give note_kind: style (how it was written), fact (something you didn't know), continue (keep going or finish the job) or new_ask (something else to do). A style note that holds beyond this card (how they write on a channel or with this kind of person: length, tone, greeting, sign-off, language, capitals, punctuation, links, formatting; "always…", "next time…", or what they asked on an earlier card) updates that channel's voice: assistant_signals remember_fact args kind=voice, channel=<the channel it is about: Email, Slack, WhatsApp, LinkedIn, X DM, another channel's name, or All when it holds everywhere>, text=<that channel's whole voice line, at most 300 characters: the current line with the note worked in and whatever it contradicts dropped>, decision_id=<that note's decision>. How a kind of task is done (what to include, where things go) is a draft rule instead: remember_fact kind=draft, text=<the rule, general>. A fact note that holds beyond this card goes in remember_fact as a fact.
 - When the owner's note means they want this task itself back later (remind me about it next week, later, on Tuesday), that is this card's snooze, not a reminder: save with outcome:'snoozed' and snooze_until:<their local date and time, e.g. 2026-10-27T09:00, or a date alone for their morning>, and a one-line body. The card leaves their list and comes back then. Do not also add an automation, cron job or reminder for it. A separate reminder about something else, or a recurring one, stays an automation. Their time zone is {getattr(local_tz(),'key','UTC')}; it is now {dt.datetime.fromisoformat(now()).astimezone(local_tz()).strftime('%a %Y-%m-%d %H:%M')} there.
 - Or record a blocker with assistant_signals preparation_blocked args suggestion_id={sid}, job_id={j}, reason=<one plain sentence>, details=<technical specifics>. Block only on what you truly can't know (their first-hand notes, a fact only they have, a call with no sensible default); a minor judgment call with an obvious sensible default you make yourself and name in one line of the result. When only the owner can unblock it, also give questions=[{{question:<one short plain question>, options:[<2-4 short choices, only when it is a clear choice>]}}] (at most 3). Each question must make sense on its own to someone who hasn't seen your work: plain words, what it is about and why it matters, no jargon or internal terms, e.g. {{question:'What did you notice when you tried OnePageCRM? A few lines on what you tried and what stood out are enough.'}}. The card shows them with quick picks and an Answer box. No paths, IDs or tool names in reason or questions.''' + owner_details(config) + (f'''
 
-Facts the owner told you earlier (true unless they say otherwise now):
+Facts the owner told you earlier that bear on this card (true unless they say otherwise now):
 {facts}''' if facts else '') + (f'''
 
-Draft rules from the owner's notes (follow them in every draft unless their note on this card says otherwise):
+Draft rules from the owner's notes that fit this card (follow them unless their note on this card says otherwise):
 {rules}''' if rules else '') + (f'''
+
+{style}''' if style else '') + (f'''
 
 Drafts the owner edited themselves before sending. Write the next drafts the way they ended up writing these (length, tone, what they cut or added):
 {edits}''' if edits else '')
@@ -8166,7 +8542,18 @@ class App:
             else:raise ValueError('Undo must come from the owner’s controls')
             return self.store.undo_merge(args['suggestion_id'],args['approval_id'],source)
         if name == 'remember_fact':
-            return self.store.remember_fact(args.get('text'), args.get('decision_id'), args.get('kind') or 'fact')
+            if args.get('kind') == 'voice':  # how the owner writes on one channel: the whole line, from their note or edit
+                return self.store.save_voice(args.get('channel'), args.get('text'), 'assistant', args.get('decision_id'), args.get('edit_id'), args.get('replaces'))
+            return self.store.remember_fact(args.get('text'), args.get('decision_id'), args.get('kind') or 'fact', args.get('replaces'))
+        if name == 'unmerge_fact':
+            if not owner_dashboard:
+                raise ValueError('Only the owner undoes a condense, on the dashboard')
+            return self.store.unmerge_fact(args.get('id'), args.get('channel'))
+        if name == 'set_voice':
+            if not owner_dashboard:
+                raise ValueError('Only the owner edits how they write, in Settings')
+            self.store.save_voice(args.get('channel'), args.get('text'), 'owner')
+            return {'voices': self.store.voices()}
         if name == 'looks_handled':
             return self.store.looks_handled(args['suggestion_id'], args.get('reason'), args.get('event_ids') or [])
         if name in ('push_subscribe', 'push_unsubscribe'):
@@ -9107,6 +9494,13 @@ class App:
         if row:
             job=dict(row);self.merge_effect(job,json.loads(job['payload']),json.loads(job['receipt']),job['operation'],next_actions.MergeTransport(self.config,restart_self))
 
+    def style_step(self):
+        """Every ten minutes: a finished profile's channel lines fill voices still empty, and a draft the owner
+        answered themselves instead of sending becomes a lesson for the next drafts."""
+        seeded, learned = self.store.seed_voices(), self.store.learn_sent_elsewhere()
+        if seeded or learned:
+            LOG.info('style learned voices=%s replies=%s', seeded, learned)
+
     def promise_step(self, limit=3):
         """Once a minute: close promises answered meanwhile, then turn the due ones that are still
         open into cards, prepared ahead when allowed. At most PROMISE_CARDS_PER_DAY a day. With reviews off
@@ -9154,12 +9548,16 @@ class App:
         return saved
 
     def action_worker(self):
-        promised = 0
+        promised = styled = 0
         while not self.stop.wait(3):
             if time.monotonic() - promised >= 60:
                 promised = time.monotonic()
                 try:self.promise_step()
                 except Exception as error:LOG.error('promise check error=%s',type(error).__name__)
+            if time.monotonic() - styled >= 600:
+                styled = time.monotonic()
+                try:self.style_step()
+                except Exception as error:LOG.error('style learning error=%s',type(error).__name__)
             try:self.action_step()
             except Exception as error:LOG.error('approved action error=%s',type(error).__name__)
             try:self.undo_step()
@@ -9271,7 +9669,12 @@ class App:
             with self.store.connect() as db:
                 job['ahead']=bool(db.execute('SELECT early FROM suggestions WHERE id=?',(job['suggestion_id'],)).fetchone()[0])
             self.store.note_rule_files(RULE_FILES)
-            request['message']=preparation_prompt(job,self.store.facts_text(),self.config,self.store.draft_edits_text(),self.store.facts_text(kind='draft'))
+            try:style=self.store.style_text(job['suggestion_id'])
+            except Exception as error:  # a draft without the owner's voice beats no preparation
+                LOG.error('style context error=%s',type(error).__name__);style=''
+            known=embeddings.settings(self.config)  # what was learned that this card needs, not all of it
+            request['message']=preparation_prompt(job,self.store.facts_for(job['suggestion_id'],'fact',known),self.config,'' if style else self.store.draft_edits_text(),
+                                                  self.store.facts_for(job['suggestion_id'],'draft',known),style)
             try:
                 lines=self.graph_lines(job['suggestion_id'])
                 if len(request['message'])+len(lines)<19000:request['message']+=lines  # the runner refuses over 20,000
@@ -9830,6 +10233,47 @@ class App:
             request['message'] = review_prompt(run['run_id'], [a['id'] for a in self.config['accounts']], self.store.preference_summary(), self.store.facts_text(),
                                                self.store.slipped(run['run_id']), self.store.promises_text(),
                                                self.store.unnamed_text(run['run_id']), self.store.role_text(run['run_id']), self.store.notes_to_learn())
+            try:  # drafts the owner rewrote, or answered themselves instead: lasting habits go into that channel's voice
+                lines = self.store.edits_to_learn()
+                if lines:
+                    voices = self.store.voices_text()
+                    block = ("\n\nDrafts the owner rewrote before sending, or answered themselves instead, shown once. Compare each draft with what they wrote. "
+                             "When the difference shows how they write on that channel beyond that one message (length, tone, greeting, sign-off, language, "
+                             "capitals, punctuation, emoji, formality), update that channel's voice: remember_fact kind=voice, channel, text=<the whole line, "
+                             "at most 300 characters, keeping what still holds>, edit_id. Skip differences in content or facts.\n"
+                             + (f"Current voices:\n{voices}\n" if voices else '') + lines)
+                    if len(request['message']) + len(block) < 18000:  # the runner refuses over 20,000
+                        request['message'] += block
+                        self.store.edits_to_learn(run['run_id'])
+            except Exception as error:
+                LOG.error('edits to learn error=%s', type(error).__name__)
+            try:  # style notes no voice or rule came from yet (older ones, or ones a preparation didn't keep)
+                lines = self.store.style_notes_to_learn()
+                if lines:
+                    block = ("\n\nNotes where the owner said how a draft should have been written, not learned from yet, shown once. When one holds beyond "
+                             "its card, work it into that channel's voice: remember_fact kind=voice, channel, text=<the whole line, at most 300 characters>, "
+                             "decision_id; how a kind of task is done is kind=draft. Skip notes that only fit that one message.\n" + lines)
+                    if len(request['message']) + len(block) < 18000:
+                        request['message'] += block
+                        self.store.style_notes_to_learn(run_id=run['run_id'])
+            except Exception as error:
+                LOG.error('style notes error=%s', type(error).__name__)
+            try:  # condense what was learned, now and then, so it stays short and doesn't contradict itself
+                lines = self.store.condense_text()
+                if lines:
+                    voices = self.store.voices_text()
+                    block = ("\n\nCondense what you've learned, conservatively. Everything current, with ids:\n" + lines
+                             + (f"\nVoices (how the owner writes per channel):\n{voices}" if voices else '') +
+                             "\nOnly merge notes that say the same thing, overlap, or contradict each other: remember_fact replaces=[their ids], "
+                             "text=<one sentence that keeps everything still true>, kind=fact or draft. Where they contradict, the newer one (higher id) wins. "
+                             "A note about how the owner writes on one channel goes into that channel's voice: remember_fact kind=voice, channel, "
+                             "text=<the whole voice line with it worked in>, replaces=[ids]. A note a newer one made outdated merges into the newer one. "
+                             "Never drop something nothing else still says, and leave a note alone when unsure. The originals stay as history and the owner can undo a merge.")
+                    if len(request['message']) + len(block) < 18000:
+                        request['message'] += block
+                        self.store.condense_text(run_id=run['run_id'])
+            except Exception as error:
+                LOG.error('condense error=%s', type(error).__name__)
             try:  # "There's a skill for this": installed skills that aren't ready here, while there is room this week
                 hint = self.skills.hint_prompt() if getattr(self, 'skills', None) else ''
                 if hint and len(request['message']) + len(hint) < 18500:  # the runner refuses over 20,000
@@ -10714,7 +11158,7 @@ class App:
                         return
                     if upload and request.get('action') not in UPLOAD_ACTIONS:
                         raise ValueError('Invalid request size')
-                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in CONNECT_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_login_choose','browser_logins','browser_login_forget','model_usage_refresh','model_reset','set_work_hours','set_signature','detect_signature')):
+                    if self.path != '/api/action' or (not internal and request['action'] not in FLEET_REQUEST_ACTIONS and request['action'] not in FRIEND_ACTIONS and request['action'] not in FAMILY_ACTIONS and request['action'] not in SKILL_ACTIONS and request['action'] not in CONNECT_ACTIONS and request['action'] not in ('decide','confirm_action','undo_merge','revise_draft','forget_fact','promise_close','graph_role','graph_rename','graph_relation','graph_warmup','graph_org_edit','graph_org_wrong','fleet_ask','fleet_decide','fleet_notice_decide','fleet_rule','fleet_take','fleet_meetings','fleet_free','fleet_brief','fleet_brief_hide','push_subscribe','push_unsubscribe','browser_focus','browser_login_open','browser_login_pages','browser_login_fill','browser_login_choose','browser_logins','browser_login_forget','model_usage_refresh','model_reset','set_work_hours','set_signature','detect_signature','set_voice','unmerge_fact')):
                         self.output(403, {'error': 'Operation is not available here'})
                         return
                     owner_key = getattr(app, 'owner_token', '')

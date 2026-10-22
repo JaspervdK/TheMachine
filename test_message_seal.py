@@ -518,6 +518,7 @@ class NothingOutsideTheSealedFields(unittest.TestCase):
             'fleet_notices.view': 'a Fleet notice', 'fleet_notices.reason': 'a reason code', 'fleet_splits.title': 'a meeting title',
             'graph_nodes.info': 'people and organisations', 'network_people.reasons': 'why someone is suggested',
             'faults.message': "an error's own message with anything private taken out (assistant.fault_message)",
+            'voices.text': 'how the owner writes on a channel, learned like a fact',
         }
         sealed = {f'{t}.{c}' for t, cs in message_seal.DERIVED.items() for c in cs} | {f'{t}.{c}' for t, c, _ in message_seal.DERIVED_JSON}
         sealed |= {'events.title', 'events.body', 'events.metadata'}

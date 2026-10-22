@@ -2,7 +2,7 @@
 installs and baking it into the product (`python3 learnings.py --database ...`, or the hosting agent's `learnings`
 command).
 
-In: feedback and the rules and facts learned from it, the owner's profile and notes (USER.md, MEMORY.md, memory/),
+In: feedback and the rules, facts and per-channel voices learned from it, the owner's profile and notes (USER.md, MEMORY.md, memory/),
 skills and proposals, how reviews, preparations and cards went (states, error codes, times), roles learned for people
 in counts, code faults, which sources are on and how they sync.
 Never: what messages say (subjects, bodies, metadata beyond counts, card text, drafts, tool results; see
@@ -28,8 +28,9 @@ TABLES = {
     'decisions': ('id', 'suggestion_id', 'choice', 'feedback', 'source', 'created_at'),
     'decision_annotations': ('decision_id', 'status', 'reason', 'superseded_by'),
     'note_kinds': ('decision_id', 'suggestion_id', 'kind', 'source', 'created_at'),
-    'facts': ('id', 'text', 'suggestion_id', 'created_at', 'removed_at'),
+    'facts': ('id', 'kind', 'text', 'suggestion_id', 'created_at', 'removed_at', 'merged_into'),
     'rule_changes': ('at', 'kind', 'text'),
+    'voices': ('channel', 'text', 'source', 'updated_at'),
     'draft_edits': ('suggestion_id', 'kind', 'source', 'created_at'),
     'deliveries': ('suggestion_id', 'status', 'error', 'updated_at', 'needs_edit'),
     'action_jobs': ('suggestion_id', 'status', 'source', 'error', 'created_at', 'updated_at', "json_extract(payload,'$.kind') AS kind"),

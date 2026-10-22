@@ -31,7 +31,7 @@ After setup, verify the provider in `openclaw models status` and test one small 
 |---|---|
 | **Reviews** | Long context: up to 120 signals per run, read in pages through the `assistant_signals` tool. Reliable tool calls and judgement: most signals deserve no card. |
 | **Do it** | Agentic work: many tool calls, the browser, files and commands, then a short result and a correct `next_actions` JSON (for example an email draft with exact recipients). |
-| **Drafts** | Writing in your voice. The service feeds your own edits of earlier drafts back as examples, so drafts improve as you edit them. |
+| **Drafts** | Writing in your voice, per channel. The service gives each draft your line for that channel, your own recent messages there and your edits of earlier drafts on it, so drafts improve as you edit them. |
 
 In practice: use a current frontier model with strong tool use as the primary. Small or older models tend to suggest too much, skip pages of a review, or save malformed next actions. The service rejects invalid ones and the run then records a blocker instead of sending anything, but you'll see more "Needs your help" cards.
 

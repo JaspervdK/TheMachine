@@ -57,7 +57,7 @@ PLAIN_METADATA = frozenset({'thread_id', 'from', 'to', 'labels', 'notification_k
 # a review's own summary, what teammates' Machines asked and answered, the line a role was read from, promises (what
 # and the note closing one), and the messages a profile, roles or skills run was given. JSON columns keep the named
 # keys in the clear. Not here, on purpose: columns the app matches in SQL, and what the Machine learned (facts, rules,
-# feedback, skills, profile, roles), which support may read (docs/configuration.md).
+# feedback, skills, profile, voices, roles), which support may read (docs/configuration.md).
 DERIVED = {'suggestions': ('title', 'body', 'handled_hint'), 'feedback_prompts': ('title',),
            'person_roles': ('quote',), 'promises': ('what', 'note'), 'profile_runs': ('evidence',),
            'draft_edits': ('before_subject', 'before_body', 'after_subject', 'after_body'),
