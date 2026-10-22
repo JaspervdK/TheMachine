@@ -150,11 +150,11 @@ class Delegate(unittest.TestCase):
             self.store.settle_awaiting(db)
         self.assertEqual(self.suggestion()['status'], 'completed')
 
-    def test_without_delegate_a_send_keeps_the_card_as_it_was(self):
+    def test_without_delegate_a_send_closes_the_card_with_one_status(self):
         self.ready(self.slack_action(delegate=None))
         self.confirm()
         self.app().action_step(self.transport(lambda *_: {'message_id': 'slack:D0SAM1:1.2', 'channel_id': 'D0SAM1', 'user_id': 'U0SAM12'}))
-        self.assertEqual(self.suggestion()['status'], 'prepared')
+        self.assertEqual(self.suggestion()['status'], 'completed')
         self.assertIn('✓ Slack message sent to Sam at ', a.card(self.row()))
 
 

@@ -186,7 +186,8 @@ def preview(value):
     if value['kind'] == 'merge':
         return merge_preview(value)
     if value['kind'] == 'finish':
-        return value['preview'] + ('\n\n' + value['url'] if value.get('url') else '')
+        message = ('\n\n' + ('To ' + value['to_name'] + ':\n' if value.get('to_name') else '') + value['message']) if value.get('message') else ''
+        return value['preview'] + message + ('\n\n' + value['url'] if value.get('url') else '')
     if value['kind'] == 'whatsapp':
         return 'WhatsApp message to ' + value['to_name'] + '\n\n' + value['body']
     if value['kind'] == 'handoff':
@@ -270,7 +271,7 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
     elif value.get('kind') == 'finish':
         # Everything up to the final click is done; the owner confirms that click. Its run
         # repeats the step from these instructions, since a tab or session may have expired.
-        if set(value)-{'kind','label','instructions','preview','url'} or not value.get('label'):
+        if set(value)-{'kind','label','instructions','preview','url','message','to_name'} or not value.get('label'):
             raise ValueError('A final step needs a label, the exact instructions and a preview of what goes out')
         if value['label'].split()[0] not in FINISH_VERBS:
             raise ValueError('A final step label starts with what it does: ' + ', '.join(FINISH_VERBS[:8]) + '…')
@@ -280,7 +281,17 @@ def validate(value, config, allowed_accounts, recipient_options=None, linkedin_t
         if 'url' in value and (not isinstance(value['url'],str) or len(value['url'])>2000 or urlsplit(value['url']).scheme!='https'
                                or urlsplit(value['url']).username or not urlsplit(value['url']).hostname):
             raise ValueError('The final step’s page is an HTTPS link')
+        # A message the step posts (a reply in a support inbox, a chat or DM in a web app): its exact
+        # text, which the card shows and the owner can edit like a draft; Confirm types exactly that.
+        if 'message' in value and (not isinstance(value['message'],str) or not value['message'].strip()
+                                   or len(value['message'])>8000 or '\x00' in value['message']):
+            raise ValueError('message is the exact text the step posts, at most 8000 characters')
+        if 'to_name' in value and (not isinstance(value['to_name'],str) or not 1<=len(value['to_name'].strip())<=100 or '\n' in value['to_name']):
+            raise ValueError('to_name is who the message goes to, on one line')
+        if 'to_name' in value and 'message' not in value:
+            raise ValueError('to_name goes with message')
         result=dict(value)
+        if 'message' in result:result['message']=result['message'].strip()
     elif value.get('kind') == 'email_demo':
         if set(value)-{'kind','label','subject','body'} or value.get('label','Send')!='Send':
             raise ValueError('The Send demo is preview-only with fixed fictional addresses')
@@ -517,7 +528,7 @@ def check(value, result='', own_addresses=()):
     run fixes them itself instead of the owner tapping Change. Returns plain problems; empty is fine."""
     problems = []
     for action in actions(value):
-        text = (action.get('subject') or '') + '\n' + (action.get('body') or action.get('preview') or '')
+        text = (action.get('subject') or '') + '\n' + (action.get('body') or action.get('preview') or '') + ('\n' + action['message'] if action.get('message') else '')
         if PLACEHOLDER.search(text):
             problems.append(f"“{action.get('label') or action['kind']}” still has a placeholder ({PLACEHOLDER.search(text)[0]}): fill it in from the evidence")
         if re.search(r'\[[^\]]+\]\((?!https?://)[^)]*\)', text):
@@ -533,10 +544,33 @@ def check(value, result='', own_addresses=()):
     return problems
 
 
+def finish_text_field(action):
+    """What the owner edits in a final step: its message when it posts one, otherwise what goes out (preview)."""
+    return 'message' if action.get('message') else 'preview'
+
+
+def draft_text(action):
+    """The editable text of a ready draft or final step."""
+    return action[finish_text_field(action)] if action['kind'] == 'finish' else action.get('body')
+
+
 def revise(action, subject=None, body=None):
-    """The owner's own edit of a ready draft: same recipients, account and attachments, new text and revision."""
+    """The owner's own edit of a ready draft: same recipients, account and attachments, new text and revision.
+    A final step (kind:finish) keeps its instructions and page; its message (or preview) becomes the edited
+    text, marked edited so its Confirm run types exactly that."""
+    if action['kind'] == 'finish':
+        field = finish_text_field(action)
+        result = {k: v for k, v in action.items() if k != 'revision'}
+        if body is not None:
+            if not isinstance(body, str) or not body.strip() or '\x00' in body or len(body.strip()) > (8000 if field == 'message' else 2000):
+                raise ValueError('The text needs some words, within the size limit')
+            if body.strip() != action[field]:
+                result[field] = body.strip()
+                result['edited'] = True
+        result['revision'] = hashlib.sha256(canonical(result).encode()).hexdigest()[:12]
+        return result
     if action['kind'] not in ('email',) + TEXT_KINDS:
-        raise ValueError('Only email, LinkedIn, Slack, X and WhatsApp drafts can be edited')
+        raise ValueError('Only email, LinkedIn, Slack, X and WhatsApp drafts and final steps can be edited')
     result = {k: v for k, v in action.items() if k != 'revision'}
     if body is not None:
         if (not isinstance(body, str) or not body.strip() or '\x00' in body

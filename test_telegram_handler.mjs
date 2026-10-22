@@ -109,9 +109,15 @@ await handler(ctx('back'));assert.equal(edits.pop().buttons.flat()[0].text,'Subm
 {const before=choices.length;await handler(ctx('next_abcdef123456'));assert.equal(choices.length,before);
  await handler(ctx('send_abcdef123456'));const r=edits.pop();
  assert.equal(r.text,'Submit claim?\n\n42.50 EUR, Travel, 16 Oct\n\nhttps://expenses.example.com/claims/7\n\nConfirm does only this last step, checks that it went through and reports back.');
- assert.deepEqual(r.buttons.flat().map(b=>b.text),['Confirm','Open page','Cancel']);assert.equal(choices.length,before);
+ assert.deepEqual(r.buttons.map(row=>row.map(b=>b.text)),[['Confirm','Edit','Cancel'],['Open page']]);assert.equal(choices.length,before);
+ assert.match(r.buttons[0][1].url,/#send=[a-f0-9]{16}&revision=abcdef123456&edit=1$/);
  await handler(ctx('confirm_abcdef123456'));assert.equal(choices.pop().revision,'abcdef123456');
  assert.ok(!edits.pop().buttons.flat().some(b=>b.text==='Submit claim'));}
+// A step that posts a message shows its exact text and who gets it; Edit opens it in the dashboard editor.
+{const step=item.next_action;item.next_action={...step,state:undefined,label:'Submit inbox reply',preview:'Reply in conversation 7.',to_name:'Sam Example',message:'Hi Sam,\n\nFixed now.'};
+ await handler(ctx('back'));edits.pop();await handler(ctx('send_abcdef123456'));const r=edits.pop();
+ assert.equal(r.text,'Submit inbox reply?\nTo: Sam Example\nReply in conversation 7.\n\nHi Sam,\n\nFixed now.\n\nhttps://expenses.example.com/claims/7\n\nConfirm types exactly this text on the page, submits it, checks that it went through and reports back.');
+ assert.deepEqual(r.buttons[0].map(b=>b.text),['Confirm','Edit','Cancel']);item.next_action=step;}
 item.next_action.state={status:'done'};
 {const before=choices.length;await handler(ctx('back'));assert.ok(!edits.pop().buttons.flat().some(b=>b.text==='Submit claim'));
  await handler(ctx('confirm_abcdef123456'));assert.equal(choices.length,before);edits.pop();}

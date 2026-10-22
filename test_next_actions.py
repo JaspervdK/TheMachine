@@ -64,7 +64,7 @@ class NextActions(unittest.TestCase):
         app=self.app();app.action_step(self.transport(send=lambda action,job:(calls.append(action),{'message_id':'accepted'})[1]))
         app.action_step(self.transport(send=lambda *_:self.fail('Duplicate send')))
         self.assertEqual(len(calls),1);self.assertEqual(calls[0]['body'],'Exact approved draft.')
-        self.assertEqual(self.action_job()['status'],'sent');self.assertEqual(self.row()['status'],'prepared')
+        self.assertEqual(self.action_job()['status'],'sent');self.assertEqual(self.row()['status'],'completed')
         self.assertNotIn('Send',[b['label'] for b in a.controls(self.row())['blocks'][0]['buttons']])
 
     def test_owner_edit_sends_exactly_the_edited_draft_and_is_remembered(self):

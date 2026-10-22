@@ -292,6 +292,28 @@ def queue_thread_snooze(db, action, job):
                    (job['id'],action['account_id'],action['thread_id'],thread_return_time(action['snooze_days']),now(),now()))
 
 
+NOTHING_SENT = re.compile(r'\s*Nothing (?:was |has been )?(?:sent|submitted|posted)(?: or (?:changed|submitted|posted|sent))?(?: yet)?\.?\s*$', re.I)
+
+
+def settle_sent(store, db, suggestion_id, job_id, label=''):
+    """A ready card whose message went out, or whose final step went through, is done: it leaves
+    Ready for you with one status, the sent note (2026-10-22). Not while another of its sends or final
+    steps still waits, not for a handoff (that card waits for the reply) and not for a merge (it keeps
+    Undo merge). The preparation's "Nothing sent." no longer holds and its needs-you outcome is answered."""
+    row = db.execute('SELECT * FROM suggestions WHERE id=?', (suggestion_id,)).fetchone()
+    if not row or row['status'] != 'prepared':
+        return False
+    finished = {r[0] for r in db.execute("SELECT revision FROM action_jobs WHERE suggestion_id=? AND status IN ('sent','done')", (suggestion_id,))}
+    waiting = [a for a in next_actions.visible_actions(row['next_action'])
+               if a['kind'] in next_actions.APPROVE_KINDS + next_actions.FINISH_KINDS and a['revision'] not in finished]
+    if waiting:
+        return False
+    body = NOTHING_SENT.sub('', row['body'] or '').strip() or row['body']
+    db.execute('UPDATE suggestions SET body=?,outcome=NULL WHERE id=?', (body, suggestion_id))
+    store._decide(db, suggestion_id, 'complete', ('Sent: ' + label if label else 'Sent')[:200], 'sent:' + job_id, 'assistant')
+    return True
+
+
 def queue_delegate_wait(db, action, job, result):
     """A task handed to someone: once the message is sent, the card waits for their answer. It
     closes when they reply (settle_awaiting) and comes back after wait_days if not."""
@@ -4080,6 +4102,9 @@ class Store:
             db.execute("UPDATE preparations SET status='done',updated_at=?,error=NULL,reason=NULL WHERE suggestion_id=?",(now(),suggestion_id))
             # A new result is worth a notification, not only an invisible edit.
             db.execute("UPDATE deliveries SET status='queued',reminder=1,error=NULL WHERE suggestion_id=? AND status IN ('queued','sent','uncertain')",(suggestion_id,))
+            # The confirmed final step went through (a verified receipt): like a sent message, the card is done.
+            if chosen and json.loads(chosen['payload'])['kind']=='finish' and state=='completed' and settle_sent(self,db,suggestion_id,chosen['id'],json.loads(chosen['payload']).get('label','')):
+                return {'status':'completed','note':'Result saved; the confirmed step went through, so the card is done.'}
         return {'status': 'prepared', 'note': 'Result saved. The service itself executed nothing.'}
 
     def revise_draft(self,suggestion_id,revision,source,subject=None,body=None):
@@ -4089,10 +4114,15 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
-            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','whatsapp'):
+            if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','whatsapp','finish'):
                 raise ValueError('This draft changed or is no longer ready. Use its current buttons.')
             if db.execute("SELECT 1 FROM action_jobs WHERE suggestion_id=? AND status IN ('sending','uncertain','sent')",(suggestion_id,)).fetchone():
                 raise ValueError('This draft is already being sent or was sent.')
+            # A final step that ran, or whose outcome is still unknown, may already have gone out:
+            # its text stays as confirmed, so a retry checks the source instead of posting other text.
+            if action['kind']=='finish' and db.execute("SELECT 1 FROM action_jobs WHERE suggestion_id=? AND revision=? AND status IN ('local_preparation','finish_uncertain','done')",(suggestion_id,revision)).fetchone():
+                raise ValueError('This step already ran or is being checked. Use its current buttons.')
+            if action['kind']=='finish':subject=None
             revised=next_actions.revise(action,subject,body)
             if revised['revision']==revision:
                 return {'status':'unchanged','revision':revision}
@@ -4105,7 +4135,7 @@ class Store:
             db.execute('UPDATE suggestions SET next_action=? WHERE id=?',(encoded(current),suggestion_id))
             db.execute("UPDATE action_jobs SET status='cancelled',updated_at=? WHERE suggestion_id=? AND revision=? AND status IN ('queued','blocked')",(stamp,suggestion_id,revision))
             db.execute('INSERT INTO draft_edits(id,suggestion_id,old_revision,new_revision,kind,before_subject,before_body,after_subject,after_body,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                (uuid.uuid4().hex,suggestion_id,revision,revised['revision'],action['kind'],action.get('subject'),action['body'],revised.get('subject'),revised['body'],source,stamp))
+                (uuid.uuid4().hex,suggestion_id,revision,revised['revision'],action['kind'],action.get('subject'),next_actions.draft_text(action),revised.get('subject'),next_actions.draft_text(revised),source,stamp))
             db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=? AND message_id IS NOT NULL',(suggestion_id,))
         return {'status':'revised','revision':revised['revision']}
 
@@ -4114,6 +4144,10 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM suggestions WHERE id=?',(suggestion_id,)).fetchone()
             action=next_actions.selected(row['next_action'],revision) if row else None
+            # A card closes once its send or final step went through (settle_sent): a repeated tap is that same send.
+            done=db.execute("SELECT status FROM action_jobs WHERE suggestion_id=? AND revision=? AND status IN ('sent','done')",(suggestion_id,revision)).fetchone() if row and row['status']=='completed' else None
+            if done:
+                return {'status':done['status'],'duplicate':True}
             if not row or row['status']!='prepared' or not action or action['kind'] not in ('email','linkedin','slack','x','whatsapp','merge','prepare','finish'):
                 raise ValueError('This result changed or is no longer ready. Use its current buttons.')
             if action.get('to_options'):
@@ -5893,7 +5927,7 @@ def card(row):
         status='Waiting for you to sign in: '+row['preparation_reason'].rstrip('.')+'. Sign in through Sign in and I carry on by myself.'
     elif row.get('preparation_status') == 'blocked': status='I’m stuck: '+(row.get('preparation_reason') or 'Preparation did not finish. I’ll keep this in your list.')
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed','undoing','undone')),None)
-    if action_state and row['status']=='prepared':
+    if action_state and (row['status']=='prepared' or (row['status']=='completed' and action_state.get('status')=='sent')):
         merging=merge_state(row,action_state)
         sent=next((a for a in row.get('next_actions') or [] if a.get('state') is action_state),{})
         who=', '.join(sent.get('to') or []) if sent.get('kind')=='email' and not sent.get('to_options') else sent.get('to_name') or ''
@@ -6660,14 +6694,25 @@ def owner_details(config=None):
     return ('\n' + '\n'.join(lines)) if lines else ''
 
 
+def finish_text(step):
+    """The exact text a confirmed final step posts, as the owner last saw (and maybe edited) it on the card."""
+    if next_actions.finish_text_field(step)=='message':
+        return ('\nThe exact message to post'+(' to '+step['to_name'] if step.get('to_name') else '')+(', as the owner edited it' if step.get('edited') else '')+':\n<<<\n'+step['message']+'\n>>>'
+                '\nThis text wins over any other wording in the instructions or an earlier draft. If the page already holds other typed text for this message (an earlier draft), clear it and type exactly this text before you submit. After submitting, check that the posted text matches it, and say so in the result.')
+    if step.get('edited'):
+        return ('\nThe owner edited what goes out themselves: the text above is their edit and wins over any other wording in the instructions or an earlier draft. '
+                'If the page already holds other typed text or values for this step (an earlier draft), replace them so it matches exactly before you submit; text to post is typed exactly as above. After submitting, check that what went out matches it, and say so in the result.')
+    return ''
+
+
 def preparation_prompt(job, facts='', config=None, edits='', rules=''):
     # The standing rules live in PREPARATION.md, which the plugin prepends to every preparation
     # session (outside the runner's message limit); this message carries only the job itself.
     j,sid=job['job_id'],job['suggestion_id']
     opening = (f'''Prepare suggestion {sid} ahead. This is a preparation task, not a signal-review task. The owner has NOT tapped Do it yet: the card reaches them once it's ready, so they can approve it in one tap. Preparation job ID: {j}.
-Prepared ahead, so these limits win over the preparation rules: take the task as far as it goes without committing anything, so the owner only confirms the last step. Research, read and draft freely (evidence, web, files, read-only commands, logged-in apps, signing in), and fill in what the last step needs (a form up to Submit, a cart or payment up to Pay, a booking up to Book, a post up to Publish). Do not change, submit, send, pay, sign, delete, book or post anything anywhere, and never use send_now. End with that last step as a next action: an email, LinkedIn, Slack or X message as a ready draft; a merge as kind:merge; anything else as {{kind:finish,label:'Submit …'/'Pay …'/'Book …',instructions:<the exact last step with every value it needs, so it can be redone from the start if the page or session expired>,preview:<what goes out, as the owner should check it: amounts, dates, names, the text>,url:<the page>}}. Several separate changes become a follow-up {{kind:prepare,label:'Apply …',instructions:<the exact changes>}}. If you can't get it ready without the owner, record a blocker: the card then reaches them as a normal suggestion.''' if job.get('ahead') else
+Prepared ahead, so these limits win over the preparation rules: take the task as far as it goes without committing anything, so the owner only confirms the last step. Research, read and draft freely (evidence, web, files, read-only commands, logged-in apps, signing in), and fill in what the last step needs (a form up to Submit, a cart or payment up to Pay, a booking up to Book, a post up to Publish). Do not change, submit, send, pay, sign, delete, book or post anything anywhere, and never use send_now. End with that last step as a next action: an email, LinkedIn, Slack or X message as a ready draft; a merge as kind:merge; anything else as {{kind:finish,label:'Submit …'/'Pay …'/'Book …',instructions:<the exact last step with every value it needs, so it can be redone from the start if the page or session expired>,preview:<what goes out, as the owner should check it: amounts, dates, names, the text>,url:<the page>}}; when that step posts a message (a reply in a support inbox, a chat or DM in a web app), also give message:<its exact text, which the owner can edit> and to_name:<who gets it>. Several separate changes become a follow-up {{kind:prepare,label:'Apply …',instructions:<the exact changes>}}. If you can't get it ready without the owner, record a blocker: the card then reaches them as a normal suggestion.''' if job.get('ahead') else
                f'''The owner confirmed the last step of suggestion {sid}: {job['finish']['label']}. This is a preparation task, not a signal-review task. Do only this step, which everything before it prepared: {job['finish']['instructions']}
-What the owner reviewed and confirmed: {job['finish']['preview']}{(chr(10)+'Page: '+job['finish']['url']) if job['finish'].get('url') else ''}
+What the owner reviewed and confirmed: {job['finish']['preview']}{(chr(10)+'Page: '+job['finish']['url']) if job['finish'].get('url') else ''}{finish_text(job['finish'])}
 If what you are about to submit differs from what they reviewed (another amount, date, recipient or text), or the step already happened, do not go ahead: record a blocker that says what changed. Otherwise do it, check that it went through (a confirmation, receipt or the new state) and save outcome:'done' with what happened and any reference. Preparation job ID: {j}.''' if job.get('finish') else
                f'''The owner accepted suggestion {sid}. This is a preparation task, not a signal-review task: the owner tapped Do it, so carry out the task itself. Owner-selected next step: {job.get('next_step') or 'the original offered preparation'}. Preparation job ID: {j}.''')
     if job.get('finish'):
@@ -8480,6 +8525,7 @@ class App:
                 if result.get('message_id'):
                     db.execute("UPDATE action_jobs SET status='sent',message_id=?,error=NULL,updated_at=? WHERE id=? AND status IN ('sending','uncertain')",(result['message_id'],now(),job['id']))
                     queue_thread_snooze(db,action,job);queue_delegate_wait(db,action,job,result)
+                    if action['kind']!='merge':settle_sent(self.store,db,job['suggestion_id'],job['id'],next_actions.label(action))
                     if action['kind']=='merge' and result.get('commit'):db.execute('INSERT OR IGNORE INTO merge_effects VALUES(?,?,?,?,?)',(job['id'],'merge',encoded(result),'pending',now()))
                     db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
                 else:
@@ -8533,7 +8579,9 @@ class App:
                        'uncertain':'I couldn’t confirm whether the fix was merged. I won’t merge it again.'}[status]
             db.execute('UPDATE action_jobs SET status=?,message_id=?,error=?,updated_at=?,retry_at=? WHERE id=?',
                 (status,result.get('message_id'),error,now(),None if status=='failed' else (dt.datetime.fromisoformat(now())+dt.timedelta(minutes=5)).isoformat(),job['id']))
-            if status=='sent':queue_thread_snooze(db,action,job);queue_delegate_wait(db,action,job,result)
+            if status=='sent':
+                queue_thread_snooze(db,action,job);queue_delegate_wait(db,action,job,result)
+                if action['kind']!='merge':settle_sent(self.store,db,job['suggestion_id'],job['id'],next_actions.label(action))
             if status=='sent' and action['kind']=='merge' and result.get('commit'):db.execute('INSERT OR IGNORE INTO merge_effects VALUES(?,?,?,?,?)',(job['id'],'merge',encoded(result),'pending',now()))
             db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
         if status=='sent' and action['kind']=='merge':

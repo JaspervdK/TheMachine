@@ -92,9 +92,11 @@ function sendReview(item:any,draft:any,dashboardBase=''){
      '','Merge now runs the tests again, then updates the running code and restarts The Machine.'].join('\n'),
    buttons:[[button(item.id,'Merge now','confirm_'+draft.revision),...(dashboardBase?[{text:'See the diff',url:`${dashboardBase}#send=${item.id}&revision=${draft.revision}`}]:[]),button(item.id,'Cancel','back')]]};
  // The last step of a prepared task: what goes out, and Confirm runs only that step.
- if(draft.kind==='finish')return {text:[`${draft.label}?`,'',draft.preview,...(draft.url?['',draft.url]:[]),
-     '','Confirm does only this last step, checks that it went through and reports back.'].join('\n'),
-   buttons:[[button(item.id,'Confirm','confirm_'+draft.revision),...(draft.url?[{text:'Open page',url:draft.url}]:[]),button(item.id,'Cancel','back')]]};
+ // It posts a message: its exact text, which Edit changes in the dashboard; Confirm types exactly that.
+ if(draft.kind==='finish')return {text:[`${draft.label}?`,...(draft.message?[...(draft.to_name?[`To: ${draft.to_name}`]:[]),draft.preview,'',draft.message]:['',draft.preview]),...(draft.url?['',draft.url]:[]),
+     '',draft.message?'Confirm types exactly this text on the page, submits it, checks that it went through and reports back.':'Confirm does only this last step, checks that it went through and reports back.'].join('\n'),
+   buttons:edit.length?[[button(item.id,'Confirm','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')],...(draft.url?[[{text:'Open page',url:draft.url}]]:[])]
+     :[[button(item.id,'Confirm','confirm_'+draft.revision),...(draft.url?[{text:'Open page',url:draft.url}]:[]),button(item.id,'Cancel','back')]]};
  if(draft.kind==='linkedin')return {text:['Send this LinkedIn message?',`To: ${draft.to_name}${draft.profile?` (linkedin.com/in/${draft.profile})`:''}`,'',draft.body].join('\n'),
    buttons:[[button(item.id,'Send now','confirm_'+draft.revision),...edit,button(item.id,'Cancel','back')]]};
  // X: a reply shows the account and the post it answers; a DM the conversation.
