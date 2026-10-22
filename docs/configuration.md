@@ -77,7 +77,8 @@ By default the service encrypts what messages say, from every source, in its dat
 subjects, bodies, attachments' names, quoted text and other metadata of email, chats, notifications, tickets,
 transcripts and calendar events, plus the text derived from them (card text, drafts and their edits, preparation
 tool calls and results, Fleet and Network questions and answers, promises, the line a role was read from, and
-the messages a profile or roles run reads). The key is `message-content.key`, next to the
+the messages a profile or roles run reads) and the sign-ins saved with **Save for next time**. The key is
+`message-content.key`, next to the
 database, readable only by the service user. The dashboard, search, embeddings and reviews work as before: search
 uses a keyed hash of each word.
 

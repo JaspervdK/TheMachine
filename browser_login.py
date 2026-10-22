@@ -5,18 +5,25 @@ page asks, a one-time code in the dashboard. The service puts them in that page 
 and submits. This is its own code path: the agent and the model never see these values, nothing here logs them, and
 errors never quote them.
 
-"Save for next time" keeps a site's username and password in browser-logins.enc in the data folder, encrypted with a
-key of its own (browser-logins.key, readable by this user only). Saved sign-ins are listed and forgotten on the
-dashboard; a move (moving.py) only takes them along with a passphrase. One-time codes are never saved.
+"Save for next time" keeps a site's username and password in browser-logins.sealed in the data folder, sealed with the
+message key (message_seal.py: the same key as the messages, so a hosted Machine keeps it off the disk, and no backup of
+the disk holds a key that opens them). Without a message key (message protection turned off) they go in
+browser-logins.enc with a key of their own next to it (browser-logins.key, readable by this user only), as before; once
+there is a message key they move over and the old file and its key are overwritten and removed. Saved sign-ins are
+listed and forgotten on the dashboard; a move (moving.py) only takes them along with a passphrase. One-time codes are
+never saved.
 """
 import datetime as dt, json, os, re, secrets, subprocess, sys, threading, time, urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'integrations'))
 import browser_cdp  # noqa: E402
+import message_seal  # noqa: E402
+import portable  # noqa: E402
 
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
-STORE, KEY = 'browser-logins.enc', 'browser-logins.key'
+SEALED = 'browser-logins.sealed'  # sealed with the message key
+STORE, KEY = 'browser-logins.enc', 'browser-logins.key'  # only without a message key, and what older versions kept
 OPENSSL = 'openssl'
 SETTLE = 10  # seconds a submitted page has to move on before the dialog says it is still there
 
@@ -454,14 +461,24 @@ def watch(config, page):
 
 
 class LoginStore:
-    """Saved sign-ins, {site: {username, password, saved_at}}, encrypted at rest (AES-256 with openssl, the key in a
-    file of its own). Only the service reads them; list() never returns a password."""
+    """Saved sign-ins, {site: {username, password, saved_at}}, encrypted at rest: sealed with the message key (SEALED),
+    or, without one, AES-256 with openssl and a key in a file of its own (STORE, KEY). Only the service reads them;
+    list() never returns a password, and no error quotes one."""
 
     def __init__(self, folder):
-        self.path, self.key_path = Path(folder) / STORE, Path(folder) / KEY
+        self.folder = Path(folder)
+        self.sealed_path = self.folder / SEALED
+        self.path, self.key_path = self.folder / STORE, self.folder / KEY
         # API requests construct separate stores, but their read/change/write must share one lock.
         with _store_locks_guard:
-            self.lock = _store_locks.setdefault(str(self.path.resolve()), threading.Lock())
+            self.lock = _store_locks.setdefault(str(self.sealed_path.resolve()), threading.Lock())
+
+    def _message_key(self):
+        """The message key next to the database in this folder (a link to memory on a hosted Machine), or None."""
+        try:
+            return message_seal.load_key(self.sealed_path)  # the key of anything in this folder: its key_path
+        except (OSError, ValueError):
+            return None
 
     def _key(self):
         if not self.key_path.exists():
@@ -479,17 +496,56 @@ class LoginStore:
         return run.stdout
 
     def _read(self):
-        if not self.path.exists():
-            return {}
-        return json.loads(self._openssl(self.path.read_bytes(), True))
+        key = self._message_key()
+        if self.sealed_path.exists():
+            data = self.sealed_path.read_bytes()
+            if message_seal.is_sealed_bytes(data):
+                if not key:
+                    raise ValueError('Saved sign-ins are encrypted with the message key, which is not here '
+                                     + ('yet' if message_seal.held_elsewhere(self.sealed_path) else 'any more'))
+                try:
+                    return json.loads(message_seal.Sealer(key).open_bytes(data))
+                except message_seal.SealError:
+                    raise ValueError('Saved sign-ins could not be read') from None
+            logins = json.loads(data)  # opened by an export and put here by an import: encrypted again at once
+            self._write(logins)
+            return logins
+        if self.path.exists():
+            logins = json.loads(self._openssl(self.path.read_bytes(), True))
+            if key:  # a message key now: over to it, and the old file and its own key go
+                self._write(logins)
+            return logins
+        return {}
 
     def _write(self, logins):
-        data = self._openssl(json.dumps(logins).encode(), False)
-        temp = self.path.with_name(self.path.name + '.tmp')
+        key = self._message_key()
+        if key:
+            target, data = self.sealed_path, message_seal.Sealer(key).seal_bytes(json.dumps(logins).encode())
+        elif message_seal.held_elsewhere(self.sealed_path):
+            raise ValueError('Saved sign-ins wait for the key your hosting keeps; try again in a minute')
+        else:
+            target, data = self.path, self._openssl(json.dumps(logins).encode(), False)
+        temp = target.with_name(target.name + '.tmp')
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'wb') as handle:
             handle.write(data)
-        os.replace(temp, self.path)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+        for older in ((self.path, self.key_path) if key else (self.sealed_path,)):
+            portable.shred(older)
+
+    def migrate(self):
+        """At the service's start: sign-ins in the older file (or opened by an import) go over to the message key.
+        Returns whether anything moved."""
+        with self.lock:
+            if not self._message_key():
+                return False
+            plain = self.sealed_path.exists() and not message_seal.is_sealed_file(self.sealed_path)
+            if not (plain or self.path.exists()):
+                return False
+            self._read()
+            return True
 
     def get(self, host):
         with self.lock:

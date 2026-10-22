@@ -10142,6 +10142,11 @@ class App:
 
     def serve(self):
         app = self
+        try:  # saved sign-ins kept with a key of their own (or opened by an import) go over to the message key
+            if browser_login.LoginStore(Path(self.config['database']).expanduser().parent).migrate():
+                LOG.info('saved sign-ins are now encrypted with the message key')
+        except Exception as error:  # they stay as they were; the next start tries again
+            LOG.warning('saved sign-ins not moved to the message key: %s', type(error).__name__)
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *_):

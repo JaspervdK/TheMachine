@@ -37,8 +37,17 @@ are handled in batches. Fixes to this repository arrive as pull requests and are
 - Fresh installs collect configured sources with recurring reviews and delivery disabled. One read-only first-look preview may run after setup; it sends no cards or external actions.
   `./install.sh --activate` explicitly enables both after setup.
 - The dashboard's sign-in dialog fills sites in the assistant's browser on the owner's behalf and can save
-  those passwords encrypted in the data folder. They never go to the model or the logs, but the key sits next
-  to them for the service user: protect that user's account and disk (full-disk encryption) accordingly.
+  those passwords in the data folder, encrypted with the message key below (on a hosted Machine that key is
+  never on the disk, so disk backups can't open them). They never go to the model, the logs or a support bundle;
+  an export holds them only with a passphrase. On a self-hosted install the key sits next to them for the service
+  user: protect that user's account and disk (full-disk encryption) accordingly. Without message protection they
+  keep a key of their own next to them, as before.
+- The browser's own cookies and sign-ins (its profile) are the browser's: protected by the account and the disk,
+  not by The Machine's keys. Anything running as the service user, the agent included, can use them.
+- Credentials a tool prints (provider tokens, JWTs, private keys, `password=` and `Authorization:` values,
+  cookie headers) are replaced with a placeholder before OpenClaw writes its session transcripts, so they don't
+  stay on disk or in backups. The turn that printed one is not changed, and Codex's own session records are
+  not covered.
 - Message contents from every source are encrypted in the database by default, on every install, with a key
   next to it for the service user ([configuration](docs/configuration.md#message-protection)). It protects
   copies of the database and tools without the key, not against root on the machine. Back the key up with the

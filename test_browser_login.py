@@ -245,7 +245,84 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(store.list(), [])
 
     def test_moves_only_with_a_passphrase(self):
-        self.assertTrue({browser_login.STORE, browser_login.KEY} <= moving.SECRET_NAMES)
+        self.assertTrue({browser_login.SEALED, browser_login.STORE, browser_login.KEY} <= moving.SECRET_NAMES)
+
+
+def message_key(folder):
+    import base64, secrets as random
+    path = Path(folder) / browser_login.message_seal.KEY_NAME
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as handle:
+        handle.write(base64.b64encode(random.token_bytes(32)).decode() + '\n')
+    return path
+
+
+class SealedStoreTest(unittest.TestCase):
+    """With a message key, saved sign-ins are sealed with it and no key of their own is ever on the disk."""
+
+    def test_sealed_with_the_message_key_and_no_key_of_their_own(self):
+        with tempfile.TemporaryDirectory() as folder:
+            message_key(folder)
+            store = browser_login.LoginStore(folder)
+            store.save('example.invalid', USER, SECRET)
+            sealed = (Path(folder) / browser_login.SEALED).read_bytes()
+            self.assertTrue(browser_login.message_seal.is_sealed_bytes(sealed))
+            self.assertNotIn(SECRET.encode(), sealed)
+            self.assertNotIn(USER.encode(), sealed)
+            self.assertEqual(os.stat(Path(folder) / browser_login.SEALED).st_mode & 0o777, 0o600)
+            self.assertFalse((Path(folder) / browser_login.KEY).exists())
+            self.assertFalse((Path(folder) / browser_login.STORE).exists())
+            self.assertEqual(browser_login.LoginStore(folder).get('www.example.invalid')['password'], SECRET)
+            self.assertEqual([e['site'] for e in store.list()], ['example.invalid'])
+            self.assertTrue(store.forget('example.invalid'))
+            self.assertEqual(store.list(), [])
+
+    @unittest.skipUnless(shutil.which('openssl'), 'needs openssl')
+    def test_older_store_moves_over_and_its_key_is_gone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            browser_login.LoginStore(folder).save('example.invalid', USER, SECRET)  # no message key: a key of its own
+            self.assertTrue((Path(folder) / browser_login.KEY).exists())
+            message_key(folder)
+            store = browser_login.LoginStore(folder)
+            self.assertTrue(store.migrate())
+            self.assertFalse(store.migrate())
+            for name in (browser_login.KEY, browser_login.STORE):
+                self.assertFalse((Path(folder) / name).exists(), name)
+            self.assertTrue(browser_login.message_seal.is_sealed_file(Path(folder) / browser_login.SEALED))
+            saved = store.get('example.invalid')
+            self.assertEqual((saved['username'], saved['password']), (USER, SECRET))
+
+    def test_a_hosted_key_not_here_yet_is_waited_for_never_replaced(self):
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as memory:
+            held = Path(memory) / browser_login.message_seal.KEY_NAME
+            (Path(folder) / browser_login.message_seal.KEY_NAME).symlink_to(held)
+            store = browser_login.LoginStore(folder)
+            with self.assertRaisesRegex(ValueError, 'wait'):
+                store.save('example.invalid', USER, SECRET)
+            self.assertEqual(sorted(p.name for p in Path(folder).iterdir()), [browser_login.message_seal.KEY_NAME])
+            self.assertEqual(store.list(), [])
+            message_key(memory)  # the hosting puts it in memory
+            store.save('example.invalid', USER, SECRET)
+            os.unlink(held)  # a restart empties memory: sealed sign-ins wait, nothing is quoted
+            with self.assertRaises(ValueError) as caught:
+                store.get('example.invalid')
+            self.assertIn('not here yet', str(caught.exception))
+            self.assertNotIn(SECRET, str(caught.exception))
+
+    def test_an_imported_plain_store_is_sealed_at_the_next_start(self):
+        with tempfile.TemporaryDirectory() as folder:
+            message_key(folder)
+            (Path(folder) / browser_login.SEALED).write_text(json.dumps({'example.invalid': {'username': USER, 'password': SECRET}}))
+            self.assertTrue(browser_login.LoginStore(folder).migrate())
+            self.assertNotIn(SECRET.encode(), (Path(folder) / browser_login.SEALED).read_bytes())
+            self.assertEqual(browser_login.LoginStore(folder).get('example.invalid')['password'], SECRET)
+
+    def test_an_export_holds_them_opened_inside_its_encryption(self):
+        with tempfile.TemporaryDirectory() as folder:
+            message_key(folder)
+            browser_login.LoginStore(folder).save('example.invalid', USER, SECRET)
+            opened = moving._open_file(Path(folder) / browser_login.SEALED, {'database': str(Path(folder) / 'events.sqlite')})
+            self.assertEqual(json.loads(opened)['example.invalid']['password'], SECRET)
 
 
 class OwnerOnlyTest(unittest.TestCase):

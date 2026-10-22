@@ -1,6 +1,7 @@
 import { registerAndroidFeed } from './android-feed.ts';
 import { registerReviewRecovery, currentReviewRun } from './review-recovery.ts';
 import { registerHeartbeatFailureGate } from './heartbeat-failure-gate.ts';
+import { registerSecretRedaction } from './secret-redaction.ts';
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -155,6 +156,7 @@ export default definePluginEntry({
     registerAndroidFeed(api);
     registerReviewRecovery(api, call);
     registerHeartbeatFailureGate(api);
+    registerSecretRedaction(api);
     api.registerTool((context: any) => {
       const key = context.sessionKey || '';
       const owner = ownerChat();
