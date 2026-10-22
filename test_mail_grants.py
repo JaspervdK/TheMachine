@@ -61,11 +61,40 @@ class Grants(unittest.TestCase):
         mail_grants.put(self.config, 'google', 'Alex@Acme.test', '1//refresh-secret')
         path = mail_grants.path(self.config)
         self.assertNotIn('refresh-secret', path.read_text())
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != 'nt':  # POSIX modes are not Windows ACLs; Windows runs the service inside WSL2
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertTrue(message_seal.key_path(self.config['database']).is_file())
         self.assertEqual(mail_grants.get(self.config, 'google', 'alex@acme.test'), '1//refresh-secret')
         self.assertIsNone(mail_grants.get(self.config, 'microsoft', 'alex@acme.test'))
         self.assertEqual(mail_grants.held(self.config), [('google', 'alex@acme.test')])
+
+    def test_late_rotation_does_not_overwrite_a_new_sign_in_or_restore_a_removed_one(self):
+        account = {'email': 'alex@acme.test', 'transport': 'broker'}
+        for provider, module in [('google', google_api), ('microsoft', ms_graph)]:
+            for remove in (False, True):
+                mail_grants.put(self.config, provider, account['email'], 'old-token')
+                def delayed(*args, **kwargs):
+                    if remove:
+                        mail_grants.forget(self.config, provider, account['email'], revoke=False)
+                    else:
+                        mail_grants.put(self.config, provider, account['email'], 'new-login')
+                    return {'access_token': 'access', 'refresh_token': 'rotated-old-token', 'expires_in': 3600}
+                with mock.patch.object(module, '_broker', delayed):
+                    if provider == 'google':
+                        google_api.token(self.config, self.credential, account, 'gmail.readonly', fresh=True)
+                    else:
+                        ms_graph._from_broker(self.config, self.credential, account, 'Mail.Read')
+                self.assertEqual(mail_grants.get(self.config, provider, account['email']), None if remove else 'new-login')
+
+    def test_exact_handoff_receipt_survives_rotation_and_changes_on_reconnect(self):
+        mail_grants.put(self.config, 'google', 'alex@acme.test', 'old', handoff='ho_1')
+        self.assertTrue(mail_grants.handed(self.config, 'google', 'alex@acme.test', 'ho_1'))
+        mail_grants.rotate(self.config, 'google', 'alex@acme.test', 'old', 'rotated')
+        self.assertTrue(mail_grants.handed(self.config, 'google', 'alex@acme.test', 'ho_1'))
+        mail_grants.put(self.config, 'google', 'alex@acme.test', 'new', handoff='ho_2')
+        self.assertFalse(mail_grants.handed(self.config, 'google', 'alex@acme.test', 'ho_1'))
+        self.assertTrue(mail_grants.handed(self.config, 'google', 'alex@acme.test', 'ho_2'))
+        self.assertNotIn('ho_2', mail_grants.path(self.config).read_text())
 
     def test_a_sign_in_moved_to_another_name_is_refused(self):
         mail_grants.put(self.config, 'google', 'alex@acme.test', 'secret')

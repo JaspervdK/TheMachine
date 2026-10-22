@@ -88,7 +88,7 @@ def token(config, credential, account, scope, fresh=False):
     if not answer.get('access_token'):
         raise BrokerError('google_broker')
     if kept and answer.get('refresh_token') and answer['refresh_token'] != kept:
-        mail_grants.put(config, 'google', account['email'], answer['refresh_token'])
+        mail_grants.rotate(config, 'google', account['email'], kept, answer['refresh_token'])
     with _lock:
         _tokens[key] = (answer['access_token'], time.monotonic() + max(0, int(answer.get('expires_in') or 0) - 120))
     return answer['access_token']

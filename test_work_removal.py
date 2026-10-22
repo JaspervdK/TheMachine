@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('assistant', Path(__file__).with_name('assistant.py'))
 assistant = importlib.util.module_from_spec(spec)
@@ -118,6 +119,25 @@ class Removal(unittest.TestCase):
         os.utime(folder, (old, old))
         self.assertEqual(work_removal.prune(self.config), 1)
         self.assertFalse(folder.exists())
+
+    def test_restart_after_config_save_finishes_the_removal(self):
+        with mock.patch.object(work_removal, '_forget_google', side_effect=RuntimeError('interrupted')):
+            with self.assertRaises(RuntimeError):
+                work_removal.remove(self.path, ['acme.com'], ['Acme'], store=self.store)
+        saved = json.loads(self.path.read_text())
+        self.assertNotIn('acme-gmail', [a['id'] for a in saved['accounts']])
+        self.assertTrue((self.dir / work_removal.PENDING).is_file())
+        result = work_removal.settle(saved, self.store)
+        self.assertEqual(result['events'], 4)
+        self.assertEqual(self.rows('SELECT DISTINCT account_id FROM events'), [('personal-gmail',)])
+
+    def test_failed_config_save_does_not_delete_credentials(self):
+        import onboarding
+        with mock.patch.object(onboarding, 'save', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                work_removal.remove(self.path, ['acme.com'], ['Acme'], store=self.store)
+        self.assertTrue((self.dir / 'intercom.env').is_file())
+        self.assertIn('acme-gmail', [a['id'] for a in json.loads(self.path.read_text())['accounts']])
 
     def test_twice_finds_nothing_and_settle_removes_what_a_late_sync_stored(self):
         work_removal.remove(self.path, ['acme.com'], ['Acme'], store=self.store)

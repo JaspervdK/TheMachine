@@ -10,6 +10,7 @@ import stat
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('assistant', ROOT / 'assistant.py')
@@ -39,6 +40,26 @@ class Files(unittest.TestCase):
         # a sealed file never opens as a sealed value, nor the other way round
         self.assertFalse(message_seal.is_sealed(sealer.seal_bytes(CANARY)))
         self.assertFalse(message_seal.is_sealed_bytes(sealer.seal('text')))
+
+
+    def test_failed_atomic_replace_preserves_original_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'invoice.pdf'
+            path.write_bytes(CANARY)
+            with mock.patch.object(mail_attachments.os, 'replace', side_effect=OSError('rename failed')):
+                with self.assertRaises(OSError):
+                    mail_attachments._write(path, b'encrypted replacement', scrub=True)
+            self.assertEqual(path.read_bytes(), CANARY)
+            self.assertEqual(list(Path(folder).iterdir()), [path])
+
+    def test_successful_replace_keeps_new_bytes_and_scrubs_only_old_inode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'invoice.pdf'
+            path.write_bytes(CANARY)
+            with open(path, 'rb') as original:
+                mail_attachments._write(path, b'encrypted replacement', scrub=True)
+                self.assertEqual(original.read(), b'\0' * len(CANARY))
+            self.assertEqual(path.read_bytes(), b'encrypted replacement')
 
 
 class AtRest(unittest.TestCase):
@@ -89,7 +110,7 @@ class AtRest(unittest.TestCase):
         self.assertEqual(Path(opened['saved']).read_bytes(), CANARY)
         self.assertEqual(Path(opened['saved']).parent.name, 'job-2')
         made = self.attachments / 'job-1/summary.csv'; made.write_bytes(b'plain')
-        self.assertEqual(mail_attachments.open_copy(self.config, made, 'job-2'), {'saved': str(made)})
+        self.assertEqual(mail_attachments.open_copy(self.config, made, 'job-2'), {'saved': str(made.resolve())})
         for path, job in [(Path(self.temp.name) / 'x', 'job-2'), (saved['sealed'], '../x')]:
             with self.assertRaises(ValueError):
                 mail_attachments.open_copy(self.config, path, job)

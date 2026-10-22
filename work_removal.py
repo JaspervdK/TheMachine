@@ -235,7 +235,7 @@ def _credential(account):
     return name
 
 
-def _drop_secrets(config, removed):
+def _drop_secrets(config, removed, unlink=True):
     """A removed account's own secret (its credential: also an Outlook sign-in's token file), when no account that
     stays uses it."""
     kept = {_credential(a) for a in config.get('accounts', [])}
@@ -245,9 +245,10 @@ def _drop_secrets(config, removed):
         if not name or name in kept or name in CORE_CREDENTIALS or name not in (config.get('credentials') or {}):
             continue
         path = Path(str(config['credentials'].pop(name))).expanduser()
-        for item in (path, Path(str(path) + '.lock')):
-            with contextlib.suppress(OSError):
-                item.unlink()
+        if unlink:
+            for item in (path, Path(str(path) + '.lock')):
+                with contextlib.suppress(OSError):
+                    item.unlink()
         dropped.append(name)
     return dropped
 
@@ -299,12 +300,21 @@ def remove(config_path, domains=(), companies=(), restart=None, store=None, run=
     folder = backup(config_path, config)
     ids = [a['id'] for a in found]
     config['accounts'] = [a for a in config['accounts'] if a.get('id') not in ids]
-    out['secrets'] = len(_drop_secrets(config, found))
+    # Record cleanup before configuration changes: a restart can finish after any later interruption.
+    note = _data_dir(config) / PENDING
+    previous = json.loads(note.read_text()) if note.is_file() else {}
+    credentials = dict(config.get('credentials') or {})
+    pending = {'accounts': sorted(set(previous.get('accounts', [])) | set(ids)), 'at': time.time(),
+               'removed': [*previous.get('removed', []), *found],
+               'credentials': {**previous.get('credentials', {}), **credentials}}
+    onboarding.write_private(note, json.dumps(pending))
+    out['secrets'] = len(_drop_secrets(config, found, unlink=False))
     onboarding.save(config_path, config)
+    # Never remove a credential file before the configuration that stops using it was saved.
+    _drop_secrets({**config, 'credentials': credentials}, found)
     outlook = {_credential(a) for a in found if a.get('transport') == 'graph'} - {_credential(k) for k in config['accounts']}
     out['signins'] = _forget_google(config, found, run) + len(outlook - {None})
     Path(config_path).with_name(config_path.name + '.bak').unlink(missing_ok=True)  # it still lists them
-    onboarding.write_private(_data_dir(config) / PENDING, json.dumps({'accounts': ids, 'at': time.time()}))
     out.update(purge(config, ids, store))
     out.update(backup=folder.name, kept_days=BACKUP_DAYS)
     if restart:
@@ -318,8 +328,13 @@ def settle(config, store=None):
         note = _data_dir(config) / PENDING
         if not note.is_file():
             return None
-        ids = [i for i in json.loads(note.read_text()).get('accounts', []) if isinstance(i, str)]
+        pending = json.loads(note.read_text())
+        ids = [i for i in pending.get('accounts', []) if isinstance(i, str)]
         ids = [i for i in ids if i not in {a.get('id') for a in config.get('accounts', [])}]
+        removed = [a for a in pending.get('removed', []) if isinstance(a, dict) and a.get('id') in ids]
+        if removed:
+            _drop_secrets({**config, 'credentials': {**pending.get('credentials', {}), **(config.get('credentials') or {})}}, removed)
+            _forget_google(config, removed)
         result = purge(config, ids, store) if ids else None
         note.unlink(missing_ok=True)
         return result

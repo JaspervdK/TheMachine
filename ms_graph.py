@@ -147,7 +147,7 @@ def _from_broker(config, credential, account, scope):
         raise GraphError('microsoft_signin_unreadable') from None
     answer = _broker(config, credential, {'email': account['email'], 'scope': scope, **({'refresh_token': kept} if kept else {})})
     if kept and answer.get('refresh_token') and answer['refresh_token'] != kept:  # Microsoft rotates them: keep the newest
-        mail_grants.put(config, 'microsoft', account['email'], answer['refresh_token'])
+        mail_grants.rotate(config, 'microsoft', account['email'], kept, answer['refresh_token'])
     return answer
 
 

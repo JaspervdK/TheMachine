@@ -263,7 +263,7 @@ class Sealer:
 
     def seal_json(self, text, plain=PLAIN_METADATA):
         """A JSON object keeps `plain` keys in the clear; the rest goes into one sealed member."""
-        if not isinstance(text, str) or not text or SEALED_KEY in text:
+        if not isinstance(text, str) or not text or is_sealed_json(text):
             return text
         try:
             value = json.loads(text)
@@ -332,7 +332,14 @@ def open_inbox(sealer, value):
 
 
 def is_sealed_json(value):
-    return type(value) is str and value.startswith('{') and f'"{SEALED_KEY}":' in value
+    if type(value) is not str or not value.lstrip().startswith('{') or SEALED_KEY not in value:
+        return False
+    try:
+        marker = json.loads(value).get(SEALED_KEY)
+        raw = base64.b64decode(marker, validate=True) if isinstance(marker, str) else b''
+    except (ValueError, AttributeError):
+        return False
+    return is_sealed(raw)
 
 
 def match(db, words, joiner):
@@ -382,6 +389,7 @@ def attach(db, sealer):
     if not sealer:
         return db
     db.create_function('mc_seal', 1, sealer.seal)
+    db.create_function('mc_is_sealed_json', 1, is_sealed_json, deterministic=True)
     db.create_function('mc_seal_json', 2, lambda text, column: sealer.seal_json(text, plain_keys(column)))
     db.create_function('mc_words', 1, sealer.words, deterministic=True)
     opened = sealer.open_any
@@ -532,7 +540,7 @@ def leftovers(db, seal=False):
     sealer, found = db.sealer, 0
     for table, column, plain in sealed_columns(db):
         rows = db.execute(f"SELECT rowid,{column} FROM {table} WHERE typeof({column})='text' AND {column}!=''"
-                          + (f" AND instr({column},'\"{SEALED_KEY}\":')=0" if plain is not None else '')).fetchall()
+                          + (f" AND mc_is_sealed_json({column})=0" if plain is not None else '')).fetchall()
         for rowid, value in rows:
             new = sealer.seal_json(value, plain) if plain is not None else sealer.seal(value)
             if new != value:

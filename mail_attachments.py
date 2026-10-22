@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 from contextlib import closing
 from pathlib import Path
 
@@ -88,22 +89,43 @@ def opener(config):
 
 
 def _write(path, data, scrub=False):
-    """Atomically, mode 600. `scrub`: the file it replaces is overwritten first, so its old bytes don't stay on disk."""
+    """Atomic, mode 600. Scrub the old inode only after the durable replacement, never before it.
+
+    A failed rename leaves the original intact. After a successful rename, an open handle lets us overwrite the
+    unlinked old inode without touching the replacement. This is best effort, not secure erasure on every filesystem.
+    """
     path = Path(path)
-    temp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'wb') as out:
-        out.write(data)
-        out.flush()
-        os.fsync(out.fileno())
-    if scrub and path.is_file():
-        size = path.stat().st_size
-        with open(path, 'r+b') as old:
+    old, temp = None, None
+    try:
+        if scrub:
+            try:
+                old = open(path, 'r+b')
+            except FileNotFoundError:
+                pass
+        fd, name = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+        temp = Path(name)
+        with os.fdopen(fd, 'wb') as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, path)
+        if os.name != 'nt':
+            folder = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(folder)
+            finally:
+                os.close(folder)
+        if old:
+            size = os.fstat(old.fileno()).st_size
             for start in range(0, size, 1 << 20):
                 old.write(b'\0' * min(1 << 20, size - start))
             old.flush()
             os.fsync(old.fileno())
-    os.replace(temp, path)
+    finally:
+        if old:
+            old.close()
+        if temp:
+            temp.unlink(missing_ok=True)
 
 
 def read(path, config):

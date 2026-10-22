@@ -88,6 +88,19 @@ class Sealer(unittest.TestCase):
         self.assertEqual(self.sealer.seal_json(only_plain), only_plain)
         self.assertTrue(message_seal.is_sealed(self.sealer.seal_json('"not an object"', frozenset())))
 
+    def test_plain_metadata_marker_is_not_an_encrypted_envelope(self):
+        for metadata in ({'thread_id': 't1', 'snippet': CANARY + ' mentions mc1_sealed'},
+                         {'thread_id': 't1', 'mc1_sealed': CANARY},
+                         {'thread_id': 't1', 'mc1_sealed': None}):
+            text = json.dumps(metadata)
+            self.assertFalse(message_seal.is_sealed_json(text))
+            self.assertEqual(self.sealer.open_any(text), text)
+            sealed = self.sealer.seal_json(text)
+            self.assertNotIn(CANARY, sealed)
+            self.assertTrue(message_seal.is_sealed_json(sealed))
+            self.assertEqual(json.loads(self.sealer.open_json(sealed)), metadata)
+            self.assertEqual(self.sealer.seal_json(sealed), sealed)
+
     def test_index_words_fold_like_sqlite_and_hide_the_word(self):
         self.assertEqual(self.sealer.words('Óscar, OSCAR oscar'), ' '.join([self.sealer.words('oscar')] * 3))
         self.assertNotIn('oscar', self.sealer.words('Óscar'))

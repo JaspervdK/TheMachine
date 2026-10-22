@@ -155,3 +155,11 @@ Do not edit worker start lines or discard jobs to pause work. There is no docume
 ### macOS service controls
 
 Stop unloads the app until you start it or log in again. Disable also records launchd’s persistent disabled state. Enable clears that state before loading the app. A try-restart only restarts an app that is already running. These platform commands are regression-tested; native setup and reboot checks remain part of the macOS beta.
+
+## Interrupted encryption and work removal
+
+Sealed metadata is recognized by its encoded envelope, not by the word `mc1_sealed` appearing in an email. Startup also repairs ordinary metadata left in clear text by earlier versions. Attachment replacement writes and syncs a new file, renames it atomically, then scrubs the old unlinked inode; failed replacement keeps the original intact. This is best-effort overwrite, not guaranteed secure erasure on SSDs or snapshots.
+
+Work-account removal saves a private pending-cleanup record before changing configuration. Startup completes that cleanup after interruptions, excluding accounts still configured. Do not clear `work-removal-pending.json` before it settles; it contains private account and credential-path references. The normal seven-day rollback backup remains. Preserve personal sources, shared credentials, message keys and newer owner feedback.
+
+Broker-token rotations replace only the exact login that made the request, never a later reconnect or a removed account. Hosted agent 98 records the exact encrypted mail handoff locally before acknowledging it; retries preserve that receipt across token rotation. These are recovery fixes, not new restrictions or approval requirements.

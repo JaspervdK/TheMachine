@@ -95,7 +95,7 @@ class _Locked:
         self.handle.close()
 
 
-def get(config, provider, email):
+def _record(config, provider, email):
     """The refresh token kept here for this sign-in, or None (not connected here, or still at the control plane)."""
     name = _name(provider, email)
     if not config.get('database'):
@@ -109,18 +109,47 @@ def get(config, provider, email):
         raise GrantError('a kept sign-in does not open') from error
     if kept.get('for') != name:  # sealed for another sign-in: never sent for this one
         raise GrantError('a kept sign-in is for another account')
-    return kept.get('token') or None
+    return kept
 
 
-def put(config, provider, email, token):
+def get(config, provider, email):
+    """The refresh token kept on this Machine, or None."""
+    return (_record(config, provider, email) or {}).get('token') or None
+
+
+def handed(config, provider, email, handoff):
+    """Whether this exact handoff was durably saved, including after a token rotation."""
+    return bool(handoff and (_record(config, provider, email) or {}).get('handoff') == handoff)
+
+
+def put(config, provider, email, token, handoff=None):
     name = _name(provider, email)
     if not isinstance(token, str) or not token or len(token) > 4096:
         raise ValueError('not a refresh token')
-    sealed = base64.b64encode(_sealer(config).seal(json.dumps({'for': name, 'token': token}))).decode()
+    sealed = base64.b64encode(_sealer(config).seal(json.dumps({'for': name, 'token': token, **({'handoff': handoff} if handoff else {})}))).decode()
     with _Locked(config):
         data = _read(config)
         data[name] = sealed
         _write(config, data)
+
+
+def rotate(config, provider, email, previous, token):
+    """Keep a rotated token only if the sign-in that made the request is still current.
+
+    A slow refresh must not overwrite a later owner reconnect or resurrect a disconnected account.
+    """
+    with _Locked(config):
+        if get(config, provider, email) != previous:
+            return False
+        # put uses the same file lock, so write here rather than recursively locking it.
+        name = _name(provider, email)
+        if not isinstance(token, str) or not token or len(token) > 4096:
+            raise ValueError('not a refresh token')
+        data = _read(config)
+        kept = _record(config, provider, email)
+        data[name] = base64.b64encode(_sealer(config).seal(json.dumps({**kept, 'token': token}))).decode()
+        _write(config, data)
+        return True
 
 
 def has(config, provider, email):
