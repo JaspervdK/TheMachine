@@ -8573,7 +8573,7 @@ class App:
         if name == 'skill_import_read':
             return keeper.import_read(str(args.get('token') or ''), str(args.get('key') or ''))
         if name == 'skill_import_run':
-            return keeper.import_run(str(args.get('token') or ''), args.get('keys'))
+            return keeper.import_run(str(args.get('token') or ''), args.get('keys'), args.get('replace') is True)
         if name == 'skill_import_install':  # exactly what the owner read: its files' hash
             return keeper.import_install(str(args.get('token') or ''), str(args.get('key') or ''), str(args.get('sha') or ''))
         if name == 'skill_import_report':  # from the Find my skills turn only

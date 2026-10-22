@@ -45,14 +45,16 @@ Both use the same `SKILL.md` form. **Import** under Settings > Skills lists skil
 
 The list starts short: **Recommended**, then **Yours**. The rest waits in closed groups with counts (in your projects,
 from vendors, built in), and a search box finds any of them. Each skill shows where it comes from, its scripts and other
-files, and its licence. One whose licence doesn't allow copying (some built-in Claude skills), or that you have already,
-is under **Can't import**, with why. **Import selected** and **Close** stay at the bottom of the panel.
+files, and its licence. What you just imported moves to **Imported**, with **View**. One you have already is under
+**Already in your skills**, with **View** and, for your own, **Replace** to update it. One whose licence doesn't allow
+copying (some built-in Claude skills), or whose name OpenClaw already uses, is under **Can't import**, with why.
+**Import selected** and **Close** stay at the bottom of the panel.
 
 An imported skill becomes your own, instructions only, and remembers where it came from. Reference `.md` files its
 instructions point to are added to them when they fit. Scripts and other files are left out, and **Read** says what was
 left out; when the instructions need the scripts, the skill says so to your agent. Claude Code tool names with a plain
 OpenClaw equivalent are renamed (`Bash` → `exec`); other tool-specific parts are flagged, not changed. A skill you have
-already, or that OpenClaw already has by that name, isn't imported twice.
+already, or that OpenClaw already has by that name, isn't imported twice; **Replace** updates your own in place.
 
 A skill that needs its scripts can instead be installed as OpenClaw's own, scripts included: **Read**, then **Install in
 OpenClaw with its scripts**. Like ClawHub, that is only exactly what you read, never forced past OpenClaw's install

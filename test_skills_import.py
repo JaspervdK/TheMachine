@@ -178,6 +178,54 @@ class Import(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'whole SKILL.md'):
             self.keeper.import_paste('claude', 'just text')
 
+    def upload_one(self, body, extra_files=None):
+        raw = io.BytesIO()
+        with zipfile.ZipFile(raw, 'w') as archive:
+            archive.writestr('writer/SKILL.md', SKILL.format(name='writer', description='When a listing page needs writing.', extra='', body=body))
+            for path, text in (extra_files or {}).items():
+                archive.writestr('writer/' + path, text)
+        view = self.keeper.import_upload('claude', {'name': 'writer.zip', 'zip': base64.b64encode(raw.getvalue()).decode()})
+        return view, view['items'][0]
+
+    def test_imported_upload_shows_as_done_not_as_a_duplicate(self):
+        # The reported case: one uploaded skill, imported once. The list it comes back with says Imported, with the new
+        # skill's id, and not a duplicate of itself; its two non-script files are listed as left out, no scripts.
+        view, item = self.upload_one('Steps: read the brief, then write.', {'agents/openai.yaml': 'x: 1', 'assets/icon.svg': '<svg/>'})
+        self.assertEqual((item['done'], item['existing'], item['script_count']), ('', None, 0))
+        self.assertEqual(item['left_out'], ['agents/openai.yaml', 'assets/icon.svg'])
+        out = self.keeper.import_run(view['token'], [item['key']])
+        self.assertEqual([r['status'] for r in out['results']], ['imported'])
+        shown = out['list']['items'][0]
+        mine = {s['name']: s for s in out['skills']}
+        self.assertEqual((shown['done'], shown['skill_id']), ('Imported', mine['writer']['id']))
+        with self.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM skills WHERE name='writer'").fetchone()[0], 1)
+
+    def test_upload_of_a_skill_already_here_offers_replace(self):
+        view, item = self.upload_one('Steps: read the brief, then write.')
+        first = self.keeper.import_run(view['token'], [item['key']])['results'][0]['id']
+        again, same = self.upload_one('Steps: read the brief, then write.')
+        self.assertEqual((same['duplicate'], same['done']), ('Already in your skills', ''))
+        self.assertEqual(same['existing'], {'id': first, 'replaceable': True, 'same': True})
+        newer, changed = self.upload_one('Steps: read the brief, check the facts, then write.')
+        self.assertEqual(changed['existing'], {'id': first, 'replaceable': True, 'same': False})
+        skipped = self.keeper.import_run(newer['token'], [changed['key']])
+        self.assertEqual(skipped['results'][0]['reason'], 'Already in your skills')
+        out = self.keeper.import_run(newer['token'], [changed['key']], replace=True)
+        self.assertEqual((out['results'][0]['status'], out['results'][0]['id']), ('replaced', first))
+        self.assertEqual((out['list']['items'][0]['done'], out['list']['items'][0]['skill_id']), ('Replaced', first))
+        with self.connect() as db:
+            rows = db.execute("SELECT id,version,body FROM skills WHERE name='writer'").fetchall()
+        self.assertEqual([(r['id'], r['version']) for r in rows], [(first, 2)])
+        self.assertIn('check the facts', rows[0]['body'])
+        # A teammate's skill of the same name is never replaced from an upload.
+        with self.connect() as db:
+            db.execute("UPDATE skills SET origin='shared' WHERE id=?", (first,))
+        last, theirs = self.upload_one('Steps: something else entirely, then write.')
+        self.assertFalse(theirs['existing']['replaceable'])
+        refused = self.keeper.import_run(last['token'], [theirs['key']], replace=True)
+        self.assertEqual(refused['results'][0]['status'], 'skipped')
+
     def test_hosted_machine_does_not_look_on_its_computer(self):
         keeper = skills.Skills(self.connect, self.workspace, home=self.home, config={'manage_url': 'https://example.invalid/account'})
         view = keeper.import_find()

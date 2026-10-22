@@ -9,7 +9,9 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 // finds any of them. Import selected and Close stay on screen at the bottom of a panel that scrolls inside. The
 // accounts turn runs on; a signed-out ChatGPT gets a Sign in step with the sign-in dialog, and once in, the list looks
 // there by itself. The owner ticks and imports; Read shows what would come in and, for a skill that needs its scripts,
-// Install in OpenClaw. Upload sends the file marked as an upload. Fits a 390px phone and a 1280px desktop.
+// Install in OpenClaw. Upload sends the file marked as an upload. Once imported, a skill shows under Imported with
+// View, never under Can't import; one already here is info with Replace; files left out are named. Fits a 390px phone
+// and a 1280px desktop.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const LONG='~/Private/some-project-with-a-really-long-folder-name/.claude/skills/answer-customer-questions-from-the-knowledge-base';
 const item=(over)=>({key:'claude:x',name:'x',description:'When to use it',from:'claude',from_label:'Claude',source:'~/.claude/skills/x',url:'',group:'yours',files:1,
@@ -46,12 +48,17 @@ const server=createServer((req,res)=>{
      items:[...list.items,item({key:'claude:account:follow-ups',name:'follow-ups',description:'Chase replies that are late.',source:'claude.ai, your account',url:'https://claude.ai/customize/skills',recommended:true,why:'You get many follow-up cards'})]};
      res.end(JSON.stringify(list));return}
    if(action==='skill_import_read'){const found=list.items.find(i=>i.key===args.key);res.end(JSON.stringify({...found,body:'# Steps\n<b>not bold</b>\n1. Run scripts/build.py',original:'',sha:'abc',installable:found.script_count>0&&!found.blocked}));return}
-   if(action==='skill_import_run'){const done=args.keys.map(k=>({key:k,name:list.items.find(i=>i.key===k).name,status:'imported',left_out:[],flags:[]}));
-     list={...list,items:list.items.map(i=>args.keys.includes(i.key)?{...i,duplicate:'Already in your skills'}:i)};
-     skills={...skills,skills:done.map((d,n)=>({id:'sk_'+n,name:d.name,description:'x',status:'on',origin:'mine',version:1,author:'',note:'',update:false,chars:9,shares:[],changed:false,imported:{from:'claude'}}))};
+   if(action==='skill_import_run'){const sid=k=>args.replace?list.items.find(i=>i.key===k).existing.id:'sk_'+k.replace(/\W/g,'_');
+     const done=args.keys.map(k=>({key:k,name:list.items.find(i=>i.key===k).name,status:args.replace?'replaced':'imported',id:sid(k),left_out:[],flags:[]}));
+     list={...list,items:list.items.map(i=>args.keys.includes(i.key)?{...i,duplicate:'Already in your skills',done:args.replace?'Replaced':'Imported',skill_id:sid(i.key),existing:null}:i)};
+     skills={...skills,skills:[...skills.skills.filter(s=>!done.some(d=>d.id===s.id)),...done.map(d=>({id:d.id,name:d.name,description:'x',status:'on',origin:'mine',version:1,author:'',note:'',update:false,chars:9,shares:[],changed:false,imported:{from:'claude'}}))]};
      res.end(JSON.stringify({results:done,list,...skills}));return}
    if(action==='skill_import_install'){res.end(JSON.stringify({installed_skill:'weekly-report',list,installed:[],checked_at:null,error:''}));return}
-   if(action==='skill_import_upload'){res.end(JSON.stringify({...list,token:'tok2',finding:null,items:[item({key:'claude:upload:x.zip/',name:'from-zip',source:'x.zip'})]}));return}
+   if(action==='skill_import_upload'){const name=args.data.name;
+     const one=name==='writer.zip'?item({key:'claude:upload:writer.zip/writer',name:'writer',source:'writer.zip › writer',left_out:['agents/openai.yaml','assets/icon.svg']})
+      :name==='here.zip'?item({key:'claude:upload:here.zip/here',name:'here',source:'here.zip',duplicate:'Already in your skills',existing:{id:'sk_old',replaceable:true,same:false}})
+      :item({key:'claude:upload:x.zip/',name:'from-zip',source:'x.zip'});
+     list={...list,token:'tok2',finding:null,sources:[],items:[one]};res.end(JSON.stringify(list));return}
    res.end('{}')});return}
  res.statusCode=404;res.end();
 });
@@ -141,7 +148,15 @@ try{
   await page.locator('#import-go').click();
   await page.locator('#notice',{hasText:'Imported 2 skills.'}).waitFor();
   assert.deepEqual(calls.find(c=>c.action==='skill_import_run').args,{token:'tok1',keys:['claude:~/.claude/skills/meeting-prep','claude:account:follow-ups']});
-  assert.match(await page.locator('[data-import="claude:account:follow-ups"]').textContent(),/Already in your skills/);
+  // Imported: shown as done, with View, under Imported; never under Can't import, and nothing left to tick.
+  const doneRow=page.locator('[data-import="claude:account:follow-ups"]');
+  assert.match(await doneRow.textContent(),/✓ Imported/);
+  assert.doesNotMatch(await doneRow.textContent(),/Already in your skills/);
+  assert.equal(await doneRow.locator('input').count(),0);
+  assert.equal(await doneRow.locator('[data-import-view]').count(),1);
+  assert.equal((await page.locator('#import-list h4').allTextContents())[0],'Imported 2');
+  assert.match(await page.locator('#import-status').textContent(),/^Imported 2 skills\./);
+  assert.equal(await page.locator('#import-go').textContent(),'Import selected');
   assert.equal(await page.locator('#skills-list [data-skill]').count(),2);
   // An upload goes as one, marked as an upload, with the chosen origin.
   assert.equal(await page.locator('#import-own').evaluate(d=>d.open),false);  // out of the way once there is a list
@@ -153,6 +168,31 @@ try{
   assert.equal(up.upload,'skill-import');assert.equal(up.args.from,'chatgpt');assert.equal(up.args.data.name,'x.zip');
   assert.equal(Buffer.from(up.args.data.zip,'base64').toString(),'PK fake');
   assert.ok(await fits(page));
+  // The reported case: one uploaded skill with two non-script files. They are named; after Import it is done, the
+  // list has no Can't import and no Import selected left, and View finds it in the list.
+  await page.locator('#import-zip').setInputFiles({name:'writer.zip',mimeType:'application/zip',buffer:Buffer.from('PK fake')});
+  const writer=page.locator('[data-import="claude:upload:writer.zip/writer"]');await writer.waitFor();
+  assert.match(await writer.textContent(),/Left out: openai\.yaml, icon\.svg/);
+  assert.doesNotMatch(await writer.textContent(),/more file/);
+  await writer.locator('input').check();await page.locator('#import-go').click();
+  await page.locator('#import-status',{hasText:'Imported 1 skill.'}).waitFor();
+  assert.deepEqual(await page.locator('#import-list h4').allTextContents(),['Imported 1']);
+  assert.equal(await page.locator('#import-list').textContent().then(t=>/Can’t import/.test(t)),false);
+  assert.equal(await page.locator('#import-go').isHidden(),true);
+  await writer.locator('[data-import-view]').click();
+  await page.locator('#skills-list [data-skill="sk_claude_upload_writer_zip_writer"].skill-flash').waitFor();
+  // A skill that is here already: info, not an error, with View and Replace; Replace updates the owner's own.
+  skills={...skills,skills:[...skills.skills,{id:'sk_old',name:'here',description:'x',status:'on',origin:'mine',version:1,author:'',note:'',update:false,chars:9,shares:[],changed:false}]};
+  await page.locator('#import-zip').setInputFiles({name:'here.zip',mimeType:'application/zip',buffer:Buffer.from('PK fake')});
+  const here=page.locator('[data-import="claude:upload:here.zip/here"]');await here.waitFor();
+  assert.deepEqual(await page.locator('#import-list h4').allTextContents(),['Already in your skills 1']);
+  assert.equal(await page.locator('#import-list .import-no').count(),0);
+  assert.equal(await here.locator('input').isDisabled(),true);
+  await here.locator('[data-import-replace]').click();
+  await page.locator('#import-status',{hasText:'Replaced 1 skill.'}).waitFor();
+  assert.deepEqual(calls.findLast(c=>c.action==='skill_import_run').args,{token:'tok2',keys:['claude:upload:here.zip/here'],replace:true});
+  assert.match(await here.textContent(),/✓ Replaced/);
+  assert.equal(await page.locator('#skills-list [data-skill="sk_old"]').count(),1);
   await context.close();
  }
  assert.deepEqual(errors,[]);
