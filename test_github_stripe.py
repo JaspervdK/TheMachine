@@ -168,6 +168,13 @@ class GitHub(Base):
              notification(2, 'subscribed', 'Watched repo noise', '2026-10-15T10:00:00Z'),
              notification(3, 'review_requested', 'Add export', '2026-10-15T11:00:00Z', number=8, kind='PullRequest', comment=False)]
 
+    def setUp(self):
+        super().setUp()
+        # The notifications are dated; a fixed clock keeps them inside the 7-day first read on any day.
+        clock = patch.object(H, 'now', return_value='2026-10-16T12:00:00+00:00')
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def test_participating_notifications_with_thread_detail_and_links(self):
         source = FakeGitHub(self.NOTES)
         self.assertEqual(github.sync(self.store, {}, GITHUB, H, source)['events'], 2)
