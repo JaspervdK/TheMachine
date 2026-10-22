@@ -36,7 +36,7 @@ try{
   const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
   await page.goto('http://127.0.0.1:'+server.address().port);
   await page.locator('#net-ask').waitFor();
-  assert.match(await page.locator('#net-ask').innerText(),/Find people you know on the Network\?/);
+  assert.match(await page.locator('#net-ask').innerText(),/Which of your contacts have a Machine\?/);assert.match(await page.locator("#net-ask").innerText(),/Check my contacts/);
   calls.length=0;await page.locator('#net-ask [data-net-do="find_on"]').click();await page.waitForTimeout(200);
   assert.deepEqual(calls[0],{action:'fleet_network',args:{do:'find_on',email:'',relation:''}});
   shown=found;await page.reload();await page.locator('#net-nia').waitFor();

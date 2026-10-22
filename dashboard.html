@@ -1922,8 +1922,8 @@ const netDay=at=>{const d=new Date(at);return isNaN(d)?'':d.toLocaleDateString([
 const netReason=r=>r.kind==='card'?`Open: ${esc(r.title)}`:r.kind==='meeting'?`You meet ${esc(netDay(r.at))}${r.title?` · ${esc(r.title)}`:''}`:'';
 function networkCards(f){const net=f.network;if(!net||!f.friends?.id)return[];const out=[];
  const card=(id,title,body,actions)=>`<article id="net-${esc(id)}" class="card t-amber fleet-card net-card"><div class="meta"><div class="card-badges">${chip('Network','lavender')}</div></div><h3>${title}</h3>${body}${actions}</article>`;
- if(net.find==null&&!net.asked)out.push(card('ask','Find people you know on the Network?',`<p class="muted">Your Machine checks your contacts privately. The Network only learns who matched, and only people who chose to be found.</p>`,
-  `<div class="actions">${netBtn('Turn on','find_on','','','primary')}${netBtn('Not now','asked')}</div>`));
+ if(net.find==null&&!net.asked)out.push(card('ask','Which of your contacts have a Machine?',`<p class="muted">Your Machine checks your contacts against people who chose to be findable, and your address book stays private. When you meet or work with a match soon, it suggests connecting. Nothing is shared until they accept.</p>`,
+  `<div class="actions">${netBtn('Check my contacts','find_on','','','primary')}${netBtn('Not now','asked')}</div>`));
  for(const p of (net.people||[]).filter(p=>p.status==='new'&&p.reasons.length)){
   const who=p.hint==='colleague'?'Same work domain as you.':'Friend or family? You choose.';
   out.push(card(p.username,`${esc(p.name)} is on the Network`,`<ul class="net-reasons">${p.reasons.slice(0,2).map(r=>`<li>${netReason(r)}</li>`).join('')}</ul><p class="muted">${who}${p.role?` You call them ${esc(p.role)}.`:''} Connecting sends a friend request; nothing is shared until they accept, then only what your rules allow.</p>`,
