@@ -388,6 +388,24 @@ class Requests(unittest.TestCase):
             self.fleet.annotate(db, shown)
         self.assertEqual(shown[0]['fleet_handoff'], {'name': 'Kim Doe', 'stage': 'declined', 'note': 'Not mine', 'back': False})
 
+    def test_a_change_after_the_handoff_came_back_makes_the_card_the_owners_again(self):
+        self.with_kim()
+        self.fleet.wake_card = lambda card_id, key, at: self.store.handoff_back(card_id, key, key.removeprefix('fleet-handoff-back-'), at)
+        card = self.ready_card([], 'k-moved-on')
+        self.fleet.hand_off(card, self.ref, 'kim1', 'Export leaks rows', self.HANDOFF_TEXT)
+        with self.store.connect() as db:
+            ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
+        self.fleet.take_answer({'id': ask_id, 'status': 'answered', 'answer': {'stage': 'declined'}})
+        shown = [self.card_row(card)]
+        with self.store.connect() as db:
+            self.fleet.annotate(db, shown)
+        self.assertTrue(shown[0]['fleet_handoff']['back'])
+        # The owner moves on with a Change note: the old handoff no longer leads, the newest question can
+        self.store.decide(card, 'other', 'Someone else picked it up. Now pay the reporter.', 'd-moved-on', 'dashboard')
+        with self.store.connect() as db:
+            self.fleet.annotate(db, shown)
+        self.assertFalse(shown[0]['fleet_handoff']['back'])
+
     def test_a_decline_reopens_a_card_the_owner_closed_after_handing_it_off_also_one_that_came_earlier(self):
         self.with_kim()
         self.fleet.wake_card = lambda card_id, key, at: self.store.handoff_back(card_id, key, key.removeprefix('fleet-handoff-back-'), at)

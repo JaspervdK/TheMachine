@@ -16,9 +16,18 @@ const cards=[
   outcome:JSON.stringify({state:'needs_you',needs:'Pay in the bank app.'})},
  {id:'d1',title:'Reply to Noor about the contract',body:'Drafted a reply for the likelier answer.',status:'prepared',scope:'work',created_at:now,event_ids:[3],
   outcome:JSON.stringify({state:'needs_you',needs:'Hold firm on the price?'}),
-  next_actions:[{kind:'email',revision:'v1',label:'Send to Noor',to:['noor@example.com'],to_name:'Noor',subject:'Contract',body:'Hi Noor'}]}];
+  next_actions:[{kind:'email',revision:'v1',label:'Send to Noor',to:['noor@example.com'],to_name:'Noor',subject:'Contract',body:'Hi Noor'}]},
+ // A run that stopped to ask, on a card a teammate handed back: Answer leads, not Do it myself
+ {id:'h1',title:'Contact creation can expose another account',body:'Drafted a handoff.',status:'instructions',scope:'work',created_at:now,event_ids:[4],
+  preparation_status:'blocked',preparation_reason:'I couldn’t find the bounty amount; please share it or point me to the message.',
+  latest_feedback:{choice:'other',feedback:'Someone else picked it up. I still need to pay the reporter.',created_at:now},fleet_handoff:{name:'Lee',stage:'declined',back:true}},
+ // The service's own failure and a sign-in keep their usual lead
+ {id:'e1',title:'Collect the invoices',body:'x',status:'instructions',scope:'work',created_at:now,event_ids:[5],preparation_status:'blocked',preparation_error:'ai_run_failed',
+  preparation_reason:'I tried twice but couldn’t finish this. Tap Try again, or change the request.'},
+ {id:'g1',title:'Download the statements',body:'x',status:'instructions',scope:'work',created_at:now,event_ids:[6],preparation_status:'blocked',
+  preparation_reason:'The bank needs your code: complete sign-in in the tab, then tap Continue.'}];
 const posts=[];
-const state=()=>({suggestions:cards,promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:false,fleets:[]}});
+const state=()=>({suggestions:cards,promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:true,fleets:[]}});
 const server=createServer(async(req,res)=>{let body='';for await(const c of req)body+=c;const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify(state()));return}
@@ -47,6 +56,15 @@ try{
   assert.deepEqual(await primary('t1'),['Mark done']);
   assert.deepEqual(await primary('d1'),['Review and send to Noor']);
   assert.equal(await page.locator('#task-d1 [data-choice="answer"]').count(),0);
+  // Stopped to ask: the blocker leads as the amber Needs you line, once; Answer leads; Hand to someone else and Mark done follow
+  assert.equal(await line('h1'),'Needs you: I couldn’t find the bounty amount; please share it or point me to the message.');
+  assert.equal(await page.locator('#task-h1 .status-line.outcome').count(),1);
+  assert.equal((await page.locator('#task-h1').innerText()).split('bounty amount').length,2);
+  assert.deepEqual(await primary('h1'),['Answer']);
+  assert.equal(await page.locator('#task-h1 [data-handoff-mine]').count(),0);
+  assert.deepEqual((await page.locator('#task-h1 .actions > button').allTextContents()).slice(0,3),['Answer','Hand to someone else','Mark done']);
+  assert.equal(await page.locator('#task-h1 [data-choice="retry"]').count(),1);
+  assert.deepEqual(await primary('e1'),['Try again']);assert.deepEqual(await primary('g1'),['Continue']);
   // The button row fits the card on a phone
   assert.ok(await page.locator('#task-q1 .actions').evaluate(a=>[...a.children].every(c=>c.getBoundingClientRect().right<=a.closest('article').getBoundingClientRect().right+1)));
   // Answer opens the answer box under the question
@@ -63,8 +81,15 @@ try{
   await page.waitForFunction(()=>/carry on/.test(document.querySelector('#toast')?.textContent||''));
   const sent=posts.find(p=>p.action==='decide');
   assert.equal(sent.args.suggestion_id,'q1');assert.equal(sent.args.choice,'other');assert.equal(sent.args.feedback,'Use 31 Dec 2099 and say so in the notes.');
+  // The same box and path on the blocked, handed-back card
+  {const box=await page.locator('#task-h1').boundingBox();await page.screenshot({path:`/tmp/answer-blocked-${width}.png`,fullPage:true,clip:box})}
+  posts.length=0;await page.locator('#task-h1 [data-choice="answer"]').click();
+  assert.equal(await page.locator('#task-h1 .answer-editor label').textContent(),'Your answer');
+  await page.locator('#feedback-h1').fill('It is 500 euros, by bank transfer.');await page.locator('#task-h1 [data-choice="other"]').click();
+  await page.waitForFunction(()=>/carry on/.test(document.querySelector('#toast')?.textContent||''));
+  assert.deepEqual([posts.find(p=>p.action==='decide')?.args.suggestion_id,posts.find(p=>p.action==='decide')?.args.choice],['h1','other']);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
-  await page.locator('#task-q1').screenshot({path:`/tmp/answer-card-${width}.png`});
+  await page.locator("#task-q1").screenshot({path:`/tmp/answer-card-${width}.png`,timeout:5000}).catch(()=>{});
   await context.close();
  }
  assert.deepEqual(errors,[]);

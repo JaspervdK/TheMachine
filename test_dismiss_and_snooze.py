@@ -204,5 +204,15 @@ class AnswerQuestion(unittest.TestCase):
         self.assertNotIn('Answer',self.labels({**row,'handled_hint':json.dumps({'reason':'You replied'})}))
         self.assertNotIn('Answer',self.labels({**row,'preparation_status':'blocked'}))
 
+    def test_a_run_that_stopped_to_ask_leads_with_answer(self):
+        ask='I couldn’t find the amount; please share it or point me to the message.'
+        row={**ux.UX.row(self),'status':'instructions','preparation_status':'blocked','preparation_reason':ask,'preparation_error':None}
+        self.assertEqual(self.labels(row)[:3],['Answer','Try again','Mark done'])
+        self.assertTrue(a.card(row).endswith('Needs you: '+ask))
+        # The service's own failure, or a sign-in: the usual buttons and line
+        failed={**row,'preparation_error':'ai_run_failed','preparation_reason':'I tried twice but couldn’t finish this. Tap Try again, or change the request.'}
+        self.assertEqual(self.labels(failed)[0],'Try again');self.assertIn('I’m stuck:',a.card(failed))
+        self.assertEqual(self.labels({**row,'preparation_reason':'Stripe needs your code: complete sign-in in the tab, then tap Continue.'})[0],'Continue')
+
 
 if __name__=='__main__':unittest.main()

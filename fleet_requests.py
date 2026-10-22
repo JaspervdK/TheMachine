@@ -752,6 +752,12 @@ class Requests:
         for r in db.execute("SELECT * FROM fleet_out WHERE context LIKE 'handoff:%' ORDER BY at"):
             answer = json.loads(r['answer'] or 'null') or {}
             stage = answer.get('stage') or r['status']
+            # The owner already moved on after it came back (a Change or an answer, Do it, Try again): the card is theirs
+            # again, so the newest question leads instead of the old handoff's Do it myself.
+            if stage in ('declined', 'expired') and r['id'] not in mine and db.execute(
+                    "SELECT 1 FROM decisions WHERE suggestion_id=? AND source!='fleet' AND choice IN ('other','accept','retry') AND created_at>?",
+                    (r['context'][8:], r['answered_at'] or r['at'])).fetchone():
+                mine.add(r['id'])
             handed[r['context'][8:]] = {'name': r['name'], 'stage': {'asked': 'asked', 'waiting': 'waiting for them'}.get(stage, STAGES.get(stage, stage)),
                                         **({'note': answer['note']} if answer.get('note') else {}),
                                         # handed back: Do it myself, Hand to someone else or Mark done, until the owner picks

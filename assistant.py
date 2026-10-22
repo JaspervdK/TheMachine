@@ -6179,6 +6179,8 @@ def card(row):
     elif row.get('preparation_status') == 'queued': status='Next up. I’ll start shortly.'
     elif row.get('preparation_status') == 'blocked' and (row.get('preparation_browser') or {}).get('sign_in'):
         status='Waiting for you to sign in: '+row['preparation_reason'].rstrip('.')+'. Sign in through Sign in and I carry on by myself.'
+    elif row.get('preparation_status') == 'blocked' and row['status'] not in ('completed','rejected','snoozed') and not row.get('handled_hint') and ask_blocked(row):
+        status='Needs you: '+sentence(row['preparation_reason'])
     elif row.get('preparation_status') == 'blocked': status='I’m stuck: '+(row.get('preparation_reason') or 'Preparation did not finish. I’ll keep this in your list.')
     action_state=row.get('action_status') or next((item.get('state') for item in row.get('next_actions',[]) if item.get('state',{}).get('status') in ('queued','sending','sent','uncertain','blocked','failed','undoing','undone')),None)
     if action_state and (row['status']=='prepared' or (row['status']=='completed' and action_state.get('status')=='sent')):
@@ -6286,10 +6288,23 @@ def sentence(text):
     return text if text.endswith(('.', '?', '!', '…')) else text + '.'
 
 
+def ask_blocked(row):
+    """A run that stopped to ask the owner: a blocker it wrote itself (no error of the service's own), not a sign-in
+    and not waiting in the browser. Same rule as askBlocked() in dashboard.html."""
+    reason = str(row.get('preparation_reason') or '').strip()
+    return bool(row.get('preparation_status') == 'blocked' and reason and not row.get('preparation_error')
+                and not row.get('preparation_browser') and retry_label(reason) != 'Continue')
+
+
 def ask_question(row, actions):
-    """A result waiting on the owner's answer (needs_you, written as a question) with nothing to send: Answer leads
-    (the Change path) and Mark done steps back. Same rule as askQuestion() in dashboard.html."""
-    if row['status'] != 'prepared' or row.get('handled_hint') or row.get('preparation_status') == 'blocked' or any(a.get('kind') != 'open' for a in actions):
+    """A card waiting on the owner's answer: Answer leads (the Change path) and Mark done steps back. Either a run that
+    stopped to ask (ask_blocked) or a result whose needs_you is a question, with nothing to send. Same rule as
+    askQuestion() in dashboard.html."""
+    if row['status'] in ('completed', 'rejected', 'snoozed') or row.get('handled_hint'):
+        return ''
+    if ask_blocked(row):
+        return str(row['preparation_reason']).strip()
+    if row['status'] != 'prepared' or row.get('preparation_status') == 'blocked' or any(a.get('kind') != 'open' for a in actions):
         return ''
     try:
         outcome = json.loads(row.get('outcome') or '{}')
@@ -6319,7 +6334,7 @@ def controls(row, root=''):
     else:
         choices = [('Do it','accept'),('Mark done','complete'),('Snooze','snooze'),('Change','other'),('Not needed','reject')]
     actions=next_actions.visible_actions({'kind':'menu','actions':row['next_actions']}) if row.get('next_actions') is not None else next_actions.visible_actions(row.get('next_action'))
-    if ask_question(row,actions):choices=[('Answer','other'),('Mark done','complete'),('Snooze','snooze'),('Not needed','reject')]
+    if ask_question(row,actions):choices=[('Answer','other'),*([(retry_label(row.get('preparation_reason')),'retry')] if row.get('preparation_status')=='blocked' else []),('Mark done','complete'),('Snooze','snooze'),('Not needed','reject')]
     buttons=[]
     link=(row.get('preparation_browser') or {}).get('link') or ''
     signin=(row.get('preparation_browser') or {}).get('signin_url') or ''
@@ -6835,7 +6850,7 @@ def deliver(store, config):
 
 
 FEEDBACK_COLUMN = "(SELECT feedback FROM decisions f WHERE f.suggestion_id=s.id AND f.feedback!='' AND NOT EXISTS (SELECT 1 FROM decision_annotations a WHERE a.decision_id=f.id) ORDER BY f.rowid DESC LIMIT 1) requested_feedback"
-EDIT_ROWS = ('SELECT s.*,d.message_id,d.edit_failures,p.status preparation_status,p.reason preparation_reason,'+FEEDBACK_COLUMN+' FROM suggestions s '
+EDIT_ROWS = ('SELECT s.*,d.message_id,d.edit_failures,p.status preparation_status,p.reason preparation_reason,p.error preparation_error,'+FEEDBACK_COLUMN+' FROM suggestions s '
              'JOIN deliveries d ON s.id=d.suggestion_id LEFT JOIN preparations p ON s.id=p.suggestion_id '
              'WHERE d.needs_edit=1 AND d.message_id IS NOT NULL')
 
@@ -6879,7 +6894,7 @@ def deliver_one(store, config, edit_cards=True):
                    ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=3)).isoformat(),))
         retry_cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).isoformat()
         store.settle_awaiting(db)
-        rows = db.execute("SELECT s.*,d.reminder,d.message_id,d.previous_message_ids,p.status preparation_status,p.reason preparation_reason,"+FEEDBACK_COLUMN+" FROM suggestions s JOIN deliveries d ON s.id=d.suggestion_id LEFT JOIN preparations p ON s.id=p.suggestion_id WHERE d.status='queued' AND (d.error IS NULL OR d.updated_at<?) AND ((s.status='pending' AND s.handled_hint IS NULL) OR (d.reminder=1 AND s.status IN ('accepted','prepared','instructions'))) AND ((d.reminder=1 AND s.early=0) OR s.deliver_after IS NULL OR s.deliver_after<=?) ORDER BY d.reminder DESC,s.created_at LIMIT 1",(retry_cutoff,now())).fetchall()
+        rows = db.execute("SELECT s.*,d.reminder,d.message_id,d.previous_message_ids,p.status preparation_status,p.reason preparation_reason,p.error preparation_error,"+FEEDBACK_COLUMN+" FROM suggestions s JOIN deliveries d ON s.id=d.suggestion_id LEFT JOIN preparations p ON s.id=p.suggestion_id WHERE d.status='queued' AND (d.error IS NULL OR d.updated_at<?) AND ((s.status='pending' AND s.handled_hint IS NULL) OR (d.reminder=1 AND s.status IN ('accepted','prepared','instructions'))) AND ((d.reminder=1 AND s.early=0) OR s.deliver_after IS NULL OR s.deliver_after<=?) ORDER BY d.reminder DESC,s.created_at LIMIT 1",(retry_cutoff,now())).fetchall()
         if not rows:
             return
         row = dict(rows[0])
