@@ -124,7 +124,7 @@ The installer offers a **preview**: your agent reviews the last 7 days once and 
 
 If the cards look useful, say yes to **turning on reviews and card delivery** (Telegram and/or the dashboard app). Read [Security model](../README.md#security-model) first: **Do it** authorizes the offered task; prepare-ahead may start read-only preparation before a tap, but stops before its consequential final step. You can also do both later with `./install.sh --preview` and `./install.sh --activate`.
 
-On a server without a screen, `./install.sh --browser-viewer` gives the assistant a browser you can watch and use from your own (sign in to LinkedIn or X there, or help when a task waits on a sign-in). On a desktop you are not always at, the dashboard can show its screen live instead (`browser_vnc`), so you can take over from your phone. See [README](../README.md#sources).
+On a server without a screen, `./install.sh --browser-viewer` gives the assistant a browser you can watch and use from your own (sign in to LinkedIn or X there, or help when a task waits on a sign-in). On a desktop you are not always at, the dashboard can show its screen live instead (`browser_vnc`), so you can take over from your phone. A short note in the viewer says what the browser is for, which task is using it, and when one waits there for you to sign in. See [README](../README.md#sources).
 
 ## Check everything
 

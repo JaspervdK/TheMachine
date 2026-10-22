@@ -9242,6 +9242,30 @@ class App:
             return None
         return base, tab[0]
 
+    def browser_now(self):
+        """What this Machine's own browser is doing, for the note in its viewer: the running tasks that use it (title
+        and latest step) and the ones waiting there for the owner to sign in (title and site). Nothing else."""
+        with self.store.connect() as db:
+            rows = db.execute("SELECT p.job_id,p.session_job_id,p.status,p.reason,s.title FROM preparations p JOIN suggestions s ON s.id=p.suggestion_id "
+                              "WHERE p.status IN ('starting','running','blocked') ORDER BY p.updated_at DESC LIMIT 20").fetchall()
+            waits = {r['job_id']: browser_wait(db, r['job_id'], r['status'], reason=r['reason']) for r in rows if r['status'] == 'blocked'}
+            try:
+                used = {r['job_id'] for r in rows if r['status'] != 'blocked' and db.execute(
+                    "SELECT 1 FROM preparation_calls WHERE job_id=? AND tool='browser' LIMIT 1", (r['job_id'],)).fetchone()}
+            except sqlite3.OperationalError:
+                used = set()
+        working, waiting = [], []
+        for r in rows:
+            title = ' '.join(str(r['title'] or '').split())[:120]
+            if r['status'] == 'blocked':
+                wait = waits.get(r['job_id'])
+                if wait and wait['sign_in']:
+                    waiting.append({'title': title, 'site': signin_name(r['reason'], wait['page'])})
+            elif r['job_id'] in used:  # a run that has used the browser counts until it ends, so the note doesn't flicker
+                steps = preparation_steps(r['session_job_id'] or r['job_id'], self.config.get('agent_db'), 1)
+                working.append({'title': title, 'step': steps[-1]['title'] if steps else None})
+        return {'working': working[:3], 'waiting': waiting[:3]}
+
     def preparation_peek(self, suggestion_id):
         """A small, current picture of the tab a running preparation is on, for its card: {on, image (a JPEG data
         address, or None while that tab is in the background)}. Read over DevTools without bringing anything to the
@@ -10295,6 +10319,8 @@ class App:
                         self.output(200, app.preparation_progress(urllib.parse.parse_qs(path.query).get('id', [''])[0]))
                     except (ValueError, sqlite3.OperationalError):
                         self.output(404, {'error': 'Progress not available'})
+                elif path.path == '/api/browser-now':  # the note in the browser's own viewer: what it is doing now
+                    self.output(200, app.browser_now())
                 elif path.path == '/api/peek':  # the live look at a preparing card's browser tab
                     try:
                         self.output(200, app.preparation_peek(urllib.parse.parse_qs(path.query).get('id', [''])[0]))

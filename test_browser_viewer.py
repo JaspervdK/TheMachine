@@ -117,6 +117,7 @@ class FocusTest(unittest.TestCase):
             self.assertTrue((web / 'app').is_symlink())
             self.assertIn('src="machine-view.js"', (web / 'vnc.html').read_text())
             self.assertIn("params.get('frame') === 'window'", (web / 'machine-view.js').read_text())
+            self.assertIn("Your Machine's own browser", (web / 'machine-view.js').read_text())  # a blank page never stands on its own
 
     def test_units_listen_on_loopback_only(self):
         for unit in browser_viewer.UNITS.glob('machine-browser-*'):

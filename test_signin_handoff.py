@@ -63,6 +63,20 @@ class SigninHandoff(unittest.TestCase):
         self.assertEqual(waiting['page'], 'https://www.example.com/login')
         self.assertEqual(waiting['signin_url'], 'https://machine.example/#signin-for=' + self.sid)
 
+    def test_the_browser_viewer_note_says_which_task_waits_there(self):
+        self.assertEqual(self.app.browser_now(), {'working': [], 'waiting': []})  # idle: the viewer explains itself
+        self.block()
+        self.assertEqual(self.app.browser_now(), {'working': [], 'waiting': [{'title': 'Confirm your details', 'site': 'example.com'}]})
+
+    def test_the_browser_viewer_note_shows_a_running_task_that_uses_it(self):
+        self.steps(('exec', {'command': 'ls'}))
+        self.assertEqual(self.app.browser_now()['working'], [])  # not on the browser: nothing to say there
+        with self.store.connect() as db:
+            db.execute('DELETE FROM preparation_calls')
+        self.steps(('browser', {'action': 'open', 'targetUrl': 'https://www.example.com/'}))
+        with patch.object(a, 'preparation_steps', return_value=[{'title': 'Opening the account page', 'at': None}]):
+            self.assertEqual(self.app.browser_now()['working'], [{'title': 'Confirm your details', 'step': 'Opening the account page'}])
+
     def test_another_blocker_after_a_command_does_not(self):
         self.block('The export failed with an error; try again later.')
         self.assertNotIn('preparation_browser', self.row())

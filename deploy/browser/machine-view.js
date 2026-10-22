@@ -148,3 +148,82 @@ if (params.get('frame') === 'window') {
     document.body.append(bar);
     label();
 }
+
+// ---------------------------------------------------------------- what this browser is (any view)
+// A short note so a blank start page never stands on its own: what this browser is for, what it is doing now (from
+// the dashboard's /api/browser-now when the viewer sits under it), and a task that waits here for a sign-in. Not in
+// the dashboard's sign-in dialog, which frames this viewer and says what to do itself.
+if (window.top === window) {
+    const KEY = 'machine-note-closed';
+    const note = document.createElement('div');
+    note.id = 'machine-note';
+    note.setAttribute('role', 'status');
+    note.innerHTML = '<strong></strong><span></span><small></small><div><a href="../" target="_top" hidden>Open your dashboard</a>' +
+        '<button type="button">Got it</button></div>';
+    const pill = document.createElement('button');
+    pill.type = 'button';
+    pill.id = 'machine-note-pill';
+    const css = document.createElement('style');
+    css.textContent = '#machine-note,#machine-note-pill{position:fixed;left:50%;transform:translateX(-50%);z-index:1001;' +
+        'bottom:var(--machine-note-bottom,8px);font:14px/1.4 system-ui,sans-serif;color:#fff;background:#1d2026f2;box-shadow:0 2px 10px #0008}' +
+        '#machine-note{width:min(520px,calc(100% - 16px));box-sizing:border-box;padding:12px 14px;border-radius:14px;display:grid;gap:4px}' +
+        '#machine-note small{color:#c9ced6;font-size:13px}#machine-note small:empty{display:none}' +
+        '#machine-note div{display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:4px}' +
+        '#machine-note a{color:#9cc3ff;margin-right:auto}' +
+        '#machine-note button,#machine-note-pill{font:600 14px system-ui,sans-serif;border:0;border-radius:18px;height:36px;padding:0 14px;cursor:pointer}' +
+        '#machine-note button{background:#fff;color:#1d2026}#machine-note-pill{max-width:calc(100% - 16px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+        '#machine-note[hidden],#machine-note-pill[hidden]{display:none}';
+    document.head.append(css);
+    document.body.append(note, pill);
+    if (document.getElementById('machine-view-bar')) document.documentElement.style.setProperty('--machine-note-bottom', '56px');
+
+    let now = {working: [], waiting: []}, shown = '', closed = localStorage.getItem(KEY) === 'idle' ? 'idle' : '';
+    function paint() {
+        const wait = now.waiting[0], work = now.working[0];
+        const [title, text, hint, key] = wait
+            ? ['Your turn', `Sign in to ${wait.site || 'the site'} here for "${wait.title}".`, 'The task carries on by itself once you are in.', 'wait:' + wait.title]
+            : work
+                ? ['Working on a task', work.title, work.step || '', 'work:' + work.title]
+                : ["Your Machine's own browser", 'Your Machine uses it to do tasks on websites for you. Sign in to a site here so it can act there. ' +
+                   'Nothing runs in it until you ask.', "To sign in, type the site's address at the top.", 'idle'];
+        if (key !== shown && closed !== key) closed = '';  // something new to say: open again
+        shown = key;
+        const [s, t, h] = note.children;
+        s.textContent = title;
+        t.textContent = text;
+        h.textContent = hint;
+        pill.textContent = wait ? 'Your turn: sign in' : work ? 'Working: ' + work.title : 'What is this?';
+        note.hidden = closed === key;
+        pill.hidden = !note.hidden;
+    }
+    note.querySelector('button').onclick = () => {
+        closed = shown;
+        if (shown === 'idle') localStorage.setItem(KEY, 'idle');
+        paint();
+    };
+    pill.onclick = () => {
+        closed = '';
+        localStorage.removeItem(KEY);
+        paint();
+    };
+    let answered = false, timer = null;
+    async function check() {
+        if (document.hidden) return;
+        let found = null;
+        try {
+            const r = await fetch('../api/browser-now', {cache: 'no-store', credentials: 'same-origin'});
+            found = r.ok && /json/.test(r.headers.get('Content-Type') || '') ? await r.json() : null;
+        } catch { found = null; }
+        if (found && Array.isArray(found.working) && Array.isArray(found.waiting)) {
+            now = found;
+            answered = true;
+            note.querySelector('a').hidden = false;  // the viewer sits under the dashboard: a way back to it
+        } else if (!answered) {
+            clearInterval(timer);  // the plain local viewer: no dashboard behind it, nothing to ask
+        }
+        paint();
+    }
+    timer = setInterval(check, 5000);
+    paint();
+    check();
+}
