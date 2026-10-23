@@ -47,6 +47,14 @@ try{
  // Close too
  await row.click();await pane.waitFor();await page.locator('#bp-close').click();await pane.waitFor({state:'hidden'});
  assert.equal(await page.locator('#events').isHidden(),false);assert.equal(await row.getAttribute('aria-current'),'false');
+ // Leaving through another row spends no Back: the one before it leaves the dashboard
+ const hist=await context.newPage();hist.on('pageerror',e=>errors.push(e.message));await hist.goto('about:blank');await hist.goto(base);await hist.locator('#open-browser').click();
+ await hist.locator('#browser-pane').waitFor();await hist.locator('nav [data-tab="events"]').click();await hist.waitForFunction(()=>!location.hash);
+ await hist.goBack();assert.equal(hist.url(),'about:blank');
+ // Narrower than a computer while it is open: the view before comes back
+ await hist.goto(base);await hist.locator('#open-browser').click();await hist.locator('#browser-pane').waitFor();
+ await hist.setViewportSize({width:800,height:900});await hist.locator('#browser-pane').waitFor({state:'hidden'});
+ assert.equal(await hist.locator('#inbox').isHidden(),false);await hist.close();
  // A link straight to #browser opens it
  const deep=await context.newPage();deep.on('pageerror',e=>errors.push(e.message));await deep.goto(base+'/#browser');await deep.locator('#browser-pane').waitFor();await deep.close();
  // A phone keeps the new tab
