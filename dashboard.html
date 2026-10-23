@@ -3720,5 +3720,5 @@ refresh().then(()=>newTagline());setInterval(refreshWhenReady,30000);
   if(pushed&&!from){pushed=false;quiet=true;history.back()}else history.replaceState(null,'',location.pathname+location.search)}).observe(pane,{attributes:true,attributeFilter:['hidden']});
  matchMedia('(min-width:1024px)').addEventListener('change',e=>{if(!e.matches)leave()});  // narrower than a computer: back to the view before
  addEventListener('hashchange',e=>{if(quiet){quiet=false;return}if(location.hash==='#browser')show();else if(e.oldURL.endsWith('#browser')){pushed=false;leave()}});
- if(location.hash==='#browser'){const t=Date.now(),wait=()=>show()||Date.now()-t>8000||setTimeout(wait,200);wait()}}
+ if(location.hash==='#browser'){const t=Date.now(),wait=()=>location.hash!=='#browser'||show()||Date.now()-t>8000||setTimeout(wait,200);wait()}}
 </script></html>
