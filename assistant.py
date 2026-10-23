@@ -5594,7 +5594,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             if agent_job is not None:
                 job = db.execute('SELECT * FROM agent_jobs WHERE id=?', (agent_job['id'],)).fetchone()
-                if (not job or job['suggestion_id'] != suggestion_id or job['status'] not in agent_jobs.ACTIVE
+                if (not job or job['suggestion_id'] != suggestion_id or job['status'] not in ((*agent_jobs.ACTIVE, 'result') if job['place'] == 'remote' else agent_jobs.ACTIVE)
                         or job['turns'] != agent_job['turns'] or job['outcome'] is not None
                         or job['draft_revision'] != revision):
                     raise ValueError('This agent job stopped or the draft changed. Its result stays on the card without replacing the draft.')
@@ -5619,6 +5619,8 @@ class Store:
                 current=revised
             stamp=now()
             db.execute('UPDATE suggestions SET next_action=? WHERE id=?',(encoded(current),suggestion_id))
+            if agent_job is not None:
+                db.execute('UPDATE agent_jobs SET draft_revision=? WHERE id=? AND turns=?', (revised['revision'], agent_job['id'], agent_job['turns']))
             draft_saved(db,suggestion_id,revised,stamp)
             db.execute("UPDATE action_jobs SET status='cancelled',updated_at=? WHERE suggestion_id=? AND revision=? AND status IN ('queued','blocked')",(stamp,suggestion_id,revision))
             db.execute('INSERT INTO draft_edits(id,suggestion_id,old_revision,new_revision,kind,before_subject,before_body,after_subject,after_body,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',

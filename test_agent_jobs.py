@@ -342,7 +342,7 @@ class AgentJobs(unittest.TestCase):
             return {'results': [r for r in self.reported if r['ticket_hash'] in body['tickets']]}
         receipts = body.get('receipts') or [{'ticket_hash': h, 'report': 1} for h in body.get('tickets') or []]
         self.reported = [r for r in self.reported if not any(r['ticket_hash'] == a['ticket_hash'] and int(r.get('report') or 1) == a['report'] for a in receipts)]
-        return {'ok': True}
+        return {'ok': True, 'acked': receipts}
 
     drafts = []
 
@@ -525,6 +525,29 @@ class AgentJobs(unittest.TestCase):
             app.agent_revise(self.sid, 'Stale', claimed)
         with self.store.connect() as db:
             self.assertEqual(json.loads(db.execute('SELECT next_action FROM suggestions WHERE id=?', (self.sid,)).fetchone()[0])['body'], 'Owner revised it')
+
+    def test_a_replacement_during_ack_wait_updates_the_result_once(self):
+        import agent_remote
+        jobs = self.jobs(claude={'place': 'remote', 'session': 'session_01AbCdEfGh1234'})
+        with patch.object(jobs, 'launch', lambda *a, **k: None):
+            job = jobs.start(self.sid, 'claude', 'Summarize')
+        digest = 'a' * 64
+        with jobs.connect() as db:
+            db.execute("UPDATE agent_jobs SET status='waiting',token_hash=? WHERE id=?", (digest, job['id']))
+        self.reported.append({'ticket_hash': digest, 'report': 1, 'summary': 'First', 'draft': 'First draft'})
+        network = jobs._network
+        def replaced(body):
+            if body['action'] == 'ack':
+                self.reported[:] = [{'ticket_hash': digest, 'report': 2, 'summary': 'Corrected', 'draft': 'Corrected draft'}]
+                return {'ok': True, 'acked': []}
+            return network(body)
+        jobs._network = replaced
+        self.assertEqual(agent_remote.fetch(jobs), 1)
+        jobs._network = network
+        self.assertEqual(agent_remote.fetch(jobs), 1)
+        self.assertEqual(jobs.get(job['id'])['summary'], 'Corrected')
+        self.assertEqual(self.revised, [(self.sid, 'First draft'), (self.sid, 'Corrected draft')])
+        self.assertEqual(agent_remote.fetch(jobs), 0)
 
     def test_a_previous_turn_cannot_complete_or_fail_the_retry(self):
         jobs = self.jobs()

@@ -153,13 +153,14 @@ def fetch(jobs, rows=None):
         receipts = [dict(r) for r in db.execute('SELECT ticket_hash,report FROM agent_result_receipts WHERE acked=0')]
     if receipts:
         try:
-            jobs.network({'action': 'ack', 'receipts': receipts})
+            reply = jobs.network({'action': 'ack', 'receipts': receipts}) or {}
         except Exception as error:  # noqa: BLE001 - durable receipts are retried after a restart too
             LOG.warning('agent results ack error=%s', type(error).__name__)
         else:
             with jobs.connect() as db:
                 db.executemany('UPDATE agent_result_receipts SET acked=1 WHERE ticket_hash=? AND report=?',
-                               [(r['ticket_hash'], r['report']) for r in receipts])
+                               [(r['ticket_hash'], r['report']) for r in reply.get('acked') or []
+                                if r in receipts])
     cutoff = time.time() - REMOTE_DAYS * 86400
     for row in rows:
         started = row['started_at'] or row['created_at']

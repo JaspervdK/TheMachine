@@ -1630,8 +1630,9 @@ class AgentJobs:
         return files[:FILES_MAX], diff
 
     def result(self, job_id, session, summary, files=None, diff=None, remote_draft=None, receipt=None, turn=None):
+        statuses = (*ACTIVE, 'result') if receipt else ACTIVE
         with self.connect() as db:
-            owner = db.execute("SELECT * FROM agent_jobs WHERE id=? AND (? IS NULL OR turns=?) AND status IN ('running','waiting','sent') AND outcome IS NULL", (job_id, turn, turn)).fetchone()
+            owner = db.execute(f"SELECT * FROM agent_jobs WHERE id=? AND (? IS NULL OR turns=?) AND status IN ({','.join('?' * len(statuses))}) AND outcome IS NULL", (job_id, turn, turn, *statuses)).fetchone()
         if not owner:
             return False
         if files is None:
@@ -1640,7 +1641,7 @@ class AgentJobs:
         summary, at = str(summary or 'Done, without a summary.')[:SUMMARY_MAX], now()
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT answers,turns FROM agent_jobs WHERE id=? AND turns=? AND status IN ('running','waiting','sent') AND outcome IS NULL", (job_id, owner['turns'])).fetchone()
+            row = db.execute(f"SELECT answers,turns FROM agent_jobs WHERE id=? AND turns=? AND status IN ({','.join('?' * len(statuses))}) AND outcome IS NULL", (job_id, owner['turns'], *statuses)).fetchone()
             if not row:
                 return False
             try:
@@ -1650,7 +1651,7 @@ class AgentJobs:
             answers = (answers if isinstance(answers, list) else []) + [{'at': at, 'turn': row['turns'], 'summary': summary,
                                                                           'files': [f['path'] for f in files]}]
             db.execute("UPDATE agent_jobs SET status='result',session_id=COALESCE(?,session_id),summary=?,files=?,diff=?,progress=NULL,"
-                       "error=NULL,error_kind=NULL,draft_updated=?,updated_at=?,finished_at=?,answers=? WHERE id=? AND status IN ('running','waiting','sent')",
+                       "error=NULL,error_kind=NULL,draft_updated=?,updated_at=?,finished_at=?,answers=? WHERE id=?",
                        (session, summary, json.dumps(files), diff or None, 1 if updated else None, at, at,
                         json.dumps(answers[-20:], ensure_ascii=False), job_id))
 
@@ -1779,7 +1780,11 @@ class AgentJobs:
         diff, and a finished message for the card's draft."""
         with self.connect() as db:
             row = db.execute('SELECT * FROM agent_jobs WHERE id=?', (str(job_id),)).fetchone()
-        if not row or row['status'] not in ('waiting', 'running') or found.get('ticket_hash') != row['token_hash']:
+        if not row or row['status'] not in ('waiting', 'running', 'result') or found.get('ticket_hash') != row['token_hash']:
+            return False
+        with self.connect() as db:
+            previous = db.execute('SELECT report FROM agent_result_receipts WHERE ticket_hash=?', (row['token_hash'],)).fetchone()
+        if previous and int(found.get('report') or 1) <= previous['report']:
             return False
         summary = str(found.get('summary') or '').strip() or 'Done, without a summary.'
         links = '\n'.join(u for u in (found.get('links') or []) if isinstance(u, str) and u.startswith('https://'))[:4000]
