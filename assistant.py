@@ -440,7 +440,8 @@ class SourceError(Exception):
 
 # Owner decisions/feedback. Only the bridge's verified Telegram handlers and the
 # authenticated dashboard may record them; never the local CLI the agent can run.
-CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel', 'connect_remove', 'connect_scope')
+CONNECT_ACTIONS = ('connect_sources', 'connect_start', 'connect_poll', 'connect_answer', 'connect_cancel', 'connect_remove', 'connect_scope',
+                   'connect_signin', 'connect_signin_state')
 OWNER_ACTIONS = {*CONNECT_ACTIONS, 'browser_focus', 'browser_login_open', 'browser_login_pages', 'browser_login_fill', 'browser_login_choose', 'browser_logins', 'browser_login_forget', 'decide', 'feedback_reply', 'request_feedback', 'bind_feedback_prompt', 'confirm_action', 'undo_merge', 'revise_draft', 'forget_fact', 'promise_close', 'promise_due', 'graph_role', 'graph_fact_unlink', 'graph_rename', 'graph_stage', 'board_save', 'board_delete', 'board_dismiss', 'graph_relation', 'graph_person_org', 'graph_warmup', 'graph_org_edit', 'graph_org_wrong', 'graph_person_delete', 'graph_same', 'set_people_lookup', 'fleet_ask', 'fleet_decide', 'fleet_notice_decide', 'fleet_rule', 'fleet_take', 'fleet_meetings', 'set_work_hours', 'fleet_free', 'fleet_brief', 'fleet_brief_hide', 'model_usage_refresh', 'model_reset', 'set_signature', 'detect_signature', 'set_voice', 'unmerge_fact', 'card_chat', 'recap_decide'}
 # Warm intros, handoffs and shared follow-ups (fleet_requests.py): the owner's own, from their dashboard only.
 FLEET_REQUEST_ACTIONS = {'fleet_intro', 'fleet_handoff_draft', 'fleet_handoff', 'fleet_handoff_email', 'fleet_handoff_mine', 'fleet_handoff_not_mine', 'fleet_split', 'fleet_split_dismiss',
@@ -10066,6 +10067,7 @@ class App:
             self.fleet.own_event = lambda event: own_or_joined(event, self.store.owner_user_ids)  # silent acceptance: only what the owner did
             self.fleet.notify_brief = self.fleet_notify_brief
             self.fleet.remove_work = self.fleet_remove_work
+            self.fleet.connect_delivered = self.fleet_connect_delivered  # Sign in with Intercom for this Machine (fleet.py)
         # Skills (skills.py): the owner's how-tos, written to the OpenClaw workspace; shared ones come in through the Fleet.
         self.skills = skills.Skills(self.store.connect, config.get('openclaw_workspace') or WORKSPACE, self.fleet, config=config)
         self.skills.finder = self.skills_find_start
@@ -12241,12 +12243,33 @@ class App:
         with lock:
             for key in [k for k, v in sessions.items() if v['state'] != 'running' and time.monotonic() - v['at'] > 1800]:
                 sessions.pop(key)
-        if name == 'connect_sources':
-            manage = str(self.config.get('manage_url') or '')
-            return {'sources': onboarding.catalog(self.config), 'manage_url': manage if manage.startswith('https://') else None,
-                    'saveable': bool(getattr(self, 'config_path', None))}
         manage = str(self.config.get('manage_url') or '')
         hosted = manage.startswith('https://')
+        if name == 'connect_sources':
+            found = {'sources': onboarding.catalog(self.config), 'manage_url': manage if hosted else None,
+                     'saveable': bool(getattr(self, 'config_path', None))}
+            if not hosted:
+                # Sign in with <provider> through The Machine's own app (fleet.py connect_start), once this Machine is
+                # paired with an account; pasting a token stays as the fallback
+                for source in found['sources']:
+                    if source['service'] in fleet.SIGNIN_SOURCES:
+                        source['signin'] = True
+                found['paired'], found['pair_url'] = getattr(self, 'fleet', None) is not None, fleet.PAIR_PAGE
+            return found
+        if name in ('connect_signin', 'connect_signin_state'):
+            source = args.get('name') if isinstance(args.get('name'), str) else ''
+            if hosted:
+                raise ValueError('Your account page signs this one in')
+            if source not in fleet.SIGNIN_SOURCES:
+                raise ValueError('That source signs in another way')
+            if getattr(self, 'fleet', None) is None:
+                raise ValueError('Pair this Machine first')
+            if name == 'connect_signin_state':
+                return self.fleet.signin_state(source)
+            if not getattr(self, 'config_path', None):
+                raise ValueError('This service cannot save its settings')
+            # one already connected is signed in again (onboarding.connect_delivered), as Reconnect does
+            return {'url': self.fleet.connect_start(source), 'state': 'started'}
         if name in ('connect_start', 'connect_remove') and args.get('account') is not None:
             account = next((a for a in self.config['accounts'] if a['id'] == args.get('account')), None)
             if not account:
@@ -13664,6 +13687,26 @@ class App:
         LOG.info('work removal accounts=%s events=%s cards=%s', len(result['accounts']), result['events'], result['cards'])
         if result['accounts']:
             result['restarting'] = restart_self(5)
+        return result
+
+    def fleet_connect_delivered(self, body):
+        """A sign-in sealed for this paired Machine (fleet.py connects_round): connected the way the dashboard's
+        Connections, Add does (onboarding.connect_delivered), then a restart reads it. Only the `connect` command."""
+        import onboarding
+        if not isinstance(body, dict) or body.get('command') != 'connect' or not isinstance(body.get('args'), dict):
+            return {'ok': False, 'error': 'Not something this Machine connects this way.'}
+        if not getattr(self, 'config_path', None):
+            return {'ok': False, 'error': 'This Machine cannot save its settings.'}
+        lock = self.__dict__.setdefault('connect_lock', threading.Lock())
+        with lock:
+            if any(v['state'] == 'running' for v in self.__dict__.setdefault('connect_sessions', {}).values()):
+                return {'ok': False, 'error': 'Another source is being added on this Machine. Sign in again once that is done.'}
+            try:
+                result = onboarding.connect_delivered(self.config_path, body['args'])
+            except onboarding.SetupError as error:  # its words name the step, never what it carried
+                return {'ok': False, 'error': error.message}
+        LOG.info('connect delivered source=%s replies=%s', body['args'].get('source'), result.get('replies'))
+        result['restarting'] = restart_self(3)
         return result
 
     def graph_build(self):
