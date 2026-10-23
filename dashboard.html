@@ -2910,7 +2910,10 @@ const agentWhere=t=>t.place==='cloud'?'Runs in Codex cloud, not on your computer
 const canAgent=s=>!closed(s)&&s.status!=='snoozed'&&agentTools().length>0&&!AGENT_ACTIVE.includes(s.agent_job?.status)&&!agentOpen(s);
 const agentOpen=s=>{const j=s.agent_job;return!!j&&!closed(s)&&!j.outcome&&['result','failed'].includes(j.status)};
 const agentCancel=j=>`<div class="actions"><button class="ghost" data-agent-cancel="${esc(j.id)}">Cancel</button></div>`;
-const agentLink=j=>j.url&&/^(https:\/\/|codex:\/\/threads\/)/.test(j.url)?`<a class="agent-app" href="${esc(j.url)}" target="_blank" rel="noreferrer">${esc(j.app||'Open')} ↗</a>`:'';
+// A Codex thread opens on this computer: from the owner's other devices through the Codex app's remote connection (hostId).
+const onMachine=()=>['localhost','127.0.0.1','[::1]','::1'].includes(location.hostname);
+const agentHref=j=>j.url_elsewhere&&/^codex:\/\/threads\/[0-9a-f-]{36}\?hostId=/.test(j.url_elsewhere)&&!onMachine()?j.url_elsewhere:j.url;
+const agentLink=j=>j.url&&/^(https:\/\/|codex:\/\/threads\/)/.test(j.url)?`<a class="agent-app" href="${esc(agentHref(j))}" target="_blank" rel="noreferrer">${esc(j.app||'Open')} ↗</a>`:'';
 // A job's follow-up goes to the same session: the card's Change asks the agent while its result is open.
 const agentAsk=s=>agentOpen(s)&&s.agent_job.can_follow_up;
 const agentFile=(j,f)=>`<a class="agent-file" href="api/agent-file?job=${encodeURIComponent(j.id)}&path=${encodeURIComponent(f.path)}" target="_blank" rel="noreferrer">${esc(f.path.split('/').pop())}</a>`;
