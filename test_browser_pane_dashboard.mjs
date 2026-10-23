@@ -9,7 +9,8 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 // loaded meanwhile. On a phone, or without a viewer on the dashboard's own address, it stays a new tab.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 let embed='/browser/';const loads=[];
-const state=()=>({suggestions:[],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:false,fleets:[]},
+const card={id:'aaaaaaaaaaaaaaa1',title:'Reply to the venue',body:'Drafted a reply.',status:'prepared',scope:'work',created_at:new Date().toISOString(),event_ids:[1]};
+const state=()=>({suggestions:[card],promises:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:false,fleets:[]},
  browser_link:'https://cp.example/open?to=browser',browser_embed:embed});
 const server=createServer(async(req,res)=>{for await(const _ of req);const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
@@ -55,6 +56,18 @@ try{
  await hist.goto(base);await hist.locator('#open-browser').click();await hist.locator('#browser-pane').waitFor();
  await hist.setViewportSize({width:800,height:900});await hist.locator('#inbox').waitFor();  // not only hidden by the narrow layout
  assert.equal(await hist.locator('#browser-pane').getAttribute('hidden'),'');await hist.close();
+ // Settings from the pane, then Back: the pane again
+ const set=await context.newPage();set.on('pageerror',e=>errors.push(e.message));await set.goto(base);await set.locator('#open-browser').click();await set.locator('#browser-pane').waitFor();
+ await set.locator('#open-settings').click();await set.locator('#settings').waitFor();assert.equal(await set.locator('#browser-pane').isHidden(),true);
+ await set.goBack();await set.locator('#browser-pane').waitFor();assert.equal(await set.locator('#settings').isHidden(),true);
+ assert.equal(await set.locator('#open-browser').getAttribute('aria-current'),'page');await set.close();
+ // From a chat: a refresh while the pane is open keeps the chat, and Back shows it
+ const ch=await context.newPage();ch.on('pageerror',e=>errors.push(e.message));await ch.goto(base+'/#chat=aaaaaaaaaaaaaaa1');await ch.locator('.chat-head').waitFor();
+ await ch.locator('#open-browser').click();await ch.locator('#browser-pane').waitFor();
+ await ch.evaluate(()=>refresh());await new Promise(r=>setTimeout(r,300));
+ assert.equal(await ch.evaluate(()=>chatId),'aaaaaaaaaaaaaaa1');
+ await ch.goBack();await ch.locator('.chat-head').waitFor();assert.ok(ch.url().endsWith('#chat=aaaaaaaaaaaaaaa1'));
+ assert.equal(await ch.locator('#browser-pane').isHidden(),true);await ch.close();
  // A link straight to #browser opens it
  const deep=await context.newPage();deep.on('pageerror',e=>errors.push(e.message));await deep.goto(base+'/#browser');await deep.locator('#browser-pane').waitFor();await deep.close();
  // A phone keeps the new tab
