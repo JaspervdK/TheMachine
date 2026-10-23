@@ -78,7 +78,8 @@ try{
   // Scrolling up at the top loads the earlier days above, and the day on screen stays where it was
   await page.locator('[data-cal-go="0"]').click();await page.waitForTimeout(300);
   const first=(await view(page)).days[0],seen=await page.evaluate(()=>{scrollTo(0,0);return calAnchor(document.querySelector('#calendar-view'))});
-  await page.mouse.wheel(0,-400);await page.waitForFunction(k=>document.querySelector('#calendar-view [data-day]').dataset.day<k,first);await page.waitForTimeout(300);
+  // (a wheel turn that can't scroll; a real one would also move the page up once the days are in)
+  await page.evaluate(()=>dispatchEvent(new WheelEvent('wheel',{deltaY:-400})));await page.waitForFunction(k=>document.querySelector('#calendar-view [data-day]').dataset.day<k,first);await page.waitForTimeout(300);
   const after=await topOf(page,seen.day);assert.ok(Math.abs(after-seen.top)<2,`no jump: ${seen.day} at ${seen.top}, then ${after}`);
   // The tap does the same
   const tap=await page.evaluate(()=>{scrollTo(0,0);return [document.querySelector('#calendar-view [data-day]').dataset.day,calAnchor(document.querySelector('#calendar-view'))]});
