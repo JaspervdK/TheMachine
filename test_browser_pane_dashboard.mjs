@@ -53,8 +53,8 @@ try{
  await hist.goBack();assert.equal(hist.url(),'about:blank');
  // Narrower than a computer while it is open: the view before comes back
  await hist.goto(base);await hist.locator('#open-browser').click();await hist.locator('#browser-pane').waitFor();
- await hist.setViewportSize({width:800,height:900});await hist.locator('#browser-pane').waitFor({state:'hidden'});
- assert.equal(await hist.locator('#inbox').isHidden(),false);await hist.close();
+ await hist.setViewportSize({width:800,height:900});await hist.locator('#inbox').waitFor();  // not only hidden by the narrow layout
+ assert.equal(await hist.locator('#browser-pane').getAttribute('hidden'),'');await hist.close();
  // A link straight to #browser opens it
  const deep=await context.newPage();deep.on('pageerror',e=>errors.push(e.message));await deep.goto(base+'/#browser');await deep.locator('#browser-pane').waitFor();await deep.close();
  // A phone keeps the new tab
