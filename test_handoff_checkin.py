@@ -93,6 +93,17 @@ class CheckInCard(unittest.TestCase):
             labels = [b['label'] for block in a.controls(row)['blocks'] for b in block.get('buttons', [])]
             self.assertEqual(labels[0], 'Unsnooze')
 
+    def test_waking_at_check_in_time_does_not_relabel_later_taps(self):
+        with patch.object(a, 'now', return_value=at(2026, 10, 23, 10)):
+            card = self.handed()
+        with patch.object(a, 'now', return_value=at(2026, 10, 26, 9)):
+            self.assertEqual(self.store.wake_snoozed(), 1)
+        self.store.decide(card, 'accept', '', 'd-do', 'dashboard')
+        self.store.decide(card, 'snooze', '', 'd-sn', 'dashboard', snooze_option='3d')
+        with self.store.connect() as db:
+            owner, _ = self.app.card_chat_service(db, card)
+        self.assertEqual([i['text'] for i in owner if i['kind'] == 'event'], ['Do it', 'Snoozed'])
+
 
 class CheckInChat(unittest.TestCase):
     def setUp(self):
@@ -112,6 +123,17 @@ class CheckInChat(unittest.TestCase):
         # With the teammate: Change time moves the check-in, Check in now brings it back. After that, a snooze is a snooze.
         self.assertEqual([i['text'] for i in owner if i['kind'] == 'event'],
                          ['Check-in moved', 'Back for a check-in in Telegram', 'Snoozed', 'Unsnoozed'])
+
+    def test_after_the_scheduled_return_later_taps_are_ordinary(self):
+        rows = (('fleet-handoff-wait-q_1', 'snooze', 'fleet', '2026-01-01T10:00:00+00:00'),
+                ('fleet-handoff-checkin-1', 'accept', 'fleet', '2026-01-02T09:00:00+00:00'),
+                ('d1', 'accept', 'dashboard', '2026-01-02T10:00:00+00:00'),
+                ('d2', 'snooze', 'dashboard', '2026-01-02T11:00:00+00:00'))
+        with self.store.connect() as db:
+            for id_, choice, source, at_ in rows:
+                db.execute("INSERT INTO decisions(id,suggestion_id,choice,feedback,source,created_at) VALUES(?,?,?,'',?,?)", (id_, self.sid, choice, source, at_))
+            owner, _ = self.app.card_chat_service(db, self.sid)
+        self.assertEqual([i['text'] for i in owner if i['kind'] == 'event'], ['Do it', 'Snoozed'])
 
 
 if __name__ == '__main__':

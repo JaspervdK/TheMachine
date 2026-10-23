@@ -4893,8 +4893,12 @@ class Store:
             db.execute('UPDATE suggestions SET undo_until=NULL WHERE undo_until<=?',(now(),))
             rows = db.execute("SELECT id,resume_status FROM suggestions WHERE status='snoozed' AND snoozed_until<=?",(now(),)).fetchall()
             for row in rows:
+                waiting = handoff_wait(db, {'id': row['id'], 'status': 'snoozed'})
                 status = row['resume_status'] if row['resume_status'] in ['pending','accepted','prepared','instructions'] else 'pending'
                 db.execute('UPDATE suggestions SET status=?,snoozed_until=NULL,resume_status=NULL WHERE id=?',(status,row['id']))
+                if waiting:  # so later owner taps aren't a check-in; the scheduled return isn't a decision of theirs
+                    db.execute('INSERT INTO decisions VALUES(?,?,?,?,?,?)',
+                               ('fleet-handoff-checkin-'+uuid.uuid4().hex,row['id'],'accept','','fleet',now()))
                 if status in ('accepted','instructions'):
                     self.queue_preparation(db,row['id'],'snooze-resumed:'+now(),resume_action=True)
                 # Exactly one new outbox intent per elapsed snooze. An unknown
