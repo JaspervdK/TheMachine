@@ -3636,8 +3636,8 @@ function calRoute(){const m=/^#calendar\?(.*)$/.exec(location.hash);if(!m)return
  else if(+mon===+calAt&&$('#calendar').classList.contains('week')===calWeek())return;
  calShow(mon,null)}
 addEventListener('popstate',calRoute);addEventListener('hashchange',calRoute);setTimeout(calRoute);
-// Keys on a computer, in one small map: t Today, ← → or k j a week, a Agenda, w Week
-const CAL_KEYS={t:()=>calGo(0),arrowleft:()=>calGo(-1),k:()=>calGo(-1),arrowright:()=>calGo(1),j:()=>calGo(1),a:()=>calSetMode('agenda'),w:()=>calSetMode('week')};
+// The arrows move a week on a computer; t, k j, a and w are with the shared shortcuts (actionAdd, below)
+const CAL_KEYS={arrowleft:()=>calGo(-1),arrowright:()=>calGo(1)};  // t, k j, a and w are in the shared shortcuts (actionAdd)
 addEventListener('keydown',e=>{if($('#calendar').hidden||e.ctrlKey||e.metaKey||e.altKey||e.isComposing||e.defaultPrevented||drawerIs()||document.querySelector('dialog[open]')||e.target.closest?.('textarea,input,select,[contenteditable]'))return;
  const f=CAL_KEYS[e.key.toLowerCase()];if(f){e.preventDefault();f()}});
 // A row opens its card's chat (back returns here), the promise's page, or the meeting in a new tab; the view is
@@ -4940,6 +4940,13 @@ const actLabel=(a,ctx)=>typeof a.label==='function'?a.label(ctx):a.label;
 function actRun(a,ctx){if(typeof drawerClose==='function')drawerClose();try{const r=a.run(ctx);if(r?.catch)r.catch(e=>toast(e.message,true))}catch(e){toast(e.message||'That didn’t work',true)}}
 // Go to
 const kbNav=sel=>()=>{const el=$(sel);if(!el)return;if(chatId&&el.dataset.tab==='inbox'&&!$('#inbox').hidden){history.replaceState(null,'',location.pathname+location.search);chatPushed=false;openChatLink();scrollTo(0,0);return}el.click()};
+// The Calendar's own keys, while it is on show: t Today, k j the period before or after (← → too), a Agenda, w Week
+{const onCal=()=>!$('#calendar').hidden;actionAdd(
+ {id:'cal-today',group:'Calendar',label:'Today',keywords:'calendar now this week',keys:'t',when:onCal,run:()=>calGo(0)},
+ {id:'cal-prev',group:'Calendar',label:'Previous',keywords:'calendar earlier back',keys:'k',when:onCal,run:()=>calGo(-1)},
+ {id:'cal-next',group:'Calendar',label:'Next',keywords:'calendar later on',keys:'j',when:onCal,run:()=>calGo(1)},
+ {id:'cal-agenda',group:'Calendar',label:'Agenda',keywords:'calendar list',keys:'a',when:onCal,run:()=>calSetMode('agenda')},
+ {id:'cal-week',group:'Calendar',label:'Week',keywords:'calendar grid',keys:'w',when:onCal,run:()=>calSetMode('week')})}
 actionAdd(
  {id:'go-suggestions',group:'Go to',label:'Suggestions',keywords:'cards home inbox',keys:'g s',run:kbNav('nav [data-tab="inbox"]')},
  {id:'go-calendar',group:'Go to',label:'Calendar',keywords:'meetings today agenda',keys:'g c',run:kbNav('nav [data-tab="calendar"]')},
@@ -5053,10 +5060,11 @@ function palPick(i){const x=pal.items[i];if(!x)return;const ctx=pal.ctx;palClose
 function keysOpen(){let d=$('#keys-sheet');for(const x of document.querySelectorAll('dialog[open]'))if(x!==d)return;
  if(!d){d=document.createElement('dialog');d.id='keys-sheet';d.setAttribute('aria-labelledby','keys-title');document.body.append(d);d.addEventListener('click',e=>{if(e.target===d)d.close()})}
  const row=(keys,label,more='')=>`<p><span>${esc(label)}</span><span class="keys">${kbKeys(keys)}${more}</span></p>`,ctx={card:null,id:'',chat:false};
- const of=g=>ACTIONS.filter(a=>a.group===g&&a.keys&&!a.review&&!a.each&&(!a.when||(()=>{try{return a.when(ctx)}catch{return false}})()||g==='This card')).map(a=>row(a.keys,actLabel(a,ctx))).join('');
+ const of=g=>ACTIONS.filter(a=>a.group===g&&a.keys&&!a.review&&!a.each&&(!a.when||(()=>{try{return a.when(ctx)}catch{return false}})()||g==='This card'||g==='Calendar')).map(a=>row(a.keys,actLabel(a,ctx))).join('');
  d.innerHTML=`<form method="dialog"><div class="snooze-heading"><h2 id="keys-title">Keyboard shortcuts</h2><button aria-label="Close">×</button></div></form><div class="keys-sheet">
  <div><h3>General</h3>${row('mod+k','Search and commands','<span class="then">or</span><kbd>/</kbd>')}${of('Actions')}${row('esc','Close')}</div>
  <div><h3>Go to</h3>${of('Go to')}</div>
+ <div><h3>Calendar</h3>${of('Calendar')}${row('←','Previous')}${row('→','Next')}</div>
  <div><h3>Lists and cards</h3>${row('j','Next')}${row('k','Previous')}${row('enter','Open')}${of('This card')}</div></div>`;
  d.showModal()}
 
@@ -5083,7 +5091,7 @@ document.addEventListener('keydown',e=>{if(e.defaultPrevented||e.isComposing||e.
  if(key==='g'&&!e.shiftKey){kbG=Date.now();e.preventDefault();return}
  if(key==='/'){e.preventDefault();palOpen();return}
  if(key==='?'){e.preventDefault();keysOpen();return}
- if(key==='j'||key==='k'){e.preventDefault();kbMove(key==='j'?1:-1);return}
+ if((key==='j'||key==='k')&&$('#calendar').hidden){e.preventDefault();kbMove(key==='j'?1:-1);return}
  if(key==='Enter'){if(kbEnter())e.preventDefault();return}
  if(key==='Escape'&&kbSel){kbPick(null);return}
  if(e.shiftKey||key.length!==1)return;
