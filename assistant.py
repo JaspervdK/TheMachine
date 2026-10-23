@@ -7051,6 +7051,9 @@ def chat_draft(action):
         return None
     to = action.get('to')
     to = [str(t) for t in to] if isinstance(to, list) else [str(to)] if to else []
+    if not to and (action.get('to_name') or action.get('to_email')):  # a chat send names its person apart from the channel
+        to = [str(action.get('to_name') or action.get('to_email'))]
+    to = [chat_plain_name(t) for t in to if not CHAT_HANDLE.fullmatch(t.strip())]
     return {'kind': action['kind'], 'to': [clamp(t, 200) for t in to[:10]], 'subject': clamp(str(action.get('subject') or ''), 300),
             'body': chat_text(action['body'], chars=8000), 'reply': bool(action.get('in_reply_to') or action.get('thread_id'))}
 
@@ -7070,12 +7073,27 @@ def chat_person(name):
     return f'{match[2].strip()} {match[1].strip()}' if match else name
 
 
+# A raw chat handle is never shown: a channel ("#DM", "#general"), a Slack or WhatsApp ID, or both together
+CHAT_HANDLE = re.compile(r'(?:#[\w.-]*|[CDGUW][A-Z0-9]{8,})(?:\s+[UW][A-Z0-9]{8,})?|\d{6,}@(?:s\.whatsapp\.net|g\.us|lid)')
+CHAT_ON = {'slack': ' on Slack', 'whatsapp': ' on WhatsApp', 'linkedin': ' on LinkedIn', 'x': ' on X'}
+
+
+def chat_plain_name(name):
+    """A bare lower-case first name as a handle ("andrea") reads as a name ("Andrea")."""
+    name = str(name).strip()
+    return name.title() if re.fullmatch(r"[a-z][a-z'-]{0,30}(?: [a-z][a-z'-]{0,30}){0,2}", name) else name
+
+
 def chat_name(address, names, fallback=''):
     """Who a draft goes to, by first name when a source message names them; a chat handle that is no email address
     (a WhatsApp or Slack ID) is the person the card is about (`fallback`)."""
     found = names.get(_address(address))
     if found:
         return found.split()[0]
+    if CHAT_HANDLE.fullmatch(str(address).strip()):
+        return (fallback.split() or ['them'])[0]
+    if not _address(address) or '@' not in str(address):
+        return chat_plain_name(str(address)).split()[0] if str(address).strip() else (fallback.split() or ['them'])[0]
     email = re.fullmatch(r'[^\s@<>]+@[\w.-]+\.[a-z]{2,}', _address(address) or '') and not re.search(r'@(s\.whatsapp\.net|g\.us|lid)$', _address(address))
     return _address(address) if email else (fallback.split() or [_address(address) or str(address)])[0]
 
@@ -9101,7 +9119,8 @@ class App:
             views = []
         note = note['feedback'].strip() if note else ''
         return {'card': card, 'drafts': drafts, 'links': links, 'files': files, 'messages': agent_messages(views), 'sources': views,
-                'task': card_task(card), 'note': note, 'about': agent_about(card, views), 'history': agent_history(*chat, skip=note)}
+                'task': card_task(card), 'note': note, 'about': agent_about(card, views), 'history': agent_history(*chat, skip=note),
+                'message_kinds': [v['kind'] for v in views]}
 
     def agent_revise(self, suggestion_id, text):
         """A message Claude Code or Codex rewrote (its draft.md) becomes the card's draft under a new revision, when the
@@ -9123,7 +9142,7 @@ class App:
         if name == 'agent_draft':
             return self.agents.draft(args['suggestion_id'])
         if name == 'agent_send':
-            return self.agents.start(args['suggestion_id'], args['tool'], args.get('brief'))
+            return self.agents.start(args['suggestion_id'], args['tool'], args.get('brief'), args.get('note'))
         if name == 'agent_follow_up':
             return self.agents.follow_up(args['job_id'], args.get('text'))
         if name == 'agent_retry':
@@ -11162,18 +11181,24 @@ class App:
                 raise ValueError('Unknown suggestion')
             job = db.execute('SELECT job_id,session_job_id,status FROM preparations WHERE suggestion_id=?', (suggestion_id,)).fetchone()
             owner, results = self.card_chat_service(db, suggestion_id)
+        # The cursor also carries a digest of what the service itself adds (sends, taps, results): when that moved
+        # ("Sending to Sam…" became "Sent to Sam"), the whole chat comes back even if the conversation didn't.
+        digest = hashlib.sha256(json.dumps([owner, results], sort_keys=True, default=str).encode()).hexdigest()[:16]
+        gateway_cursor, _, seen = (cursor or '').rpartition('|') if cursor and '|' in cursor else (cursor, '', None)
+        if seen is not None and seen != digest:
+            gateway_cursor = None
         active = bool(job) and job['status'] in ('queued', 'starting', 'running')
         result = {'session': bool(job), 'active': active, 'status': job['status'] if job else None}
         if not job:
             return {**result, 'items': chat_items([], owner, results), 'cursor': None}
         found = self.card_chat_gateway({'session_key': 'agent:main:assistant-review-preparation-' + (job['session_job_id'] or job['job_id']),
-                                        'cursor': cursor, 'limit': CHAT_HISTORY_LIMIT})
+                                        'cursor': gateway_cursor, 'limit': CHAT_HISTORY_LIMIT})
         if not isinstance(found, dict) or found.get('error') or not isinstance(found.get('messages', []), list):
             return {**result, 'items': chat_items([], owner, results), 'cursor': None, 'unavailable': True}
         flight = found.get('inFlightRun') if isinstance(found.get('inFlightRun'), dict) else None
         result['live'] = {'text': chat_text(flight.get('text'), chars=8000)} if flight and active else None
-        result['cursor'] = found.get('deltaCursor') if isinstance(found.get('deltaCursor'), str) else None
-        if found.get('kind') == 'delta':
+        result['cursor'] = found['deltaCursor'] + '|' + digest if isinstance(found.get('deltaCursor'), str) else None
+        if found.get('kind') == 'delta' and gateway_cursor:
             return {**result, 'unchanged': True}
         return {**result, 'items': chat_items(found.get('messages'), owner, results), 'more': bool(found.get('hasMore'))}
 
@@ -11210,6 +11235,19 @@ class App:
             if text or v['title']:
                 owner.append({'kind': 'source', 'from': clamp(who, 120), 'via': via, 'title': clamp(v['title'], 200),
                               'text': text, 'mine': v['from'] == 'You', 'at': at})
+        # A chat source has only its channel and handle ("#DM U…"): name it after the person the card's sends go to
+        for r in db.execute('SELECT payload FROM action_jobs WHERE suggestion_id=? ORDER BY created_at', (suggestion_id,)):
+            try:
+                person = (chat_draft(json.loads(r['payload'])) or {}).get('to', [])
+            except ValueError:
+                continue
+            if person:
+                break
+        else:
+            person = []
+        for i in owner:
+            if i['kind'] == 'source' and CHAT_HANDLE.fullmatch(str(i['from']).strip()):
+                i['from'] = person[0] if len(person) == 1 else ''
         runs = [r['started_at'] for r in db.execute('SELECT started_at FROM preparation_runs WHERE suggestion_id=?', (suggestion_id,))]
         about = max(((i['at'], i['from']) for i in owner if i['kind'] == 'source' and not i['mine'] and i['from']), default=(0, ''))[1]  # the latest who wrote
         waiting = False  # with a teammate: Later means back to check in, not a snooze of the owner's
@@ -11245,7 +11283,10 @@ class App:
                 continue
             draft = chat_draft(payload)
             if draft:
+                if len(draft['to']) == 1 and _address(draft['to'][0]) and str(payload.get('to_name') or '').strip():
+                    names.setdefault(_address(draft['to'][0]), chat_person(str(payload['to_name']).strip()))  # "Sent to Sam", not the address
                 to = ', '.join(chat_name(t, names, about) for t in draft['to'][:3]) or (about.split() or ['them'])[0]
+                to += CHAT_ON.get(draft['kind'], '')
                 text = {'sent': f'Sent to {to}', 'cancelled': 'Send cancelled', 'failed': f'Didn’t go out to {to}'}.get(r['status'], f'Sending to {to}…')
                 owner.append({'kind': 'event', 'text': text, 'sent': draft['body'] if r['status'] == 'sent' else None,
                               'mine': r['source'] != 'auto' and r['status'] != 'failed', 'at': chat_ms(r['created_at'])})
@@ -12521,7 +12562,7 @@ class App:
                     asset = BRAND_ASSETS[path.path]
                     self.output(200, asset.read_bytes(), {'.webp': 'image/webp', '.woff2': 'font/woff2'}.get(asset.suffix, 'image/png'))
                 elif path.path == '/api/status':
-                    self.output(200, {**app.action('status', {'full': True}), 'ui_version': dashboard_version()})
+                    self.output(200, {**app.action('status', {'full': True}), 'ui_version': dashboard_version(), 'browser_link': browser_link(app.config)})
                     try:
                         app.store.note_card_shown()
                     except sqlite3.Error as error:

@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import {OPENCLAW} from './openclaw-root.mjs';
 const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs');
 
-// Card chat: the card's title, its Chat › link or its "You asked" note opens #chat=<id>: a header with back, the title
+// Card chat: the card's title, its Chat › link or its "Asked" note opens #chat=<id>: a header with back, the title
 // and a ⋯ menu, the conversation from the service's card_chat strictly by time (the source first, the card itself as
 // the first message with its question and choices, the owner's own taps as quiet lines on the right with repeats
 // folded, the steps before the reply, drafts inline with what changed, a coding agent's answers with their files),
@@ -24,11 +24,15 @@ const cards=[
  {id:'c6c6c6c6c6c6c6c6',title:'Andrea needs your call on 60 mailboxes',body:'Drafted your note for Andrea. Nothing sent.\n\n[Draft and sources](memory/assistant/note.md)',status:'prepared',scope:'work',created_at:now,event_ids:[6],
   result_files:[{name:'note.md',path:'memory/assistant/note.md'}]},
  // A draft with a send path: Send leads, on the card and on the draft in the chat
+ {id:'c8c8c8c8c8c8c8c8',title:'Waiting on Andrea',body:'Sent the nudge.',status:'completed',scope:'work',created_at:now,event_ids:[8]},
  {id:'c7c7c7c7c7c7c7c7',title:'Nudge Andrea about the signup',body:'Drafted a short nudge to Andrea.',status:'prepared',scope:'work',created_at:now,event_ids:[7],
   next_action:{kind:'menu',actions:[{kind:'slack',label:'Send to Andrea',body:'did you get a chance to try it?',revision:'r7',to_name:'andrea',account_id:'work-slack'}]},
-  next_actions:[{kind:'slack',label:'Send to Andrea',body:'did you get a chance to try it?',revision:'r7',to_name:'andrea',account_id:'work-slack'}]}];
+  next_actions:[{kind:'slack',label:'Send to Andrea',body:'did you get a chance to try it?',revision:'r7',to_name:'andrea',account_id:'work-slack'}]},
+ // An email reply sent from the chat (a fake send: the fixture plays the send queue)
+ {id:'c9c9c9c9c9c9c9c9',title:'Reply to Robin about the pilot',body:'Drafted a reply to Robin.',status:'prepared',scope:'work',created_at:now,event_ids:[9],
+  next_actions:[{kind:'email',label:'Reply to Robin',to:['robin@example.com'],to_name:'Robin Lee',from:'me@example.com',subject:'Re: Pilot',body:'Hi Robin, Thursday works.',revision:'r9',account_id:'work-mail'}]}];
 const state=()=>({suggestions:cards,promises:[],suggestion_counts:{},decisions:[{suggestion_id:'c3c3c3c3c3c3c3c3',choice:'complete',created_at:now}],analyses:[],deliveries:[],
- review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:false,fleets:[]}});
+ review_health:{},review_runs:[],review_live:{runs:[]},connectors:[],fleet:{on:false,fleets:[]},agent_tools:[{id:'codex',name:'Codex',place:'local'},{id:'claude',name:'Claude Code',place:'local'}]});
 const d0=t0-86400000*2,mail=b=>({kind:'email',to:['Sam'],subject:'Re: Dates',body:b,reply:true});
 const history={session:true,status:'ok',active:false,cursor:'k1',items:[
  {kind:'source',from:'Sam Lee',via:'email',title:'Dates',text:'Can we do **Tuesday** instead?',mine:false,at:d0},
@@ -45,14 +49,22 @@ const actions=[];let live=null;
 const server=createServer(async(req,res)=>{let body='';for await(const c of req)body+=c;const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify(state()));return}
- if(url.pathname==='/api/result'){res.end(JSON.stringify({text:'Hi Andrea,\n\nEach person who uses the CRM needs their own seat; the mailbox count alone does not.'}));return}
+ if(url.pathname==='/api/result'){res.end(JSON.stringify({text:'# Acme: draft internal answer for Andrea\n\n> Each person who uses the CRM needs their own seat;\n>\n> the mailbox count alone does not.\n\n## Verification\n- [Pricing](https://example.com/pricing): per user.'}));return}
  if(url.pathname==='/api/action'){const r=JSON.parse(body);actions.push({...r,csrf:req.headers['x-csrf-token']});
   if(r.action==='card_chat'){
-   if(r.args.suggestion_id==='c6c6c6c6c6c6c6c6'){res.end(JSON.stringify({session:true,status:'ok',active:false,cursor:'k6',items:[{kind:'reply',text:'Drafted your note for Andrea. Nothing sent.',drafts:[],files:[{label:'Draft and sources',path:'memory/assistant/note.md'}],at:t0}]}));return}
+   if(r.args.suggestion_id==='c6c6c6c6c6c6c6c6'){res.end(JSON.stringify({session:true,status:'ok',active:false,cursor:'k6',items:[{kind:'source',from:'Andrea',via:'intercom',note:true,text:'We need to ask J.',mine:false,at:t0-1000},{kind:'reply',text:'Drafted your note for Andrea. Nothing sent.',drafts:[],files:[{label:'Draft and sources',path:'memory/assistant/note.md'}],at:t0}]}));return}
+   if(r.args.suggestion_id==='c8c8c8c8c8c8c8c8'){const m={kind:'slack',to:['Andrea'],subject:'',body:'how did it go?',reply:false};res.end(JSON.stringify({session:true,status:'ok',active:false,cursor:'k8',items:[
+    {kind:'reply',text:'Drafted a nudge.',drafts:[m],at:t0},{kind:'event',text:'Send cancelled',mine:true,at:t0+1000},{kind:'reply',text:'Fixed her name.',drafts:[m],at:t0+2000},
+    {kind:'event',text:'Sent to Andrea on Slack',sent:'how did it go?',mine:true,at:t0+3000}]}));return}
+   if(r.args.suggestion_id==='c9c9c9c9c9c9c9c9'){res.end(JSON.stringify({session:true,status:'ok',active:false,cursor:'k9',items:[{kind:'reply',text:'Drafted a reply to Robin.',drafts:[{kind:'email',to:['Robin'],subject:'Re: Pilot',body:'Hi Robin, Thursday works.',reply:true}],at:t0}]}));return}
    if(r.args.suggestion_id==='c7c7c7c7c7c7c7c7'){res.end(JSON.stringify({session:true,status:'ok',active:false,cursor:'k7',items:[{kind:'reply',text:'Drafted a short nudge to Andrea.',drafts:[{kind:'slack',to:['andrea'],subject:'',body:'did you get a chance to try it?',reply:false}],at:t0}]}));return}
    if(['c2c2c2c2c2c2c2c2','c5c5c5c5c5c5c5c5'].includes(r.args.suggestion_id)){res.end(JSON.stringify({session:false,active:false,status:null,items:[],cursor:null}));return}
    if(live){const step=live.shift();res.end(JSON.stringify(r.args.cursor?{session:true,active:true,status:'running',cursor:'k2',unchanged:true,live:{text:step}}:{...history,active:true,status:'running',live:{text:step}}));if(!live.length)live=null;return}
    res.end(JSON.stringify(history));return}
+  if(r.action==='agent_draft'){res.end(JSON.stringify({suggestion_id:r.args.suggestion_id,brief:'Reply to the venue\n\nLinks:\n- https://mail.google.com/mail/u/?authuser=x#all/1a167\n\nFiles from the card, in your folder: card/messages.md',
+   line:'Picks up “Reply to the venue” and reports back here. Sends nothing itself.',gets:[{kind:'mail',label:'5 emails'},{kind:'file',label:'messages.md'}]}));return}
+  if(r.action==='agent_send'){res.end(JSON.stringify({id:'aj_x',name:'Codex',status:'sent'}));return}
+  if(r.action==='confirm_action'){const a=cards.find(c=>c.id===r.args.suggestion_id).next_actions[0];a.state={status:'queued',revision:a.revision};res.end(JSON.stringify({status:'queued'}));return}
   if(r.action==='decide'){live=['Sure, a shorter one','Sure, a shorter one: Hi, Tuesday works.'];res.end(JSON.stringify({status:'instructions'}));return}
   res.end('{}');return}
  res.statusCode=url.pathname.startsWith('/brand/')?404:200;res.end('{}')});
@@ -89,8 +101,17 @@ try{
  assert.ok((await page.locator('#chat-log .chat-day').count())>=2);
  for(const t of await page.locator('#chat-log .chat-time').allTextContents())assert.match(t,/^\d\d:\d\d$/);
  // The owner's own taps are quiet lines on the right, the same one in a row folded with a count; others' in the middle; their time shows on hover
- assert.match(await page.locator('#chat-log .chat-event.mine').first().textContent(),/^You snoozed it 3 times›\d\d:\d\d/);
- assert.ok((await page.locator('#chat-log .chat-event.mine').allTextContents()).some(t=>/^You chose Do it\d\d:\d\d$/.test(t)));
+ assert.match(await page.locator('#chat-log .chat-event.mine').first().textContent(),/^Snoozed it 3 times›\d\d:\d\d/);
+ assert.ok((await page.locator('#chat-log .chat-event.mine').allTextContents()).some(t=>/^Chose Do it\d\d:\d\d$/.test(t)));
+ // No event line starts with "You" (the side says who): every tap word, and any other line that would
+ for(const t of await page.locator('#chat-log .chat-event').allTextContents())assert.doesNotMatch(t,/^You\s/);
+ for(const text of ['Do it','Reopened','Snoozed','Unsnoozed','Marked done','Not needed','Try again','Snoozed in Telegram','You asked for a shorter draft'])
+  assert.doesNotMatch(await page.evaluate(text=>chatEventText({kind:'event',mine:true,text}),text),/^You\s/,text);
+ // Right-aligned lines end exactly at the user pills' right edge; the hover time sits to their left without moving them
+ {const edge=await page.evaluate(()=>{const r=n=>n.getBoundingClientRect().right,ev=document.querySelector('#chat-log .chat-event.mine'),pill=document.querySelector('#chat-log .chat-msg.you .bubble'),t=ev.querySelector('.chat-time'),line=document.createRange();line.selectNodeContents(ev.querySelector('summary')||ev);line.setEndBefore(t);
+   return {line:line.getBoundingClientRect().right,ev:r(ev),pill:r(pill),time:r(t),evLeft:ev.getBoundingClientRect().left}});
+  assert.ok(Math.abs(edge.ev-edge.pill)<0.5&&Math.abs(edge.line-edge.pill)<1,`event line right ${edge.ev}/${edge.line} vs pill right ${edge.pill}`);
+  assert.ok(edge.time<=edge.evLeft,'the hover time sits left of the line, outside it')}
  await page.locator('#chat-log .chat-event.mine summary').click();
  assert.equal(await page.locator('#chat-log .chat-event.mine li').count(),3);
  assert.match(await page.locator('#chat-log .chat-event:not(.mine)').textContent(),/^Didn’t go out to Sam\d\d:\d\d$/);
@@ -193,13 +214,67 @@ try{
  // A draft result shows the draft: copy-only leads with Copy draft (and says why); the result file is a chip, never a bare title
  await page.locator('.chat-side a',{hasText:'60 mailboxes'}).click();await page.locator('#chat-log .chat-result.current').waitFor();
  await page.locator('#chat-log .chat-result.current',{hasText:'Each person who uses the CRM needs their own seat'}).waitFor();
- assert.equal(await page.locator('#chat-log .chat-result.current .chat-result-title').textContent(),'Draft and sources');
+ assert.equal(await page.locator('#chat-log .chat-result.current .chat-result-title').textContent(),'Internal answer for Andrea · Intercom note');
+ // Only the draft shows, as a quote-free text: no heading, no raw ">", no sources section (that is behind Open)
+ {const d=await page.locator('#chat-log .chat-result.current .chat-draft-text').innerText();assert.match(d,/^Each person who uses the CRM/);assert.doesNotMatch(d,/>|Verification|Pricing|Acme/)}
+ assert.equal(await page.evaluate(()=>{const t=document.createElement('div');t.innerHTML=chatMarkdown('Before\n> quoted\nAfter');return t.querySelector('blockquote')?.textContent+'|'+t.textContent.includes('>')}),'quoted|false');
  assert.equal(await page.locator('#chat-log .chat-result.current .chat-why').count(),1);
  assert.equal(await page.locator('#chat-log .chat-result.current .chat-options button.primary').textContent(),'Copy draft');
  assert.equal(await page.locator('#chat-log .bubble',{hasText:/^\s*Draft and sources\s*$/}).count(),0);
  await page.locator('.chat-side a',{hasText:'Nudge Andrea'}).click();await page.locator('#chat-log .chat-draft.current').waitFor();
  assert.match(await page.locator('#chat-log .chat-draft.current').textContent(),/did you get a chance to try it\?/);
  assert.match(await page.locator('#chat-log .chat-draft.current .chat-draft-foot button.primary').textContent(),/send to Andrea/i);
+ // The header: back, the title's first line and ⋯ on one centre line (the title's x-height centre on the chevron's)
+ {const m=await page.evaluate(()=>{const q=s=>document.querySelector(s),R=n=>n.getBoundingClientRect(),c=r=>r.top+r.height/2,h=q('.chat-title'),cs=getComputedStyle(h),cv=document.createElement('canvas').getContext('2d');cv.font=cs.font;
+  const f=cv.measureText('x'),L=parseFloat(cs.lineHeight),base=R(h).top+(L-(f.fontBoundingBoxAscent+f.fontBoundingBoxDescent))/2+f.fontBoundingBoxAscent;
+  return {x:base-f.actualBoundingBoxAscent/2,back:c(R(q('.chat-back path'))),menu:c(R(q('.chat-menu>summary svg')))}});
+  assert.ok(Math.abs(m.x-m.back)<1&&Math.abs(m.back-m.menu)<0.5,JSON.stringify(m))}
+ // A snooze whose time passed is back before the service's wake-up reaches the page; the Browser pill shows only with a browser view
+ assert.deepEqual(await page.evaluate(()=>{const st=wakeSnoozed({suggestions:[{status:'snoozed',snoozed_until:new Date(Date.now()-60000).toISOString(),resume_status:'prepared'},{status:'snoozed',snoozed_until:new Date(Date.now()+3600000).toISOString()}]});
+  return st.suggestions.map(s=>s.status)}),['prepared','snoozed']);
+ assert.deepEqual(await page.evaluate(()=>{const a=document.querySelector('#open-browser'),r=[];browserPill({browser_link:'https://machine.example/browser'});r.push(a.hidden,a.getAttribute('href'),a.target);browserPill({browser_link:'javascript:alert(1)'});r.push(a.hidden);browserPill(state);return r}),[false,'https://machine.example/browser','_blank',true]);
+ // Emoji shortcodes render; unknown ones and times stay as typed
+ assert.equal(await page.evaluate(()=>chatEmoji('Oki doki :face_with_hand_over_mouth: :tada: :not_a_code: 10:30:45')),'Oki doki 🤭 🎉 :not_a_code: 10:30:45');
+ // Only the draft that went out says Sent; the cancelled one before it, with the same text, says Not sent
+ await page.locator('.chat-side a',{hasText:'Waiting on Andrea'}).click();await page.locator('#chat-log .chat-draft .went-tag').first().waitFor();
+ assert.deepEqual(await page.locator('#chat-log .chat-draft .went-tag').allTextContents(),['Not sent','Sent']);
+ assert.equal(await page.locator('#chat-log',{hasText:'#DM'}).count(),0);
+ // Hand to Codex from the chat: a compact sheet in the message box's place, not in the thread; Cancel brings the box back
+ await page.locator('.chat-side a',{hasText:'Reply to the venue'}).click();await page.locator('h2.chat-title',{hasText:'Reply to the venue'}).waitFor();
+ await page.locator('#chat-menu summary').click();await page.locator('#chat-menu [data-agent-hand="codex"]').click();
+ const sheet=page.locator('.chat-compose .agent-sheet');await sheet.waitFor();
+ assert.equal(await page.locator('#chat-log .agent-sheet,.chat-panel .agent-sheet').count(),0);
+ assert.equal(await page.locator('.chat-compose .chat-box').isVisible(),false);
+ assert.deepEqual(await sheet.locator('.agent-get').allTextContents(),['5 emails','messages.md']);
+ assert.doesNotMatch(await sheet.innerText(),/https?:|card\/messages\.md|The job, as it will get it/);
+ await shot('handoff-open');
+ await sheet.locator('textarea.agent-note').fill('Ask for Tuesday only');await page.evaluate(()=>refresh());  // a refresh keeps what you typed
+ assert.equal(await sheet.locator('textarea.agent-note').inputValue(),'Ask for Tuesday only');
+ await sheet.locator('[data-agent-edit-cancel]').click();await sheet.waitFor({state:'detached'});
+ assert.equal(await page.locator('.chat-compose .chat-box').isVisible(),true);
+ assert.equal(actions.filter(a=>a.action==='agent_send').length,0);
+ // A send from the chat says what it is doing: Sending… with the bar (no next step offered yet), then who it went to,
+ // how and when, with Mark done as the next step; a failed one says so with Try again. Fake send only.
+ await page.locator('.chat-side a',{hasText:'Reply to Robin'}).click();await page.locator('#chat-log .chat-draft.current').waitFor();
+ await page.locator('#chat-log .chat-draft-foot [data-smart]').click();await page.locator('#send-dialog[open]').waitFor();
+ await page.locator('#send-confirm').click();await page.locator('#chat-log .chat-sendstate',{hasText:'Sending…'}).waitFor();
+ assert.equal(await page.locator('#chat-log .chat-draft .send-progress').count(),1);
+ assert.equal(await page.locator('#chat-log .chat-options,#chat-log .chat-draft [data-smart]').count(),0,'no choices at all while it goes out');
+ await shot('send-sending');
+ const robin=cards.find(c=>c.id==='c9c9c9c9c9c9c9c9').next_actions[0],sentAt=new Date(Date.now()-1000).toISOString();
+ robin.state={status:'sent',revision:'r9',message_id:'m-1',sent_at:sentAt};  // the queue sends it; the page sees it by itself within seconds
+ await page.locator('#chat-log .chat-sendstate.ok').waitFor({timeout:5000});
+ const hm=await page.evaluate(t=>chatHM(Date.parse(t)),sentAt);
+ assert.equal(await page.locator('#chat-log .chat-sendstate.ok').textContent(),'Sent to Robin by email · '+hm);
+ assert.equal(await page.locator('#chat-log .chat-options .primary').textContent(),'Mark done');
+ assert.equal(await page.locator('#chat-log .chat-draft .send-progress').count(),0);
+ await shot('send-sent');
+ robin.state={status:'failed',revision:'r9',error:'Gmail refused the message.'};await page.evaluate(()=>refresh());
+ await page.locator('#chat-log .chat-sendstate.failed').waitFor();
+ assert.equal(await page.locator('#chat-log .chat-sendstate.failed').textContent(),'Didn’t go out. Gmail refused the message.');
+ assert.equal(await page.locator('#chat-log .chat-draft-foot [data-smart]').textContent(),'Try again');
+ await shot('send-failed');
+ delete robin.state;await page.evaluate(()=>refresh());
  // The cards agree: Copy draft leads a copy-only draft (Mark done steps back, one line why); Send leads one with a send path
  const lead=await page.evaluate(()=>Object.fromEntries(['c6c6c6c6c6c6c6c6','c7c7c7c7c7c7c7c7'].map(id=>{const t=document.createElement('template');t.innerHTML=suggestionCard(state.suggestions.find(x=>x.id===id),'Ready');
   return [id,{primary:[...t.content.querySelectorAll('.actions .primary')].map(b=>b.textContent),why:!!t.content.querySelector('.copy-why'),copyLink:t.content.querySelectorAll('.foot-links [data-result="copy"]').length}]})));
@@ -215,7 +290,7 @@ try{
  // A done task keeps the message box: a message reopens it first, then goes as a Change
  await page.locator('.chat-side a',{hasText:'Old finished task'}).click();
  await page.locator('h2.chat-title',{hasText:'Old finished task'}).waitFor();
- assert.match(await page.locator('.chat-status').textContent(),/^Marked done·Reopen$/);
+ assert.match(await page.locator('.chat-status').textContent(),/^Done·Reopen$/);
  const before=actions.length;
  await page.locator('#chat-input').fill('One more thing');
  await page.locator('[data-chat-send]').click();
@@ -227,7 +302,7 @@ try{
  await page.locator('#suggestions .chat-layout').waitFor({state:'detached'});
  assert.ok(await page.locator('#task-c3c3c3c3c3c3c3c3').count()===1);
  assert.ok(await page.locator('#suggestion-stats').isVisible());
- // The "You asked" note opens the chat too
+ // The "Asked" note opens the chat too
  // (a tap right after a scroll is the one that stops a fling, never an open: scroll first, then tap)
  await page.locator('#task-c1c1c1c1c1c1c1c1 .saved-feedback').scrollIntoViewIfNeeded();await page.waitForTimeout(400);
  await page.locator('#task-c1c1c1c1c1c1c1c1 .saved-feedback').click();
@@ -241,6 +316,17 @@ try{
  await page.locator('#feedback-c2c2c2c2c2c2c2c2').waitFor({state:'detached'});
  assert.equal(actions.filter(a=>a.action==='decide').at(-1).args.feedback,'Use the new address');
  assert.notEqual(new URL(page.url()).hash,'#chat=c2c2c2c2c2c2c2c2');assert.equal(await page.locator('#suggestions .chat-layout').count(),0);
+ // The card's More menu: items on one line at menu density, the menu as wide as its longest one and inside a phone's screen
+ for(const width of [1280,390]){await page.setViewportSize({width,height:800});await page.waitForTimeout(150);
+  const more=page.locator('#task-c2c2c2c2c2c2c2c2 .more-actions');await more.locator('summary').click();
+  const m=await more.evaluate(d=>{const menu=d.querySelector('.more-menu'),b=document.createElement('button');b.textContent='Hand to Claude Code';menu.append(b);
+   const bs=[...menu.querySelectorAll('button')].map(x=>x.getBoundingClientRect()),r=menu.getBoundingClientRect(),out={left:r.left,right:r.right,vw:innerWidth,tall:Math.max(...bs.map(x=>x.height)),
+    wraps:[...menu.querySelectorAll('button')].some(x=>x.scrollWidth>x.clientWidth+1||x.getClientRects().length>1||x.getBoundingClientRect().height>40)};b.remove();return out});
+  if(process.env.SHOT_DIR&&width===390){await more.evaluate(d=>{const b=document.createElement('button');b.textContent='Hand to Claude Code';b.dataset.shot='1';d.querySelector('.more-menu').append(b)});await more.screenshot({path:process.env.SHOT_DIR+'/more-menu-390.png'}).catch(()=>{});await page.screenshot({path:process.env.SHOT_DIR+'/more-menu-390-page.png'});await more.evaluate(d=>d.querySelector('[data-shot]')?.remove())}
+  assert.ok(!m.wraps&&m.tall<=34,`menu items on one line at menu density (${width}: ${m.tall}px)`);
+  assert.ok(m.left>=8&&m.right<=m.vw-8,`menu inside the screen at ${width}: ${m.left}–${m.right} of ${m.vw}`);
+  await more.locator('summary').click()}
+ await page.setViewportSize({width:1280,height:900});
  // On a phone: the page header steps aside, the task list is a drawer under ⋯
  await page.setViewportSize({width:390,height:800});
  await page.evaluate(()=>{location.hash='#chat=c1c1c1c1c1c1c1c1'});
