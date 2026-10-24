@@ -41,6 +41,12 @@ their answers, and the log.
 4. **Shared connectors.** An admin connects Intercom once and shares it from the Fleet tab, **Shared connectors**: the
    Machines they say OK to get it as a work source, sealed Machine to Machine. Connections shows "Shared by <Fleet>".
    How it's kept safe: [Network](network.md#shared-connectors).
+5. **Shared Graph.** Work People, Organisations and Projects are shared with the Fleet: name, role, company, stage,
+   next step, a short timeline and client threads with their attachments, as far back as the Machine has them.
+   Sensitive client threads show only that they exist; colleague threads and Personal never leave. Every thread has
+   Team or Only you, every record Keep private. Stopping altogether takes an admin's OK on the Fleet tab. Graph has
+   **Mine / Team**, "via <name>" and **Ask <name>**. It all stays on the Machines; the Network only passes it on.
+   Design: [Shared Graph](shared-graph.md).
 
 A Family Fleet asks three things: when everyone is free, to-dos for one another, and family plans to say yes or no to.
 See [Family](family.md). Work questions never travel in a Family.
@@ -171,8 +177,9 @@ company (a `work:<Fleet name>` boundary, or an address at a teammate's domain).
 
 ## Answers, not data
 
-A Machine never hands out an email, a message, a calendar entry or a file. It answers with a short summary it builds
-itself:
+A Machine never hands out an email, a message, a calendar entry or a file in an answer. It answers with a short
+summary it builds itself (the [Shared Graph](shared-graph.md) is the one place Work client threads are shared, sealed
+to the Fleet's Machines):
 
 | Question | Without names (the default) | With names, also |
 |---|---|---|
