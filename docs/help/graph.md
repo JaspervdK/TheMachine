@@ -56,13 +56,13 @@ Untick a kind or a single row to leave it as it is. Nothing is fixed unless it's
 
 The preview shows each row as new, matching one already in your Graph, or skipped, with why. A match is the same email for a person (else the same name at the same organization), the same website or name for an organization, and the same name for a project.
 
-**Import** adds the new ones and fills in the matches; an empty cell changes nothing. **Undo** right after, or **Undo last import** under the order menu, takes the last import back. The file stays on your Machine.
+**Import** adds the new ones and fills in the matches; an empty cell changes nothing. **Undo** right after, or **Undo last import** under the order menu, takes the last import back while those records have not been changed since. Later corrections are kept: if Undo would overwrite one, it explains why instead. The file stays on your Machine.
 
 ## One organization, several websites
 
 **⋯**, **Same organization as…** on an organization's page makes it part of another one, with its people, projects and notes. **Add a website…** adds one more of its websites, like its .io next to its .com: people with an address there join it, and its details are looked up for every website.
 
-They're listed under **Websites**, each with **Split off** to undo it. Organizations that look like doubles show under **Same organization?**: **Merge** or **Not the same**.
+They're listed under **Websites**, each with **Split off** to undo it. Later edits to the combined organization are kept. Organizations that look like doubles show under **Same organization?**: **Merge** or **Not the same**.
 
 ## Add someone or an organization
 

@@ -126,6 +126,18 @@ class Crm(unittest.TestCase):
             self.assertEqual(json.loads(db.execute("SELECT fields FROM org_edits WHERE domain='globex.example'").fetchone()[0])['notes'], 'Main office')
             self.assertEqual(crm.org_doubles(db), [])  # kept apart from then on
 
+    def test_split_off_preserves_later_edits_to_the_combined_organization(self):
+        self.mails()
+        self.act('graph_org_edit', node_id='org:globex.io', fields={'notes': 'Met at the fair'})
+        self.act('graph_org_edit', node_id='org:globex.example', fields={'notes': 'Main office'})
+        self.act('graph_org_merge', node_id='org:globex.io', into='org:globex.example')
+        self.act('graph_org_edit', node_id='org:globex.example', fields={'notes': 'Updated after the merge'})
+        self.act('graph_org_split', alias='org:globex.io')
+        with self.store.connect() as db:
+            notes = json.loads(db.execute("SELECT fields FROM org_edits WHERE domain='globex.example'").fetchone()[0])['notes']
+        self.assertEqual(notes, 'Updated after the merge')
+        self.assertIsNotNone(self.node('org:globex.io'))
+
     def test_a_website_added_to_an_organisation_and_a_named_one_keeps_its_name(self):
         self.mails()
         made = self.act('graph_new', kind='org', name='Globex Group')
@@ -340,6 +352,35 @@ class Crm(unittest.TestCase):
         self.assertEqual([(f['id'], f['after'], f.get('ai')) for f in seen['fixes']], [('2:value', '5000', True)])
         other = self.act('graph_import_preview', kind='project', text=text + 'Ash,1,Lead,Cy\n', ai_run=started['run_id'])
         self.assertIsNone(other['columns'][0]['field'])  # a different file: the check isn't for it
+
+    def test_import_undo_keeps_later_owner_edits(self):
+        self.mails()
+        result = self.act('graph_import_run', kind='person', text='Name,Email,Title\nIvy,ivy@globex.example,Imported title\n')
+        self.act('graph_person_edit', node_id='email:ivy@globex.example', fields={'title': 'Owner correction'})
+        with self.assertRaisesRegex(ValueError, 'changed since'):
+            self.act('graph_import_undo', import_id=result['import_id'])
+        with self.store.connect() as db:
+            fields = json.loads(db.execute('SELECT fields FROM person_edits WHERE identifier=?', ('email:ivy@globex.example',)).fetchone()[0])
+        self.assertEqual(fields['title'], 'Owner correction')
+
+    def test_import_undo_still_works_after_unrelated_edits(self):
+        self.mails()
+        result = self.act('graph_import_run', kind='person', text='Name,Email,Title\nIvy,ivy@globex.example,Imported title\n')
+        self.act('graph_person_edit', node_id='email:jo@globex.io', fields={'title': 'Other contact'})
+        self.act('graph_import_undo', import_id=result['import_id'])
+        with self.store.connect() as db:
+            ivy = db.execute('SELECT fields FROM person_edits WHERE identifier=?', ('email:ivy@globex.example',)).fetchone()
+            jo = db.execute('SELECT fields FROM person_edits WHERE identifier=?', ('email:jo@globex.io',)).fetchone()
+        self.assertIsNone(ivy)
+        self.assertEqual(json.loads(jo[0])['title'], 'Other contact')
+
+    def test_import_undo_does_not_delete_a_new_record_edited_afterwards(self):
+        result = self.act('graph_import_run', kind='person', text='Name,Email\nNew contact,new@example.net\n')
+        self.act('graph_person_edit', node_id='email:new@example.net', fields={'notes': 'Keep this correction'})
+        with self.assertRaisesRegex(ValueError, 'changed since'):
+            self.act('graph_import_undo', import_id=result['import_id'])
+        with self.store.connect() as db:
+            self.assertIsNotNone(db.execute('SELECT 1 FROM manual_nodes WHERE identifier=?', ('email:new@example.net',)).fetchone())
 
     def test_only_the_owner_on_the_dashboard(self):
         with self.assertRaisesRegex(ValueError, 'Only the owner'):
