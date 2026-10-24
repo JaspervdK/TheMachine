@@ -153,11 +153,11 @@ class Requests(unittest.TestCase):
             ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
             suggestions = [{'id': card}]
             self.fleet.annotate(db, suggestions)
-        self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'asked'})
+        self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'asked', 'asked': 'Sam wants pricing for 40 seats; I am out next week.'})
         self.fleet.take_answer({'id': ask_id, 'status': 'answered', 'answer': {'stage': 'accepted'}})
         with self.store.connect() as db:
             self.fleet.annotate(db, suggestions)
-        self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'accepted'})
+        self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'accepted', 'asked': 'Sam wants pricing for 40 seats; I am out next week.'})
         self.assertEqual(self.told[-1], 'Pat accepted your handoff: Send Sam the pricing.')
         self.assertEqual(self.card_row(card)['status'], 'pending')  # nothing closes it without the app's hook
 
@@ -177,7 +177,7 @@ class Requests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT feedback FROM decisions WHERE suggestion_id=? AND choice='complete'", (card,)).fetchall()[0][0], 'Handed off to Pat')
             suggestions = [dict(self.card_row(card))]
             self.fleet.annotate(db, suggestions)
-        self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'accepted'})
+        self.assertEqual(suggestions[0]['fleet_handoff'], {'name': 'Pat', 'stage': 'accepted', 'asked': 'Sam wants pricing.'})
 
     def chat_events(self, card):
         with self.store.connect() as db:
@@ -264,6 +264,80 @@ class Requests(unittest.TestCase):
         draft = self.fleet.handoff_draft(self.ready_card([{'kind': 'slack', 'to_email': 'ann@other.example', 'to_name': 'Ann', 'body': 'Hi Ann', 'delegate': True}], 'k-ann'))
         self.assertNotEqual(draft['summary'], 'Hi Ann')
         self.assertEqual([m['member_id'] for m in draft['fleets'][0]['members']], ['pat1', 'kim1'])
+
+    def redirected(self, replace):
+        """Handed to Pat, then the owner asked for Kim instead: the handoff text for Kim waits on the card for review."""
+        self.with_kim()
+        card = self.handed_card()
+        self.fleet.wait_card = lambda card_id, why, key, expected: self.store.wait_handoff(card_id, why, key, expected)
+        self.fleet.wake_card = lambda card_id, key, at: self.store.handoff_back(card_id, key, key.removeprefix('fleet-handoff-back-'), at)
+        self.fleet.hand_off(card, self.ref, 'pat1', 'Send Sam the pricing', 'Sam wants pricing.')
+        with self.store.connect() as db:
+            pat = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
+        self.fleet.take_answer({'id': pat, 'status': 'waiting'})
+        self.store.decide(card, 'other', 'Sorry, this should go to Kim', 'chat-1', 'dashboard')
+        with self.store.connect() as db:
+            db.execute("UPDATE suggestions SET status='prepared',next_action=? WHERE id=?", (json.dumps({'kind': 'menu', 'actions': [
+                {'kind': 'handoff', 'label': 'Hand off to Kim', 'to_name': 'Kim Doe', 'to_email': 'kim@acme.example', 'body': 'Can you send Sam the pricing?'}]}), card))
+        draft = self.fleet.handoff_draft(card)
+        self.assertEqual(draft['fleets'][0]['members'][0]['member_id'], 'kim1')  # the form opens on Kim
+        self.fleet.hand_off(card, self.ref, 'kim1', 'Send Sam the pricing', draft['summary'], replace=replace)  # the owner's Send
+        return card, pat
+
+    def handed_to(self, card):
+        with self.store.connect() as db:
+            suggestions = [{'id': card, 'status': 'snoozed'}]
+            self.fleet.annotate(db, suggestions)
+        return suggestions[0].get('fleet_handoff')
+
+    def test_a_handoff_sent_to_someone_else_takes_it_back_from_the_first(self):
+        card, pat = self.redirected(replace=True)
+        events = [t for t, _, _ in self.chat_events(card)]
+        self.assertEqual(events[-3:], ['Handed off to Pat’s Machine', 'Taken back from Pat', 'Handed off to Kim’s Machine'])
+        self.assertEqual(self.handed_to(card), {'name': 'Kim Doe', 'stage': 'asked', 'asked': 'Can you send Sam the pricing?'})  # Pat isn't current
+        self.assertEqual(self.card_row(card)['status'], 'snoozed')  # with Kim now
+        # Pat's late answer doesn't move the card: Kim's handoff owns it
+        self.fleet.take_answer({'id': pat, 'status': 'answered', 'answer': {'stage': 'declined'}})
+        self.assertEqual(self.card_row(card)['status'], 'snoozed')
+        self.assertEqual(self.handed_to(card)['name'], 'Kim Doe')
+
+    def test_taking_it_back_tells_their_machine_and_nothing_of_theirs_moves_it_after(self):
+        card, pat = self.redirected(replace=True)
+        self.assertEqual(self.relay.sent('/withdraw'), [{'id': pat, 'fleet': self.ref, 'to': 'pat1', 'kind': 'handoff'}])  # sealed by network.py
+        with self.store.connect() as db:
+            log = db.execute("SELECT outcome FROM fleet_log WHERE direction='out' ORDER BY id DESC LIMIT 1").fetchone()[0]
+        self.assertEqual(log, 'taken back')
+        told = len(self.told)
+        self.fleet.take_answer({'id': pat, 'status': 'answered', 'answer': {'stage': 'accepted'}})
+        self.assertEqual((len(self.told), self.card_row(card)['status']), (told, 'snoozed'))  # not "Pat accepted", and still with Kim
+
+    def test_a_handoff_taken_back_drops_the_card_it_made_saying_so(self):
+        self.fleet.drop_card = lambda card_id, why='Teammate not reached', key=None: self.store.decide(card_id, 'reject', why, key or 'x', 'fleet')
+        self.ask('handoff', {'title': 'Send Sam the pricing', 'summary': 'Sam wants pricing.'}, 'q1')
+        made = self.fleet.decide('q1', 'once')['card_id']
+        self.ask('handoff', {'title': 'Book the demo', 'summary': 'Lee wants a demo'}, 'q2')  # still waiting for the owner
+        with self.store.connect() as db:
+            db.execute("UPDATE fleet_in SET telegram_message_id='77' WHERE id='q2'")
+        retold = []
+        self.fleet.retell = retold.append
+        self.assertIsNone(self.fleet.take_withdrawn({'id': 'q1', 'from': 'kim1', 'kind': 'handoff'}))  # only who sent it
+        self.assertEqual(self.card_row(made)['status'], 'pending')
+        self.assertEqual(self.fleet.take_withdrawn({'id': 'q1', 'from': 'pat1', 'kind': 'handoff'}), 'Taken back by Pat')
+        self.assertEqual(self.card_row(made)['status'], 'rejected')
+        self.assertIn(('Taken back by Pat', False, None), self.chat_events(made))  # theirs, not the owner's
+        self.assertEqual(self.fleet.take_withdrawn({'id': 'q2', 'from': 'pat1', 'kind': 'handoff'}), 'Taken back by Pat')
+        self.assertEqual(retold, ['77'])  # the Telegram message says so too
+        self.assertEqual(self.fleet.view()['waiting'], [])  # nothing left to accept
+        self.assertIsNone(self.fleet.take_withdrawn({'id': 'q2', 'from': 'pat1', 'kind': 'handoff'}))  # once
+        with self.store.connect() as db:
+            stages = [r[0] for r in db.execute("SELECT stage FROM fleet_requests WHERE id IN ('q1','q2') ORDER BY id")]
+        self.assertEqual(stages, ['withdrawn', 'withdrawn'])
+
+    def test_a_handoff_to_both_shows_both(self):
+        card, _ = self.redirected(replace=False)
+        self.assertEqual(self.relay.sent('/withdraw'), [])
+        self.assertNotIn('Taken back from Pat', [t for t, _, _ in self.chat_events(card)])
+        self.assertEqual(self.handed_to(card), {'name': 'Kim Doe', 'stage': 'asked', 'asked': 'Can you send Sam the pricing?', 'also': ['Pat']})
 
     # -- handled elsewhere: a teammate already closed their card on the same email
     def stripe_alert(self, status, key, next_action=None, decided=None):
@@ -392,7 +466,8 @@ class Requests(unittest.TestCase):
                 with self.store.connect() as db:
                     shown = view(card)
                     ask_id = db.execute("SELECT id FROM fleet_out WHERE kind='handoff'").fetchone()[0]
-                self.assertEqual(shown['fleet_handoff'], {'name': 'Kim Doe', 'stage': 'asked'})
+                self.assertEqual({k: v for k, v in shown['fleet_handoff'].items() if k != 'asked'}, {'name': 'Kim Doe', 'stage': 'asked'})
+                self.assertTrue(shown['fleet_handoff']['asked'].startswith('Confirmed P1: the export leaks'))  # the body: what was asked
                 self.assertEqual(shown['next_actions'], [link])  # no Review and send while it is with them
                 if answer == 'expired':
                     self.fleet.take_answer({'id': ask_id, 'status': 'expired'})

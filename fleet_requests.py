@@ -71,6 +71,7 @@ SPLIT_SHOWN_DAYS = 7
 ON_IT = {'gmail.message': 'email', 'outlook.message': 'email', 'slack.message': 'Slack', 'whatsapp.message': 'WhatsApp',
          'linkedin.message': 'LinkedIn', 'teams.message': 'Teams', 'calendar.event': 'a call', 'outlook_calendar.event': 'a call'}
 WHERE = set(ON_IT.values())
+ASKED_CHARS = 240  # a handed-off card's body: "Asked Pat: …", one or two lines
 WAITING_DAYS = 14  # handoffs waiting this long or less are offered to the review
 
 
@@ -239,6 +240,12 @@ def meeting_key(secret, source_id, day):
 
 def first_name(name):
     return (str(name or '').split() or [''])[0]
+
+
+def taken_line(name):
+    """A request its sender took back, as the one it went to sees it: "Taken back by Kim"."""
+    first = first_name(name) if name and name != 'A teammate' else ''
+    return 'Taken back by ' + (first or 'your teammate')
 
 
 def intro_draft(asker, contact, me):
@@ -609,10 +616,24 @@ class Requests:
                 "or email to them (delegate:true) can be a second choice. Your result says you prepared a handoff to them "
                 "through The Machine. Anyone else gets a Slack message or email as usual.")
 
-    def hand_off(self, card_id, fleet_ref, member_id, title, summary, contact=None, sources=True):
+    def open_handoffs(self, db, card_id):
+        """The card's handoffs still waiting on a teammate (asked or waiting, not taken back), oldest first."""
+        out = []
+        for r in db.execute("SELECT id,fleet,member_id,name,status,answer,at FROM fleet_out WHERE kind='handoff' AND context=? ORDER BY at",
+                            ('handoff:' + str(card_id),)):
+            try:
+                stage = (json.loads(r['answer'] or 'null') or {}).get('stage') or r['status']
+            except (ValueError, AttributeError):
+                stage = r['status']
+            if stage in ('asked', 'waiting') and not db.execute('SELECT 1 FROM fleet_meta WHERE key=?', ('handoff_withdrawn:' + r['id'],)).fetchone():
+                out.append(dict(r))
+        return out
+
+    def hand_off(self, card_id, fleet_ref, member_id, title, summary, contact=None, sources=True, replace=False):
         """Hand a card to a teammate, with the summary exactly as the owner read and edited it and the card's sources
         (handoff_sources): all of them (True), none (False) or those the owner kept, by their place in the draft's list.
-        Their card says how it went."""
+        Their card says how it went. `replace`: it goes to them instead of whoever still has it, who it is taken back
+        from once this one went out; otherwise both have it."""
         with self.connect() as db:
             latest = db.execute('SELECT id FROM decisions WHERE suggestion_id=? ORDER BY rowid DESC LIMIT 1', (str(card_id),)).fetchone()
             expected = latest['id'] if latest else None
@@ -647,6 +668,9 @@ class Requests:
         carried = parse_sources(found)
         if carried:
             question['sources'] = carried
+        with self.connect() as db:
+            earlier = [r for r in self.open_handoffs(db, card_id) if (r['fleet'], r['member_id']) != (fleet_ref, member_id)] if replace else []
+        taken_at = fleet.now()
         try:
             sent = self.ask('handoff', question, context='handoff:' + str(card_id), fleet=fleet_ref, to=[member_id])
         except Exception:
@@ -656,6 +680,16 @@ class Requests:
             raise
         with self.connect() as db:
             db.execute('DELETE FROM fleet_meta WHERE key=?', ('handoff_failed:' + str(card_id),))
+            # Taken back from whoever had it: on this card at once (a late answer of theirs no longer moves it; the newest
+            # handoff owns it), and their Machine is told below, sealed for it (withdraw).
+            for r in earlier:
+                db.execute('INSERT OR REPLACE INTO fleet_meta(key,value) VALUES(?,?)',
+                           ('handoff_withdrawn:' + r['id'], json.dumps({'at': taken_at, 'name': r['name']})))
+        for r in earlier:
+            told = self.withdraw(r)
+            with self.connect() as db:
+                self.log(db, 'out', r['fleet'], r['member_id'], r['name'], 'handoff', title,
+                         'taken back' if told else "taken back on your card; their Machine couldn't be told")
         if self.wait_card:  # it's with them now: the card leaves Ready and waits under Later until their Machine answers
             try:
                 self.wait_card(str(card_id), f"Handed off to {fleet.label(self.member(fleet_ref, member_id))}",
@@ -663,6 +697,42 @@ class Requests:
             except ValueError as error:
                 LOG.info('fleet handoff wait skipped error=%s', error)
         return sent
+
+    def withdraw(self, row):
+        """Tell their Machine a handoff was taken back (network.py seals it for theirs; the outbox keeps it while the
+        Network is away). Only the Machine that asked can: the relay checks that too. False when it can't be told."""
+        try:
+            self.relay.call('POST', '/withdraw', {'id': row['id'], 'fleet': row['fleet'], 'to': row['member_id'], 'kind': 'handoff'})
+            return True
+        except Exception as error:  # taken back on this card all the same
+            LOG.warning('fleet withdraw not sent error=%s', type(error).__name__)
+            return False
+
+    def take_withdrawn(self, item):
+        """A teammate took back a handoff they sent this owner: the request says "Taken back by <them>", waits no
+        more, and the card made for it goes (Not needed, saying so). A card of the owner's own it joined stays theirs."""
+        ask_id = str(item.get('id') or '')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM fleet_in WHERE id=?', (ask_id,)).fetchone()
+            if not row or row['kind'] != 'handoff' or row['member_id'] != item.get('from') or row['status'] == 'withdrawn':
+                return None
+            request = db.execute('SELECT card_id FROM fleet_requests WHERE id=?', (ask_id,)).fetchone()
+            silent = db.execute('SELECT value FROM fleet_meta WHERE key=?', ('handoff_silent:' + ask_id,)).fetchone()
+            card_id = (request['card_id'] if request else None) or (json.loads(silent['value']).get('card_id') if silent else None)
+            card = card_id and db.execute('SELECT status FROM suggestions WHERE id=? AND dedupe_key=?', (card_id, 'fleet:' + ask_id)).fetchone()
+            line = taken_line(row['name'])
+            db.execute("UPDATE fleet_in SET status='withdrawn',decided_at=?,choice='withdrawn' WHERE id=?", (fleet.now(), ask_id))
+            db.execute("UPDATE fleet_requests SET stage='withdrawn',updated_at=? WHERE id=?", (fleet.now(), ask_id))
+            self.log(db, 'in', row['fleet'], row['member_id'], row['name'], 'handoff', fleet.question_text('handoff', json.loads(row['question'])),
+                     line[0].lower() + line[1:])
+        if card and card['status'] in OPEN and self.drop_card:
+            try:
+                self.drop_card(card_id, line, 'fleet-withdrawn-' + ask_id)
+            except Exception as error:
+                LOG.warning('fleet withdrawn drop error=%s', type(error).__name__)
+        if row['telegram_message_id'] and self.retell:
+            self.retell(row['telegram_message_id'])
+        return line
 
     def message_keys(self, card_id, fleet_ref):
         """The card's emails as sha256(Fleet secret + Message-ID), as handling claims send them: the teammate's Machine
@@ -722,6 +792,10 @@ class Requests:
                             if (answer or {}).get('what'):
                                 p['what'] = answer['what']
                     db.execute('UPDATE fleet_splits SET parts=?,updated_at=? WHERE id=?', (json.dumps(parts), fleet.now(), split['id']))
+        if row['kind'] == 'handoff':
+            with self.connect() as db:
+                if db.execute('SELECT 1 FROM fleet_meta WHERE key=?', ('handoff_withdrawn:' + str(row['id']),)).fetchone():
+                    return  # taken back from them: their answer is kept, and moves or tells nothing
         if row['kind'] == 'handoff' and stage in ('accepted', 'adjusted', 'done') and self.close_card and str(row['context'] or '').startswith('handoff:'):
             try:  # it's theirs now: the owner's card is done, saying to whom (Undo or Reopen bring it back)
                 self.close_card(row['context'][8:], self.on_it_line(row['name'], answer) if (answer or {}).get('silent') else f"Handed off to {row['name']}",
@@ -759,6 +833,9 @@ class Requests:
         them); never over a choice the owner made later than that, and only once per answer."""
         if not self.wake_card or not str(row['context'] or '').startswith('handoff:'):
             return None
+        with self.connect() as db:
+            if db.execute('SELECT 1 FROM fleet_meta WHERE key=?', ('handoff_withdrawn:' + str(row['id']),)).fetchone():
+                return None  # taken back from them: their answer doesn't bring the card back
         try:
             return self.wake_card(row['context'][8:], 'fleet-handoff-back-' + str(row['id']), row['at'])
         except ValueError as error:
@@ -1144,9 +1221,15 @@ class Requests:
         """A card handed off (to whom, how it went), and who does what after the meeting a card is on."""
         handed = {}
         mine = {r['key'][13:] for r in db.execute("SELECT key FROM fleet_meta WHERE key LIKE 'handoff_mine:%'")}
+        withdrawn = {r['key'][18:] for r in db.execute("SELECT key FROM fleet_meta WHERE key LIKE 'handoff_withdrawn:%'")}
+        still = {}  # card: first names of everyone it is still with (both, when the owner kept both)
         for r in db.execute("SELECT * FROM fleet_out WHERE context LIKE 'handoff:%' ORDER BY at"):
+            if r['id'] in withdrawn:  # taken back: not current, and nothing it says moves the card
+                continue
             answer = json.loads(r['answer'] or 'null') or {}
             stage = answer.get('stage') or r['status']
+            if stage in ('asked', 'waiting'):
+                still.setdefault(r['context'][8:], []).append(first_name(r['name']))
             # The owner already moved on after it came back (a Change or an answer, Do it, Try again): the card is theirs
             # again, so the newest question leads instead of the old handoff's Do it myself.
             if stage in ('declined', 'expired') and r['id'] not in mine and db.execute(
@@ -1156,10 +1239,20 @@ class Requests:
             if answer.get('silent') and stage == 'accepted':
                 handed[r['context'][8:]] = {'name': r['name'], 'stage': 'on it', 'line': self.on_it_line(r['name'], answer)}
                 continue
+            try:  # what was asked, for the card's body while it's with them (the suggestion to hand it stays in the chat)
+                asked = ' '.join(str(json.loads(r['question']).get('summary') or '').split())
+            except (ValueError, AttributeError):
+                asked = ''
             handed[r['context'][8:]] = {'name': r['name'], 'stage': {'asked': 'asked', 'waiting': 'waiting for them'}.get(stage, STAGES.get(stage, stage)),
+                                        **({'asked': asked[:ASKED_CHARS - 1] + '…' if len(asked) > ASKED_CHARS else asked} if asked and stage not in ('declined', 'expired') else {}),
                                         **({'note': answer['note']} if answer.get('note') else {}),
                                         # handed back: Do it myself, Hand to someone else or Mark done, until the owner picks
                                         **({'back': r['id'] not in mine} if stage in ('declined', 'expired') else {})}
+        for card, names in still.items():
+            lead = handed.get(card)
+            others = [n for n in dict.fromkeys(names) if lead and n != first_name(lead['name'])]
+            if lead and lead['stage'] in ('asked', 'waiting for them') and others:
+                lead['also'] = others
         splits = {}
         for r in db.execute("SELECT * FROM fleet_splits WHERE status IN ('sent','accepted') AND event_id IS NOT NULL"):
             splits[r['event_id']] = '; '.join(f"{'you' if p.get('mine') else p['name']}: {p['what']}" for p in json.loads(r['parts']) if p.get('what'))
