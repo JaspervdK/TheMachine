@@ -87,6 +87,7 @@ try{
    await log.locator('[data-learned-edit="31"]').click();
    const box=page.locator('#learned-31 textarea');await box.waitFor();
    assert.equal(await box.inputValue(),rule);
+   await page.waitForFunction(()=>document.activeElement===document.querySelector('#learned-31 textarea'));
    assert.equal(await page.evaluate(()=>document.activeElement?.tagName),'TEXTAREA');
    if(shots)await page.screenshot({path:`${shots}/learned-edit-from-chat-${width}.png`});
   }
