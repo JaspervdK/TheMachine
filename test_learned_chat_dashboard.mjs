@@ -74,6 +74,8 @@ try{
    // The link opens the rule on What I've learned: its block unfolded (it is the 7th rule), the row in view and lit.
    await line.getByRole('button',{name:'Saved to what I’ve learned'}).click();
    const row=page.locator('#learned-31');await row.waitFor();
+   // The row is inserted before the scheduled scroll/highlight runs. Wait for that actual outcome, not a frame guess.
+   await page.waitForFunction(()=>{const e=document.getElementById('learned-31');if(!e?.classList.contains('flash'))return false;const r=e.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight});
    assert.equal(await page.locator('#feedback').isVisible(),true);
    assert.equal(await page.locator('#facts [data-group="rules"] .fact-row').count(),7);
    assert.ok(await row.evaluate(e=>{const r=e.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight}),'row in view');
@@ -85,6 +87,7 @@ try{
    await log.locator('[data-learned-edit="31"]').click();
    const box=page.locator('#learned-31 textarea');await box.waitFor();
    assert.equal(await box.inputValue(),rule);
+   await page.waitForFunction(()=>document.activeElement===document.querySelector('#learned-31 textarea'));
    assert.equal(await page.evaluate(()=>document.activeElement?.tagName),'TEXTAREA');
    if(shots)await page.screenshot({path:`${shots}/learned-edit-from-chat-${width}.png`});
   }

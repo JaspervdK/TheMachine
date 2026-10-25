@@ -24,7 +24,10 @@ const heldZ=async page=>{for(;;){await page.waitForFunction(()=>document.querySe
   document.querySelector('#held')?.removeAttribute('id');z.id='held';z.classList.remove('gold');z.style.zIndex='5';game.end=Date.now()+120000;
   for(const a of z.getAnimations()){a.pause();a.currentTime=600;await a.ready}
   await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
-  if(!z.isConnected)return null;const b=z.getBoundingClientRect();return {x:b.x+b.width/2,y:b.y+b.height/2,w:b.width,h:b.height}});
+  if(!z.isConnected)return null;
+  // Read the hit's real DOM effects after the game handler, before its 250/600 ms animations can remove them.
+  window.__caught=null;document.querySelector('#game-field').addEventListener('pointerdown',()=>{window.__caught={got:!!document.querySelector('#held')?.classList.contains('got'),plus:document.querySelectorAll('#game-field .zz-plus').length}},{once:true});
+  const b=z.getBoundingClientRect();return {x:b.x+b.width/2,y:b.y+b.height/2,w:b.width,h:b.height}});
  if(r)return r}};
 const score=page=>page.evaluate(()=>+document.querySelector('#game-score').textContent);
 try{
@@ -40,8 +43,8 @@ try{
   assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('#held')).cursor),'pointer');
   // Pointerdown alone counts, just outside the glyph box; no pointerup or click needed
   await page.mouse.move(z.x+z.w/2+8,z.y);await page.mouse.down();
-  assert.equal(await score(page),1);assert.ok(await page.evaluate(()=>document.querySelector('#held').classList.contains('got')));
-  assert.equal(await page.locator('#game-field .zz-plus').count(),1,'a +1 shows where the Z was caught');
+  assert.equal(await score(page),1);assert.ok(await page.evaluate(()=>__caught?.got));
+  assert.equal(await page.evaluate(()=>__caught?.plus),1,'a +1 shows where the Z was caught');
   await page.mouse.up();
   // Best follows the score live once it passes the old best
   const z2=await heldZ(page);await page.mouse.move(z2.x,z2.y);await page.mouse.down();await page.mouse.up();

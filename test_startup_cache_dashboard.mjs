@@ -46,11 +46,14 @@ const base='http://127.0.0.1:'+server.address().port+'/';
 const errors=[];let browser;
 // What the device keeps, read the way the page itself can: the raw rows, and the plain text with the page's own key
 const kept=p=>p.evaluate(async()=>{const dbs=await indexedDB.databases();if(!dbs.some(d=>d.name==='tm-cache'))return null;
- const db=await new Promise(r=>{const q=indexedDB.open('tm-cache');q.onsuccess=()=>r(q.result)});const get=(s,k)=>new Promise(r=>{const q=db.transaction(s).objectStore(s).get(k);q.onsuccess=()=>r(q.result)});
+ // The wipe can land between databases() and open(): a reader must never create an empty replacement database.
+ const db=await new Promise(r=>{const q=indexedDB.open('tm-cache');q.onupgradeneeded=()=>q.transaction.abort();q.onerror=()=>r(null);q.onsuccess=()=>r(q.result)});if(!db)return null;
+ db.onversionchange=()=>db.close();
+ try{const get=(s,k)=>new Promise((r,no)=>{const q=db.transaction(s).objectStore(s).get(k);q.onsuccess=()=>r(q.result);q.onerror=()=>no(q.error)});
  const keys=await new Promise(r=>{const q=db.transaction('data').objectStore('data').getAllKeys();q.onsuccess=()=>r(q.result)});const meta=await get('meta','key'),out={scope:meta?.scope,extractable:meta?.key?.extractable,alg:meta?.key?.algorithm?.name,rows:{}};
  for(const k of keys){const row=await get('data',k);const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:row.iv,additionalData:new TextEncoder().encode(meta.scope+'\n'+k)},meta.key,row.ct).then(b=>new TextDecoder().decode(b),()=>null);
   out.rows[k]={rawHasText:new TextDecoder('latin1').decode(row.ct).includes('Robin'),isBuffer:row.ct instanceof ArrayBuffer,plain}}
- db.close();return out});
+ return out}finally{db.close()}});
 const shellCopy=p=>p.evaluate(async()=>{const c=await caches.open('tm-shell-1');const r=await c.match(location.origin+'/');return r?await r.text():null});
 const until=async(p,fn,arg,label)=>{try{await p.waitForFunction(fn,arg,{timeout:15000})}catch{throw Error('timed out: '+label)}};
 try{
@@ -134,7 +137,8 @@ try{
  // 8. The session is gone (the sign-in gate redirects the status): wiped, and the gate gets the next load
  await tab.goto(base);await tab.locator('#suggestions article[id]').first().waitFor();
  for(let i=0;i<50&&!(await kept(tab))?.rows.status;i++)await tab.waitForTimeout(100);
- mode='gone';await tab.evaluate(()=>refresh());
+ // Refresh deliberately reloads after wiping the cache: do not await its promise in the old document.
+ mode='gone';const reloaded=tab.waitForEvent('domcontentloaded');await tab.evaluate(()=>{void refresh()});await reloaded;
  await until(tab,async()=>!(await indexedDB.databases()).some(d=>d.name==='tm-cache'),null,'wiped when the session is gone');
  mode='ok';await tab.goto(base);await tab.locator('#suggestions article[id]').first().waitFor();
 
