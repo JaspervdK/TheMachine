@@ -109,8 +109,13 @@ more gets the usual empty blob.
 
 **A project on a Team board** shares its record (name, board, stage, why, next step, organization, people) even before
 a review has judged one of its threads, so the team pipeline shows every project on it. Its threads still go only as
-they are judged, and so do its meetings, Zoom notes and chats: the history review sorts them like mail (`Scope.team_items`),
-after the threads of boards shared by name and before the rest. A why or next step that came from a signal that never
+they are judged. Its meetings, Zoom notes, Intercom conversations and chats (`Scope.team_items`) go by being on the
+board, whatever the review called them (client, other, internal or unsure) except sensitive (deals, HR, legal,
+health, money): only a board shared by name takes those. Each waits until the review has looked (the history review
+sorts them right after the threads of boards shared by name), so nothing sensitive goes even for a while, and one
+just called client waits out `HOLD` like mail. Never one of a personal
+account or another company's, with someone of the owner's own life, the review called personal, automated, kept
+private, of an Only you project, or with only colleagues on it. A why or next step that came from a signal that never
 goes (another company's or a personal account, kept private) doesn't go either.
 
 The weekly recap says, in one line: "Shared 214 threads with Acme this week, 4 held back." with a link to
