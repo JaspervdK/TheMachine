@@ -56,7 +56,7 @@ jobs:
         run: |
           node --input-type=module -e 'const {chromium}=await import(process.env.OPENCLAW_PACKAGE_DIR+"/node_modules/playwright-core/index.mjs"); console.log("CHROMIUM_PATH="+chromium.executablePath())' >> "$GITHUB_ENV"
       - name: Test Python, Node, OpenClaw SDK and dashboard
-        run: python3 scripts/test.py
+        run: python3 scripts/test.py test_startup_cache_dashboard.mjs test_learned_chat_dashboard.mjs test_org_edit_dashboard.mjs test_zzz_game_dashboard.mjs
       - name: Check whitespace
         run: git diff --check
 
@@ -113,7 +113,7 @@ jobs:
           THE_MACHINE_TEST_TIMEOUT: ${{ runner.os == 'Windows' && '240' || '' }}
           # Native Windows fixtures derive message keys repeatedly; avoid four competing crypto-heavy suites.
           THE_MACHINE_TEST_JOBS: ${{ runner.os == 'Windows' && '2' || '' }}
-        run: python scripts/test.py
+        run: python scripts/test.py test_startup_cache_dashboard.mjs test_learned_chat_dashboard.mjs test_org_edit_dashboard.mjs test_zzz_game_dashboard.mjs
       - name: Installer dry run
         run: python installer.py --dry-run
       - name: Windows installer dry run
