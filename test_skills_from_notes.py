@@ -1,7 +1,8 @@
 """Notes about one kind of task become a skill, only when the owner says so on a card.
 
-A review that sees 5 or more notes about one scenario suggests a skill (remember_fact kind=skill): a card with the
-notes, Create skill or Add to <one of the owner's own skills>, and Not now. Not now isn't asked again until the same
+A review that sees 5 or more notes about one scenario suggests a skill (remember_fact kind=skill), checked first against
+the skills here: a card with the notes, Create skill (with a line on a related skill) or Update <one of the owner's own
+skills> after its before and after, and Not now. Not now isn't asked again until the same
 notes grew. On yes the skill is written and the notes move into it: kept, shown with the skill, gone from the list
 every task gets. A teammate's skill is never changed. All local; nothing is sent."""
 import json
@@ -38,6 +39,13 @@ class SkillsFromNotes(unittest.TestCase):
     def propose(self, ids, **more):
         return self.app.action('remember_fact', {'kind': 'skill', 'name': 'Listing exchanges', 'description': 'When a listing exchange is agreed.',
                                                  'text': '## Steps\n' + '\n'.join(f'- Rule {i}.' for i in range(len(ids))), 'replaces': ids, **more})
+
+    def update(self, ids, skill, merge=None):
+        """An update the way the review sends it: first it gets the skill's instructions, then the whole skill rewritten."""
+        asked = self.propose(ids, skill=skill)
+        self.assertEqual(asked['rewrite'], True)
+        text = merge(asked['instructions']) if merge else asked['instructions'] + '\n\n## Steps\n' + '\n'.join(f'- Rule {i}.' for i in range(len(ids)))
+        return self.propose(ids, skill=skill, text=text, base=asked['base'])
 
     def card(self, sid):
         return next(c for c in self.store.snapshot([])['suggestions'] if c['id'] == sid)
@@ -86,9 +94,10 @@ class SkillsFromNotes(unittest.TestCase):
             self.propose(self.notes[9:12] + self.notes[6:8], skill='Nope')
         with self.store.connect() as db:  # the pending one is decided first
             db.execute("UPDATE skill_clusters SET status='done'")
-        out = self.propose(self.notes[9:12] + self.notes[6:8], skill='partner listings')
-        self.assertEqual(self.card(out['suggestion_id'])['labels']['accept'], 'Add to Partner listings')
-        self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 'yes2'}, owner_dashboard=True)
+        out = self.update(self.notes[9:12] + self.notes[6:8], 'partner listings')
+        self.assertEqual(self.card(out['suggestion_id'])['labels']['accept'], 'Update Partner listings')
+        self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 'yes2',
+                                   'reviewed': self.card(out['suggestion_id'])['skill_proposal']['update']['review']}, owner_dashboard=True)
         mine = next(s for s in self.app.skills.view()['skills'] if s['name'] == 'Partner listings')
         self.assertEqual(len(mine['notes']), 5)
         self.assertIn('Be generous with partners', self.app.skills.get(mine['id'])['body'])
@@ -100,14 +109,14 @@ class SkillsFromNotes(unittest.TestCase):
         with self.store.connect() as db:
             db.execute("UPDATE facts SET text=text||?", (' More exact details to keep. ' * 8,))
         self.app.skills.save(None, 'Existing', 'When this scenario happens.', 'Original steps for this existing skill.')
-        out=self.propose(self.notes[:6], skill='Existing')
+        out=self.update(self.notes[:6], 'Existing')
         card=self.card(out['suggestion_id'])
         self.assertLessEqual(len(card['body']),700)
         self.assertTrue(all(len(n)>200 for n in card['skill_proposal']['notes']))
     def test_interrupted_skill_database_write_rolls_back_and_retry_adds_once(self):
         self.app.skills.save(None, 'Existing', 'When this scenario happens.', 'Original steps for this existing skill.')
-        out=self.propose(self.notes[:6], skill='Existing')
-        self.store.decide(out['suggestion_id'],'accept','', 'yes-retry','dashboard')
+        out=self.update(self.notes[:6], 'Existing')
+        self.store.decide(out['suggestion_id'],'accept','', 'yes-retry','dashboard',reviewed=self.card(out['suggestion_id'])['skill_proposal']['update']['review'])
         real=self.app.skills.save
         def interrupted(*args,**kwargs):
             real(*args,**kwargs)
@@ -135,6 +144,109 @@ class SkillsFromNotes(unittest.TestCase):
         self.assertEqual(len(self.store.facts()),12)
         self.app.action('decide',{'suggestion_id':out['suggestion_id'],'choice':'accept','decision_id':'create'},owner_dashboard=True)
         self.assertEqual(len(self.app.skills.view()['skills']),1)
+
+    def buttons(self, sid):
+        with self.store.connect() as db:
+            row = dict(db.execute('SELECT * FROM suggestions WHERE id=?', (sid,)).fetchone()); row.update(self.store.suggestion_result(row, db))
+        return [b for block in a.controls(row, 'https://fixture.invalid/')['blocks'] for b in block['buttons']]
+
+    def test_existing_skills_are_checked_first_by_their_names_and_descriptions(self):
+        self.assertIn('They have no skills yet', self.app.skills_from_notes_prompt())
+        self.app.skills.save(None, 'Inclusion writer', 'When we write our product into a third-party article.', 'Research the article, then draft our part.')
+        prompt = self.app.skills_from_notes_prompt()
+        self.assertIn('- Inclusion writer: When we write our product into a third-party article.', prompt)
+        self.assertIn('judging the meaning', prompt)
+        with self.assertRaisesRegex(ValueError, 'Inclusion writer: When we write our product'):  # no silent new skill next to one that may cover it
+            self.propose(self.notes[:6])
+        self.assertIn('suggestion_id', self.propose(self.notes[:6], new=True))
+
+    def test_a_related_skill_is_named_in_one_line_and_the_new_one_is_still_offered(self):
+        self.app.skills.save(None, 'Inclusion writer', 'When we write our product into a third-party article.', 'Research the article, then draft our part.')
+        with self.assertRaisesRegex(ValueError, 'one short line'):
+            self.propose(self.notes[:6], related='Inclusion writer')
+        with self.assertRaisesRegex(ValueError, 'Inclusion writer'):
+            self.propose(self.notes[:6], related='Nope', relation='The other direction.')
+        out = self.propose(self.notes[:6], related='inclusion writer', relation='That one is the other direction: our product in their articles.')
+        card = self.card(out['suggestion_id'])
+        self.assertEqual(card['labels']['accept'], 'Create skill')
+        self.assertIn('Related to Inclusion writer: That one is the other direction', card['body'])
+        self.assertEqual(card['skill_proposal']['related'], {'name': 'Inclusion writer', 'relation': 'That one is the other direction: our product in their articles.'})
+        self.assertNotIn('update', card['skill_proposal'])
+        self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 'new1'}, owner_dashboard=True)
+        names = sorted(s['name'] for s in self.app.skills.view()['skills'])
+        self.assertEqual(names, ['Inclusion writer', 'Listing exchanges'])
+        self.assertEqual(self.app.skills.get(next(s['id'] for s in self.app.skills.view()['skills'] if s['name'] == 'Inclusion writer'))['body'],
+                         'Research the article, then draft our part.')
+
+    def test_an_update_is_the_skill_rewritten_as_one_shown_before_and_after_and_applied_only_on_the_owner_ok(self):
+        steps = '## When to use\nA partner agrees to swap listings.\n\n## Steps\n1. Check their site first.\n2. Write our entry in their format.'
+        self.app.skills.save(None, 'Listing swaps', 'When a partner agrees to swap listings.', steps)
+        self.app.skills.save(None, 'Other skill', 'When something else entirely happens.', 'Leave this one alone.')
+        asked = self.propose(self.notes[:6], skill='Listing swaps')  # first the skill as it is, to merge into
+        self.assertEqual((asked['rewrite'], asked['skill'], asked['instructions']), (True, 'Listing swaps', steps))
+        self.assertEqual(len(self.store.snapshot([])['suggestions']), 12)  # no card yet
+        with self.assertRaisesRegex(ValueError, '"## Steps" comes twice'):  # appended, not merged
+            self.propose(self.notes[:6], skill='Listing swaps', text=steps + '\n\n## Steps\n1. Ask for their listing link first.', base=asked['base'])
+        with self.assertRaisesRegex(ValueError, 'less than half'):
+            self.propose(self.notes[:6], skill='Listing swaps', text='## Steps\n1. Ask for their link.', base=asked['base'])
+        merged = ('## When to use\nA partner agrees to swap listings.\n\n## Steps\n1. Ask for their listing link first.\n'
+                  '2. Check their site first.\n3. Write our entry in their format.')
+        self.assertEqual(self.propose(self.notes[:6], skill='Listing swaps', text=merged, base='0' * 16)['rewrite'], True)  # another version
+        out = self.propose(self.notes[:6], skill='Listing swaps', text=merged, base=asked['base'])
+        card = self.card(out['suggestion_id'])
+        self.assertEqual(card['title'], 'Update Listing swaps with 6 notes')
+        self.assertEqual(card['labels']['accept'], 'Update Listing swaps')
+        shown = card['skill_proposal']['update']
+        self.assertEqual((shown['before'], shown['after']), (steps, merged))
+        heads = skills.headings(shown['after'])
+        self.assertEqual(len(heads), len(set(heads)), 'no heading twice in the After')
+        self.assertEqual(shown['changes']['after'][0], ['same', '## When to use\nA partner agrees to swap listings.\n\n## Steps'])
+        self.assertEqual(shown['changes']['after'][1], ['added', '1. Ask for their listing link first.\n2. Check their site first.\n3. Write our entry in their format.'])
+        self.assertIn(['removed', '1. Check their site first.\n2. Write our entry in their format.'], shown['changes']['before'])
+        labels = [b['label'] for b in self.buttons(out['suggestion_id'])]  # Telegram: reviewed on the dashboard, never one tap
+        self.assertIn('Review update', labels)
+        self.assertNotIn('Update Listing swaps', labels)
+        with self.assertRaisesRegex(ValueError, 'Decisions must come'):
+            self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 'agent'})
+        with self.assertRaisesRegex(ValueError, 'before and after first'):
+            self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 'telegram:x1'})
+        with self.assertRaisesRegex(ValueError, 'before and after first'):
+            self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 'd1'}, owner_dashboard=True)
+        with self.assertRaisesRegex(ValueError, 'changed since'):
+            self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 'd2', 'reviewed': 'x' * 24}, owner_dashboard=True)
+        self.assertEqual(len(self.store.facts()), 12)  # nothing applied yet
+        self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 'd3', 'reviewed': shown['review']}, owner_dashboard=True)
+        mine = next(s for s in self.app.skills.view()['skills'] if s['name'] == 'Listing swaps')
+        self.assertEqual((self.app.skills.get(mine['id'])['body'], mine['description'], mine['version']), (merged, 'When a partner agrees to swap listings.', 2))
+        other = next(s for s in self.app.skills.view()['skills'] if s['name'] == 'Other skill')
+        self.assertEqual((self.app.skills.get(other['id'])['body'], other['version']), ('Leave this one alone.', 1))
+        self.assertEqual(len(self.app.skills.view()['skills']), 2)  # no new skill next to it
+
+    def test_an_update_written_on_an_older_version_is_never_applied_and_is_suggested_again_on_the_new_one(self):
+        self.app.skills.save(None, 'Listing swaps', 'When a partner agrees to swap listings.', '## Steps\n1. Check their site first.')
+        out = self.update(self.notes[:6], 'Listing swaps', lambda now: now + '\n2. Ask for their link.')
+        mine = next(s for s in self.app.skills.view()['skills'] if s['name'] == 'Listing swaps')
+        self.app.skills.save(mine['id'], 'Listing swaps', 'When a partner agrees to swap listings.', '## Steps\n1. Check their site and traffic first.')
+        shown = self.card(out['suggestion_id'])['skill_proposal']['update']
+        self.assertEqual((shown.get('stale'), 'review' in shown), (True, False))  # its After would undo the owner's edit
+        with self.assertRaisesRegex(ValueError, 'changed after this was suggested'):
+            self.app.action('decide', {'suggestion_id': out['suggestion_id'], 'choice': 'accept', 'decision_id': 's1', 'reviewed': 'x' * 24}, owner_dashboard=True)
+        again = self.update(self.notes[:6], 'Listing swaps', lambda now: now + '\n2. Ask for their link.')
+        self.assertEqual((again['suggestion_id'], again.get('updated')), (out['suggestion_id'], True))
+        shown = self.card(out['suggestion_id'])['skill_proposal']['update']
+        self.assertEqual(shown['after'], '## Steps\n1. Check their site and traffic first.\n2. Ask for their link.')
+        self.assertIn('review', shown)
+
+    def test_an_offer_made_before_the_check_is_brought_up_to_date_on_the_same_card(self):
+        out = self.propose(self.notes[:6])  # no skills yet: a new one
+        with self.store.connect() as db:
+            db.execute('UPDATE skill_clusters SET checked=NULL')  # as offered before skills were checked first
+        self.app.skills.save(None, 'Listing swaps', 'When a partner agrees to swap listings.', 'Check their site first.')
+        again = self.update(self.notes[:6], 'Listing swaps', lambda now: now + ' Ask for their link too.')
+        self.assertEqual((again['suggestion_id'], again.get('updated')), (out['suggestion_id'], True))
+        card = self.card(out['suggestion_id'])
+        self.assertEqual((card['title'], card['labels']['accept']), ('Update Listing swaps with 6 notes', 'Update Listing swaps'))
+        self.assertEqual(self.update(self.notes[:6], 'Listing swaps', lambda now: now + ' Ask for their link too.')['duplicate'], True)  # checked now: asked once
 
 
 if __name__ == '__main__':
