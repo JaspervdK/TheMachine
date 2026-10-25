@@ -50,7 +50,9 @@ try{
   if(shot)await page.screenshot({path:`${shot}/open-${width}.png`});
   // Change one field, deep in the form: Save stays in view and sends that field only.
   await form.locator('[name=industry]').fill('Example research');
-  await form.locator('[name=about]').scrollIntoViewIfNeeded();await page.mouse.wheel(0,400);await page.waitForTimeout(100);
+  await form.locator('[name=about]').scrollIntoViewIfNeeded();await page.mouse.wheel(0,400);
+  // Wheel delivery and the scroll listener are asynchronous on native macOS: wait for the sticky state itself.
+  await page.waitForFunction(()=>document.querySelector('#people-view .graph-detail > .name-row')?.classList.contains('stuck'));
   assert.ok(await inView(save),`Save stays reachable while scrolled at ${width}px`);
   // Stuck, the header covers the card's full width with square corners, so nothing scrolled under it peeks out.
   const stuck=await head.evaluate(h=>{const a=h.closest('.graph-detail').getBoundingClientRect(),r=h.getBoundingClientRect();return {stuck:h.classList.contains('stuck'),left:r.left-a.left,right:a.right-r.right}});

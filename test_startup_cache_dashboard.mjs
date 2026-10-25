@@ -134,7 +134,8 @@ try{
  // 8. The session is gone (the sign-in gate redirects the status): wiped, and the gate gets the next load
  await tab.goto(base);await tab.locator('#suggestions article[id]').first().waitFor();
  for(let i=0;i<50&&!(await kept(tab))?.rows.status;i++)await tab.waitForTimeout(100);
- mode='gone';await tab.evaluate(()=>refresh());
+ // Refresh deliberately reloads after wiping the cache: do not await its promise in the old document.
+ mode='gone';const reloaded=tab.waitForEvent('domcontentloaded');await tab.evaluate(()=>{void refresh()});await reloaded;
  await until(tab,async()=>!(await indexedDB.databases()).some(d=>d.name==='tm-cache'),null,'wiped when the session is gone');
  mode='ok';await tab.goto(base);await tab.locator('#suggestions article[id]').first().waitFor();
 
