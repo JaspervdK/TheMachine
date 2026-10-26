@@ -12,6 +12,8 @@ order: 12
 - **Outlook**: all your mail, the last 7 days when you connect, then everything new.
 - **Outlook Calendar**: your meetings, read only.
 
+Mail in Other and newsletters get a quick look first: sender, subject and a few words, many at once. When one matters, it is read in full and can become a card. Nothing is skipped unseen.
+
 ## What it can send and change
 
 - An email from a card, only after you approve it in the preview.

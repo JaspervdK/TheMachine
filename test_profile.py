@@ -151,6 +151,7 @@ class Profile(unittest.TestCase):
                                                    body=f'Initial separate message {i}', from_me=True) for i in range(30)])
         run = self.store.profile_start()
         session = a.PROFILE_SESSION_PREFIX + run['run_id']
+        small = patch.object(a, 'EVIDENCE_PAGE_CHARS', 3000); small.start(); self.addCleanup(small.stop)  # pages by size
         first = self.store.profile_evidence(1, session)
         before = self.store.profile_evidence(2, session)
         self.store.commit_page('work', {}, [signal(f'arrival{i}', i / 1000, kind='whatsapp.message',
@@ -232,6 +233,11 @@ class Profile(unittest.TestCase):
         started = self.app.first_profile_step()
         self.assertTrue(started['run_id'])
         self.assertIsNone(self.app.first_profile_step())  # one at a time
+        runner = Runner('admitted')
+        self.assertIsNone(self.app.profile_step(runner))  # it waits until the first card was shown: the first look comes first
+        self.assertEqual(runner.requests, [])
+        with self.store.connect() as db:
+            db.execute("INSERT INTO milestones(name,at) VALUES('first_card_shown',?)", (a.now(),))
         self.finish_first_profile(started['run_id'], {'role': 'Developer working on integrations', 'tone': 'Short and direct',
                                                       'leave_alone': ['payment alerts: a colleague handles them']})
         text = path.read_text()

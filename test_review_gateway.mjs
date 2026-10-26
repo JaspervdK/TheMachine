@@ -19,6 +19,15 @@ r=await run({kind:'review',job_id:id,action:'stop'},[{ok:true,status:'aborted',a
 assert.equal(r.result.status,'pending');  // abort admission is not terminal proof
 r=await run({kind:'review',job_id:id,action:'stop'},[{ok:true,status:'aborted',abortedRunId:id},{status:'timeout',endedAt:123}]);
 assert.equal(r.result.status,'timed_out');
+r=await run({kind:'preparation',job_id:id,action:'stop'},[{ok:true,status:'aborted',abortedRunId:id},{status:'aborted',endedAt:123}]);
+assert.equal(r.result.status,'aborted');  // a preparation we stopped did not time out
+// Past the queue, a session whose complete active set lacks the run proves a restart lost it; unknown sets prove nothing.
+r=await run({kind:'preparation',job_id:id,action:'status',probe:true},[{status:'timeout'},{session:{hasActiveRun:true,activeRunIds:['b'.repeat(32)]}}]);
+assert.equal(r.result.status,'lost');assert.equal(r.calls[1].method,'sessions.describe');
+for(const row of [{session:{hasActiveRun:true}},{session:{activeRunIds:null}},{session:{activeRunIds:[id]}},new Error('offline')]){
+  r=await run({kind:'preparation',job_id:id,action:'status',probe:true},[{status:'timeout'},row]);assert.equal(r.result.status,'pending');
+}
+r=await run({kind:'preparation',job_id:id,action:'status'},[{status:'timeout'}]);assert.equal(r.calls.length,1);  // no probe while young
 for(const response of [{ok:true,status:'aborted',abortedRunId:'b'.repeat(32)},{ok:true,status:'no-active-run',warning:'cleanup pending'},new Error('offline')]){
   r=await run({kind:'review',job_id:id,action:'stop'},[response]);assert.equal(r.result.status,'unavailable');
 }
@@ -38,6 +47,25 @@ for(const [response,error,phase] of [
   assert.equal(r.result.error,error);assert.equal(r.result.error_phase,phase);
   assert.ok(!JSON.stringify(r.result).includes('private'));assert.ok(!JSON.stringify(r.result).includes('abc'));
 }
+// A sign-in's usage limit is its own category, with only the reset time kept (2026-10-25: retried every few minutes).
+{
+  const t0=Math.round(Date.now()/1000);
+  for(const [text,check] of [
+    ["You've reached your Codex subscription usage limit. Next reset Oct 25, 11:12 PM UTC. private",v=>v>t0&&new Date(v*1000).getUTCHours()===23&&new Date(v*1000).getUTCMinutes()===12],
+    ['Claude AI usage limit reached|'+(t0+3600),v=>v===t0+3600],
+    ['You have hit your limit, try again in 2h 30m',v=>Math.abs(v-(t0+9000))<5],
+    ['Provider openai is in cooldown',v=>v===undefined],
+  ]){
+    r=await run({kind:'review',job_id:id,action:'status'},[{status:'error',error:text}]);
+    assert.equal(r.result.error,'usage_limited');assert.equal(r.result.error_phase,'model');
+    assert.ok(check(r.result.retry_at),text);assert.ok(!JSON.stringify(r.result).includes('private'));
+  }
+}
+// Background work can name a cheaper model; anything malformed is dropped.
+r=await run({kind:'review',job_id:id,action:'start',message:'Review',provider:'openai',model:'gpt-6.1-sol'},[{runId:id}]);
+assert.equal(r.calls[0].args.provider,'openai');assert.equal(r.calls[0].args.model,'gpt-6.1-sol');
+r=await run({kind:'review',job_id:id,action:'start',message:'Review',provider:'openai',model:'x y; rm'},[{runId:id}]);
+assert.equal(r.calls[0].args.model,undefined);assert.equal(r.calls[0].args.provider,undefined);
 r=await run({kind:'review',job_id:id,action:'status'},[{status:'pending',timeoutPhase:'queue'}]);
 assert.equal(r.result.status,'pending');assert.equal(r.result.error,undefined);
 r=await run({kind:'review',job_id:id,action:'start',message:'Review'},[{runId:id}]);

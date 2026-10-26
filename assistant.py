@@ -73,6 +73,7 @@ import places
 import browser_login
 import browser_viewer
 import preparation_state
+import model_budget
 import portable
 import service
 
@@ -598,9 +599,75 @@ SET_ASIDE_AFTER = 2
 # Mail that comes from a system, not a person: by address (slipped, first-look order) and by Gmail's category labels
 ROBOT_SENDER = re.compile(r'(?i)^(?:no-?reply|do-?not-?reply|notifications?|mailer-daemon|bounce|support|billing|info|hello|team)@')
 AUTOMATED_LABELS = frozenset({'CATEGORY_UPDATES', 'CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL', 'CATEGORY_FORUMS'})
-# OpenClaw cuts a live tool result at 64,000 characters, so review replies are paged
-# well below that, with bookkeeping metadata left out.
-REVIEW_PAGE_CHARS = 30000
+# Bulk mail (bulk_kind): promotions, newsletters, list mail, updates and forums reach the review as a title line (sender,
+# subject, a short snippet), so many fit in one turn and the model still judges each; it can read the whole mail with
+# the events tool. Nothing is skipped on its headers alone. A title line counts as BRIEF_WEIGHT of a signal in a claim.
+BULK_PRECEDENCE = frozenset({'bulk', 'junk'})
+BRIEF_WEIGHT = 0.25
+BRIEF_SNIPPET_CHARS = 200
+
+
+def list_headers(headers):
+    """What says a message went to a list: List-Unsubscribe (only that it is there, never its link or address), List-Id
+    and Precedence. Lowercased header names, as message_event reads them."""
+    found = {}
+    if headers.get('list-unsubscribe', '').strip():
+        found['list_unsubscribe'] = True
+    if headers.get('list-id', '').strip():
+        found['list_id'] = ' '.join(headers['list-id'].split())[:200]
+    if headers.get('precedence', '').strip():
+        found['precedence'] = headers['precedence'].strip().lower()[:20]
+    return found
+
+
+def bulk_kind(kind, metadata, title='', owner_in_thread=False):
+    """Whether a mail signal reaches the review as a title line, and why: 'promo' (Gmail's Promotions), 'forum'
+    (Forums), 'update' (Updates, Social, Outlook's Other), 'bulk' (a list header from a system sender, or Precedence
+    bulk or junk, outside those); None is a full look. The owner's own mail and a thread they wrote in always get
+    a full look, and so does a person writing in Primary."""
+    if kind != 'gmail.message' or not isinstance(metadata, dict):
+        return None
+    labels = set(metadata.get('labels') or ())
+    if labels & {'SENT', 'DRAFT'} or metadata.get('from_me') or owner_in_thread:
+        return None
+    category = next((c for c in ('CATEGORY_PROMOTIONS', 'CATEGORY_FORUMS', 'CATEGORY_UPDATES', 'CATEGORY_SOCIAL') if c in labels), None)
+    if category:
+        return {'CATEGORY_PROMOTIONS': 'promo', 'CATEGORY_FORUMS': 'forum'}.get(category, 'update')
+    if metadata.get('in-reply-to'):
+        return None  # someone answering in Primary: a full look
+    sender = _address(metadata.get('from'))
+    system = bool(sender) and bool(ROBOT_SENDER.match(sender) or graph.bulk(sender))
+    listed = metadata.get('list_unsubscribe') or metadata.get('list_id')
+    if metadata.get('precedence') in BULK_PRECEDENCE or (listed and system):
+        return 'bulk'
+    return None
+
+
+def signal_weight(row):
+    """How much of a review's signal budget a signal takes: BRIEF_WEIGHT for bulk mail (a title line), else 1."""
+    metadata = row['metadata'] if isinstance(row['metadata'], dict) else json.loads(row['metadata'] or '{}')
+    return BRIEF_WEIGHT if not row.get('deleted') and bulk_kind(row['kind'], metadata, row['title']) else 1
+
+
+def claim_weight(items):
+    """The signal budget a claim's items took (signal_weight, as review_claim noted them)."""
+    return sum(BRIEF_WEIGHT if i.get('brief') else 1 for i in items)
+
+
+def title_view(row, metadata):
+    """A review's title line for bulk mail: who, what, when and a short snippet, and the ids to read the whole signal with."""
+    view = {'id': row['id'], 'account_id': row['account_id'], 'source_id': clamp(row['source_id'], 500), 'kind': row['kind'],
+            'occurred_at': row['occurred_at'], 'title': clamp(row['title']), 'from': clamp(str(metadata.get('from') or ''), 200),
+            'snippet': clamp(re.sub(r'\s+', ' ', row.get('body') or '').strip(), BRIEF_SNIPPET_CHARS),
+            'title_only': 'bulk mail: judge it from this line; read it with events when it may matter'}
+    if 'version' in row:
+        view['version'] = row['version']
+    return view
+
+# OpenClaw cuts a live tool result at 64,000 characters, so review replies are paged below that (with room for the
+# escaping a Code Mode result adds); fuller pages mean fewer model steps, each resending the whole context.
+# Bookkeeping metadata is left out.
+REVIEW_PAGE_CHARS = 48000
 REVIEW_PREVIEW_CHARS = 1500
 REVIEW_METADATA_SKIP = {
     'coverage', 'transport', 'notification_key_hash', 'last_notification_event_id', 'last_notification_event_ms',
@@ -608,7 +675,7 @@ REVIEW_METADATA_SKIP = {
     'in-reply-to', 'date', 'mailbox_user_id', 'source_account', 'bucket_minutes', 'unit', 'lines_shown',
     'parts_returned', 'message_id', 'chat_id', 'sender_id', 'channel_id', 'message_ts', 'thread_ts', 'user_id',
     'bot_id', 'conversation_id', 'created_at', 'updated_at', 'post_time_ms', 'source_url', 'thread_id',
-    'admin_assignee_id', 'team_assignee_id'}
+    'admin_assignee_id', 'team_assignee_id', 'list_id'}
 
 
 def clamp(value, chars=300, items=10):
@@ -684,9 +751,11 @@ OWNER_CARD_RULE = ('The owner added this card themselves, in their own words. Fi
                    'pass that card_id and the owner is asked whether to merge.')
 
 
-def review_view(row, preview=REVIEW_PREVIEW_CHARS, offset=0, earlier=None):
-    """What a reviewer needs from a signal, without sync bookkeeping."""
+def review_view(row, preview=REVIEW_PREVIEW_CHARS, offset=0, earlier=None, brief=False, owner_in_thread=False):
+    """What a reviewer needs from a signal, without sync bookkeeping. brief: bulk mail as a title line (bulk_kind)."""
     metadata = row['metadata'] if isinstance(row['metadata'], dict) else json.loads(row['metadata'])
+    if brief and not row.get('deleted') and bulk_kind(row['kind'], metadata, row['title'], owner_in_thread):
+        return title_view(row, metadata)
     compact, metadata_clipped = compact_metadata(metadata)
     text = re.sub(r'\s+', ' ', row['body']).strip()
     view = {'id': row['id'], 'account_id': row['account_id'], 'source_id': clamp(row['source_id'], 500), 'kind': row['kind'], 'occurred_at': row['occurred_at'],
@@ -713,6 +782,20 @@ def review_view(row, preview=REVIEW_PREVIEW_CHARS, offset=0, earlier=None):
     if row['kind'] == 'calendar.event' and not calendar_owned(metadata):
         view['not_owners'] = f"On {calendar_owner_name(metadata)}'s calendar, shared with the owner, who isn't on it: context only, no card, prep or promise for them"
     return view
+
+
+def evidence_pages(items, budget=None, first=0):
+    """Items split into pages of at most `budget` characters (`first`: what page 1 carries besides), at least one item
+    a page, in order. The same evidence always gives the same pages."""
+    budget, pages, size = budget or EVIDENCE_PAGE_CHARS, [[]], first
+    for item in items:
+        length = len(encoded(item)) + 2
+        if pages[-1] and size + length > budget:
+            pages.append([])
+            size = 0
+        pages[-1].append(item)
+        size += length
+    return pages
 
 
 def review_pages(views, budget=REVIEW_PAGE_CHARS - 4000):
@@ -792,6 +875,12 @@ QUICK_LOOK_HOURS, QUICK_LOOK_SIGNALS, FIRST_LOOK_RETRY_MIN_SECONDS = 48, 20, 120
 # The first profile on an install without the interactive installer (hosted): tries, and the wait between them.
 FIRST_PROFILE_TRIES, FIRST_PROFILE_RETRY_SECONDS = 3, 6 * 3600
 PREPARATION_INTERRUPTED_TRIES = 4  # starts of one card's preparation that a Gateway restart may cut off before it counts
+# A run that saved its result or blocker usually still writes its last reply: it gets this long to end by itself
+# before it is stopped, so its record says how it ended (ok) instead of a stop's lost/aborted.
+PREPARATION_SETTLE_SECONDS = 120
+# A run still pending this long after it started is checked against its Gateway session (a crash or restart ends it
+# without a terminal state for its run id); a younger one may still be queued.
+PREPARATION_PROBE_SECONDS = 120
 SYSTEM_SERVICES = {'gateway'}  # The Machine's own logs: not a source of the owner's
 
 
@@ -810,7 +899,7 @@ def first_look_retry_at(runs, current):
         if run['status'] == 'ok':
             break
         failed += 1
-    wait = FIRST_LOOK_RETRY_SECONDS if runs[-1].get('error') == 'rate_limited' else min(
+    wait = FIRST_LOOK_RETRY_SECONDS if runs[-1].get('error') in ('rate_limited', 'usage_limited') else min(
         FIRST_LOOK_RETRY_MIN_SECONDS * 2 ** (failed - 1), FIRST_LOOK_RETRY_SECONDS)
     at = dt.datetime.fromisoformat(runs[-1]['finished_at']) + dt.timedelta(seconds=wait)
     return at.isoformat() if at > current else None
@@ -926,6 +1015,25 @@ def model_ready(config=None, run=subprocess.run):
     return ready
 
 
+def background_model(config):
+    """(provider, model) for The Machine's background turns when the main model is one background work never uses
+    (BACKGROUND_SWAP), and the owner's model allowlist (`agents.defaults.models`, empty allows any) allows the other.
+    None: the main model."""
+    main = openclaw_model(config) or ''
+    provider, _, name = main.partition('/')
+    cheaper = BACKGROUND_SWAP.get(name)
+    if not cheaper:
+        return None
+    path = Path(config.get('openclaw_config') or Path.home() / '.openclaw' / 'openclaw.json')
+    try:
+        allowed = json.loads(path.read_text()).get('agents', {}).get('defaults', {}).get('models') or {}
+    except (OSError, ValueError, AttributeError):
+        allowed = {}
+    if isinstance(allowed, dict) and allowed and not ({f'{provider}/{cheaper}', f'{provider}/*'} & set(allowed)):
+        return None
+    return provider, cheaper
+
+
 def has_model(config=None):
     """Whether OpenClaw has a main model to review with that can run (model_ready). When that can't be read,
     a main model set in its config is taken as one."""
@@ -955,13 +1063,22 @@ VERIFIED_DECISION_SOURCES = ('telegram', 'dashboard')
 
 # One heartbeat may claim this many signals, in a single begin_analysis call if it likes.
 RUN_SIGNAL_BUDGET = 120
+# After the quick first look, the next review (the full first look, or the first regular one) takes this many of the
+# most promising signals; the backlog after it goes in the regular reviews, spread out under the usage budget.
+FIRST_LOOK_NEXT_SIGNALS = 60
+# Background turns beyond the first look (profile, voices, roles, organizations, drafts prepared ahead) start at most
+# one per this many seconds, and only once the first card was shown, so the first cards come first and a new
+# install's usage is spread out instead of spent in its first minutes.
+BACKGROUND_GAP_SECONDS = 600
+FIRST_MAGIC_SETTLE_SECONDS = 900  # no card shown yet: a finished review counts as the first look after this long
+# Background work never runs on these models (several times the cost for the same result): the cheaper one instead.
+BACKGROUND_SWAP = {'gpt-6-astra': 'gpt-6.1-sol'}
 
 # `assistant profile`: one read-only turn of the owner's agent drafts USER.md lines (how they write,
 # their role, who and what matters) from their own recent messages; the owner sees it before anything is saved.
 PROFILE_SESSION_PREFIX = 'agent:main:assistant-review-profile-'
 SKILLS_SESSION_PREFIX = 'agent:main:assistant-review-skills-'  # the Find my skills turn: the browser, read-only, and its report
 PROFILE_MESSAGES = 120  # the owner's own messages one draft reads, newest first, mixed across sources
-PROFILE_PAGE = 15
 PROFILE_MIN = 5         # fewer says too little about how someone writes
 PROFILE_SECONDS = 900
 PROFILE_LISTS = {'languages': 4, 'examples': 4, 'matters': 8, 'leave_alone': 6}
@@ -973,9 +1090,11 @@ PROFILE_SKIP = re.compile(r'^(?:Sent (?:an? )?(?:image|photo|video|sticker|audio
                           r'\[(?:image|photo|video|sticker|audio|voice|document|gif|file)[^\]]*\]$|!\[)', re.I)
 PROFILE_TEMPLATE_COPIES = 2  # near-identical sends (outreach templates) kept per template
 ROLES_PEOPLE = 15       # closest people without a role one roles turn names
-ROLES_PAGE = 3
 ORGS_PEOPLE = 60        # people without an organization one organizations turn reads
-ORGS_PAGE = 6
+# A profile, voices, roles or organizations turn reads its evidence in pages of about this many characters, well below
+# OpenClaw's 64,000-character tool result: each page is a model step that resends the whole context, so fewer, fuller
+# pages cost less for the same evidence (2026-10-26: 15 messages, 3 or 6 people a page took 5 to 10 steps).
+EVIDENCE_PAGE_CHARS = 40000
 SHARE_HISTORY_BATCH, SHARE_HISTORY_PAGE = 120, 20  # the Shared Graph's history pass: threads per turn, and per page
 PROFILE_WEIGHTS = {'gmail.message': 2}  # drafts are mostly email, so email gets two turns per round
 OWN_KINDS = {'gmail.message': 'email', 'slack.message': 'Slack', 'whatsapp.message': 'WhatsApp', 'linkedin.message': 'LinkedIn', 'x.dm': 'X DM'}
@@ -2381,6 +2500,7 @@ def message_event(account, raw, config=None):
     metadata = {key: headers.get(key, '') for key in ['from', 'to', 'cc', 'date', 'message-id', 'in-reply-to']}
     if headers.get('reply-to'):
         metadata['reply-to'] = headers['reply-to']
+    metadata.update(list_headers(headers))
     metadata.update(thread_id=raw.get('threadId'), labels=sorted(raw.get('labelIds', [])),
                     source_url=raw.get('webLink') if account.get('service') == 'outlook' else
                     'https://mail.google.com/mail/u/?authuser=' + urllib.parse.quote(account['email']) + '#all/' + raw['id'],
@@ -2631,6 +2751,8 @@ class Store:
             if 'window_hours' not in worker_columns:  # a quick first look: only this many hours back, at most `budget` signals
                 db.execute('ALTER TABLE review_runs ADD COLUMN window_hours INTEGER')
                 db.execute('ALTER TABLE review_runs ADD COLUMN budget INTEGER')
+            if 'promising' not in worker_columns:  # the review after the quick look: the most promising signals first
+                db.execute('ALTER TABLE review_runs ADD COLUMN promising INTEGER NOT NULL DEFAULT 0')
             # When setup steps first happened (first import per source, first card shown): timestamps and counts only.
             # `tracking_since` tells a new install from one that had cards before this was recorded.
             db.execute('CREATE TABLE IF NOT EXISTS milestones(name TEXT PRIMARY KEY,at TEXT NOT NULL,detail TEXT)')
@@ -3173,6 +3295,15 @@ class Store:
         if not row or row['detail'] != detail:
             db.execute("INSERT OR REPLACE INTO milestones(name,at,detail) VALUES('first_look_state',?,?)", (now(), detail))
 
+    def first_magic_done(self, db):
+        """The first look has done its job, so the rest of onboarding (profile, voices, roles, organizations, drafts
+        beyond the first) may start: the first card was shown, or a review finished a while ago (one that found no card,
+        an install from before this was recorded)."""
+        if db.execute("SELECT 1 FROM milestones WHERE name='first_card_shown'").fetchone():
+            return True
+        settled = (dt.datetime.fromisoformat(now()) - dt.timedelta(seconds=FIRST_MAGIC_SETTLE_SECONDS)).isoformat()
+        return bool(db.execute("SELECT 1 FROM review_runs WHERE status='ok' AND finished_at<=? LIMIT 1", (settled,)).fetchone())
+
     def note_card_shown(self):
         """The first card the dashboard showed on a new install (one with cards from before this was recorded keeps none)."""
         if getattr(self, '_card_shown', False):
@@ -3449,11 +3580,11 @@ class Store:
                        (now(), (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat(), REVIEW_SESSION_PREFIX))
             if db.execute("SELECT 1 FROM analyses WHERE status='retryable'").fetchone():
                 return {'busy': True}
-            scope = db.execute('SELECT preview,window_hours,budget FROM review_runs WHERE run_id=?', (owner_run,)).fetchone() if owner_run else None
+            scope = db.execute('SELECT preview,window_hours,budget,promising FROM review_runs WHERE run_id=?', (owner_run,)).fetchone() if owner_run else None
             budget = (scope and scope['budget']) or RUN_SIGNAL_BUDGET  # a quick first look: fewer
             if owner_run:
                 run_reviews = db.execute('SELECT items,started_at FROM analyses WHERE owner_session=? AND owner_run=?', (owner_session, owner_run)).fetchall()
-                claimed = sum(len(json.loads(r['items'])) for r in run_reviews)
+                claimed = sum(claim_weight(json.loads(r['items'])) for r in run_reviews)
                 started = min((r['started_at'] for r in run_reviews), default=None)
                 elapsed = (dt.datetime.fromisoformat(now()) - dt.datetime.fromisoformat(started)).total_seconds() if started else 0
                 if claimed >= budget or elapsed >= 900:
@@ -3467,7 +3598,7 @@ class Store:
                      if scope and (scope['preview'] or scope['window_hours']) else '')
             # A quick first look takes what most likely needs the owner first (most_promising); other reviews share the
             # budget out over the sources
-            quick = bool(scope and scope['window_hours'])
+            quick = bool(scope and (scope['window_hours'] or scope['promising']))
             rows, recovered_from = (self.most_promising(db, accounts, since, limit), None) if quick else (None, None)
             if not quick:
                 counts = {a: db.execute('SELECT count(*) FROM events WHERE account_id=? AND analyzed_version<version AND deferrals<? AND occurred_at>=?', (a, SET_ASIDE_AFTER, since)).fetchone()[0] for a in accounts}
@@ -3503,17 +3634,22 @@ class Store:
                         event = dict(row); event.pop('review_id')
                         picked.append(event); selected.add(row['id'])
                         recovered_from = recovered_from or row['review_id']
-                    remaining = quota - len(picked)
+                    remaining = quota - len(picked)  # a title line (bulk mail) counts BRIEF_WEIGHT
                     # Alternate oldest backlog and newest/upcoming signals. New arrivals
                     # cannot indefinitely starve old imports, or vice versa. Signals deferred
                     # once wait behind fresh ones; set-aside signals are not offered again.
-                    oldest = [dict(r) for r in db.execute('SELECT * FROM events WHERE account_id=? AND analyzed_version<version AND deferrals<? AND occurred_at>=? ORDER BY deferrals,ingested_at,id LIMIT ?', (account, SET_ASIDE_AFTER, since, limit))]
-                    newest = self.events([account], limit=limit, pending=True, reviewable=True, since=since)
-                    for i in range(remaining):
-                        queue = oldest if i % 2 == 0 else newest
-                        candidate = next((r for r in queue if r['id'] not in selected), None)
-                        if candidate:
-                            picked.append(candidate); selected.add(candidate['id'])
+                    wide = int(limit / BRIEF_WEIGHT)
+                    oldest = [dict(r) for r in db.execute('SELECT * FROM events WHERE account_id=? AND analyzed_version<version AND deferrals<? AND occurred_at>=? ORDER BY deferrals,ingested_at,id LIMIT ?', (account, SET_ASIDE_AFTER, since, wide))]
+                    newest = self.events([account], limit=wide, pending=True, reviewable=True, since=since)
+                    turn = 0
+                    while remaining > 0:
+                        queue = oldest if turn % 2 == 0 else newest
+                        candidate = next((r for r in queue if r['id'] not in selected), None) or next(
+                            (r for r in oldest + newest if r['id'] not in selected), None)
+                        if not candidate:
+                            break
+                        picked.append(candidate); selected.add(candidate['id'])
+                        remaining -= signal_weight(candidate); turn += 1
                     account_rows.append(picked)
                 while any(account_rows):
                     for queue in account_rows:
@@ -3580,6 +3716,27 @@ class Store:
                         break
         ranked = sorted(range(len(found)), key=lambda i: (ranks[i], i))  # stable: newest, then soonest, first within a rank
         return [found[i] for i in ranked[:limit]]
+
+    @staticmethod
+    def owner_wrote_in(db, account_id, metadata):
+        """The owner sent mail in this message's thread. Only asked for replies: a newsletter starts its own thread."""
+        return bool(metadata.get('in-reply-to') and metadata.get('thread_id') and db.execute(
+            "SELECT 1 FROM events WHERE account_id=? AND kind='gmail.message' AND deleted=0 "
+            "AND json_extract(metadata,'$.thread_id')=? AND instr(metadata,'\"SENT\"')>0 LIMIT 1",
+            (account_id, metadata['thread_id'])).fetchone())
+
+    def owner_threads(self, rows):
+        """The ids of mail rows (replies) in a thread the owner wrote in: never a title line."""
+        found = set()
+        mail = [r for r in rows if r['kind'] == 'gmail.message']
+        if not mail:
+            return found
+        with self.connect() as db:
+            for row in mail:
+                metadata = row['metadata'] if isinstance(row['metadata'], dict) else json.loads(row['metadata'] or '{}')
+                if self.owner_wrote_in(db, row['account_id'], metadata):
+                    found.add(row['id'])
+        return found
 
     def conversation_context(self, rows, limit=4, hours=48):
         """Up to four earlier messages from the same chat for each Slack/WhatsApp signal, so a
@@ -3810,10 +3967,12 @@ class Store:
         context = self.conversation_context(rows)
         replies = self.card_replies(rows)
         hints = self.project_hints([r['id'] for r in rows])
-        pages = review_pages([{**review_view(r, earlier=context.get(r['id'])), **({'answers_your_card': replies[r['id']]} if r['id'] in replies else {}),
+        owned = self.owner_threads(rows)
+        pages = review_pages([{**review_view(r, earlier=context.get(r['id']), brief=True, owner_in_thread=r['id'] in owned), **({'answers_your_card': replies[r['id']]} if r['id'] in replies else {}),
                                **hints.get(r['id'], {})} for r in rows])
         page_of = {view['id']: n for n, page in enumerate(pages) for view in page}
-        return [{'id': r['id'], 'version': r['version'], 'page': page_of[r['id']]} for r in rows], pages
+        brief = {view['id'] for page in pages for view in page if view.get('title_only')}
+        return [{'id': r['id'], 'version': r['version'], 'page': page_of[r['id']], **({'brief': 1} if r['id'] in brief else {})} for r in rows], pages
 
     @staticmethod
     def review_result(analysis_id, pages, **extra):
@@ -3838,7 +3997,8 @@ class Store:
         # A signal may grow after the original page layout was committed.
         replies = self.card_replies([rows[i] for i in ids if i in rows])
         hints = self.project_hints([i for i in ids if i in rows])
-        views = [{**review_view(rows[i], earlier=context.get(i)), **({'answers_your_card': replies[i]} if i in replies else {}), **hints.get(i, {})}
+        owned = self.owner_threads([rows[i] for i in ids if i in rows])
+        views = [{**review_view(rows[i], earlier=context.get(i), brief=True, owner_in_thread=i in owned), **({'answers_your_card': replies[i]} if i in replies else {}), **hints.get(i, {})}
                  for i in ids if i in rows]
         row_offset = int(row_offset)
         if row_offset < 0 or row_offset > len(views):
@@ -4657,17 +4817,18 @@ class Store:
         if evidence.get('learnings'):  # a learnings run (team_learnings.py)
             return team_learnings.evidence_page(evidence, page)
         if 'people' in evidence:  # a roles or organizations run
-            people, size = evidence['people'], int(evidence.get('page_size') or ROLES_PAGE)
-            pages = max(1, -(-len(people) // size))
-            page = min(max(int(page or 1), 1), pages)
-            result = {'page': page, 'pages': pages, 'people': people[(page - 1) * size:page * size]}
+            extra = {k: evidence[k] for k in ('organisations', 'corrections') if evidence.get(k)}
+            split = evidence_pages(evidence['people'], first=len(encoded(extra)))
+            page = min(max(int(page or 1), 1), len(split))
+            result = {'page': page, 'pages': len(split), 'people': split[page - 1]}
             if page == 1:  # the organizations, and how the owner corrected earlier roles
-                result.update({k: evidence[k] for k in ('organisations', 'corrections') if evidence.get(k)})
+                result.update(extra)
             return result
         items = evidence['messages']
-        pages = max(1, -(-len(items) // PROFILE_PAGE))
-        page = min(max(int(page or 1), 1), pages)
-        result = {'page': page, 'pages': pages, 'messages': items[(page - 1) * PROFILE_PAGE:page * PROFILE_PAGE]}
+        extra = {k: evidence.get(k) for k in ('notes', 'voices', 'frequent_unanswered_senders')}
+        split = evidence_pages(items, first=len(encoded(extra)) + 200)
+        page = min(max(int(page or 1), 1), len(split))
+        result = {'page': page, 'pages': len(split), 'messages': split[page - 1]}
         if page == 1 and 'notes' in evidence:  # a voice study: the owner's style notes and the current blocks
             result.update(counts=dict(collections.Counter(i['channel'] for i in items)), style_notes=evidence['notes'], current_voices=evidence['voices'])
         elif page == 1:
@@ -4698,7 +4859,7 @@ class Store:
                 return {'run_id': run['run_id'], 'started_at': run['started_at'], 'attached': True}
             db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,room,evidence,auto) VALUES(?,'starting',?,?,?,?,?)",
                        (run_id, started, started, None if room is None else min(max(int(room), 400), 4000), json.dumps(evidence), int(bool(auto))))
-        roles = self.roles_start(again=again)  # onboarding names the closest people too, right after the draft
+        roles = self.roles_start(again=again, auto=auto)  # onboarding names the closest people too, right after the draft
         return {'run_id': run_id, 'started_at': started, 'counts': dict(counts), 'roles_run_id': roles.get('run_id')}
 
     def no_role_yet(self, event_ids):
@@ -4744,7 +4905,7 @@ class Store:
                                         'ORDER BY strength DESC LIMIT 6')]
         return people, orgs
 
-    def roles_start(self, again=False):
+    def roles_start(self, again=False, auto=False):
         """One turn that says what the closest people are to the owner (also part of onboarding's profile)."""
         recent = (dt.datetime.fromisoformat(now()) - dt.timedelta(minutes=30)).isoformat()
         with self.connect() as db:
@@ -4762,8 +4923,8 @@ class Store:
                              "(status='ok' AND finished_at>? AND NOT ?)) ORDER BY started_at DESC LIMIT 1", (recent, int(bool(again)))).fetchone()
             if run:
                 return {'run_id': run['run_id'], 'started_at': run['started_at'], 'attached': True}
-            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind) VALUES(?,'starting',?,?,?,'roles')",
-                       (run_id, started, started, json.dumps({'people': people, 'organisations': orgs, 'corrections': graph.corrections(db)})))
+            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind,auto) VALUES(?,'starting',?,?,?,'roles',?)",
+                       (run_id, started, started, json.dumps({'people': people, 'organisations': orgs, 'corrections': graph.corrections(db)}), int(bool(auto))))
         return {'run_id': run_id, 'started_at': started, 'people': len(people), 'organisations': len(orgs)}
 
     def org_evidence(self, limit=ORGS_PEOPLE):
@@ -4795,7 +4956,7 @@ class Store:
         run_id, started = uuid.uuid4().hex, now()
         with self.connect() as db:
             db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind,auto) VALUES(?,'starting',?,?,?,'orgs',?)",
-                       (run_id, started, started, json.dumps({'people': people, 'page_size': ORGS_PAGE}), int(bool(auto))))
+                       (run_id, started, started, json.dumps({'people': people}), int(bool(auto))))
         return {'run_id': run_id, 'started_at': started, 'people': len(people)}
 
     def save_profile(self, profile, session):
@@ -5489,7 +5650,7 @@ class Store:
             voices = [{'channel': v['channel'], 'text': v['text'], 'written_by_owner': v['source'] == 'owner'} for v in self.voices(db)]
         return {'messages': items, 'notes': notes, 'voices': voices}
 
-    def voice_study_start(self, again=False):
+    def voice_study_start(self, again=False, auto=False):
         """One turn that reads a sample of the owner's own messages per channel and writes each channel's voice block
         (greetings and sign-offs per language, length and structure, tone per kind of person, habits), with their style
         notes worked in. Blocks the owner wrote themselves stay as they are."""
@@ -5507,8 +5668,8 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             if db.execute("SELECT 1 FROM profile_runs WHERE kind='voices' AND status IN ('starting','running')").fetchone():
                 return {'attached': True}
-            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind) VALUES(?,'starting',?,?,?,'voices')",
-                       (run_id, started, started, json.dumps(evidence)))
+            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind,auto) VALUES(?,'starting',?,?,?,'voices',?)",
+                       (run_id, started, started, json.dumps(evidence), int(bool(auto))))
         return {'run_id': run_id, 'started_at': started, 'counts': dict(collections.Counter(m['channel'] for m in evidence['messages']))}
 
     def voice_study_due(self):
@@ -5519,7 +5680,7 @@ class Store:
         if last and (last['status'] in ('starting', 'running') or (last['finished_at'] or last['started_at']) >
                      (stamp - dt.timedelta(days=VOICE_STUDY_DAYS if last['status'] == 'ok' else 1)).isoformat()):
             return None
-        return self.voice_study_start()
+        return self.voice_study_start(auto=True)
 
     def learnings_due(self, current=None):
         """About once a week, when the owner wants to be offered: one turn distils what was learned into a few general
@@ -5531,7 +5692,7 @@ class Store:
                 return None
             evidence = team_learnings.evidence(db, lambda: self.quality(team_learnings.SINCE_DAYS), current)
             run_id, started = uuid.uuid4().hex, now()
-            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind) VALUES(?,'starting',?,?,?,'learnings')",
+            db.execute("INSERT INTO profile_runs(run_id,status,started_at,updated_at,evidence,kind,auto) VALUES(?,'starting',?,?,?,'learnings',1)",
                        (run_id, started, started, json.dumps(evidence)))
         return run_id
 
@@ -8867,7 +9028,7 @@ def owner_reports_handled(text):
 
 
 REVIEW_FAILURES = {'runtime_error','runtime_timeout','runtime_aborted','runtime_lost',
-                   'model_idle_timeout','bridge_error','rate_limited','connection_error','prompt_too_long'}
+                   'model_idle_timeout','bridge_error','rate_limited','usage_limited','connection_error','prompt_too_long'}
 REVIEW_FAILURE_PHASES = {'runtime','model','bridge','connection','queue','provider','tool','gateway_draining'}
 
 
@@ -11570,6 +11731,10 @@ class App:
                     connector['sign_in_command'] = 'assistant connect ' + onboarding.connect_name(by_id[connector['id']], self.config)
             result['model_usage'] = getattr(self, 'model_usage', None)
             result['model_status'] = getattr(self, 'model_status', None)
+            try:  # the limit banner: a usage limit reached, which one and when it resets
+                result['model_pause'] = self.model_pause()
+            except Exception as error:  # noqa: BLE001 - the dashboard shows without it
+                LOG.error('model pause error=%s', type(error).__name__); result['model_pause'] = None
             result['skills'] = self.skills.view() if getattr(self, 'skills', None) else None
             result['review_live'] = self.review_live()
             result['reviews_on'] = bool((self.config.get('review_worker') or {}).get('enabled'))  # off until activated
@@ -13399,11 +13564,27 @@ class App:
             room=max(0,int(self.config.get('preparation_concurrency',3))-len(active))
             # A replacement waits only for an unfinished old run in its own session or card; checked in
             # this same transaction so a decision on another thread can't slip a second run in.
-            queued=[dict(r) for r in db.execute("""SELECT p.*,s.status suggestion_status FROM preparations p JOIN suggestions s ON s.id=p.suggestion_id
+            # A usage limit holds every new run until it resets. Drafts prepared ahead (no owner asked yet) are background
+            # work: one usage check each (model_budget), the first look's first one as the first magic, the others one
+            # per BACKGROUND_GAP_SECONDS once the first card was shown.
+            limited=self.background_pause(owner=True) if room else None
+            queued=[dict(r) for r in db.execute("""SELECT p.*,s.status suggestion_status,s.early FROM preparations p JOIN suggestions s ON s.id=p.suggestion_id
                 WHERE p.status='queued' AND s.status IN ('accepted','instructions') AND (p.retry_at IS NULL OR p.retry_at<=?)
                 AND NOT EXISTS(SELECT 1 FROM preparation_runs r WHERE r.finished_at IS NULL AND r.job_id!=p.job_id
                                AND (r.suggestion_id=p.suggestion_id OR r.session_job_id=coalesce(p.session_job_id,p.job_id)))
-                ORDER BY p.created_at LIMIT ?""",(now(),room)).fetchall()] if room else []
+                ORDER BY p.created_at LIMIT ?""",(now(),room+20)).fetchall()] if room and not limited else []
+            ahead_first=not db.execute("SELECT 1 FROM milestones WHERE name='first_ahead_started'").fetchone()
+            admitted=[]
+            for job in queued:
+                if len(admitted)>=room:break
+                if job['early'] and job['status']=='queued' and job.get('session_job_id') in (None,job['job_id']):  # a fresh one, not a retry
+                    first=ahead_first and not any(j['early'] for j in admitted)
+                    if any(j['early'] for j in admitted) or self.background_pause(first=first) or not (first or (self.store.first_magic_done(db) and self.background_spaced())):
+                        continue
+                    if first:db.execute("INSERT OR IGNORE INTO milestones(name,at) VALUES('first_ahead_started',?)",(now(),))
+                    self.background_started()
+                admitted.append(job)
+            queued=admitted
             jobs=[]
             for job in active+queued:
                 if job.get('retry_at') and job['retry_at']>now():continue
@@ -13423,6 +13604,9 @@ class App:
         """One start or status check for one admitted preparation."""
         action='status' if job['status']=='running' else 'start'
         request={'action':action,'job_id':job['job_id'],'session_job_id':job.get('session_job_id') or job['job_id']}
+        if action=='status' and job.get('started_at'):
+            # Old enough that it can't still be waiting in the queue: the runner also checks the run is still in its session.
+            request['probe']=(dt.datetime.fromisoformat(now())-dt.datetime.fromisoformat(job['started_at'])).total_seconds()>=PREPARATION_PROBE_SECONDS
         if action=='start':
             with self.store.connect() as db:
                 chosen=db.execute("SELECT payload FROM action_jobs WHERE suggestion_id=? AND id=? AND status='local_preparation'",(job['suggestion_id'],job.get('action_id'))).fetchone()
@@ -13437,6 +13621,7 @@ class App:
             with self.store.connect() as db:
                 card=db.execute('SELECT early,owner_step FROM suggestions WHERE id=?',(job['suggestion_id'],)).fetchone()
                 job['ahead'],job['owner_step']=bool(card['early']),bool(card['owner_step'])
+            if job['ahead']:request['background']=True  # nobody asked yet: background work (background_model)
             # A chat message (dashboard chat, decision chat-…) in a session that already has the card's context: a short
             # follow-up turn instead of the full card context again, so long chats stay cheap.
             if str(job.get('decision_id') or '').startswith('chat-') and request['session_job_id']!=job['job_id'] and not job.get('finish') and not job['ahead']:
@@ -13492,6 +13677,13 @@ class App:
             if status=='admitted':
                 db.execute("UPDATE preparations SET status='running',updated_at=?,error=NULL,retry_at=NULL WHERE job_id=?",(now(),job['job_id']))
                 db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
+            elif status=='error' and result.get('error')=='usage_limited':
+                # The sign-in's usage limit: the card waits for the reset (note_usage_limit) and starts again in the same
+                # session then, without using up its retry. The dashboard says which limit and when it resets.
+                until=getattr(self,'usage_limit',None) or {'until':time.time()+model_budget.LIMIT_WAIT}
+                db.execute("UPDATE preparations SET job_id=?,status='queued',error='usage_limited',retry_at=?,updated_at=?,started_at=NULL WHERE job_id=?",
+                           (uuid.uuid4().hex,dt.datetime.fromtimestamp(until['until'],dt.timezone.utc).isoformat(),now(),job['job_id']))
+                db.execute('UPDATE deliveries SET needs_edit=1 WHERE suggestion_id=?',(job['suggestion_id'],))
             elif status in ('ok','error','aborted','timed_out','lost'):  # lost: the Gateway refused this run id for good
                 error={'ok':'run_ended_without_preparation','timed_out':'ai_run_timed_out'}.get(status,'ai_run_failed')
                 if status in ('aborted','lost') and current['attempts']<PREPARATION_INTERRUPTED_TRIES:
@@ -13530,10 +13722,24 @@ class App:
         """Canceled, replaced or finished runs live on in their Gateway session until stopped. Stop and
         confirm each exact old run; only work in that same session or card waits for it."""
         with self.store.connect() as db:
-            stale=db.execute("""SELECT r.* FROM preparation_runs r LEFT JOIN preparations p ON p.job_id=r.job_id
+            stale=db.execute("""SELECT r.*,p.status prep_status,p.error prep_error,p.updated_at prep_updated
+                FROM preparation_runs r LEFT JOIN preparations p ON p.job_id=r.job_id
                 WHERE r.finished_at IS NULL AND (p.job_id IS NULL OR p.status NOT IN ('starting','running'))
                 AND (r.retry_at IS NULL OR r.retry_at<=?) ORDER BY r.started_at LIMIT ?""",(now(),limit)).fetchall()
         for run in stale:
+            # Its own result or blocker is saved (not replaced, canceled or timed out): the run normally ends by itself
+            # seconds later. Read how it ended; stop it only when it is still going after PREPARATION_SETTLE_SECONDS.
+            if run['prep_status'] in ('done','blocked') and run['prep_error']!='completion_unconfirmed':
+                outcome=runner({'action':'status','job_id':run['job_id'],'session_job_id':run['session_job_id']})
+                if outcome.get('status') in preparation_state.TERMINAL:
+                    with self.store.connect() as db:
+                        db.execute('UPDATE preparation_runs SET status=?,finished_at=? WHERE job_id=? AND finished_at IS NULL',(outcome['status'],now(),run['job_id']))
+                    continue
+                settled=dt.datetime.fromisoformat(run['prep_updated'] or run['started_at'])
+                if (dt.datetime.fromisoformat(now())-settled).total_seconds()<PREPARATION_SETTLE_SECONDS:
+                    with self.store.connect() as db:
+                        db.execute('UPDATE preparation_runs SET retry_at=? WHERE job_id=?',((dt.datetime.fromisoformat(now())+dt.timedelta(seconds=10)).isoformat(),run['job_id']))
+                    continue
             outcome=runner({'action':'stop','job_id':run['job_id'],'session_job_id':run['session_job_id']})
             with self.store.connect() as db:
                 if outcome.get('status') not in preparation_state.TERMINAL:
@@ -14022,10 +14228,15 @@ class App:
             return view
 
     def preparation_gateway(self, request):
+        if request.get('action')=='start' and (request.get('kind') in ('review','profile') or request.get('background')):
+            swap=background_model(self.config)  # never the costliest model for background work
+            if swap:request={**request,'provider':swap[0],'model':swap[1]}
         try:
             result=subprocess.run([node_bin(self.config),str(ROOT/'preparation-run.mjs')],env=node_env(self.config),input=encoded(request),capture_output=True,text=True,timeout=30)
-            return json.loads(result.stdout) if result.returncode==0 else {'status':'unavailable'}
+            receipt=json.loads(result.stdout) if result.returncode==0 else {'status':'unavailable'}
         except (ValueError,subprocess.TimeoutExpired):return {'status':'unavailable'}
+        self.note_usage_limit(receipt)
+        return receipt
 
     def preparation_worker(self):
         while not self.stop.wait(5):
@@ -14261,6 +14472,8 @@ class App:
                 due = (look or {}).get('state') == 'due'
                 if not running:
                     self.store.note_first_look(db, look)
+            # One usage check before every background turn (model_budget); the quick look, the first magic, may go further
+            due = due and not self.background_pause(first=bool(look.get('quick')))
             if not running and not due:
                 return None
             if due:
@@ -14313,6 +14526,8 @@ class App:
                 # Reviews just turned on and nothing reviewed yet: first a quick look at the newest mail, at once (no
                 # waiting for a batch or for the rest of the import); the regular reviews take the rest after it.
                 quick = 0 if recovery else self.quick_first_review(db)
+                if self.background_pause(first=bool(quick)):  # one usage check before every background turn (model_budget)
+                    return None
                 if quick:
                     run = {'run_id': uuid.uuid4().hex, 'status': 'starting', 'started_at': now(), 'attempts': 0}
                     db.execute('INSERT INTO review_runs(run_id,status,started_at,updated_at,planned,auto,window_hours,budget) VALUES(?,?,?,?,?,1,?,?)',
@@ -14333,8 +14548,12 @@ class App:
                     if not waiting and not recovery and not sort_due:
                         return None
                     run = {'run_id': uuid.uuid4().hex, 'status': 'starting', 'started_at': now(), 'attempts': 0}
-                    db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,planned) VALUES(?,?,?,?,?)",
-                               (run['run_id'], 'starting', run['started_at'], run['started_at'], min(waiting, RUN_SIGNAL_BUDGET)))
+                    # Right after the quick first look: the most promising FIRST_LOOK_NEXT_SIGNALS next, the rest after it
+                    nxt = not recovery and not db.execute("SELECT 1 FROM review_runs WHERE status='ok' AND window_hours IS NULL LIMIT 1").fetchone() \
+                        and bool(db.execute("SELECT 1 FROM review_runs WHERE status='ok' AND window_hours IS NOT NULL LIMIT 1").fetchone())
+                    budget = FIRST_LOOK_NEXT_SIGNALS if nxt else RUN_SIGNAL_BUDGET
+                    db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,planned,budget,promising) VALUES(?,?,?,?,?,?,?)",
+                               (run['run_id'], 'starting', run['started_at'], run['started_at'], min(waiting, budget), budget if nxt else None, int(nxt)))
             if run['status'] == 'starting':
                 db.execute('UPDATE review_runs SET attempts=attempts+1,updated_at=? WHERE run_id=?', (now(), run['run_id']))
         expired = (stamp - dt.datetime.fromisoformat(run['started_at'])).total_seconds() > (
@@ -14421,6 +14640,7 @@ class App:
         result = receipt.get('status', 'unavailable')
         with self.store.connect() as db:
             if result == 'admitted':
+                self.background_started()
                 db.executemany('INSERT OR IGNORE INTO edits_offered(edit_id,run_id,offered_at) VALUES(?,?,?)',
                                [(value, run['run_id'], now()) for value in offered_edits])
                 db.execute("UPDATE review_runs SET status='running',updated_at=?,error=NULL,error_phase=NULL,retry_at=NULL,unavailable_since=NULL WHERE run_id=?", (now(), run['run_id']))
@@ -14583,7 +14803,9 @@ class App:
             raise ValueError('Reviews are already on: new suggestions arrive by themselves. See assistant tasks or the dashboard.')
         accounts = [a['id'] for a in self.config['accounts']]
         hours = QUICK_LOOK_HOURS if quick else PREVIEW_DAYS * 24
-        budget = QUICK_LOOK_SIGNALS if quick else RUN_SIGNAL_BUDGET
+        # The first look by itself: after the quick one, the most promising FIRST_LOOK_NEXT_SIGNALS of the week
+        nxt = auto and not quick
+        budget = QUICK_LOOK_SIGNALS if quick else FIRST_LOOK_NEXT_SIGNALS if nxt else RUN_SIGNAL_BUDGET
         since = (dt.datetime.fromisoformat(now()) - dt.timedelta(hours=hours)).isoformat()
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -14598,8 +14820,8 @@ class App:
             if not waiting:
                 raise ValueError(f'No unreviewed signals from the last {PREVIEW_DAYS} days yet. Check assistant sources; the first import can take a few minutes.')
             run_id, started = uuid.uuid4().hex, now()
-            db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,preview,auto,planned,window_hours,budget) VALUES(?,'starting',?,?,1,?,?,?,?)",
-                       (run_id, started, started, int(auto), min(waiting, budget), QUICK_LOOK_HOURS if quick else None, budget if quick else None))
+            db.execute("INSERT INTO review_runs(run_id,status,started_at,updated_at,preview,auto,planned,window_hours,budget,promising) VALUES(?,'starting',?,?,1,?,?,?,?,?)",
+                       (run_id, started, started, int(auto), min(waiting, budget), QUICK_LOOK_HOURS if quick else None, budget if quick or nxt else None, int(nxt)))
         return {'run_id': run_id, 'started_at': started, 'waiting': waiting, 'signals': min(waiting, budget)}
 
     def recap_push(self, message, week):
@@ -14764,10 +14986,17 @@ class App:
         """Start and follow the one profile turn `assistant profile` asked for (reviews may be off)."""
         runner = runner or self.preparation_gateway
         with self.store.connect() as db:
-            run = db.execute("SELECT * FROM profile_runs WHERE status IN ('starting','running') ORDER BY started_at LIMIT 1").fetchone()
+            # The one being followed first, then what the owner asked for, then The Machine's own
+            run = db.execute("SELECT * FROM profile_runs WHERE status IN ('starting','running') ORDER BY status='running' DESC,coalesce(auto,0),started_at LIMIT 1").fetchone()
+            ready = run and run['status'] == 'starting' and (not run['auto'] or self.store.first_magic_done(db))
         if not run:
             return None
         run, stamp = dict(run), dt.datetime.fromisoformat(now())
+        if run['status'] == 'starting':
+            # One usage check before every background turn (model_budget); The Machine's own turns (profile, voices, roles,
+            # organizations) wait for the first card and start one per BACKGROUND_GAP_SECONDS. A usage limit holds all.
+            if self.background_pause(owner=not run['auto']) or (run['auto'] and not (ready and self.background_spaced())):
+                return None
         age = (stamp - dt.datetime.fromisoformat(run['started_at'])).total_seconds()
         if run['status'] == 'starting' and run['attempts'] and run['updated_at'] > (stamp - dt.timedelta(minutes=1)).isoformat():
             return None
@@ -14801,6 +15030,8 @@ class App:
         result = runner(request).get('status', 'unavailable')
         with self.store.connect() as db:
             if result == 'admitted':
+                if run['auto']:
+                    self.background_started()
                 db.execute("UPDATE profile_runs SET status='running',error=NULL,updated_at=? WHERE run_id=?", (now(), run['run_id']))
             elif result in REVIEW_TERMINAL or (action == 'stop' and age > PROFILE_SECONDS + 900):
                 draft = db.execute('SELECT draft FROM profile_runs WHERE run_id=?', (run['run_id'],)).fetchone()[0]
@@ -15265,6 +15496,53 @@ class App:
                 return own_addresses.view(db, self.config)
         except sqlite3.Error:
             return None
+
+    def note_usage_limit(self, receipt):
+        """A run ended on the sign-in's usage limit: everything the service starts waits until it resets (the time the
+        provider named, else the window's), instead of trying again every few minutes."""
+        if not isinstance(receipt, dict) or receipt.get('error') != 'usage_limited':
+            return None
+        until = model_budget.limit_until(receipt.get('retry_at'), getattr(self, 'model_usage', None))
+        known = getattr(self, 'usage_limit', None)
+        if not known or known['until'] < until:
+            LOG.warning('usage limit reached until=%s', dt.datetime.fromtimestamp(until, dt.timezone.utc).isoformat(timespec='minutes'))
+        self.usage_limit = {'until': until, 'at': int(time.time())}
+        getattr(self, 'model_usage_wake', threading.Event()).set()
+        return until
+
+    def background_pause(self, first=False, owner=False):
+        """None when a turn the service starts may go now; else why it waits ({'window', 'until', 'limited'...}). A
+        usage limit holds everything; the budget (model_budget.pause) holds background work only, `first` for the
+        first look and its first draft. A sign-in that reports no usage windows (an API key) is never paused here."""
+        now_s, usage = time.time(), getattr(self, 'model_usage', None)
+        limit = getattr(self, 'usage_limit', None)
+        if limit and limit['until'] > now_s:
+            return {'window': 'limit', 'until': limit['until'], 'limited': True}
+        full = [{'window': '5h' if model_budget.window_kind(w['label']) == 'short' else 'week', 'until': w.get('reset'), 'limited': True}
+                for p in usage or [] for w in p.get('windows') or [] if w.get('used', 0) >= 100 and (w.get('reset') or now_s + 1) > now_s]
+        if full:
+            return max(full, key=lambda f: f['until'] or 0)
+        if owner:
+            return None
+        found = model_budget.pause(usage, now_s, first=first)
+        return {**found, 'limited': False} if found else None
+
+    def background_spaced(self):
+        """At most one background turn beyond the first look per BACKGROUND_GAP_SECONDS."""
+        return time.time() - getattr(self, 'background_at', 0) >= BACKGROUND_GAP_SECONDS
+
+    def background_started(self):
+        self.background_at = time.time()
+
+    def model_pause(self):
+        """What the dashboard's limit banner shows: a usage limit reached (which one, when it resets), else None. The
+        budget's own pauses are not shown: nothing is wrong then."""
+        found = self.background_pause(owner=True)
+        if not found:
+            return None
+        model = openclaw_model(self.config) or ''
+        name = 'Claude' if model.startswith(('claude-cli/', 'anthropic/')) or claude_plan_route(self.config) else 'ChatGPT' if model.startswith(('openai', 'codex')) else None
+        return {'window': found['window'], 'until': found.get('until'), 'name': name}
 
     def model_room(self, most=80):
         """The model's limits have room for extra work (a board's look through the history): no window the sign-in reports
