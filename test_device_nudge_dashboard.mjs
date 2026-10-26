@@ -12,9 +12,10 @@ const {chromium}=await import(process.env.PLAYWRIGHT_CORE||OPENCLAW+'/node_modul
 // SHOTS=<folder> saves light and dark screenshots at 390 and 1440.
 const dashboard=await readFile(new URL('./dashboard.html',import.meta.url),'utf8');
 const now=new Date().toISOString();
+let setupHints=[];
 let connectors=[{id:'mail',service:'gmail',email:'owner@example.org',display_name:'Mail',status:'ok'}];
 const status=()=>({suggestions:[{id:'ab'.repeat(8),title:'Reply to Robin about the garden plan',body:'Robin asked for the dates.',status:'pending',scope:'personal',created_at:now,event_ids:[1]}],
- promises:[],connectors,suggestion_counts:{pending:1},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[]});
+ promises:[],connectors,suggestion_counts:{pending:1},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],setup_hints:setupHints});
 const actions=[];
 const server=createServer(async(req,res)=>{let body='';for await(const c of req)body+=c;const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
@@ -22,7 +23,8 @@ const server=createServer(async(req,res)=>{let body='';for await(const c of req)
  if(url.pathname==='/api/status'){res.end(JSON.stringify(status()));return}
  if(url.pathname==='/api/push-key'){res.end(JSON.stringify({key:'B'+'A'.repeat(86)}));return}
  if(url.pathname==='/api/action'){const r=JSON.parse(body);actions.push(r);res.end(JSON.stringify(r.action==='push_test'?{sent:true}:{subscribed:r.action==='push_subscribe'}));return}
- if(/^\/brand\/[\w.-]+\.(png|webp|woff2)$/.test(url.pathname)){try{const f=await readFile(new URL('.'+url.pathname,import.meta.url));res.setHeader('Content-Type',url.pathname.endsWith('.png')?'image/png':url.pathname.endsWith('.webp')?'image/webp':'font/woff2');res.end(f)}catch{res.statusCode=404;res.end()}return}
+ // brand/avatar.png is the app icon, as assistant.py serves it (there is no avatar.png file)
+ if(/^\/brand\/[\w.-]+\.(png|webp|woff2)$/.test(url.pathname)){try{const f=await readFile(new URL('.'+(url.pathname==='/brand/avatar.png'?'/brand/app-icon-192.png':url.pathname),import.meta.url));res.setHeader('Content-Type',url.pathname.endsWith('.png')?'image/png':url.pathname.endsWith('.webp')?'image/webp':'font/woff2');res.end(f)}catch{res.statusCode=404;res.end()}return}
  res.end('{}')});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const base='http://127.0.0.1:'+server.address().port+'/';
@@ -226,6 +228,27 @@ try{
  {const {context,page}=await open({mode:'standalone',blockStorage:true});
   if((await nudge(page)).shown){await page.locator('#device-nudge [data-nudge-later]').click()}
   await context.close()}
+
+ // What setup left out (state.setup_hints, hosted): after the device ones, one at a time, linked to its setup step.
+ for(const [width,height] of [[1440,900],[390,844]])for(const scheme of ['dark','light']){
+  setupHints=[{id:'source-github',title:'Connect GitHub?',text:'GitHub mails you often. Connected, I read it directly.',href:'https://app.example.test/setup#source-github',button:'Connect'},
+   {id:'codex',title:'Hand coding cards to Codex?',text:'It works on your ChatGPT plan.',href:'https://app.example.test/setup#codex',button:'Connect'}];
+  const {context,page}=await open({width,height,scheme,mode:'standalone',perm:'granted',sub:true});
+  await page.evaluate(()=>{window.__opened=[];window.open=(u,...r)=>{window.__opened.push([u,...r]);return null}});
+  let n=await nudge(page);assert.equal(n.kind,'hint:source-github');assert.ok(n.shown);
+  assert.match(n.text,/Connect GitHub\? GitHub mails you often\. Connected, I read it directly\./);assert.doesNotMatch(n.text,/—|^You/m);
+  await shot(page,`setup-hint-${width}-${scheme}`);
+  if(width===390||scheme==='light'){await context.close();continue}
+  await page.locator('#device-nudge [data-hint-open]').click();
+  assert.deepEqual(await page.evaluate(()=>window.__opened),[['https://app.example.test/setup#source-github','_blank','noopener']]);
+  assert.equal((await nudge(page)).shown,false,'opened: it rests');
+  await page.evaluate(()=>{localStorage.setItem('nudge-rest','0');const v=JSON.parse(localStorage.getItem('nudge-hint-source-github'));v.until=0;localStorage.setItem('nudge-hint-source-github',JSON.stringify(v));deviceRender()});
+  assert.equal((await nudge(page)).kind,'hint:source-github','back after its rest, until GitHub is connected');
+  await page.locator('#device-nudge [data-nudge-later]').click();assert.equal((await stored(page,'nudge-hint-source-github')).n,1);
+  await page.evaluate(()=>{localStorage.setItem('nudge-rest','0');deviceRender()});assert.equal((await nudge(page)).kind,'hint:codex','then the next one');
+  setupHints=[];await page.evaluate(()=>refresh());assert.equal((await nudge(page)).shown,false,'done at setup: gone');
+  await context.close()}
+ setupHints=[];
 
  // The site's demo: in a frame, without a service worker, push or notifications. No nudge and nothing asked.
  {const {context,page}=await open({url:base+'frame'});const frame=page.frames().find(f=>f!==page.mainFrame());
