@@ -69,6 +69,7 @@ import security_levels
 import skills
 import task_invites
 import task_pages
+import help_topics
 import team_learnings
 import authorship
 import learning_loop
@@ -567,7 +568,7 @@ AGENT_ACTIONS = {'agent_draft', 'agent_send', 'agent_follow_up', 'agent_retry', 
 OWNER_ACTIONS |= AGENT_ACTIONS
 # Learnings for The Machine team (team_learnings.py): sharing, Not now, Never ask and the Settings switch are the owner's
 # own, from their dashboard only. Nothing is sent without their Send on exactly what they saw.
-LEARNING_ACTIONS = {'learnings_share', 'learnings_later', 'learnings_never', 'set_learnings_offer', 'set_learnings_vote', 'set_error_reports'}
+LEARNING_ACTIONS = {'learnings_share', 'learnings_later', 'learnings_never', 'set_learnings_offer', 'set_learnings_vote', 'set_help_topics', 'set_error_reports'}
 OWNER_ACTIONS |= LEARNING_ACTIONS
 # The Graph as a CRM (crm.py, crm_import.py): who owns a record, one organization with several websites, and a
 # spreadsheet imported; the owner's own, from their dashboard only.
@@ -12897,6 +12898,8 @@ class App:
                     team_learnings.never(db, str(args.get('id') or '') or None)
                 elif name == 'set_learnings_vote':
                     team_learnings.set_vote(db, args.get('on') is not False)
+                elif name == 'set_help_topics':
+                    help_topics.set_on(db, args.get('on') is not False)
                 elif name == 'set_error_reports':
                     error_feed.set_on(db, args.get('on') is not False)
                 else:
@@ -14199,6 +14202,7 @@ class App:
                 self.store.learnings_due()
                 self.team_votes_due()  # and other Machines' learnings come to be judged, when voting is on
         if self.fleet:
+            self.help_topics_send()  # what Help was asked, as topics (help_topics.py)
             self.error_reports_step()
         self.apply_skill_clusters()  # a Create skill tapped on Telegram
         if seeded or learned:
@@ -15884,6 +15888,14 @@ class App:
             self.first_profile_save(run['run_id'])
         return result
 
+    def owner_role(self):
+        """The Role line of USER.md ('' when there is none): only for Help's guess at how technical the owner is."""
+        try:
+            found = re.search(r'(?m)^- Role: *(.+)$', self.user_md().read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return ''
+        return found[1].strip()[:200] if found else ''
+
     def user_md(self):
         import onboarding
         return onboarding.user_md_path(self.config.get('openclaw_workspace') or WORKSPACE)
@@ -16917,10 +16929,19 @@ class App:
                 raise ValueError('Help needs a model. Set one up in Settings, Model.')
             swap = background_model(self.config)
             try:
-                return help_chat.ask(args.get('question'), args.get('history') or [], run=run,
-                                     config=self.config, model='/'.join(swap) if swap else None)
+                found = help_chat.ask(args.get('question'), args.get('history') or [], run=run, config=self.config,
+                                      model='/'.join(swap) if swap else None, role=self.owner_role())
             except help_chat.Unavailable as error:
                 raise ValueError(str(error)) from None
+            topic, answered = found.pop('topic', ''), found.pop('answered', False)
+            try:  # the topic for The Machine team, when the owner shares it (help_topics.py); never the question
+                if not getattr(self, 'fleet', None):
+                    return found  # without the Network nothing goes, so nothing is kept
+                with self.store.connect() as db:
+                    help_topics.record(db, self.config, topic, answered)
+            except (sqlite3.Error, ValueError) as error:
+                LOG.info('help topic not kept error=%s', type(error).__name__)
+            return found
         path = getattr(self, 'config_path', None) or os.environ.get('ASSISTANT_CONFIG') or ''
         if name == 'support_access':
             if not getattr(self, 'fleet', None):
@@ -17050,9 +17071,24 @@ class App:
         """Feedback, Share learnings with The Machine team, and its Settings switch (team_learnings.py)."""
         try:
             with self.store.connect() as db:
-                return {**team_learnings.view(db, network=bool(getattr(self, 'fleet', None))), 'errors': error_feed.on(db)}
+                # and Share what Help is asked (help_topics.py) and Send error reports (error_feed.py), on the same Settings card
+                return {**team_learnings.view(db, network=bool(getattr(self, 'fleet', None))), 'help_topics': help_topics.on(db), 'errors': error_feed.on(db)}
         except sqlite3.Error:
             return None
+
+    HELP_TOPICS_SECONDS = 6 * 3600
+
+    def help_topics_send(self):
+        """Now and then: the finished days of Help topics to the control plane (help_topics.send), when sharing is on."""
+        due = getattr(self, '_help_topics_at', 0)
+        if time.monotonic() < due:
+            return 0
+        self._help_topics_at = time.monotonic() + self.HELP_TOPICS_SECONDS
+        try:
+            return help_topics.send(self.store.connect, self.fleet.relay.call)
+        except Exception as error:  # the Network or the control plane is away: next time
+            LOG.warning('help topics error=%s', type(error).__name__)
+            return 0
 
     def team_votes_due(self):
         """Once a day, with voting on: fetch other Machines' learnings, send votes judged earlier, and start one small
