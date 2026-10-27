@@ -286,6 +286,78 @@ def wait(jobs, job_id, done=('result', 'failed', 'cancelled'), seconds=20):
     raise AssertionError('job still ' + jobs.get(job_id)['status'])
 
 
+class FakeNetwork:
+    """The Network's /api/fleet/agent-results for Codex on the owner's computer, as cloud/agent_results.py answers it:
+    the hosted Machine (app token) and the laptop it paired (device token) of one owner. Like the control plane it
+    only relays the sealed brief, with the keys each side published."""
+    def __init__(self, device=False):
+        self.jobs, self.sent, self.device = {}, [], device
+        self.keys = {}  # endpoint -> public keys, as network_keys
+        if device:
+            import network_crypto
+            self.laptop_private = network_crypto.new_keys()
+            self.keys['dev_1'] = network_crypto.public_keys(self.laptop_private)
+
+    def hosted(self, body):
+        self.sent.append(('hosted', body))
+        what = body['action']
+        if what == 'where':
+            device = {'id': 'dev_1', 'label': 'Laptop', 'codex': self.device, 'online': self.device}
+            if self.device and self.keys.get('dev_1'):
+                device['keys'] = self.keys['dev_1']
+            return {'codex': 'device' if self.device else None, 'chosen': None, 'devices': [device], 'me': 'm:hosted'}
+        if what == 'dispatch':
+            assert 'brief' not in body and body['to'] == 'dev_1'
+            self.keys['m:hosted'] = body['keys']
+            self.jobs[body['ticket_hash']] = {'sealed': body['sealed'], 'job': body['job']}
+            return {'ok': True, 'device': 'Laptop', 'online': True}
+        if what == 'cancel':
+            self.jobs.get(body['ticket_hash'], {})['cancelled'] = True
+            return {'ok': True}
+        if what == 'fetch':
+            found = [dict(ticket_hash=h, report=1, **j['result']) for h, j in self.jobs.items() if h in body['tickets'] and j.get('result') and not j.get('acked')]
+            running = [{'ticket_hash': h, 'device': 'Laptop', 'progress': j['running']} for h, j in self.jobs.items()
+                       if h in body['tickets'] and j.get('running') and not j.get('result')]
+            return {'results': found, 'running': running}
+        if what == 'ack':
+            for r in body.get('receipts') or []:
+                self.jobs[r['ticket_hash']]['acked'] = True
+            return {'ok': True, 'acked': body.get('receipts') or []}
+        raise ValueError(what)
+
+    def laptop(self, body):
+        self.sent.append(('laptop', body))
+        what = body['action']
+        if what == 'jobs':
+            if body.get('keys'):
+                self.keys['dev_1'] = body['keys']
+            self.device = self.device or 'codex' in body['tools']
+            out = []
+            for h, j in self.jobs.items():
+                if 'codex' in body['tools'] and not j.get('taken') and not j.get('cancelled'):
+                    j['taken'] = True
+                    out.append({'ticket_hash': h, 'job': j['job'], 'tool': 'codex', 'sealed': j.pop('sealed'), 'from': 'm:hosted',
+                                'from_keys': self.keys.get('m:hosted')})
+            return {'jobs': out, 'cancelled': [h for h, j in self.jobs.items() if j.get('taken') and j.get('cancelled')], 'me': 'dev_1'}
+        if what == 'progress':
+            self.jobs[body['ticket_hash']]['running'] = body['progress']
+            return {'ok': True}
+        if what == 'done':
+            self.jobs[body['ticket_hash']]['result'] = {k: v for k, v in body.items() if k not in ('action', 'ticket_hash')}
+            return {'ok': True}
+        raise ValueError(what)
+
+
+def handed(home, job_id):
+    """'waiting' shows as a hand-off to the owner's computer starts; it is sealed, sent and its ticket kept right after."""
+    for _ in range(400):
+        with home.connect() as db:
+            if db.execute('SELECT token_hash FROM agent_jobs WHERE id=?', (job_id,)).fetchone()[0]:
+                return
+        time.sleep(0.05)
+    raise AssertionError('not handed over')
+
+
 class AgentJobs(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -564,6 +636,118 @@ class AgentJobs(unittest.TestCase):
         self.assertIsNone(jobs.get(job['id'])['progress'])
         with jobs.connect() as db:
             self.assertIsNone(db.execute('SELECT session_id FROM agent_jobs WHERE id=?', (job['id'],)).fetchone()[0])
+
+    def test_codex_on_my_computer_runs_on_the_paired_computer_and_comes_back(self):
+        """Where Codex runs: On my computer. The hosted Machine hands the job over the Network, the owner's paired
+        computer runs it with its own Codex and reports back; nothing of Codex is on the hosted Machine."""
+        import agent_remote
+        net = FakeNetwork()
+        hosted = dict(self.config, manage_url='https://app.example.test/setup', agents={'timeout_minutes': 1})
+        home = agent_jobs.AgentJobs(self.store.connect, hosted, Path(self.tmp.name) / 'hosted-jobs',
+                                    card=lambda sid: {'card': {'title': 'Fix the typo'}, 'drafts': [], 'links': [], 'files': [], 'messages': ''} if sid == self.sid else None,
+                                    network=net.hosted)
+        self.assertEqual(home.tools(wait=True), [])  # no computer of theirs takes Codex jobs yet
+        laptop_store = a.Store(Path(self.tmp.name) / 'laptop.sqlite', protect=True)
+        laptop = agent_jobs.AgentJobs(laptop_store.connect, {'database': str(Path(self.tmp.name) / 'laptop.sqlite'), 'accounts': [], 'agents': {'timeout_minutes': 1}},
+                                      Path(self.tmp.name) / 'laptop-jobs', network=net.laptop)
+        signed_in = lambda argv, *rest: (0, 'Logged in using ChatGPT') if argv[1:] == ['login', 'status'] else (1, '')
+        agent_remote._ready.update(at=0.0)
+        self.assertEqual(agent_remote.serve_once(laptop, signed_in), 0)
+        self.assertEqual({k: v for k, v in net.sent[-1][1].items() if k != 'keys'}, {'action': 'jobs', 'tools': ['codex']})
+        self.assertEqual(set(net.sent[-1][1]['keys']), {'v', 'box', 'sign', 'sig'})  # public halves only
+        home._where['at'] = 0.0
+        self.assertEqual(home.tools(wait=True), [{'id': 'codex', 'name': 'Codex', 'place': 'device', 'device': 'Laptop'}])
+        with patch.object(agent_remote, 'watch', lambda jobs: None):
+            job = wait(home, home.start(self.sid, 'codex', 'Fix the typo in README')['id'], done=('waiting', 'failed'))
+        self.assertEqual((job['status'], job['device'], job['can_follow_up']), ('waiting', 'Laptop', False), job)
+        self.assertEqual(self.calls('codex'), [])  # nothing ran on the hosted Machine
+        handed(home, job['id'])
+        self.assertEqual(home.get(job['id'])['status'], 'waiting', home.get(job['id']))
+        [(ticket, waiting)] = net.jobs.items()
+        self.assertNotIn('Fix the typo', json.dumps(net.sent))  # the Network only ever saw it sealed
+        self.assertNotIn('Fix the typo', json.dumps(waiting))
+        # The laptop takes it, runs it with its own Codex, and reports back
+        self.assertEqual(agent_remote.serve_once(laptop, signed_in), 1)
+        with laptop_store.connect() as db:
+            local = db.execute('SELECT * FROM agent_jobs').fetchone()
+        self.assertEqual((local['place'], local['token_hash'], local['suggestion_id'][:4]), ('local', ticket, 'net:'))
+        wait(laptop, local['id'])
+        self.assertTrue(self.calls('codex'))
+        agent_remote.serve_once(laptop, signed_in)
+        self.assertIn('summary', net.jobs[ticket]['result'])
+        self.assertEqual(agent_remote.fetch(home), 1)
+        job = home.get(job['id'])
+        self.assertEqual(job['status'], 'result', job)
+        self.assertEqual(job['summary'], net.jobs[ticket]['result']['summary'])
+        self.assertEqual(net.sent[-1], ('hosted', {'action': 'ack', 'receipts': [{'ticket_hash': ticket, 'report': 1}]}))
+        agent_remote.serve_once(laptop, signed_in)  # reported once
+        self.assertEqual(sum(1 for who, body in net.sent if body['action'] == 'done'), 1)
+
+    def test_codex_on_my_computer_that_stops_there_says_why_here(self):
+        import agent_remote
+        net = FakeNetwork(device=True)
+        hosted = dict(self.config, manage_url='https://app.example.test/setup', agents={})
+        home = agent_jobs.AgentJobs(self.store.connect, hosted, Path(self.tmp.name) / 'hosted-jobs',
+                                    card=lambda sid: {'card': {'title': 'Fix'}, 'drafts': [], 'links': [], 'files': [], 'messages': ''}, network=net.hosted)
+        with patch.object(agent_remote, 'watch', lambda jobs: None):
+            job = wait(home, home.start(self.sid, 'codex', 'Fix it')['id'], done=('waiting', 'failed'))
+        handed(home, job['id'])
+        [ticket] = net.jobs
+        net.jobs[ticket]['running'] = 'Editing README.md'
+        agent_remote.fetch(home)
+        self.assertEqual(home.get(job['id'])['progress'], 'On Laptop: Editing README.md')
+        net.jobs[ticket]['result'] = {'summary': 'Codex is not signed in here', 'failed': True, 'error_kind': 'failed'}
+        self.assertEqual(agent_remote.fetch(home), 1)
+        self.assertEqual((home.get(job['id'])['status'], home.get(job['id'])['error']), ('failed', 'Codex is not signed in here'))
+        # Cancel here: the Network hears it
+        with patch.object(agent_remote, 'watch', lambda jobs: None):
+            second = wait(home, home.retry(job['id'])['id'], done=('waiting', 'failed'))
+        handed(home, second['id'])
+        home.cancel(second['id'])
+        self.assertEqual(net.sent[-1][1]['action'], 'cancel')
+
+    def test_a_computer_without_codex_signed_in_takes_no_jobs(self):
+        import agent_remote
+        net = FakeNetwork()
+        laptop_store = a.Store(Path(self.tmp.name) / 'laptop.sqlite', protect=True)
+        laptop = agent_jobs.AgentJobs(laptop_store.connect, {'database': str(Path(self.tmp.name) / 'laptop.sqlite'), 'accounts': [], 'agents': {}},
+                                      Path(self.tmp.name) / 'lj', network=net.laptop)
+        agent_remote._ready.update(at=0.0)
+        net.jobs['f' * 64] = {'sealed': {}, 'job': 'aj_1'}
+        self.assertEqual(agent_remote.serve_once(laptop, lambda *a: (1, 'Not logged in')), 0)
+        self.assertEqual(net.sent[-1][1]['tools'], [])
+        agent_remote._ready.update(at=0.0)
+        laptop.config['agents'] = {'codex': {'serve': False}}
+        self.assertFalse(agent_remote.codex_ready(laptop, lambda *a: (0, 'Logged in')))
+
+    def test_a_brief_for_another_computer_or_not_from_their_machine_is_never_run(self):
+        import agent_remote
+        import network_crypto as nc
+        net = FakeNetwork()
+        laptop_store = a.Store(Path(self.tmp.name) / 'laptop.sqlite', protect=True)
+        laptop = agent_jobs.AgentJobs(laptop_store.connect, {'database': str(Path(self.tmp.name) / 'laptop.sqlite'), 'accounts': [], 'agents': {}},
+                                      Path(self.tmp.name) / 'lj', network=net.laptop)
+        signed_in = lambda argv, *rest: (0, 'Logged in') if argv[1:] == ['login', 'status'] else (1, '')
+        agent_remote._ready.update(at=0.0)
+        agent_remote.serve_once(laptop, signed_in)
+        mine = net.keys['dev_1']
+        hosted, other_computer, stranger = nc.new_keys(), nc.new_keys(), nc.new_keys()
+        net.keys['m:hosted'] = nc.public_keys(hosted)
+        def hand(ticket, body, private, to_public, device='dev_1'):
+            net.jobs[ticket] = {'job': 'aj_x', 'sealed': nc.seal(body, private, to_public, agent_remote.job_context('m:hosted', device, ticket))}
+        hand('a' * 64, {'brief': 'For the other computer'}, hosted, nc.public_keys(other_computer))  # sealed for another key
+        hand('b' * 64, {'brief': 'For this computer, bound to another'}, hosted, mine, device='dev_2')  # bound to another computer
+        hand('c' * 64, {'brief': 'Made up on the way'}, stranger, mine)  # not signed by their Machine
+        self.assertEqual(agent_remote.serve_once(laptop, signed_in), 0)
+        self.assertEqual(self.calls('codex'), [])
+        with laptop_store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM agent_jobs').fetchone()[0], 0)
+        self.assertEqual({h: j['result']['error_kind'] for h, j in net.jobs.items()}, {'a' * 64: 'sealed', 'b' * 64: 'sealed', 'c' * 64: 'sealed'})
+        # Their Machine's keys changed after this computer pinned them: nothing opens until it is paired again
+        net.keys['m:hosted'] = nc.public_keys(nc.new_keys())
+        hand('d' * 64, {'brief': 'After a key change'}, hosted, mine)
+        agent_remote.serve_once(laptop, signed_in)
+        self.assertIn('Pair this computer again', net.jobs['d' * 64]['result']['summary'])
 
     def test_codex_cloud_runs_there_and_its_diff_comes_back(self):
         import agent_remote

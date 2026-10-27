@@ -51,7 +51,21 @@ Coding agents**.
   `https://app.themachine.computer/mcp`. It has one tool, `report_result`. Each job gets its own ticket, and the
   Network keeps only the ticket's hash and the sealed result until your Machine picks it up. A result that hasn't come
   back after two days shows as stopped.
-- **Codex**: sign in to Codex first, on the setup page (step **Codex**): your server runs `codex login --device-auth`
+- **Codex**: pick where it runs on the setup page (step **Codex**, **Where Codex runs**).
+- **Codex, On my computer** (the default): the job runs on your own computer, which needs The Machine installed and
+  paired with your account (Account page, Fleet, pair a Machine) and `codex login` done there. Your hosted Machine
+  hands the brief to the Network with only a ticket's sha256 (`dispatch`). The brief is end to end: your hosted
+  Machine seals it for that one computer's Network keys and signs it with its own (`network_crypto.seal`, bound to
+  both Machines and the ticket), so the Network only relays an envelope it can't read, and deletes it once your
+  computer takes it. Your computer asks for work every 30 seconds with its own device token, opens the brief with its
+  private key (`network-keys.json`, which never leaves it), checks it was signed by your hosted Machine, and runs
+  it as an ordinary local Codex job (a thread in the Codex app there), and reports its progress and result into
+  that ticket. Your hosted Machine fetches it like a Claude result. Only your own paired computer can take the job, and
+  no sign-in or token moves between the two. Both pin each other's keys the first time; if either one's keys change,
+  nothing is sealed or opened until you pair the computer again. A computer that isn't signed in to Codex takes no jobs; set
+  `"codex": {"serve": false}` in its config.json to never take any. A job that waits for a computer that is off
+  stops after two days.
+- **Codex cloud**: sign in to Codex first, on the setup page (step **Codex**): your server runs `codex login --device-auth`
   and the page shows a code to enter on OpenAI's page, on your own phone or computer. The Codex CLI keeps its sign-in
   on your server, as it always does. Then enter a Codex cloud environment id (and a branch, if not the default). The job runs as a Codex cloud task
   (`codex cloud exec`). The card shows its status and then its changes, and **Open in Codex cloud** goes to the task.
