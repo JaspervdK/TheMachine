@@ -10,15 +10,15 @@ const {chromium}=await import(OPENCLAW+'/node_modules/playwright-core/index.mjs'
 // included, and back to English without a reload. Words around filled-in parts ("{} · {} today") and plurals read
 // translated too, and rows of parts joined by " · " part by part; t() is the same lookup for code. English is untouched when the language is English.
 const dashboard=await readFile(new URL('../dashboard.html',import.meta.url),'utf8');
-const cats={};for(const l of ['en','nl','fr','de','es'])cats[l]=await readFile(new URL(`../i18n/${l}.json`,import.meta.url),'utf8');
-const languages={en:'English',nl:'Nederlands',fr:'Français',de:'Deutsch',es:'Español'};
+const cats={};for(const l of ['en','nl','fr','de','es','it','pt-BR'])cats[l]=await readFile(new URL(`../i18n/${l}.json`,import.meta.url),'utf8');
+const languages={en:'English',nl:'Nederlands',fr:'Français',de:'Deutsch',es:'Español',it:'Italiano','pt-BR':'Português (Brasil)'};
 const view=(language,set=true)=>({locale:'en-BE',region:'BE',language,language_set:set,clock:'auto',hour12:false,auto_hour12:false,
- date_locale:language==='en'?'en-GB':language+'-BE',languages,saveable:true});
+ date_locale:language==='en'?'en-GB':language.includes('-')?language:language+'-BE',languages,saveable:true});
 let locale=view('en',false),saved=[],asked=[];
 const server=createServer(async(req,res)=>{
  const url=new URL(req.url,'http://fixture.invalid');res.setHeader('Content-Type','application/json');
  if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(dashboard);return}
- const cat=/^\/i18n\/(\w\w)\.json$/.exec(url.pathname);if(cat){asked.push(cat[1]);res.end(cats[cat[1]]||'{}');return}
+ const cat=/^\/i18n\/(\w\w(?:-[A-Z]{2})?)\.json$/.exec(url.pathname);if(cat){asked.push(cat[1]);res.end(cats[cat[1]]||'{}');return}
  if(url.pathname==='/api/action'){let body='';req.on('data',c=>body+=c);req.on('end',()=>{const {action,args}=JSON.parse(body);
   if(action!=='set_locale'){res.end('{}');return}saved.push(args);if(args.language)locale=view(args.language);res.end(JSON.stringify(locale))});return}
  if(url.pathname==='/api/status'){res.end(JSON.stringify({suggestions:[],promises:[],connectors:[],suggestion_counts:{},decisions:[],analyses:[],deliveries:[],review_health:{},review_runs:[],
@@ -68,6 +68,13 @@ try{
  assert.deepEqual(saved,[]);assert.deepEqual(asked,[]);
  assert.equal((await settingsLabel(page)).trim(),'Settings');
  await context.close();
+ // Never chosen, a browser from Portugal: Brazilian Portuguese for now, saved once.
+ locale=view('en',false);saved=[];
+ [context,page]=await open('pt-PT');
+ await page.waitForFunction(()=>document.documentElement.lang==='pt-BR');
+ assert.deepEqual(saved,[{language:'pt-BR'}]);
+ assert.equal((await settingsLabel(page)).trim(),'Configurações');
+ await context.close();
  // Chosen Dutch: the next start reads Dutch at once, from the copy kept on the device.
  locale=view('nl');
  [context,page]=await open('en-US');
@@ -75,6 +82,26 @@ try{
  assert.equal((await settingsLabel(page)).trim(),'Instellingen');
  await page.reload();
  assert.equal(await page.evaluate(()=>document.documentElement.lang),'nl');  // before any state arrives
+ await context.close();
+ // Calendar text built in code: a week range in the language's own order, a time range with a dash, counts by its
+ // plural rules, and a row of parts (" · ") part by part, never one count swallowing the rest.
+ const cal={nl:['26 okt – 1 nov 2026','26–30 okt 2026','1 gast','3 gasten','Wren · 1 gast'],
+  fr:['26 oct. – 1 nov. 2026','26–30 oct. 2026','1 invité','3 invités','Wren · 1 invité'],
+  de:['26. Okt. – 1. Nov. 2026','26.–30. Okt. 2026','1 Gast','3 Gäste','Wren · 1 Gast']};
+ for(const [lang,want] of Object.entries(cal)){locale=view(lang);
+  [context,page]=await open('en-US');await page.waitForFunction(l=>document.documentElement.lang===l,lang);
+  assert.deepEqual(await page.evaluate(()=>[calSpan(new Date(2026,9,26)),calSpan(new Date(2026,9,26),5),t(['{} guest','{} guests'],1),t(['{} guest','{} guests'],3),i18nLookup('Wren · 1 guest')]),want,lang);
+  assert.equal(await page.evaluate(()=>rangeText('09:45','10:30')),'09:45–10:30',lang);
+  await context.close()}
+ locale=view('en');[context,page]=await open('en-US');
+ assert.deepEqual(await page.evaluate(()=>[calSpan(new Date(2026,9,26)),rangeText('09:45','10:30'),t(['{} guest','{} guests'],1),t(['{} guest','{} guests'],3)]),['Oct 26 – Nov 1, 2026','09:45 to 10:30','1 guest','3 guests']);
+ // A sync count with one sync reads as one, also in English.
+ const syncs=()=>[spark({sync_activity:[{status:'success',signals:1,at:'2026-10-26T10:00:00Z'}]}).match(/aria-label="([^"]*)/)[1],spark({sync_activity:[0,1,2,3,4].map(i=>({status:i<2?'error':'success',signals:1,at:'2026-10-26T10:00:00Z'}))}).match(/aria-label="([^"]*)/)[1],t(['{} signal','{} signals'],1)];
+ assert.deepEqual(await page.evaluate(syncs),['Last sync: 0 failed','Last 5 syncs: 2 failed','1 signal']);
+ await context.close();
+ locale=view('pt-BR');[context,page]=await open('en-US');await page.waitForFunction(()=>document.documentElement.lang==='pt-BR');
+ assert.deepEqual(await page.evaluate(syncs),['Última sincronização: 0 com falha','Últimas 5 sincronizações: 2 com falha','1 sinal']);
+ assert.equal(await page.evaluate(()=>t('Last signal {}','seg., 26 de out.')),'Último sinal seg., 26 de out.');
  await context.close();
  assert.deepEqual(errors,[]);
  console.log('i18n dashboard: ok');
