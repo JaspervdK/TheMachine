@@ -757,7 +757,7 @@ button.inline-node{display:inline;min-height:0;box-shadow:none;border-radius:0;p
 .ed-projects li span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ed-projects li.muted{padding:6px 10px;border-style:dashed;color:var(--c-text-3)}
 .ed-projects input{display:block;width:100%;margin:0}
-.ed-note{margin:0;color:var(--c-text-3);font-size:var(--fs-xs)}.ed-note.warn{color:var(--c-orange)}
+.ed-note{margin:0;color:var(--c-text-3);font-size:var(--fs-xs)}.ed-note.warn{color:var(--c-orange)}#agents-codex-where.warn{color:var(--c-orange)}
 .ed-actions{position:sticky;bottom:-16px;z-index:1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 -18px -16px;padding:12px 18px 16px;border-top:1px solid var(--c-line);background:var(--surface)}.ed-actions .grow{flex:1}.ed-actions button{margin:0}
 .ed-actions button.danger{color:var(--orange)}
 @media(max-width:560px){
@@ -2893,7 +2893,9 @@ $('#settings-locale').addEventListener('change',async e=>{const el=e.target;if(!
 // Coding agents (agent_remote.py): the Claude Code session a card goes to and the Codex cloud environment.
 function renderAgents(){const f=$('#agents-settings'),a=state.agents_settings;f.hidden=!a;if(!a||agentsDirty)return;
  const cw=$('#agents-codex-where'),onDevice=a.codex_where==='device';cw.hidden=!onDevice;$('#agents-env').closest('label').hidden=onDevice;$('#agents-branch').closest('label').hidden=onDevice;
- if(onDevice)cw.innerHTML=esc(t('Codex runs on {}, with the Codex signed in there.',a.codex_device))+(a.codex_setup?` <a class="learn" href="${esc(a.codex_setup)}" target="_blank" rel="noopener">${esc(t('Change'))}</a>`:'');
+ cw.classList.toggle('warn',!!(onDevice&&a.codex_rekey));
+ if(onDevice&&a.codex_rekey)cw.innerHTML=esc(t('{} needs pairing again before it can take Codex jobs.',a.codex_rekey))+(a.codex_setup?` <a class="learn" href="${esc(a.codex_setup)}" target="_blank" rel="noopener">${esc(t('Pair again'))}</a>`:'');
+ else if(onDevice)cw.innerHTML=esc(t('Codex runs on {}, with the Codex signed in there.',a.codex_device))+(a.codex_setup?` <a class="learn" href="${esc(a.codex_setup)}" target="_blank" rel="noopener">${esc(t('Change'))}</a>`:'');
  $('#agents-session').value=a.claude_session?'https://claude.ai/code/'+a.claude_session:'';$('#agents-device').value=a.device;$('#agents-env').value=a.codex_env;$('#agents-branch').value=a.codex_branch;$('#agents-connector').textContent=a.connector;
  for(const el of f.querySelectorAll('input,button'))el.disabled=!a.saveable;$('#agents-error').textContent=a.saveable?(a.on_network?'':'Claude results need The Machine Network.'):'Change these in config.json (agents) on this computer.'}
 let agentsDirty=false;$('#agents-settings').addEventListener('input',()=>{agentsDirty=true});

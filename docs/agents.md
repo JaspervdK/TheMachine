@@ -60,9 +60,11 @@ Coding agents**.
   computer takes it. Your computer asks for work every 30 seconds with its own device token, opens the brief with its
   private key (`network-keys.json`, which never leaves it), checks it was signed by your hosted Machine, and runs
   it as an ordinary local Codex job (a thread in the Codex app there), and reports its progress and result into
-  that ticket. Your hosted Machine fetches it like a Claude result. Only your own paired computer can take the job, and
+  that ticket, sealed the other way: for your hosted Machine's keys and signed by your computer's, the diff cut to
+  what fits (the whole of it stays on your computer). Your hosted Machine opens it and fetches it like a Claude result. Only your own paired computer can take the job, and
   no sign-in or token moves between the two. Both pin each other's keys the first time; if either one's keys change,
-  nothing is sealed or opened until you pair the computer again. A computer that isn't signed in to Codex takes no jobs; set
+  nothing is sealed or opened until you pair the computer again, and Settings, Coding agents and the setup page say
+  which computer needs it. A computer that isn't signed in to Codex takes no jobs; set
   `"codex": {"serve": false}` in its config.json to never take any. A job that waits for a computer that is off
   stops after two days.
 - **Codex cloud**: sign in to Codex first, on the setup page (step **Codex**): your server runs `codex login --device-auth`

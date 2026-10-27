@@ -2434,5 +2434,7 @@
  "Ultra thinking (slower, uses more of your plan)": "Ultra-Nachdenken (langsamer, verbraucht mehr von deinem Plan)",
  "Ask or change something": "Frag oder ändere etwas",
  "Runs on {}, with the Codex signed in there.": "Läuft auf {}, mit dem dort angemeldeten Codex.",
- "Codex runs on {}, with the Codex signed in there.": "Codex läuft auf {}, mit dem dort angemeldeten Codex."
+ "Codex runs on {}, with the Codex signed in there.": "Codex läuft auf {}, mit dem dort angemeldeten Codex.",
+ "{} needs pairing again before it can take Codex jobs.": "{} muss neu gekoppelt werden, bevor es Codex-Aufgaben übernehmen kann.",
+ "Pair again": "Neu koppeln"
 }

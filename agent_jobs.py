@@ -104,8 +104,18 @@ def coding_relevant(config, codex_home=None):
 def device_label(where):
     """The owner's computer that takes Codex jobs (from the Network's `where`): an online one first."""
     ready = [d for d in (where or {}).get('devices') or [] if isinstance(d, dict) and d.get('codex')]
+    ready.sort(key=lambda d: bool(d.get('keys_changed')))
     found = next((d for d in ready if d.get('online')), ready[0] if ready else {})
     return str(found.get('label') or 'your computer')[:60]
+
+
+def rekey_label(where):
+    """The owner's computer that needs pairing again (its keys changed since this Machine pinned them, or the Network
+    says so) when no other computer of theirs takes Codex jobs: its label, else ''."""
+    ready = [d for d in (where or {}).get('devices') or [] if isinstance(d, dict) and d.get('codex')]
+    if not ready or not all(d.get('keys_changed') for d in ready):
+        return ''
+    return str(ready[0].get('label') or 'your computer')[:60]
 
 
 def tools(config, where=None):

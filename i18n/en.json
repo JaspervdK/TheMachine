@@ -2434,5 +2434,7 @@
  "Ultra thinking (slower, uses more of your plan)": "Ultra thinking (slower, uses more of your plan)",
  "Ask or change something": "Ask or change something",
  "Runs on {}, with the Codex signed in there.": "Runs on {}, with the Codex signed in there.",
- "Codex runs on {}, with the Codex signed in there.": "Codex runs on {}, with the Codex signed in there."
+ "Codex runs on {}, with the Codex signed in there.": "Codex runs on {}, with the Codex signed in there.",
+ "{} needs pairing again before it can take Codex jobs.": "{} needs pairing again before it can take Codex jobs.",
+ "Pair again": "Pair again"
 }

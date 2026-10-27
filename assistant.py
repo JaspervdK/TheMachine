@@ -12316,6 +12316,7 @@ class App:
         base = f'{origin.scheme}://{origin.netloc}' if origin.scheme == 'https' and origin.netloc else 'https://app.themachine.computer'
         return {'claude_session': str(claude.get('session') or ''), 'device': str(claude.get('device') or ''),
                 'codex_where': 'device' if on_device else None, 'codex_device': agent_jobs.device_label(where) if on_device else '',
+                'codex_rekey': agent_jobs.rekey_label(where) if on_device else '',
                 'codex_setup': manage.split('#')[0] + '#codex' if manage.startswith('https://') else '',
                 'codex_env': str(codex.get('env') or ''), 'codex_branch': str(codex.get('branch') or ''),
                 'connector': base + '/mcp', 'on_network': bool(getattr(self, 'fleet', None)),

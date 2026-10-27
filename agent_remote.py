@@ -14,8 +14,10 @@
   (serve: `jobs`), opens the brief with its private key (network-keys.json, never sent anywhere) after checking it was
   signed by its owner's hosted Machine, runs it there as an ordinary local job (a thread in the Codex app on that
   computer, under the Codex sign-in it has there), and reports progress and the result into that ticket (`progress`,
-  `done`). The hosted Machine fetches it like a Claude result. Each side pins the other's keys the first time it sees
-  them (agent_key_pins); when they change, nothing is sealed or opened until the computer is paired again.
+  `done`). Those are sealed the other way, for the hosted Machine's keys and signed by the computer's, so the Network
+  carries the result and the progress lines without reading them; the hosted Machine opens them and fetches it like a
+  Claude result. Each side pins the other's keys the first time it sees them (agent_key_pins); when they change,
+  nothing is sealed or opened until the computer is paired again, and the dashboard says so (rekey).
 
 None of them keeps, reads or moves a Claude or ChatGPT credential: the CLIs hold their own, on their own computer.
 """
@@ -46,6 +48,12 @@ HASH = re.compile(r'[0-9a-f]{64}')
 DONE = ('ready', 'applied')
 FAILED = ('error', 'failed', 'cancelled')
 PIN_SCHEMA = 'CREATE TABLE IF NOT EXISTS agent_key_pins(slot TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,first_at TEXT NOT NULL)'
+# What the pins keep besides the fingerprint: the keys (to seal for them later) and when other keys showed up.
+PIN_COLUMNS = (('keys', 'TEXT'), ('changed_at', 'TEXT'))
+# A hosted Machine's own jobs on the owner's computer: which computer it sealed for, and its own key slot (`me`), so
+# what comes back opens only as from that computer to this Machine for that ticket.
+SENT_SCHEMA = 'CREATE TABLE IF NOT EXISTS agent_device_sent(token_hash TEXT PRIMARY KEY,device TEXT NOT NULL,me TEXT NOT NULL,created_at TEXT NOT NULL)'
+RESULT_MAX = 140_000      # bytes of a sealed result: sealed and encoded it fits the Network's request limit
 REPAIR = 'Its keys changed since it was paired. Pair it again on your Account page, then try again.'
 
 
@@ -62,22 +70,63 @@ def own_keys(jobs):
         return None
 
 
+def _pins(db):
+    db.execute(PIN_SCHEMA)
+    have = {r[1] for r in db.execute('PRAGMA table_info(agent_key_pins)')}
+    for name, kind in PIN_COLUMNS:
+        if name not in have:
+            db.execute(f'ALTER TABLE agent_key_pins ADD COLUMN {name} {kind}')
+
+
 def pinned(jobs, slot, public):
     """The other side's keys, checked (box key signed by its sign key) and pinned the first time: the keys, None when
-    they don't check out, False when they differ from the pinned ones."""
+    they don't check out, False when they differ from the pinned ones (kept as changed, for the dashboard)."""
     checked = nc.check_keys(public) if public else None
     if not checked:
         return None
     with jobs.connect() as db:
-        db.execute(PIN_SCHEMA)
+        _pins(db)
         row = db.execute('SELECT fingerprint FROM agent_key_pins WHERE slot=?', (slot,)).fetchone()
         if not row:
-            db.execute('INSERT INTO agent_key_pins(slot,fingerprint,first_at) VALUES(?,?,?)', (slot, checked['fingerprint'], aj.now()))
+            db.execute('INSERT INTO agent_key_pins(slot,fingerprint,first_at,keys) VALUES(?,?,?,?)',
+                       (slot, checked['fingerprint'], aj.now(), json.dumps(public)))
             return public
-    if row['fingerprint'] != checked['fingerprint']:
-        LOG.warning('agent keys changed slot=%s', slot[:40])
-        return False
+        if row['fingerprint'] != checked['fingerprint']:
+            db.execute('UPDATE agent_key_pins SET changed_at=COALESCE(changed_at,?) WHERE slot=?', (aj.now(), slot))
+            LOG.warning('agent keys changed slot=%s', slot[:40])
+            return False
+        db.execute('UPDATE agent_key_pins SET keys=? WHERE slot=? AND keys IS NULL', (json.dumps(public), slot))
     return public
+
+
+def pin_keys(jobs, slot):
+    """The keys pinned for a slot, unless other keys showed up since (then None: nothing is sealed or opened)."""
+    with jobs.connect() as db:
+        _pins(db)
+        row = db.execute('SELECT keys, changed_at FROM agent_key_pins WHERE slot=?', (slot,)).fetchone()
+    if not row or row['changed_at'] or not row['keys']:
+        return None
+    try:
+        return json.loads(row['keys'])
+    except ValueError:
+        return None
+
+
+def rekeyed(jobs, device_ids):
+    """Which of these computers showed other keys than the ones this Machine pinned: they need pairing again."""
+    if not device_ids:
+        return set()
+    with jobs.connect() as db:
+        _pins(db)
+        rows = db.execute(f'SELECT slot FROM agent_key_pins WHERE changed_at IS NOT NULL AND slot IN ({",".join("?" * len(device_ids))})',
+                          ['to:' + str(d) for d in device_ids]).fetchall()
+    return {r['slot'][3:] for r in rows}
+
+
+def result_context(device, me, digest, what='codex-result'):
+    """What a sealed result (or progress line, `codex-progress`) is bound to: from that computer, to this hosted
+    Machine, for this ticket."""
+    return {'p': what, 'k': 'codex', 'f': device, 't': me, 'r': digest}
 
 
 def job_context(sender, device, digest):
@@ -195,8 +244,11 @@ def fetch(jobs, rows=None):
         LOG.warning('agent results fetch error=%s', type(error).__name__)
         reply = {}
     found, took = reply.get('results') or [], []
+    private = own_keys(jobs) if any(r['place'] == 'device' for r in rows) else None
     for result in found:
-        row = by_hash.get(result.get('ticket_hash'))
+        row = by_hash.get(result.get('ticket_hash')) if isinstance(result, dict) else None
+        if row and row['place'] == 'device':
+            result = opened_result(jobs, row, private, result)
         if row and result.get('failed'):
             if stopped(jobs, row, result):
                 took.append(row['token_hash'])
@@ -206,7 +258,8 @@ def fetch(jobs, rows=None):
     for going in reply.get('running') or []:  # a job on the owner's computer: which one, and how far it got
         row = by_hash.get(going.get('ticket_hash')) if isinstance(going, dict) else None
         if row and row['token_hash'] not in took:
-            line = f"On {str(going.get('device') or 'your computer')[:60]}" + (f": {going['progress']}" if going.get('progress') else '')
+            said = opened_progress(jobs, row, private, going)
+            line = f"On {str(going.get('device') or 'your computer')[:60]}" + (f": {said}" if said else '')
             jobs.progress(row['id'], line[:200], turn=row['turns'])
     with jobs.connect() as db:
         receipts = [dict(r) for r in db.execute('SELECT ticket_hash,report FROM agent_result_receipts WHERE acked=0')]
@@ -228,6 +281,56 @@ def fetch(jobs, rows=None):
                                                     if row['place'] == 'device' else 'No result came back. Open it in Claude to see where it got to.'),
                         error_kind='timeout', only_if=('waiting', 'running'))
     return len(took)
+
+
+def _sent(jobs, digest):
+    with jobs.connect() as db:
+        db.execute(SENT_SCHEMA)
+        return db.execute('SELECT device, me FROM agent_device_sent WHERE token_hash=?', (digest,)).fetchone()
+
+
+def _open_from_device(jobs, row, private, env, what):
+    """A body the owner's computer sealed for this Machine, for this job, signed by the keys pinned for that computer;
+    SealError otherwise."""
+    sent = _sent(jobs, row['token_hash'])
+    keys = pin_keys(jobs, 'to:' + sent['device']) if sent and private else None
+    if not keys:
+        raise nc.SealError('no keys pinned for that computer')
+    return nc.open_sealed(env, private, keys, result_context(sent['device'], sent['me'], row['token_hash'], what), limit=RESULT_MAX)
+
+
+def opened_result(jobs, row, private, result):
+    """A result from the owner's computer, opened: as the Network gives a connector's result ({summary, diff, draft,
+    links} or {failed, error_kind, summary}) with its report number. One that doesn't open is a failure with why;
+    only a computer that could not open the job sends why in the clear (error_kind 'sealed', a fixed line)."""
+    keep = {'ticket_hash': result.get('ticket_hash'), 'report': result.get('report')}
+    if not result.get('sealed'):
+        if result.get('failed') and result.get('error_kind') == 'sealed':
+            return {**keep, 'failed': True, 'error_kind': 'sealed', 'summary': str(result.get('summary') or '')[:300]}
+        return {**keep, 'failed': True, 'error_kind': 'sealed', 'summary': 'The result came back unsealed, so it was dropped.'}
+    try:
+        body = _open_from_device(jobs, row, private, result['sealed'], 'codex-result')
+    except nc.SealError:
+        LOG.warning('agent result not opened ticket=%s', row['token_hash'][:12])
+        return {**keep, 'failed': True, 'error_kind': 'sealed', 'summary': 'The result did not open here, so it was dropped. ' + REPAIR}
+    if not isinstance(body, dict):
+        return {**keep, 'failed': True, 'error_kind': 'sealed', 'summary': 'The result came back empty.'}
+    links = [u for u in body.get('links') or [] if isinstance(u, str) and u.startswith('https://')][:10]
+    if body.get('failed'):
+        return {**keep, 'failed': True, 'error_kind': str(body.get('error_kind') or 'failed')[:40], 'summary': str(body.get('summary') or '')[:500]}
+    return {**keep, 'summary': str(body.get('summary') or '')[:aj.SUMMARY_MAX], 'diff': str(body.get('diff') or '')[:aj.DIFF_MAX],
+            'draft': str(body.get('draft') or '')[:aj.SUMMARY_MAX], 'links': links}
+
+
+def opened_progress(jobs, row, private, going):
+    """A progress line from the owner's computer, opened, or '' (none yet, or it didn't open)."""
+    if row['place'] != 'device' or not going.get('sealed'):
+        return str(going.get('progress') or '')[:160] if row['place'] != 'device' else ''
+    try:
+        body = _open_from_device(jobs, row, private, going['sealed'], 'codex-progress')
+    except nc.SealError:
+        return ''
+    return str(body.get('progress') or '')[:160] if isinstance(body, dict) else ''
 
 
 def stopped(jobs, row, result):
@@ -257,8 +360,12 @@ def where(jobs):
     except Exception as error:  # noqa: BLE001 - asked again later
         LOG.warning('agent where error=%s', type(error).__name__)
         return None
-    devices = [{'label': str(d.get('label') or '')[:60], 'codex': bool(d.get('codex')), 'online': bool(d.get('online'))}
+    devices = [{'id': str(d.get('id') or '')[:80], 'label': str(d.get('label') or '')[:60], 'codex': bool(d.get('codex')),
+                'online': bool(d.get('online')), 'keys_changed': bool(d.get('keys_changed'))}
                for d in found.get('devices') or [] if isinstance(d, dict)][:10]
+    mine = rekeyed(jobs, [d['id'] for d in devices if d['id']])  # this Machine saw other keys for it than it pinned
+    for d in devices:
+        d['keys_changed'] = d['keys_changed'] or d['id'] in mine
     return {'codex': found.get('codex') if found.get('codex') in ('device', 'cloud') else None, 'devices': devices}
 
 
@@ -276,10 +383,13 @@ class DeviceCodex:
         except Exception as error:  # noqa: BLE001 - the Network's own message, never a secret
             raise aj.Stopped('failed', f'The Network could not say where Codex runs: {error}'[:300]) from None
         ready = [d for d in found.get('devices') or [] if isinstance(d, dict) and d.get('codex') and d.get('id')]
+        ready.sort(key=lambda d: bool(d.get('keys_changed') or d['id'] in rekeyed(self.jobs, [d['id']])))  # one paired again first
         device = next((d for d in ready if d.get('online')), ready[0] if ready else None)
         if not device:
             raise aj.Stopped('missing', 'Set up Codex on your computer first')
         label = str(device.get('label') or 'your computer')[:60]
+        if device.get('keys_changed'):
+            raise aj.Stopped('failed', f'{label}: {REPAIR}')
         if not device.get('keys'):
             raise aj.Stopped('missing', f'Update The Machine on {label}, then try again.')
         keys = pinned(self.jobs, 'to:' + str(device['id']), device['keys'])
@@ -306,6 +416,9 @@ class DeviceCodex:
         except Exception as error:  # noqa: BLE001 - the Network's own message, never a secret
             raise aj.Stopped('failed', f'The Network could not take the job: {error}'[:300]) from None
         with self.jobs.connect() as db:
+            db.execute(SENT_SCHEMA)
+            db.execute('INSERT OR REPLACE INTO agent_device_sent(token_hash,device,me,created_at) VALUES(?,?,?,?)',
+                       (digest, str(device['id']), me, aj.now()))
             db.execute('UPDATE agent_jobs SET token_hash=? WHERE id=?', (digest, job['id']))
         if sent.get('device') and not sent.get('online'):
             on_progress(f"Waiting for {str(sent['device'])[:60]} to come online")
@@ -330,6 +443,15 @@ class DeviceCodex:
 
 RELAY_SCHEMA = """CREATE TABLE IF NOT EXISTS agent_relayed(ticket_hash TEXT PRIMARY KEY,job_id TEXT NOT NULL,
   reported INTEGER NOT NULL DEFAULT 0,progress TEXT,created_at TEXT NOT NULL)"""
+RELAY_COLUMNS = (('sender', 'TEXT'), ('me', 'TEXT'))  # who sent it (its hosted Machine's key slot) and this computer's
+
+
+def _relayed(db):
+    db.execute(RELAY_SCHEMA)
+    have = {r[1] for r in db.execute('PRAGMA table_info(agent_relayed)')}
+    for name, kind in RELAY_COLUMNS:
+        if name not in have:
+            db.execute(f'ALTER TABLE agent_relayed ADD COLUMN {name} {kind}')
 _ready = {'at': 0.0, 'ok': False}
 
 
@@ -364,7 +486,7 @@ def serve(jobs, stop, run=None):
 
 def serve_once(jobs, run=None):
     with jobs.connect() as db:
-        db.execute(RELAY_SCHEMA)
+        _relayed(db)
     private = own_keys(jobs)
     ready = bool(private) and codex_ready(jobs, run)
     ask = {'action': 'jobs', 'tools': ['codex'] if ready else []}
@@ -383,7 +505,7 @@ def serve_once(jobs, run=None):
                 jobs.cancel(row['job_id'])
             except ValueError:
                 pass  # it ended meanwhile
-    report(jobs)
+    report(jobs, private)
     return taken
 
 
@@ -429,7 +551,8 @@ def take(jobs, job, private=None, me=''):
             return False
         db.execute('INSERT INTO agent_jobs(id,suggestion_id,tool,place,status,brief,asks,turns,token_hash,created_at,updated_at) '
                    'VALUES(?,?,?,?,?,?,?,?,?,?,?)', (job_id, aj.RELAYED + digest[:16], 'codex', 'local', 'sent', brief, '[]', 1, digest, at, at))
-        db.execute('INSERT INTO agent_relayed(ticket_hash,job_id,created_at) VALUES(?,?,?)', (digest, job_id, at))
+        db.execute('INSERT INTO agent_relayed(ticket_hash,job_id,created_at,sender,me) VALUES(?,?,?,?,?)',
+                   (digest, job_id, at, str(job.get('from') or ''), me))
     try:
         jobs.prepare_folder(job_id, brief, {})
     except OSError as error:
@@ -440,21 +563,31 @@ def take(jobs, job, private=None, me=''):
     return True
 
 
-def report(jobs):
+CANT_SEAL = "This computer can't seal the result for your Machine, so it kept it here. Pair this computer again."
+
+
+def report(jobs, private=None):
     """Tells the Network how each job from the hosted Machine is doing: its progress line while it runs, then its
-    result (summary, changes, a rewritten message) or why it stopped, once."""
+    result (summary, changes, a rewritten message) or why it stopped, once. Both sealed for the hosted Machine that
+    sent the job (the keys this computer pinned for it), so the Network relays them without reading them."""
+    private = private or own_keys(jobs)
     with jobs.connect() as db:
-        rows = [dict(r) for r in db.execute('SELECT r.ticket_hash, r.progress AS sent, j.* FROM agent_relayed r '
+        _relayed(db)
+        rows = [dict(r) for r in db.execute('SELECT r.ticket_hash, r.progress AS sent, r.sender, r.me, j.* FROM agent_relayed r '
                                             'JOIN agent_jobs j ON j.id=r.job_id WHERE r.reported=0')]
     for row in rows:
         try:
             if row['status'] in ('result', 'failed', 'cancelled'):
-                jobs.network(done_body(jobs, row))
+                body = sealed_for(jobs, row, private, done_body(jobs, row), 'codex-result')
+                jobs.network({'action': 'done', 'ticket_hash': row['ticket_hash'],
+                              **({'sealed': body} if body else {'failed': True, 'error_kind': 'sealed', 'summary': CANT_SEAL})})
                 with jobs.connect() as db:
                     db.execute('UPDATE agent_relayed SET reported=1 WHERE ticket_hash=?', (row['ticket_hash'],))
             elif row['status'] == 'running' and (row['progress'] or 'Running') != row['sent']:
                 line = row['progress'] or 'Running'
-                jobs.network({'action': 'progress', 'ticket_hash': row['ticket_hash'], 'progress': line[:200]})
+                body = sealed_for(jobs, row, private, {'progress': line[:200]}, 'codex-progress')
+                if body:
+                    jobs.network({'action': 'progress', 'ticket_hash': row['ticket_hash'], 'sealed': body})
                 with jobs.connect() as db:
                     db.execute('UPDATE agent_relayed SET progress=? WHERE ticket_hash=?', (line, row['ticket_hash']))
         except Exception as error:  # noqa: BLE001 - told on the next round; a ticket the Network forgot is not retried
@@ -464,10 +597,24 @@ def report(jobs):
             LOG.warning('agent report error=%s', type(error).__name__)
 
 
+def sealed_for(jobs, row, private, body, what):
+    """`body` sealed for the hosted Machine that sent this job, signed by this computer, or None when it can't be: no
+    keys here, or that Machine's keys changed since this computer pinned them."""
+    sender, me = str(row.get('sender') or ''), str(row.get('me') or '')
+    keys = pin_keys(jobs, 'from:' + me + ':' + sender) if private and sender and me else None
+    if not keys:
+        return None
+    try:
+        return nc.seal(body, private, keys, result_context(me, sender, row['ticket_hash'], what), limit=RESULT_MAX)
+    except nc.SealError:
+        return None
+
+
 def done_body(jobs, row):
-    body = {'action': 'done', 'ticket_hash': row['ticket_hash']}
+    """What goes back for a finished job, before it is sealed: why it stopped, or its summary, changes and draft. The
+    diff is cut to what fits (RESULT_MAX); the whole of it stays on this computer."""
     if row['status'] != 'result':
-        return {**body, 'failed': True, 'error_kind': row['error_kind'] or row['status'],
+        return {'failed': True, 'error_kind': row['error_kind'] or row['status'],
                 'summary': (row['error'] or 'It stopped on this computer.')[:500]}
     draft = ''
     found = jobs.work(row['id']) / aj.DRAFT_FILE
@@ -478,8 +625,13 @@ def done_body(jobs, row):
         except OSError:
             draft = ''
     links = [u for u in dict.fromkeys(aj.URL.findall(row['summary'] or '')) if u.startswith('https://')][:10]
-    return {**body, 'summary': (row['summary'] or 'Done, without a summary.')[:aj.SUMMARY_MAX],
-            'diff': (row['diff'] or '')[:aj.DIFF_MAX], 'draft': draft, 'links': links}
+    body = {'summary': (row['summary'] or 'Done, without a summary.')[:aj.SUMMARY_MAX], 'diff': '', 'draft': draft, 'links': links}
+    room = RESULT_MAX - len(json.dumps(body).encode()) - 200
+    diff = (row['diff'] or '')[:aj.DIFF_MAX]
+    while diff and len(json.dumps(diff).encode()) > room:
+        diff = diff[:max(0, int(len(diff) * 0.9) - 100)]
+    body['diff'] = diff
+    return body
 
 
 class CloudCodex:

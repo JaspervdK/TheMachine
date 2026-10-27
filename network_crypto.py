@@ -344,10 +344,11 @@ def _signed(ctx, env):
     return (b'tm-network-msg/1\n' + ctx + b'\n' + unb64(env['eph']) + unb64(env['n']) + unb64(env['ct']) + unb64(env['mac']))
 
 
-def seal(body, private, to_public, context):
-    """`body` (JSON-able) sealed for one Machine: only it can open it, and it can check it came from us."""
+def seal(body, private, to_public, context, limit=MAX_BODY):
+    """`body` (JSON-able) sealed for one Machine: only it can open it, and it can check it came from us. `limit`: the
+    most bytes it may hold (a coding agent's result with its diff is bigger than a message)."""
     data = json.dumps(body, separators=(',', ':'), sort_keys=True).encode()
-    if len(data) > MAX_BODY:
+    if len(data) > limit:
         raise SealError('too big')
     recipient = check_keys(to_public)
     if not recipient:
@@ -369,13 +370,13 @@ def is_sealed(value):
     return isinstance(value, dict) and value.get('alg') == ALG and 'ct' in value
 
 
-def open_sealed(env, private, from_public, context):
+def open_sealed(env, private, from_public, context, limit=MAX_BODY):
     """The body of a sealed message for us, from `from_public`, routed as `context`; SealError otherwise."""
     if not is_sealed(env) or env.get('v') != VERSION:
         raise SealError('not a sealed message')
     for field, size in (('eph', 32), ('n', 16), ('mac', 32), ('sig', 64)):
         unb64(env.get(field), size)
-    if len(unb64(env.get('ct'))) > MAX_BODY:
+    if len(unb64(env.get('ct'))) > limit:
         raise SealError('too big')
     sender = check_keys(from_public)
     if not sender:
@@ -390,7 +391,7 @@ def open_sealed(env, private, from_public, context):
     nonce, ct = unb64(env['n'], 16), unb64(env['ct'])
     if not hmac.compare_digest(hmac.new(keys[32:], nonce + ct, hashlib.sha256).digest(), unb64(env['mac'], 32)):
         raise SealError('changed on the way')
-    if len(ct) > MAX_BODY:
+    if len(ct) > limit:
         raise SealError('too big')
     try:
         return json.loads(_stream(keys[:32], nonce, ct))

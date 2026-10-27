@@ -2434,5 +2434,7 @@
  "Ultra thinking (slower, uses more of your plan)": "Ultra denkwerk (trager, gebruikt meer van je abonnement)",
  "Ask or change something": "Vraag of wijzig iets",
  "Runs on {}, with the Codex signed in there.": "Draait op {}, met de Codex die daar is ingelogd.",
- "Codex runs on {}, with the Codex signed in there.": "Codex draait op {}, met de Codex die daar is ingelogd."
+ "Codex runs on {}, with the Codex signed in there.": "Codex draait op {}, met de Codex die daar is ingelogd.",
+ "{} needs pairing again before it can take Codex jobs.": "{} moet opnieuw gekoppeld worden voordat het Codex-taken kan aannemen.",
+ "Pair again": "Opnieuw koppelen"
 }
