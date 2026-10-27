@@ -3,12 +3,18 @@
     python3 scripts/i18n_extract.py            # what's missing from i18n/en.json in the moved areas
     python3 scripts/i18n_extract.py --add      # add it to en.json (then translate it in every language)
     python3 scripts/i18n_extract.py --all      # every area, moved or not
+    python3 scripts/i18n_extract.py --sort     # rewrite every i18n/*.json in its canonical form (run before pushing)
+    python3 scripts/i18n_extract.py --merge    # during a git merge: settle the catalogs' conflicts key by key
 
 The dashboard translates by source text (the i18n script in dashboard.html): an element's text, placeholder, aria-label or
 title that equals a catalog key reads in the owner's language. So moving an area into the catalog means its strings
 are keys in en.json, nothing in the markup changes. AREAS says where each area lives: element ids in the static markup
 and the names of the functions that build it. tests/test_i18n.py fails when a moved area (MOVED) has English that is
-neither in en.json nor in i18n/not-ui.json (strings the extractor finds that nobody reads: ids, codes, examples)."""
+neither in en.json nor in i18n/not-ui.json (strings the extractor finds that nobody reads: ids, codes, examples).
+
+The catalogs are kept sorted by key, one key per line (canonical()), so pull requests that add different strings touch
+different lines and merge without conflicts; add a key anywhere and --sort puts it in its place. tests/test_i18n.py
+fails on a catalog that isn't in that form."""
 from __future__ import annotations
 
 import html.parser
@@ -258,6 +264,60 @@ def area_strings(area, source=None):
     return unique
 
 
+def canonical(data):
+    """A catalog's text: keys sorted (a list, as not-ui.json, sorted too), indent 1, UTF-8 as is, a final newline."""
+    if isinstance(data, list):
+        data = sorted(data)
+    return json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True) + '\n'
+
+
+def write_catalog(path, data):
+    path.write_text(canonical(data), encoding='utf-8')
+
+
+def unsorted():
+    """The catalogs (i18n/*.json) whose text isn't canonical(): what --sort rewrites."""
+    out = []
+    for path in sorted(CATALOG.glob('*.json')):
+        text = path.read_text(encoding='utf-8')
+        if text != canonical(json.loads(text)):
+            out.append(path)
+    return out
+
+
+def sort_all():
+    for path in unsorted():
+        write_catalog(path, json.loads(path.read_text(encoding='utf-8')))
+
+
+def _git(*args):
+    import subprocess
+    return subprocess.run(['git', '-C', str(ROOT), *args], capture_output=True, text=True, check=False).stdout
+
+
+def merge_conflicts():
+    """In a git merge: each conflicted catalog becomes the other side's plus what this side changed since the merge
+    base (added, changed or removed keys), in canonical form. For a branch made before the catalogs were sorted."""
+    base = _git('merge-base', 'HEAD', 'MERGE_HEAD').strip()
+    done = []
+    for name in _git('diff', '--name-only', '--diff-filter=U', '--', 'i18n/').split():
+        if not name.endswith('.json'):
+            continue
+        b, ours, theirs = ((json.loads(_git('show', f'{rev}:{name}') or 'null')) for rev in (base, 'HEAD', 'MERGE_HEAD'))
+        if isinstance(theirs, list) or isinstance(ours, list):
+            b, ours, theirs = set(b or []), set(ours or []), set(theirs or [])
+            out = sorted((theirs | (ours - b)) - (b - ours))
+        else:
+            b, ours, out = b or {}, ours or {}, dict(theirs or {})
+            out.update({k: v for k, v in ours.items() if b.get(k) != v})
+            for k in set(b) - set(ours):
+                out.pop(k, None)
+        write_catalog(ROOT / name, out)
+        _git('add', name)
+        done.append(name)
+    return done
+
+
 def catalog(lang):
     path = CATALOG / f'{lang}.json'
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
@@ -281,6 +341,14 @@ def missing(areas=MOVED):
 
 
 def main(argv):
+    if '--merge' in argv:
+        print('\n'.join(f'merged {n}' for n in merge_conflicts()) or 'no catalog conflicts')
+        return 0
+    if '--sort' in argv:
+        fixed = unsorted()
+        sort_all()
+        print('\n'.join(f'sorted {p.relative_to(ROOT)}' for p in fixed) or 'every catalog is sorted')
+        return 0
     areas = list(AREAS) if '--all' in argv else MOVED
     gone = missing(areas)
     if '--add' in argv:
@@ -288,7 +356,7 @@ def main(argv):
         for strings in gone.values():
             for s in strings:
                 en.setdefault(s, s)
-        (CATALOG / 'en.json').write_text(json.dumps(en, ensure_ascii=False, indent=1) + '\n', encoding='utf-8')
+        write_catalog(CATALOG / 'en.json', en)
     print(json.dumps(gone, ensure_ascii=False, indent=1))
     return 0
 
