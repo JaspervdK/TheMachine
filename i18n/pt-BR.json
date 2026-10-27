@@ -2432,5 +2432,7 @@
  "More thinking is slower and uses more of your plan.": "Mais raciocínio é mais lento e usa mais do seu plano.",
  "Background work": "Trabalho em segundo plano",
  "Ultra thinking (slower, uses more of your plan)": "Raciocínio ultra (mais lento, usa mais do seu plano)",
- "Ask or change something": "Pergunte ou altere algo"
+ "Ask or change something": "Pergunte ou altere algo",
+ "Runs on {}, with the Codex signed in there.": "Roda em {}, com o Codex conectado lá.",
+ "Codex runs on {}, with the Codex signed in there.": "Codex roda em {}, com o Codex conectado lá."
 }
