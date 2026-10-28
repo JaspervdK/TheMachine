@@ -19,22 +19,19 @@ import urllib.request
 KINDS = {'google_meet.transcript': 'Meet transcript', 'google_meet.notes': 'Meet notes'}
 SETUP = {
     'label': 'Google Meet',
-    'what': 'Generated meeting transcripts and Gemini meeting notes.',
+    'what': 'Meeting transcripts and Gemini notes from Google Meet.',
     'account': {'id': 'google-meet', 'service': 'google_meet', 'transport': 'api',
                 'boundary': 'work', 'credential': 'google_meet', 'poll_seconds': 900},
     'ask': [],
-    'secret': 'Google OAuth access token (not an API key)',
-    'note': 'Enable Google Meet API and Google Drive API at https://console.cloud.google.com/apis/library . '
-            'Get an OAuth access token at https://developers.google.com/oauthplayground/ with scopes '
+    'secret': 'Google OAuth access token',
+    'note': 'Turn on the Google Meet API and the Google Drive API at https://console.cloud.google.com/apis/library . '
+            'Get an access token at https://developers.google.com/oauthplayground/ with the scopes '
             'https://www.googleapis.com/auth/meetings.space.readonly and '
-            'https://www.googleapis.com/auth/drive.meet.readonly . '
-            'An API key cannot read private meetings. Access tokens expire (usually after one hour); '
-            'provide a renewed token when needed. Reads generated artifacts from meetings you organized, '
-            'within the recent import window (seven days by default; Meet retains records for 30 days). '
-            'See https://developers.google.com/workspace/meet/api/guides/authenticate-authorize .',
-    'hints': {'google_meet_http:HTTP_401': 'Replace the expired or rejected OAuth access token.',
-              'google_meet_http:HTTP_403': 'Enable both APIs and authorize both read-only scopes; '
-                                           'the signed-in user must have access to the artifact.'}}
+            'https://www.googleapis.com/auth/drive.meet.readonly . An API key can\'t read private meetings. '
+            'The token expires after about an hour: paste a new one then. '
+            'It reads transcripts and notes of meetings you organized in the last 7 days. Meet keeps them for 30 days.',
+    'hints': {'google_meet_http:HTTP_401': 'Google rejected the access token: paste a new one',
+              'google_meet_http:HTTP_403': 'Google refused: turn on both APIs and allow both read-only scopes'}}
 PAGE_SIZE = 10
 PAGES = 20
 MAX_BYTES = 10_000_000
